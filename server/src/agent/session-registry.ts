@@ -24,6 +24,7 @@ import { getMcpTools } from "./mcp.ts";
 import { defaultModel, setupAuth } from "./models.ts";
 import { seedAgentFiles } from "./agent-files.ts";
 import { makeInterviewTool } from "./interview.ts";
+import { makeCouncilTool } from "./council.ts";
 import { makeSubagentLedgerExtension, subagentsExtensionPath } from "./subagent-bridge.ts";
 import { WEB_ACCESS_TOOLS, ensureWebAccess } from "./web-access-bridge.ts";
 import { BUILTIN_TOOLS } from "./tools.ts";
@@ -99,6 +100,10 @@ async function build(
   // The interview tool blocks mid-run on answers posted to the HTTP API; it
   // reads the live sessionId through the same holder as the ledger extension.
   const interviewTool = makeInterviewTool(projectId, () => holder.session?.sessionId ?? "");
+  // The native AI Council tool: convenes a panel of OpenRouter models + a chair to
+  // deliberate hard questions. Reads the live sessionId through the same holder so its
+  // spend is ledgered against this session.
+  const councilTool = makeCouncilTool(projectId, () => holder.session?.sessionId ?? "");
   const { session } = await createAgentSession({
     cwd: paths.sandbox,
     model: fallbackModel,
@@ -110,10 +115,11 @@ async function build(
       ...BUILTIN_TOOLS,
       "subagent",
       "interview",
+      "council",
       ...WEB_ACCESS_TOOLS,
       ...mcpTools.map((t) => t.name),
     ],
-    customTools: [interviewTool, ...mcpTools],
+    customTools: [interviewTool, councilTool, ...mcpTools],
   });
   holder.session = session;
   return session;

@@ -20,11 +20,21 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import type { ProjectPaths } from "../projects.ts";
 import { SUBAGENT_TYPES } from "./subagents.ts";
+import { KDENSE_AGENTS } from "./kdense-agents.ts";
 
 const require_ = createRequire(import.meta.url);
 
 export const AGENT_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+
+// The deliberation backend an agent runs its reasoning through:
+//   none         — plain model (default)
+//   fusion-direct — force the model to OpenRouter Fusion (panel + judge)
+//   council-tool  — add the native `council` tool to the agent's allowlist
+export const DELIBERATION_BACKENDS = ["none", "fusion-direct", "council-tool"] as const;
+export type DeliberationBackend = (typeof DELIBERATION_BACKENDS)[number];
+// Canonical ref for fusion-direct; resolveModel() routes it to OpenRouter Fusion.
+const FUSION_DIRECT_MODEL = "openrouter/openrouter/fusion";
 
 export interface AgentFile {
   name: string;
@@ -38,6 +48,12 @@ export interface AgentFile {
   systemPromptMode?: "append" | "replace";
   inheritProjectContext?: boolean;
   inheritSkills?: boolean;
+  /**
+   * Host-side convenience: which deliberation backend this agent uses. The writer
+   * derives `model`/`tools` from it (applyDeliberationBackend) so pi-subagents — which
+   * does not know this field — still enacts the choice.
+   */
+  deliberationBackend?: DeliberationBackend;
   /** Frontmatter keys we don't model, preserved verbatim on round-trip. */
   extra?: Record<string, string>;
   systemPrompt: string;
@@ -66,6 +82,7 @@ const KNOWN_KEYS = new Set([
   "systemPromptMode",
   "inheritProjectContext",
   "inheritSkills",
+  "deliberationBackend",
 ]);
 
 function unquote(value: string): string {
@@ -118,6 +135,9 @@ export function parseAgentMarkdown(
     systemPromptMode: mode === "append" || mode === "replace" ? mode : undefined,
     inheritProjectContext: bool(fm.inheritProjectContext),
     inheritSkills: bool(fm.inheritSkills),
+    deliberationBackend: DELIBERATION_BACKENDS.includes(fm.deliberationBackend as never)
+      ? (fm.deliberationBackend as DeliberationBackend)
+      : undefined,
     extra: Object.keys(extra).length > 0 ? extra : undefined,
     systemPrompt: body.trim(),
   };
@@ -138,6 +158,9 @@ export function serializeAgentMarkdown(agent: Omit<AgentFile, "source">): string
     lines.push(`inheritProjectContext: ${agent.inheritProjectContext}`);
   }
   if (agent.inheritSkills !== undefined) lines.push(`inheritSkills: ${agent.inheritSkills}`);
+  if (agent.deliberationBackend && agent.deliberationBackend !== "none") {
+    lines.push(`deliberationBackend: ${agent.deliberationBackend}`);
+  }
   for (const [k, v] of Object.entries(agent.extra ?? {})) lines.push(`${k}: ${v}`);
   lines.push("---", "", agent.systemPrompt.trim(), "");
   return lines.join("\n");
@@ -198,6 +221,31 @@ export function listAgents(paths: ProjectPaths): AgentFile[] {
 
 // --- mutations ---------------------------------------------------------------
 
+/**
+ * Turn a deliberationBackend choice into the concrete `model`/`tools` that actually
+ * enact it, so the on-disk agent file pi-subagents reads does the right thing:
+ *   fusion-direct → pin the model to OpenRouter Fusion
+ *   council-tool  → ensure `council` is in the tool allowlist
+ *   none / unset   → leave model/tools untouched
+ * Returns a new patch; never mutates the input.
+ */
+export function applyDeliberationBackend(patch: AgentFilePatch): AgentFilePatch {
+  const backend = patch.deliberationBackend;
+  if (!backend || backend === "none") return patch;
+  const next: AgentFilePatch = { ...patch };
+  if (backend === "fusion-direct") {
+    next.model = FUSION_DIRECT_MODEL;
+  } else if (backend === "council-tool") {
+    const tools = (next.tools ?? "")
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+    if (!tools.includes("council")) tools.push("council");
+    next.tools = tools.join(", ");
+  }
+  return next;
+}
+
 export function writeProjectAgent(
   paths: ProjectPaths,
   name: string,
@@ -210,7 +258,11 @@ export function writeProjectAgent(
   if (patch.thinking && !THINKING_LEVELS.includes(patch.thinking as never)) {
     throw new Error(`thinking must be one of: ${THINKING_LEVELS.join(", ")}`);
   }
-  const agent: AgentFile = { ...patch, name, source: "project" };
+  if (patch.deliberationBackend && !DELIBERATION_BACKENDS.includes(patch.deliberationBackend)) {
+    throw new Error(`deliberationBackend must be one of: ${DELIBERATION_BACKENDS.join(", ")}`);
+  }
+  // Derive the effective model/tools from the backend choice before persisting.
+  const agent: AgentFile = { ...applyDeliberationBackend(patch), name, source: "project" };
   const dir = agentsDir(paths);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, `${name}.md`), serializeAgentMarkdown(agent), "utf-8");
@@ -243,10 +295,32 @@ function rosterMarkdown(type: (typeof SUBAGENT_TYPES)[number]): string {
  * file so agents the user deleted in the UI stay deleted. Returns the number
  * of files written.
  */
+/**
+ * Seed the K-Dense persona agents (Karpathy, agentic data scientist) as editable project
+ * agents, idempotently — only writes one that's absent, so a user's edits (or deletions)
+ * stick. Deliberately NOT gated by the roster marker so they also appear in projects that
+ * were seeded before these agents existed.
+ */
+export function seedKDenseAgents(paths: ProjectPaths): number {
+  const dir = agentsDir(paths);
+  fs.mkdirSync(dir, { recursive: true });
+  let written = 0;
+  for (const agent of KDENSE_AGENTS) {
+    const file = path.join(dir, `${agent.name}.md`);
+    if (fs.existsSync(file)) continue;
+    fs.writeFileSync(file, serializeAgentMarkdown(agent), "utf-8");
+    written++;
+  }
+  return written;
+}
+
 export function seedAgentFiles(paths: ProjectPaths): number {
   const dir = agentsDir(paths);
-  if (fs.existsSync(seedMarkerPath(paths))) return 0;
   fs.mkdirSync(dir, { recursive: true });
+  // Ensure the K-Dense persona agents on every call (side effect; NOT counted in the
+  // return so the contract — "number of roster files written" — stays unchanged).
+  seedKDenseAgents(paths);
+  if (fs.existsSync(seedMarkerPath(paths))) return 0;
   let written = 0;
   for (const type of SUBAGENT_TYPES) {
     const file = path.join(dir, `${type.name}.md`);

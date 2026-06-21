@@ -33,6 +33,7 @@ import {
   saveAgent,
   THINKING_LEVELS,
   type AgentFile,
+  type AgentPatch,
 } from "@/lib/agents";
 
 interface AgentFormState {
@@ -46,6 +47,7 @@ interface AgentFormState {
   systemPromptMode: "append" | "replace";
   inheritProjectContext: boolean;
   inheritSkills: boolean;
+  deliberationBackend: string; // "none" | "fusion-direct" | "council-tool"
   extra?: Record<string, string>;
   systemPrompt: string;
 }
@@ -60,6 +62,7 @@ const EMPTY_FORM: AgentFormState = {
   systemPromptMode: "append",
   inheritProjectContext: true,
   inheritSkills: true,
+  deliberationBackend: "none",
   systemPrompt: "",
 };
 
@@ -74,6 +77,7 @@ function formFromAgent(agent: AgentFile, asCopy: boolean): AgentFormState {
     systemPromptMode: agent.systemPromptMode ?? "append",
     inheritProjectContext: agent.inheritProjectContext ?? true,
     inheritSkills: agent.inheritSkills ?? true,
+    deliberationBackend: agent.deliberationBackend ?? "none",
     extra: agent.extra,
     systemPrompt: agent.systemPrompt,
   };
@@ -141,6 +145,7 @@ export function SubagentsPanel() {
         systemPromptMode: form.systemPromptMode,
         inheritProjectContext: form.inheritProjectContext,
         inheritSkills: form.inheritSkills,
+        deliberationBackend: form.deliberationBackend as AgentPatch["deliberationBackend"],
         extra: form.extra,
         systemPrompt: form.systemPrompt,
       });
@@ -265,6 +270,32 @@ export function SubagentsPanel() {
                   onClick={() => setForm({ ...form, thinking: level })}
                 >
                   {level || "default"}
+                </Button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs font-medium">
+              Deliberation backend{" "}
+              <span className="font-normal text-muted-foreground">
+                (how this agent reasons)
+              </span>
+            </label>
+            <div className="flex flex-wrap gap-1">
+              {[
+                { value: "none", label: "Default" },
+                { value: "fusion-direct", label: "Fusion (direct)" },
+                { value: "council-tool", label: "AI Council" },
+              ].map((opt) => (
+                <Button
+                  key={opt.value}
+                  variant={form.deliberationBackend === opt.value ? "default" : "outline"}
+                  size="sm"
+                  className="h-6 px-2 text-[11px]"
+                  onClick={() => setForm({ ...form, deliberationBackend: opt.value })}
+                >
+                  {opt.label}
                 </Button>
               ))}
             </div>

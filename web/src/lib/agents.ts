@@ -21,6 +21,8 @@ export interface AgentFile {
   systemPromptMode?: "append" | "replace";
   inheritProjectContext?: boolean;
   inheritSkills?: boolean;
+  /** How this agent reasons: plain model, OpenRouter Fusion, or the AI Council tool. */
+  deliberationBackend?: "none" | "fusion-direct" | "council-tool";
   /** Frontmatter keys the UI doesn't model; preserved on save. */
   extra?: Record<string, string>;
   systemPrompt: string;

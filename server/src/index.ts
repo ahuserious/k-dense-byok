@@ -23,6 +23,7 @@ import { registerSystemRoutes } from "./api/system.ts";
 import { registerMcpRoutes } from "./api/mcp.ts";
 import { registerCredentialRoutes } from "./api/credentials.ts";
 import { registerAgentRoutes } from "./api/agents.ts";
+import { registerPipelineRoutes } from "./api/pipelines.ts";
 
 function readCookie(req: FastifyRequest, name: string): string | undefined {
   const raw = req.headers.cookie;
@@ -98,6 +99,7 @@ export async function buildApp() {
   await registerMcpRoutes(app);
   await registerCredentialRoutes(app);
   await registerAgentRoutes(app);
+  await registerPipelineRoutes(app);
 
   return app;
 }

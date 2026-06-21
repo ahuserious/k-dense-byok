@@ -15,6 +15,7 @@ import type { FastifyInstance } from "fastify";
 import { activePaths } from "../projects.ts";
 import {
   AGENT_NAME_RE,
+  DELIBERATION_BACKENDS,
   THINKING_LEVELS,
   deleteProjectAgent,
   listAgents,
@@ -36,6 +37,12 @@ function patchFromBody(body: Record<string, unknown>): AgentFilePatch | string {
   if (mode && mode !== "append" && mode !== "replace") {
     return `systemPromptMode must be "append" or "replace"`;
   }
+  const deliberationBackend = body.deliberationBackend
+    ? String(body.deliberationBackend)
+    : undefined;
+  if (deliberationBackend && !DELIBERATION_BACKENDS.includes(deliberationBackend as never)) {
+    return `deliberationBackend must be one of: ${DELIBERATION_BACKENDS.join(", ")}`;
+  }
   const boolOrUndef = (v: unknown) => (v === undefined || v === null ? undefined : Boolean(v));
   let extra: Record<string, string> | undefined;
   if (body.extra && typeof body.extra === "object" && !Array.isArray(body.extra)) {
@@ -54,6 +61,7 @@ function patchFromBody(body: Record<string, unknown>): AgentFilePatch | string {
     systemPromptMode: mode as AgentFilePatch["systemPromptMode"],
     inheritProjectContext: boolOrUndef(body.inheritProjectContext),
     inheritSkills: boolOrUndef(body.inheritSkills),
+    deliberationBackend: deliberationBackend as AgentFilePatch["deliberationBackend"],
     extra,
   };
 }

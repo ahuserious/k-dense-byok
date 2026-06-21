@@ -15,6 +15,7 @@ import {
   writeProjectAgent,
 } from "../src/agent/agent-files.ts";
 import { SUBAGENT_TYPES } from "../src/agent/subagents.ts";
+import { KDENSE_AGENTS } from "../src/agent/kdense-agents.ts";
 
 function reset(): void {
   fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
@@ -68,8 +69,10 @@ describe("agent markdown", () => {
 describe("agent files CRUD + seeding", () => {
   it("seeds the scientific roster once, then respects deletions", () => {
     const paths = ensureProjectExists("seed-test");
+    // seedAgentFiles returns the roster count; it ALSO seeds the K-Dense persona agents
+    // (Karpathy, data-scientist) as a side effect, so the listing has both sets.
     expect(seedAgentFiles(paths)).toBe(SUBAGENT_TYPES.length);
-    expect(listProjectAgents(paths)).toHaveLength(SUBAGENT_TYPES.length);
+    expect(listProjectAgents(paths)).toHaveLength(SUBAGENT_TYPES.length + KDENSE_AGENTS.length);
 
     expect(deleteProjectAgent(paths, "code-reviewer")).toBe(true);
     // Re-seeding is a no-op after the marker exists — the deletion sticks.

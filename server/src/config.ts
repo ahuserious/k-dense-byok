@@ -36,6 +36,11 @@ export const DEFAULT_MODEL_ID =
 export const OLLAMA_BASE_URL =
   process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
 
+/** Base URL of the Archon sidecar (the "Pipelines" workflow engine). Pinned off :3000
+ *  and :8000 by default; the Kady /pipelines routes proxy to it. */
+export const ARCHON_BASE_URL =
+  process.env.ARCHON_BASE_URL ?? "http://localhost:3091";
+
 /** Whether Modal-style remote compute is configured (kept for /config parity). */
 export function modalConfigured(): boolean {
   return Boolean(process.env.MODAL_TOKEN_ID && process.env.MODAL_TOKEN_SECRET);

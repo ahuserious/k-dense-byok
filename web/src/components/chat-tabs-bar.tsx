@@ -35,13 +35,14 @@ export interface ChatTabDescriptor {
 export interface ChatTabsBarProps {
   tabs: ChatTabDescriptor[];
   activeTabId: string;
-  view: "chat" | "workflows";
+  view: "chat" | "workflows" | "pipelines";
   maxTabs: number;
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
   onNew: () => void;
   onRename: (id: string, title: string) => void;
   onSelectWorkflows: () => void;
+  onSelectPipelines: () => void;
   /** Session id of the active tab, for reproducibility export. */
   activeSessionId?: string | null;
   /** Whether the active tab has any messages worth exporting. */
@@ -129,6 +130,7 @@ export function ChatTabsBar({
   onNew,
   onRename,
   onSelectWorkflows,
+  onSelectPipelines,
   activeSessionId,
   canExport = false,
 }: ChatTabsBarProps) {
@@ -324,6 +326,19 @@ export function ChatTabsBar({
             Workflows
           </button>
         </InfoTooltip>
+        <button
+          onClick={onSelectPipelines}
+          type="button"
+          className={cn(
+            "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors",
+            view === "pipelines"
+              ? "bg-muted text-foreground"
+              : "text-muted-foreground hover:text-foreground hover:bg-muted/50",
+          )}
+        >
+          <WorkflowIcon className="size-3.5" />
+          Pipelines
+        </button>
       </div>
     </div>
   );

@@ -81,7 +81,7 @@ export interface CostEntry {
   entryId: string;
   ts: number;
   sessionId: string;
-  role: "agent" | "subagent";
+  role: "agent" | "subagent" | "council" | "workflow";
   model: string;
   promptTokens: number;
   completionTokens: number;
@@ -106,7 +106,7 @@ export function recordRun(args: {
   model: string;
   before: CostSnapshot;
   after: CostSnapshot;
-  role?: "agent" | "subagent";
+  role?: "agent" | "subagent" | "council" | "workflow";
   projectId?: string;
 }): CostEntry | null {
   const delta = snapshotDelta(args.before, args.after);
@@ -162,6 +162,34 @@ export function recordSubagentRun(
   });
 }
 
+/**
+ * Ledger a native AI-council deliberation's spend. The council makes its own
+ * OpenRouter calls (a panel of advisors + a chair) outside Pi's session stats, so we
+ * record the summed cost here as a `council` row to keep budgets + totals accurate.
+ */
+export function recordCouncilRun(
+  projectId: string,
+  sessionId: string,
+  model: string,
+  stats: { cost: number; tokens: { input: number; output: number; total: number } },
+): CostEntry | null {
+  if (!sessionId) return null;
+  return recordRun({
+    sessionId,
+    projectId,
+    model,
+    role: "council",
+    before: { costUsd: 0, input: 0, output: 0, cacheRead: 0, total: 0 },
+    after: {
+      costUsd: stats.cost,
+      input: stats.tokens.input,
+      output: stats.tokens.output,
+      cacheRead: 0,
+      total: stats.tokens.total,
+    },
+  });
+}
+
 function readEntries(sessionId: string, projectId?: string): CostEntry[] {
   const file = costsPath(sessionId, projectId);
   try {
@@ -181,6 +209,7 @@ export interface SessionCostSummary {
   totalTokens: number;
   agentUsd: number;
   subagentUsd: number;
+  councilUsd: number;
   entries: CostEntry[];
 }
 
@@ -190,13 +219,15 @@ export function sessionCostSummary(sessionId: string, projectId?: string): Sessi
   let totalTokens = 0;
   let agentUsd = 0;
   let subagentUsd = 0;
+  let councilUsd = 0;
   for (const e of entries) {
     totalUsd += e.costUsd;
     totalTokens += e.totalTokens;
     if (e.role === "subagent") subagentUsd += e.costUsd;
-    else agentUsd += e.costUsd;
+    else if (e.role === "council") councilUsd += e.costUsd;
+    else agentUsd += e.costUsd; // agent + (for now) workflow rows
   }
-  return { sessionId, totalUsd, totalTokens, agentUsd, subagentUsd, entries };
+  return { sessionId, totalUsd, totalTokens, agentUsd, subagentUsd, councilUsd, entries };
 }
 
 export type BudgetState = "ok" | "warn" | "exceeded";

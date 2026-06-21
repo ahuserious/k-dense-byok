@@ -32,7 +32,17 @@ interface CatalogueEntry {
   costOutput: number; // USD per 1M completion tokens
   input: ("text" | "image")[];
   label: string;
+  isFusion: boolean; // true for OpenRouter's Fusion meta-model (variable, never-$0 pricing)
 }
+
+// OpenRouter's Fusion meta-model runs a panel of models plus a judge: it bills several
+// completions per request and reports variable pricing, so a Fusion turn must never
+// resolve to {cost: $0} — that would silently disable the project spend caps. When the
+// catalogue carries no positive price for it, FUSION_COST_FLOOR is the conservative
+// per-1M floor we charge instead so budgets still accrue. (Forwarding a picker's custom
+// expert panel into the Fusion request is a separate, tracked follow-up — see resolveModel.)
+const FUSION_MODEL_ID = "openrouter/fusion";
+const FUSION_COST_FLOOR = { input: 5, output: 15 };
 
 let catalogue: Map<string, CatalogueEntry> | null = null;
 
@@ -62,6 +72,7 @@ function loadCatalogue(): Map<string, CatalogueEntry> {
         costOutput: Number(pricing.completion ?? 0),
         input,
         label: String(m.label ?? id),
+        isFusion: Boolean(m.isFusion),
       });
     }
   } catch (err) {
@@ -77,8 +88,20 @@ function loadCatalogue(): Map<string, CatalogueEntry> {
   return map;
 }
 
+// Choose a per-1M cost. A positive catalogue price is always trusted. Otherwise, a Fusion
+// model falls back to the conservative floor (never $0); a normal unknown model keeps the
+// historical $0 fallback (changing that is out of scope for the Fusion work).
+function pickCost(catalogueValue: number | undefined, isFusion: boolean, floor: number): number {
+  if (typeof catalogueValue === "number" && catalogueValue > 0) return catalogueValue;
+  return isFusion ? floor : catalogueValue ?? 0;
+}
+
 function buildOpenRouterModel(orId: string): Model<Api> {
-  const cat = loadCatalogue().get(orId);
+  // Look the entry up under the SAME normalization the catalogue is keyed by
+  // (stripOpenRouter), so an OpenRouter-vendor meta-model like `openrouter/fusion` —
+  // keyed as `fusion` — is actually found instead of missing and pricing at $0.
+  const cat = loadCatalogue().get(stripOpenRouter(orId));
+  const isFusion = cat?.isFusion ?? false;
   return {
     id: orId,
     name: cat?.label ?? orId,
@@ -88,8 +111,8 @@ function buildOpenRouterModel(orId: string): Model<Api> {
     reasoning: true,
     input: cat?.input ?? ["text"],
     cost: {
-      input: cat?.costInput ?? 0,
-      output: cat?.costOutput ?? 0,
+      input: pickCost(cat?.costInput, isFusion, FUSION_COST_FLOOR.input),
+      output: pickCost(cat?.costOutput, isFusion, FUSION_COST_FLOOR.output),
       cacheRead: 0,
       cacheWrite: 0,
     },
@@ -139,7 +162,18 @@ export function resolveModel(
   if (usingDefault && DEFAULT_MODEL_PROVIDER.toLowerCase() === "ollama") {
     return buildOllamaModel(r);
   }
-  const orId = stripOpenRouter(r);
+  // Fusion refs arrive in a few shapes: the picker's user-defined panels as
+  // "fusion/<configId>", and the canonical "openrouter/fusion" / "openrouter/openrouter/fusion".
+  // They all run OpenRouter's Fusion meta-model, so resolve them to its real slug — this
+  // gives a valid API id AND routes through the isFusion cost path (never $0). The panel's
+  // experts/reasoning_effort are a frontend feature today; forwarding them into the Fusion
+  // request body is a tracked follow-up. Until then a Fusion selection runs Fusion's own
+  // auto-selected panel.
+  const stripped = stripOpenRouter(r);
+  if (r.startsWith("fusion/") || stripped === "fusion" || stripped === "openrouter/fusion") {
+    return buildOpenRouterModel(FUSION_MODEL_ID);
+  }
+  const orId = stripped;
   return registry.find("openrouter", orId) ?? buildOpenRouterModel(orId);
 }
 

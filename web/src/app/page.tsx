@@ -7,6 +7,7 @@ import { ChatTab, type ChatTabHandle, type ChatTabMeta } from "@/components/chat
 import { ChatTabsBar, type ChatTabDescriptor } from "@/components/chat-tabs-bar";
 import { SettingsDialog } from "@/components/settings-dialog";
 import { WorkflowsPanel } from "@/components/workflows-panel";
+import { PipelinesPanel } from "@/components/pipelines-panel";
 import { ProjectSwitcher } from "@/components/project-switcher";
 import { SessionCostPill } from "@/components/session-cost-pill";
 import { useSessionCost } from "@/lib/use-session-cost";
@@ -84,7 +85,7 @@ export default function ChatPage() {
     { id: initialTabId, title: defaultTabTitle(0) },
   ]);
   const [activeTabId, setActiveTabId] = useState<string>(() => initialTabId);
-  const [view, setView] = useState<"chat" | "workflows">("chat");
+  const [view, setView] = useState<"chat" | "workflows" | "pipelines">("chat");
   // Mirror of tabs in a ref so synchronous handlers can read length without
   // putting impure logic inside a setState updater (which strict mode runs
   // twice for purity testing).
@@ -553,6 +554,7 @@ export default function ChatPage() {
             onNew={newTab}
             onRename={renameTab}
             onSelectWorkflows={() => setView("workflows")}
+            onSelectPipelines={() => setView("pipelines")}
             activeSessionId={activeSessionId}
             canExport={(activeMeta?.userMessageCount ?? 0) > 0}
           />
@@ -585,6 +587,13 @@ export default function ChatPage() {
                 onUploadFiles={sandbox.uploadFiles}
                 budgetBlocked={projectCost.budget.state === "exceeded"}
               />
+            </div>
+          )}
+
+          {/* Pipelines view — the Archon workflow engine (list + builder link). */}
+          {view === "pipelines" && (
+            <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
+              <PipelinesPanel />
             </div>
           )}
         </div>
