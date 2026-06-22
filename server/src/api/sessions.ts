@@ -36,6 +36,10 @@ import {
   toShellScript,
 } from "../agent/session-export.ts";
 import {
+  finishRun as indexFinishRun,
+  startRun as indexStartRun,
+} from "../agent/runs-index.ts";
+import {
   pendingInterviewFor,
   resolveInterview,
   validateAnswer,
@@ -299,18 +303,42 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
           if (session.isStreaming) session.abort().catch(() => {});
         });
 
+        // Backfill the run/loop index alongside the cost ledger: a 'running' row
+        // at start, a terminal row in the finally. role 'agent' (a single chat
+        // turn, loopId null); task is the user message, truncated so the index
+        // row stays small. Index writes are best-effort — a failure here must
+        // never break the live SSE run, so each is wrapped in try/catch.
+        let indexRunId: string | null = null;
+        try {
+          indexRunId = indexStartRun(projectId, {
+            sessionId: req.params.id,
+            loopId: null,
+            iteration: 0,
+            task: (body.message ?? "").slice(0, 500),
+            role: "agent",
+            model: session.model?.id ?? "unknown",
+          });
+        } catch (err) {
+          req.log.warn({ err }, "failed to write runs-index startRun");
+        }
+
         // errorMessage is sticky on the session; only report it if THIS run set it.
         const priorError = session.state.errorMessage;
         const before = snapshot(session);
+        // Tracks whether THIS turn errored, so the runs-index terminal row gets
+        // the right status (a streamed error frame still ends as 'failed').
+        let runFailed = false;
         try {
           await session.prompt(body.message ?? "");
           // Surface a provider/agent error that didn't already stream as a frame
           // (e.g. an auth failure that produced an empty assistant turn).
           const errorMessage = session.state.errorMessage;
           if (errorMessage && errorMessage !== priorError) {
+            runFailed = true;
             write({ type: "error", message: errorMessage });
           }
         } catch (err) {
+          runFailed = true;
           write({ type: "error", message: (err as Error).message });
         } finally {
           unsub();
@@ -326,6 +354,21 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
               before: emptySnapshot(),
               after: run,
             });
+            // Terminal runs-index row mirroring the ledger row, carrying this
+            // turn's status + cost/tokens. Best-effort: a failure here must not
+            // break the cost frame or the SSE close below.
+            if (indexRunId) {
+              try {
+                indexFinishRun(projectId, req.params.id, indexRunId, {
+                  status: runFailed ? "failed" : "completed",
+                  costUsd: run.costUsd,
+                  tokensIn: run.input,
+                  tokensOut: run.output,
+                });
+              } catch (err) {
+                req.log.warn({ err }, "failed to write runs-index finishRun");
+              }
+            }
             const stats = session.getSessionStats();
             // `cost` is the session's full ledgered spend (subagents included,
             // restart/compaction-proof); `tokens` is Pi's in-context cumulative;

@@ -16,6 +16,8 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import * as archon from "../agent/archon/client.ts";
 import { ArchonUnavailableError, sumRunCost } from "../agent/archon/client.ts";
 import { recordRun } from "../cost/ledger.ts";
+import { startRun as indexStartRun } from "../agent/runs-index.ts";
+import { currentProjectId } from "../scope.ts";
 
 // Map an Archon-call failure to the right HTTP status: 503 when the sidecar is simply
 // down (recoverable — the user just needs to start it), 502 for any other upstream error.
@@ -155,6 +157,37 @@ export async function registerPipelineRoutes(app: FastifyInstance): Promise<void
             total: totals.tokensIn + totals.tokensOut,
           },
         });
+
+        // Backfill a runs-index row alongside the ledger row so the console shows
+        // workflow runs too. role 'workflow', loopId null; task is the workflow
+        // name when the Archon run object exposes one, else the runId. The run
+        // object is typed `unknown` (the client doesn't trust a fixed field name
+        // across Archon versions), so we probe a couple of likely keys defensively.
+        // Single terminal 'completed' row: reconcile-cost runs after the workflow
+        // finishes. Best-effort — never fail the reconcile on an index write.
+        try {
+          const runObj = (run ?? {}) as Record<string, unknown>;
+          const workflowName =
+            typeof runObj.workflowName === "string"
+              ? runObj.workflowName
+              : typeof runObj.name === "string"
+                ? runObj.name
+                : req.params.runId;
+          indexStartRun(currentProjectId(), {
+            sessionId,
+            loopId: null,
+            iteration: 0,
+            task: workflowName,
+            role: "workflow",
+            status: "completed",
+            model: "archon-pipeline",
+            costUsd: totals.costUsd,
+            tokensIn: totals.tokensIn,
+            tokensOut: totals.tokensOut,
+          });
+        } catch (err) {
+          req.log.warn({ err }, "failed to write runs-index workflow row");
+        }
         return { reconciled: totals, entry };
       } catch (err) {
         return mapError(reply, err);

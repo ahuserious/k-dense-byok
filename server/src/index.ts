@@ -24,6 +24,8 @@ import { registerMcpRoutes } from "./api/mcp.ts";
 import { registerCredentialRoutes } from "./api/credentials.ts";
 import { registerAgentRoutes } from "./api/agents.ts";
 import { registerPipelineRoutes } from "./api/pipelines.ts";
+import { registerConsoleRoutes } from "./api/console.ts";
+import { reconcileInterruptedLoops } from "./agent/runs-index.ts";
 
 function readCookie(req: FastifyRequest, name: string): string | undefined {
   const raw = req.headers.cookie;
@@ -100,6 +102,20 @@ export async function buildApp() {
   await registerCredentialRoutes(app);
   await registerAgentRoutes(app);
   await registerPipelineRoutes(app);
+  await registerConsoleRoutes(app);
+
+  // Best-effort: on boot no goal loop is actually executing (in-flight loop state
+  // doesn't survive a restart), so flag any loop still 'running'/'pending' as
+  // failed rather than leaving a zombie in the console. Scoped to the default
+  // project — boot runs outside any request, so that's the only active project.
+  try {
+    const reconciled = reconcileInterruptedLoops(DEFAULT_PROJECT_ID);
+    if (reconciled.length > 0) {
+      app.log.info(`Reconciled ${reconciled.length} interrupted loop(s) on startup.`);
+    }
+  } catch (err) {
+    app.log.warn({ err }, "failed to reconcile interrupted loops on startup");
+  }
 
   return app;
 }

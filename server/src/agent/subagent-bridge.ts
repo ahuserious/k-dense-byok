@@ -22,6 +22,7 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { isBudgetExceeded, recordSubagentRun } from "../cost/ledger.ts";
+import { startRun as indexStartRun } from "./runs-index.ts";
 
 const require_ = createRequire(import.meta.url);
 
@@ -109,6 +110,43 @@ export function usageFromSessionFile(
 const ledgeredAsyncRuns = new Set<string>();
 
 /**
+ * Backfill a runs-index row for a completed subagent delegation, alongside the
+ * cost-ledger row. The child has already finished by the time we ledger it, so
+ * we write a single terminal row (status 'completed') rather than start/finish.
+ * sessionId is the PARENT session (the child runs in its own process/session);
+ * task names the child agent so the console can show "delegated to <agent>".
+ *
+ * Best-effort: a runs-index failure must never break a live subagent run, so the
+ * caller wraps this in try/catch.
+ *
+ * NOTE on parentRunId: the bridge sees the parent SESSION id, not the parent's
+ * runs-index run id (the chat turn's index row), so we can't link rows directly
+ * yet — parentRunId is left undefined. They share a sessionId, which is enough
+ * for the console to group a session's runs.
+ */
+function recordSubagentIndexRow(
+  projectId: string,
+  parentSessionId: string,
+  agent: string | undefined,
+  model: string | undefined,
+  usage: { cost: number; tokens: { input: number; output: number } },
+): void {
+  if (!parentSessionId) return;
+  indexStartRun(projectId, {
+    sessionId: parentSessionId,
+    loopId: null,
+    iteration: 0,
+    task: agent ? `subagent: ${agent}` : "subagent delegation",
+    role: "subagent",
+    status: "completed",
+    model: model ?? "unknown",
+    costUsd: usage.cost,
+    tokensIn: usage.tokens.input,
+    tokensOut: usage.tokens.output,
+  });
+}
+
+/**
  * Budget gate + cost ledger for subagent runs, as a Pi extension.
  *
  * `getSessionId` is lazy because the extension is constructed before the
@@ -152,6 +190,14 @@ export function makeSubagentLedgerExtension(
             total: input + output + cacheRead + cacheWrite,
           },
         });
+        try {
+          recordSubagentIndexRow(projectId, getSessionId(), result.agent, result.model, {
+            cost: usage.cost ?? 0,
+            tokens: { input, output },
+          });
+        } catch {
+          /* index row is best-effort; never break a live subagent run */
+        }
       }
     });
 
@@ -169,6 +215,14 @@ export function makeSubagentLedgerExtension(
         const usage = usageFromSessionFile(result.sessionFile);
         if (usage) {
           recordSubagentRun(projectId, getSessionId(), result.model ?? "unknown", usage);
+          try {
+            recordSubagentIndexRow(projectId, getSessionId(), result.agent, result.model, {
+              cost: usage.cost,
+              tokens: { input: usage.tokens.input, output: usage.tokens.output },
+            });
+          } catch {
+            /* index row is best-effort */
+          }
         }
       }
     });
