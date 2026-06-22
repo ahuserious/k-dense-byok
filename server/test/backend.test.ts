@@ -221,20 +221,34 @@ describe("sandbox-fs", () => {
 });
 
 describe("skills", () => {
-  it("copies skills from a sibling project and lists them", () => {
-    // sibling with one skill
-    const sib = resolvePaths("sib");
-    const skillDir = path.join(sib.skillsDir, "anndata");
+  it("seeds skills from the committed catalogue and lists them", () => {
+    // Point the committed seed at a controlled one-skill dir via the override, so
+    // the assertion is deterministic and independent of sibling-discovery order or
+    // parallel-FS state (the committed seed is now the primary seeding source).
+    const seed = path.join(PROJECTS_ROOT, ".test-seed-skills");
+    fs.rmSync(seed, { recursive: true, force: true });
+    const skillDir = path.join(seed, "anndata");
     fs.mkdirSync(skillDir, { recursive: true });
     fs.writeFileSync(
       path.join(skillDir, "SKILL.md"),
       "---\nname: anndata\ndescription: Annotated matrices.\n---\n# anndata\n",
     );
-    const target = ensureProjectExists("default");
-    const count = seedProjectSkills(target, false); // no network
-    expect(count).toBe(1);
-    const listed = listProjectSkills(target);
-    expect(listed.map((s) => s.name)).toContain("anndata");
+    const prev = process.env.KADY_SEED_SKILLS_DIR;
+    process.env.KADY_SEED_SKILLS_DIR = seed;
+    try {
+      const target = ensureProjectExists("skills-seed-test");
+      fs.rmSync(target.skillsDir, { recursive: true, force: true }); // ensure a fresh seed
+      const count = seedProjectSkills(target, false); // no network
+      expect(count).toBe(1);
+      const listed = listProjectSkills(target);
+      expect(listed.map((s) => s.name)).toContain("anndata");
+      // The committed skills are also mirrored into .agents/skills for Archon nodes.
+      expect(fs.existsSync(path.join(target.sandbox, ".agents", "skills", "anndata", "SKILL.md"))).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.KADY_SEED_SKILLS_DIR;
+      else process.env.KADY_SEED_SKILLS_DIR = prev;
+      fs.rmSync(seed, { recursive: true, force: true });
+    }
   });
 });
 

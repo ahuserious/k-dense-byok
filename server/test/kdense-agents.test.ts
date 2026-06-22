@@ -7,8 +7,12 @@ import { KDENSE_AGENTS } from "../src/agent/kdense-agents.ts";
 import { parseAgentMarkdown, serializeAgentMarkdown } from "../src/agent/agent-files.ts";
 
 describe("K-Dense persona agents", () => {
-  it("ships exactly karpathy + data-scientist", () => {
-    expect(KDENSE_AGENTS.map((a) => a.name).sort()).toEqual(["data-scientist", "karpathy"]);
+  it("ships exactly karpathy + data-scientist + background-rescue", () => {
+    expect(KDENSE_AGENTS.map((a) => a.name).sort()).toEqual([
+      "background-rescue",
+      "data-scientist",
+      "karpathy",
+    ]);
   });
 
   for (const agent of KDENSE_AGENTS) {
@@ -16,7 +20,9 @@ describe("K-Dense persona agents", () => {
       const parsed = parseAgentMarkdown(serializeAgentMarkdown(agent), agent.name, "project");
       expect(parsed.name).toBe(agent.name);
       expect(parsed.source).toBe("project"); // editable, not a read-only builtin
-      expect(parsed.tools).toContain("subagent");
+      // Every persona ships a usable tool allowlist that survives the round-trip;
+      // `read` is the common denominator (background-rescue is read-only by design).
+      expect(parsed.tools).toContain("read");
       expect(parsed.systemPrompt.length).toBeGreaterThan(100);
     });
   }

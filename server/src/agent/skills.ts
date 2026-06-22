@@ -13,6 +13,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadSkillsFromDir, type Skill } from "@earendil-works/pi-coding-agent";
 import { PROJECTS_ROOT } from "../config.ts";
 import type { ProjectPaths } from "../projects.ts";
@@ -20,6 +21,22 @@ import type { ProjectPaths } from "../projects.ts";
 const SKILLS_REPO = process.env.KADY_SKILLS_REPO ?? "K-Dense-AI/scientific-agent-skills";
 const SKILLS_SUBPATH = "skills";
 const SKILLS_BRANCH = process.env.KADY_SKILLS_BRANCH ?? "main";
+
+/**
+ * Committed, in-repo skill catalogue. This module lives at
+ * `server/src/agent/skills.ts`; the seed dir is `server/seed/skills`, i.e.
+ * two levels up from `src/agent` (→ `server/`) then `seed/skills`.
+ *
+ * Overridable via `KADY_SEED_SKILLS_DIR` — used by tests to isolate the
+ * sibling/remote fallbacks, and by deployments that ship a different seed set.
+ * Read at call time (not module load) so the override can be set per-test.
+ */
+function committedSeedSkillsDir(): string {
+  return (
+    process.env.KADY_SEED_SKILLS_DIR ??
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../seed/skills")
+  );
+}
 
 function countSkillDirs(dir: string): number {
   try {
@@ -74,19 +91,36 @@ function cloneCatalogue(): { skillsDir: string; tmpRoot: string } | null {
 }
 
 /**
- * Ensure a project's skills dir is populated. Returns the number of skills.
- * `allowRemote=false` skips the network clone (fast path only).
+ * Ensure a project's skills dir (`<sandbox>/.pi/skills`) is populated. Returns
+ * the number of skills.
+ *
+ * Sources, tried in order (each is non-clobbering; the first that yields skills
+ * short-circuits the rest):
+ *   1. the committed in-repo seed (`server/seed/skills`) — offline, deterministic;
+ *   2. a sibling project's already-seeded skills (local I/O fast path);
+ *   3. a shallow `git clone` of the remote catalogue (only if `allowRemote`).
+ *
+ * After populating `.pi/skills`, the same skills are mirrored into
+ * `<sandbox>/.agents/skills` so imported Archon chat agents (which resolve
+ * workflow-node `skills:` from `.agents/skills`, not `.pi/skills`) see them too.
  */
 export function seedProjectSkills(paths: ProjectPaths, allowRemote = true): number {
   const dest = paths.skillsDir;
-  if (countSkillDirs(dest) > 0) return countSkillDirs(dest);
-
-  const sibling = findSiblingSkillsDir(paths.id);
-  if (sibling) {
-    copySkillDirs(sibling, dest);
-    if (countSkillDirs(dest) > 0) return countSkillDirs(dest);
+  if (countSkillDirs(dest) > 0) {
+    // Already seeded (e.g. legacy project): still ensure the Archon mirror exists.
+    seedArchonSkills(paths);
+    return countSkillDirs(dest);
   }
-  if (allowRemote) {
+
+  const seedDir = committedSeedSkillsDir();
+  if (countSkillDirs(seedDir) > 0) {
+    copySkillDirs(seedDir, dest);
+  }
+  if (countSkillDirs(dest) === 0) {
+    const sibling = findSiblingSkillsDir(paths.id);
+    if (sibling) copySkillDirs(sibling, dest);
+  }
+  if (countSkillDirs(dest) === 0 && allowRemote) {
     const catalogue = cloneCatalogue();
     if (catalogue) {
       try {
@@ -96,7 +130,23 @@ export function seedProjectSkills(paths: ProjectPaths, allowRemote = true): numb
       }
     }
   }
+
+  seedArchonSkills(paths);
   return countSkillDirs(dest);
+}
+
+/**
+ * Mirror the project's seeded `.pi/skills` into `<sandbox>/.agents/skills` so
+ * Archon-style chat agents resolve their workflow-node `skills:` references.
+ * Non-clobbering (reuses copySkillDirs), so user-customized Archon skills are
+ * preserved. Returns the number of skills present in the Archon dir.
+ */
+export function seedArchonSkills(paths: ProjectPaths): number {
+  const archonSkillsDir = path.join(paths.sandbox, ".agents", "skills");
+  if (countSkillDirs(paths.skillsDir) > 0) {
+    copySkillDirs(paths.skillsDir, archonSkillsDir);
+  }
+  return countSkillDirs(archonSkillsDir);
 }
 
 /** List installed skills for the project (parsed SKILL.md frontmatter). */
