@@ -1,0 +1,71 @@
+name: data-scientist
+description: |
+  An end-to-end data-science loop: plan the analysis, iteratively write and run
+  the code, pause for a human review of the results, reflect on that feedback,
+  then summarize the findings. Mirrors the plan -> code -> review -> reflect ->
+  summarize roles of a careful analyst. Has a human approval gate, so it runs
+  interactively.
+provider: pi
+interactive: true
+
+nodes:
+  - id: plan
+    prompt: |
+      You are a senior data scientist. Read the user's request and produce a
+      concrete analysis plan: the questions to answer, the datasets/inputs
+      involved, the methods to apply, and the deliverables.
+
+      Request: $ARGUMENTS
+    model: openrouter/anthropic/claude-opus-4.8
+
+  - id: code
+    depends_on: [plan]
+    idle_timeout: 600000
+    loop:
+      prompt: |
+        Implement the next unfinished step of the analysis plan below. Write the
+        code (use `uv run python` in the sandbox), run it, and check the output.
+        When every step of the plan has been implemented and validated, output:
+        <promise>COMPLETE</promise>
+
+        Plan: $plan.output
+      until: COMPLETE
+      max_iterations: 10
+      fresh_context: false
+    model: openrouter/anthropic/claude-opus-4.8
+
+  - id: review
+    depends_on: [code]
+    approval:
+      message: |
+        Review the analysis results above. Approve to continue to the write-up,
+        or reject with feedback to send the work back for another reflection
+        pass.
+      capture_response: true
+      on_reject:
+        prompt: |
+          The reviewer rejected the current results with this feedback:
+          $REJECTION_REASON
+
+          Address the feedback: fix the analysis or code as needed, re-run, and
+          summarize what you changed.
+        max_attempts: 3
+
+  - id: reflect
+    depends_on: [review]
+    prompt: |
+      Reflect on the analysis and the reviewer's comments. Call out the key
+      assumptions, the limitations of the methods used, and any results that
+      warrant caution or further work.
+
+      Reviewer comments: $review.output
+    model: openrouter/anthropic/claude-opus-4.8
+
+  - id: summarize
+    depends_on: [reflect]
+    prompt: |
+      Write the final report for the user. Lead with the headline findings,
+      then the methodology, then the caveats from the reflection below.
+
+      Reflection: $reflect.output
+    model: openrouter/anthropic/claude-opus-4.8

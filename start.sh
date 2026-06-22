@@ -218,8 +218,11 @@ cleanup() {
         command -v pkill &>/dev/null && {
             pkill -TERM -P "$BACKEND_PID" 2>/dev/null || true
             pkill -TERM -P "$FRONTEND_PID" 2>/dev/null || true
+            [ -n "$ARCHON_PID" ] && pkill -TERM -P "$ARCHON_PID" 2>/dev/null || true
         }
-        kill "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null || true
+        # ARCHON_PID is only set when start.sh launched the sidecar itself; a
+        # reused (already-running) Archon is intentionally left alone.
+        kill "$BACKEND_PID" "$FRONTEND_PID" ${ARCHON_PID:+"$ARCHON_PID"} 2>/dev/null || true
     fi
     wait 2>/dev/null || true
     exit "${1:-0}"
@@ -255,6 +258,98 @@ echo
 echo "Waiting for services to come up (the first run can take a minute)..."
 wait_for "http://localhost:$BACKEND_PORT/" "$BACKEND_PID" "backend" 120
 wait_for "http://localhost:$FRONTEND_PORT/" "$FRONTEND_PID" "app UI" 180
+
+# ---- Step 7: Pipeline Builder (Archon) sidecar ----
+# Optional companion service. It's launched last and is entirely non-fatal:
+# any failure here prints a warning and leaves Kady itself running. A clean
+# reimport that drops an Archon checkout next to this repo stands it up
+# automatically; if the checkout is absent, this whole block is skipped.
+
+ARCHON_PORT="${ARCHON_PORT:-3091}"
+# Default to the sibling checkout (../Archon relative to this repo); override
+# with ARCHON_DIR. PWD is the repo root here (we cd'd to it at the top).
+ARCHON_DIR="${ARCHON_DIR:-$PWD/../Archon}"
+ARCHON_HEALTH_URL="http://127.0.0.1:$ARCHON_PORT/api/health"
+
+# archon_health_ok: succeeds only when the URL answers with an "ok" status.
+# Used both to decide whether to reuse an existing instance and to poll our own.
+archon_health_ok() {
+    command -v curl &>/dev/null || return 1
+    curl -s --max-time 2 "$ARCHON_HEALTH_URL" 2>/dev/null | grep -q '"status":[[:space:]]*"ok"'
+}
+
+echo
+if [ ! -d "$ARCHON_DIR" ]; then
+    echo "  → Pipeline Builder (Archon) not found at $ARCHON_DIR — skipping (set ARCHON_DIR to enable)."
+elif ! command -v bun &>/dev/null; then
+    # The sidecar is a bun project; without bun we can't build or run it.
+    echo "  ⚠ Pipeline Builder (Archon) found but 'bun' is not installed — skipping the sidecar."
+    echo "    Install bun (https://bun.sh) to enable it, then run ./start.sh again."
+elif archon_health_ok; then
+    # Something already healthy on this port — reuse it, don't duplicate or kill it.
+    echo "  → Pipeline Builder (Archon) already running on :$ARCHON_PORT — reusing it."
+else
+    echo "  → Pipeline Builder (Archon) on port $ARCHON_PORT (building if needed)..."
+
+    # One-time build, marker-guarded so repeat starts are fast. The rebrand
+    # overlay is applied once, just before the first web build, so the built
+    # assets carry the K-Dense branding.
+    if [ ! -f "$ARCHON_DIR/.archon-web-built" ]; then
+        REBRAND_SCRIPT="$PWD/server/seed/archon-rebrand/apply-rebrand.sh"
+        if [ -f "$REBRAND_SCRIPT" ]; then
+            echo "    Applying K-Dense rebrand overlay..."
+            sh "$REBRAND_SCRIPT" "$ARCHON_DIR" || echo "    ⚠ Rebrand overlay failed — continuing with stock branding."
+        else
+            echo "    ⚠ Rebrand overlay script not found at $REBRAND_SCRIPT — building with stock branding."
+        fi
+        echo "    Installing Archon packages and building the web bundle (first run only)..."
+        if (cd "$ARCHON_DIR" && bun install && bun run build:web); then
+            : > "$ARCHON_DIR/.archon-web-built"
+        else
+            echo "  ⚠ Pipeline Builder (Archon) build failed — skipping the sidecar (Kady is unaffected)."
+        fi
+    fi
+
+    # Only launch if the build marker exists (i.e. the build above, or a prior
+    # run, succeeded). Otherwise we'd start a server with no web bundle.
+    if [ -f "$ARCHON_DIR/.archon-web-built" ]; then
+        # CLAUDECODE is unset so the embedded agent doesn't think it's nested
+        # inside Claude Code; PORT/HOST pin it to a loopback sidecar on our port.
+        (
+            cd "$ARCHON_DIR" && \
+            unset CLAUDECODE && \
+            ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING=1 \
+            PORT="$ARCHON_PORT" \
+            HOST=127.0.0.1 \
+            DEFAULT_AI_ASSISTANT=pi \
+            OPENROUTER_API_KEY="$OPENROUTER_API_KEY" \
+            bun run start
+        ) &
+        ARCHON_PID=$!
+
+        # Poll the health endpoint for up to ~30s. Non-fatal: a slow or failed
+        # start just prints a warning — it never aborts the script.
+        if command -v curl &>/dev/null; then
+            archon_i=0
+            until archon_health_ok; do
+                if ! kill -0 "$ARCHON_PID" 2>/dev/null; then
+                    echo "  ⚠ Pipeline Builder (Archon) exited during startup — see the log above (Kady is unaffected)."
+                    ARCHON_PID=""
+                    break
+                fi
+                archon_i=$((archon_i + 1))
+                if [ "$archon_i" -ge 30 ]; then
+                    echo "  ⚠ Pipeline Builder (Archon) didn't report healthy within ~30s — it may still be starting."
+                    break
+                fi
+                sleep 1
+            done
+            archon_health_ok && echo "  Pipeline Builder (Archon) ready on :$ARCHON_PORT"
+        else
+            echo "  → Pipeline Builder (Archon) launched on :$ARCHON_PORT (curl unavailable — skipping health check)."
+        fi
+    fi
+fi
 
 echo
 echo "============================================"

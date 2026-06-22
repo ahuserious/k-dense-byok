@@ -1,0 +1,36 @@
+name: kdense-starter
+description: |
+  A simple three-step research pipeline: scope the question, gather and
+  synthesize findings, then write up the result. Each step pauses for the
+  user's input so they can steer the research between stages. A gentle
+  starter workflow for new K-Dense projects.
+provider: pi
+interactive: true
+
+nodes:
+  - id: scope
+    prompt: |
+      You are starting a research task. Restate the user's request in your own
+      words, list the key sub-questions worth investigating, and note any
+      assumptions you are making.
+
+      Request: $ARGUMENTS
+    model: openrouter/anthropic/claude-opus-4.8
+
+  - id: research
+    prompt: |
+      Using the scope below, gather the relevant facts and synthesize the most
+      important findings. Be concrete and cite what each finding rests on.
+
+      Scope: $scope.output
+    depends_on: [scope]
+    model: openrouter/anthropic/claude-opus-4.8
+
+  - id: writeup
+    prompt: |
+      Write a clear, well-structured summary of the research for the user.
+      Lead with the answer, then supporting detail, then open questions.
+
+      Findings: $research.output
+    depends_on: [research]
+    model: openrouter/anthropic/claude-opus-4.8

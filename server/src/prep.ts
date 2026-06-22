@@ -7,6 +7,7 @@
 import "./env.ts";
 import { ensureProjectExists, listProjects, resolvePaths } from "./projects.ts";
 import { seedProjectSkills } from "./agent/skills.ts";
+import { prepArchonForProject } from "./agent/archon/prep.ts";
 import { seedSandboxFiles, syncSandboxVenv } from "./sandbox-seed.ts";
 import { DEFAULT_PROJECT_ID } from "./config.ts";
 
@@ -20,6 +21,8 @@ async function main(): Promise<void> {
     seedSandboxFiles(paths);
     const count = seedProjectSkills(paths, true);
     process.stdout.write(`   skills: ${count}\n`);
+    // Best-effort: prepArchonForProject never throws fatally (logs internally).
+    await prepArchonForProject(paths);
     const synced = syncSandboxVenv(paths);
     process.stdout.write(`   venv: ${synced ? "synced" : "skipped (uv unavailable or sync failed)"}\n`);
   }

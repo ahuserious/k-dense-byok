@@ -73,6 +73,39 @@ export async function validateWorkflow(definition: unknown): Promise<unknown> {
   });
 }
 
+// --- codebase registration --------------------------------------------------
+
+/** List the codebases (target repos) Archon knows about. Shape kept loose. */
+export async function listCodebases(): Promise<unknown> {
+  return archonFetch("/api/codebases");
+}
+
+/**
+ * Register a local repo path as an Archon codebase (idempotent). Archon's POST
+ * /api/codebases rejects a duplicate path, so we first list and short-circuit if
+ * a codebase already points at `localPath`. The list shape is loose, so we walk
+ * each entry and treat any string field equal to `localPath` as a match.
+ */
+export async function registerCodebase(localPath: string): Promise<unknown> {
+  const existing = await listCodebases();
+  if (Array.isArray(existing)) {
+    const alreadyRegistered = existing.some((entry) => {
+      if (!entry || typeof entry !== "object") return false;
+      return Object.values(entry as Record<string, unknown>).some(
+        (value) => value === localPath,
+      );
+    });
+    if (alreadyRegistered) return existing.find((entry) =>
+      entry && typeof entry === "object" &&
+      Object.values(entry as Record<string, unknown>).some((v) => v === localPath),
+    );
+  }
+  return archonFetch("/api/codebases", {
+    method: "POST",
+    body: JSON.stringify({ path: localPath }),
+  });
+}
+
 // --- run lifecycle ----------------------------------------------------------
 
 export async function runWorkflow(name: string, body: unknown): Promise<unknown> {
