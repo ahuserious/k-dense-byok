@@ -654,10 +654,9 @@ export default function ChatPage() {
             onNew={newTab}
             onRename={renameTab}
             onSelectWorkflows={() => setView("workflows")}
-            onSelectPipelines={() => setView("pipelines")}
-            onSelectPipelineBuilder={() => {
-              // The generic "Pipeline Builder" tab opens the blank canvas; per-pipeline
-              // Edit (handleEditPipeline) is what deep-links a specific workflow.
+            onSelectPipelines={() => {
+              // "DAG Pipelines" opens Archon's canvas / YAML editor (the Pipeline Builder).
+              // The legacy list view ("pipelines") is intentionally no longer reachable.
               setBuilderWorkflowName(null);
               setView("pipeline-builder");
             }}

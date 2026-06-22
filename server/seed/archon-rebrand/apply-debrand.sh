@@ -38,15 +38,15 @@ WEB="$ARCHON_DIR/packages/web"
 TOPNAV="$WEB/src/components/layout/TopNav.tsx"
 WORKFLOWS_PAGE="$WEB/src/routes/WorkflowsPage.tsx"
 MAIN_TSX="$WEB/src/main.tsx"
-THEME_SRC="$OVERLAY_DIR/kdense-theme.css"
-THEME_DEST="$WEB/src/kdense-theme.css"
+CONSOLE_THEME="$WEB/src/experiments/console/theme.css"
+LAYOUT_TSX="$WEB/src/components/layout/Layout.tsx"
 
 # ARCHON_HOME mirrors Archon's own resolution (default ~/.archon).
 ARCHON_HOME="${ARCHON_HOME:-$HOME/.archon}"
 CONFIG_YAML="$ARCHON_HOME/config.yaml"
 
 # --- preflight: fail fast if the clone or any target is missing -------------
-for f in "$TOPNAV" "$WORKFLOWS_PAGE" "$MAIN_TSX" "$THEME_SRC"; do
+for f in "$TOPNAV" "$WORKFLOWS_PAGE" "$MAIN_TSX" "$CONSOLE_THEME" "$LAYOUT_TSX"; do
   if [ ! -f "$f" ]; then
     echo "ERROR: expected file not found: $f" >&2
     echo "Is '$ARCHON_DIR' a valid Archon clone (and is the overlay intact)?" >&2
@@ -186,26 +186,39 @@ else
   echo "  [WorkflowsPage] Plus import already clean (skip)"
 fi
 
-# --- (6) theme override: copy kdense-theme.css + import LAST in main.tsx -----
-# Always copy (cheap; keeps the embedded theme in sync with the overlay source).
-cp "$THEME_SRC" "$THEME_DEST"
-echo "  [theme] copied kdense-theme.css -> $THEME_DEST"
-
-# Add the import AFTER `import './index.css';` so it is the last stylesheet and
-# wins on equal-specificity :root/.dark/.console-root redeclarations.
+# --- (6) theme: keep Archon's own colors, just remove the purple --------------
+# Revert any legacy full-neutral override (older overlay versions copied + imported
+# kdense-theme.css). We no longer fully re-theme Archon — only de-purple it.
 if grep -q "import './kdense-theme.css';" "$MAIN_TSX"; then
-  echo "  [theme] main.tsx already imports kdense-theme.css (skip)"
-elif grep -q "import './index.css';" "$MAIN_TSX"; then
-  perl -0pi -e "s{import './index.css';}{import './index.css';\nimport './kdense-theme.css';}" "$MAIN_TSX"
-  if grep -q "import './kdense-theme.css';" "$MAIN_TSX"; then
-    echo "  [theme] added kdense-theme.css import after index.css in main.tsx"
-  else
-    echo "  ERROR [theme] failed to add import to main.tsx — edit by hand" >&2
-    exit 1
-  fi
+  perl -0pi -e "s{\nimport './kdense-theme.css';}{}" "$MAIN_TSX"
+  echo "  [theme] removed legacy kdense-theme.css import from main.tsx"
+fi
+rm -f "$WEB/src/kdense-theme.css"
+
+# De-purple the console theme: repoint brand magenta (hue 330) + violet (hue 305)
+# to blue (hue 245), leaving Archon's structure intact. Idempotent — guarded on the
+# magenta hue still being present.
+if grep -q '0.295 330' "$CONSOLE_THEME"; then
+  perl -0pi -e 's{--brand-magenta: oklch\(0\.64 0\.295 330\);}{--brand-magenta: oklch(0.66 0.17 245);}' "$CONSOLE_THEME"
+  perl -0pi -e 's{--brand-magenta-2: oklch\(0\.72 0\.26 335\);}{--brand-magenta-2: oklch(0.72 0.16 245);}' "$CONSOLE_THEME"
+  perl -0pi -e 's{--brand-violet: oklch\(0\.56 0\.215 305\);}{--brand-violet: oklch(0.62 0.16 245);}' "$CONSOLE_THEME"
+  perl -0pi -e 's{--accent-hover: oklch\(0\.7 0\.28 330\);}{--accent-hover: oklch(0.7 0.17 245);}' "$CONSOLE_THEME"
+  perl -0pi -e 's{oklch\(0\.64 0\.295 330 / 0\.3\)}{oklch(0.66 0.17 245 / 0.3)}g' "$CONSOLE_THEME"
+  perl -0pi -e 's{oklch\(0\.64 0\.295 330 / 0\.14\)}{oklch(0.66 0.17 245 / 0.14)}g' "$CONSOLE_THEME"
+  perl -0pi -e 's{oklch\(0\.64 0\.295 330 / 0\.18\)}{oklch(0.66 0.17 245 / 0.18)}g' "$CONSOLE_THEME"
+  perl -0pi -e 's{oklch\(0\.56 0\.215 305 / 0\.12\)}{oklch(0.62 0.16 245 / 0.12)}g' "$CONSOLE_THEME"
+  echo "  [theme] de-purpled console theme.css (magenta/violet -> blue)"
 else
-  echo "  ERROR [theme] anchor \"import './index.css';\" not found in main.tsx" >&2
-  exit 1
+  echo "  [theme] console theme already de-purpled (skip)"
+fi
+
+# --- (6b) Layout: remove the top nav row so the embedded canvas is full-bleed --
+if grep -q '<TopNav />' "$LAYOUT_TSX"; then
+  perl -0pi -e "s{import \{ TopNav \} from './TopNav';\n}{}" "$LAYOUT_TSX"
+  perl -0pi -e 's{\n\s*<TopNav />}{}' "$LAYOUT_TSX"
+  echo "  [Layout] removed the TopNav row (embedded canvas is full-bleed)"
+else
+  echo "  [Layout] TopNav row already removed (skip)"
 fi
 
 # --- (7) config.yaml: default conversational assistant = pi -----------------

@@ -1,7 +1,6 @@
 "use client";
 
 import {
-  BoxesIcon,
   DownloadIcon,
   FileTextIcon,
   GaugeIcon,
@@ -45,7 +44,6 @@ export interface ChatTabsBarProps {
   onRename: (id: string, title: string) => void;
   onSelectWorkflows: () => void;
   onSelectPipelines: () => void;
-  onSelectPipelineBuilder: () => void;
   onSelectAgentConsole: () => void;
   /** Session id of the active tab, for reproducibility export. */
   activeSessionId?: string | null;
@@ -135,7 +133,6 @@ export function ChatTabsBar({
   onRename,
   onSelectWorkflows,
   onSelectPipelines,
-  onSelectPipelineBuilder,
   onSelectAgentConsole,
   activeSessionId,
   canExport = false,
@@ -346,36 +343,13 @@ export function ChatTabsBar({
             type="button"
             className={cn(
               "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors",
-              view === "pipelines"
+              view === "pipeline-builder"
                 ? "bg-muted text-foreground"
                 : "text-muted-foreground hover:text-foreground hover:bg-muted/50",
             )}
           >
             <WorkflowIcon className="size-3.5" />
             DAG Pipelines
-          </button>
-        </InfoTooltip>
-        <InfoTooltip
-          content={
-            <>
-              <b>Pipeline Builder</b>
-              <br />
-              Compose and edit pipelines visually in Archon&apos;s builder.
-            </>
-          }
-        >
-          <button
-            onClick={onSelectPipelineBuilder}
-            type="button"
-            className={cn(
-              "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors",
-              view === "pipeline-builder"
-                ? "bg-muted text-foreground"
-                : "text-muted-foreground hover:text-foreground hover:bg-muted/50",
-            )}
-          >
-            <BoxesIcon className="size-3.5" />
-            Pipeline Builder
           </button>
         </InfoTooltip>
         <InfoTooltip

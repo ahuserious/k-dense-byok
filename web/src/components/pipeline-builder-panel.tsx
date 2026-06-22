@@ -15,20 +15,17 @@ import { pipelineHealth } from "@/lib/pipelines";
 // works regardless of the port the sidecar was pinned to.
 const ARCHON_URL = process.env.NEXT_PUBLIC_ARCHON_URL ?? "http://localhost:3091";
 
-// Archon's "Pipelines" LIST route (label "Pipelines", path still /legacy/workflows). This is
-// the default landing view — browse + run + Edit saved pipelines, NOT the blank canvas.
-const PIPELINES_LIST_URL = `${ARCHON_URL}/legacy/workflows`;
-
-// Archon's visual builder canvas lives one level deeper, under /legacy/workflows/builder.
+// Archon's visual builder canvas / YAML editor — the default landing view (this is where
+// Archon's "+ New pipeline" used to go).
 const BUILDER_URL = `${ARCHON_URL}/legacy/workflows/builder`;
 
-// Build the iframe src. With no workflowName we land on the Pipelines LIST (so the panel opens
-// to the saved-pipelines list, not an empty canvas). When a workflowName is passed (from Edit)
-// we deep-link the builder canvas with it loaded: Archon's builder reads the workflow to open
-// from the `?edit=` query param (WorkflowBuilder.tsx auto-loads it on mount); the name is
-// URL-encoded to mirror Archon's own WorkflowCard deep-link.
+// Build the iframe src. With no workflowName we open the blank builder canvas. When a
+// workflowName is passed (e.g. a future Edit affordance) we deep-link the canvas with it
+// loaded — Archon's builder reads the workflow to open from the `?edit=` query param
+// (WorkflowBuilder.tsx auto-loads it on mount); the name is URL-encoded to mirror Archon's
+// own WorkflowCard deep-link.
 function builderSrc(workflowName?: string): string {
-  if (!workflowName) return PIPELINES_LIST_URL;
+  if (!workflowName) return BUILDER_URL;
   return `${BUILDER_URL}?edit=${encodeURIComponent(workflowName)}`;
 }
 
