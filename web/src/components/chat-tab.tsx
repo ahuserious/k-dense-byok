@@ -737,9 +737,9 @@ export interface ChatTabMeta {
 
 /**
  * Two quick-action CTAs shown under the empty-state prompt. "Stitch workflows
- * into a pipeline" routes straight to the visual builder; "Create a goal-based
- * workflow" collects a goal in a small dialog and hands it to the parent, which
- * starts an orchestrated loop and opens the Agent Console.
+ * into a pipeline" routes straight to the visual builder; "Build a pipeline"
+ * collects a goal in a small dialog and hands it to the parent, which sends a
+ * chat message that triggers the scientific-pipeline-builder skill.
  */
 function EmptyStateCtas({
   onStitchPipeline,
@@ -775,21 +775,21 @@ function EmptyStateCtas({
         className="flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
       >
         <TargetIcon className="size-3.5" />
-        Create a goal-based workflow
+        Build a pipeline
       </button>
 
       <Dialog open={goalOpen} onOpenChange={setGoalOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Create a goal-based workflow</DialogTitle>
+            <DialogTitle>Build a pipeline</DialogTitle>
             <DialogDescription>
-              Describe the goal. A long-running orchestrated loop will pursue it
-              and stream its progress in the Agent Console.
+              Describe the goal. Kady will use the scientific-pipeline-builder
+              skill in this chat to design a pipeline for it.
             </DialogDescription>
           </DialogHeader>
           <Input
             autoFocus
-            placeholder="e.g. Build a CLI todo app with tests"
+            placeholder="e.g. RNA-seq differential expression from raw FASTQ"
             value={goal}
             onChange={(e) => setGoal(e.target.value)}
             onKeyDown={(e) => {
@@ -808,7 +808,7 @@ function EmptyStateCtas({
               Cancel
             </Button>
             <Button type="button" onClick={submitGoal} disabled={!goal.trim()}>
-              Start goal loop
+              Build pipeline
             </Button>
           </DialogFooter>
         </DialogContent>

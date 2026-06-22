@@ -10,7 +10,6 @@ import { WorkflowsPanel } from "@/components/workflows-panel";
 import { PipelinesPanel } from "@/components/pipelines-panel";
 import { PipelineBuilderPanel } from "@/components/pipeline-builder-panel";
 import { AgentConsolePanel } from "@/components/agent-console/agent-console-panel";
-import { startLoop } from "@/lib/console";
 import { ProjectSwitcher } from "@/components/project-switcher";
 import { SessionCostPill } from "@/components/session-cost-pill";
 import { useSessionCost } from "@/lib/use-session-cost";
@@ -348,8 +347,8 @@ export default function ChatPage() {
   // ------------------------------------------------------------------
   // Chat empty-state CTAs.
   //   - "Stitch workflows into a pipeline" just routes to the visual builder.
-  //   - "Create a goal-based workflow" starts an orchestrated goal loop on the
-  //     console backend and switches to the Agent Console to watch it.
+  //   - "Build a pipeline" sends a chat message into the active tab that
+  //     triggers the scientific-pipeline-builder skill for the given goal.
   // ------------------------------------------------------------------
 
   const handleStitchPipeline = useCallback(() => {
@@ -409,19 +408,22 @@ export default function ChatPage() {
     void handle.launchWorkflow(pending.prompt, pending.model, [], []);
   }, [tabs]);
 
-  const handleCreateGoalWorkflow = useCallback(async (goal: string) => {
-    const trimmed = goal.trim();
-    if (!trimmed) return;
-    // Surface the console view first so the new loop is visible as it starts;
-    // startLoop's positional signature is (goal, maxIterations, mode).
-    setView("agent-console");
-    try {
-      await startLoop(trimmed, 10, "orchestrated");
-    } catch {
-      // The Agent Console polls and will surface any backend error itself;
-      // nothing actionable to do here beyond having switched the view.
-    }
-  }, []);
+  const handleCreateGoalWorkflow = useCallback(
+    async (goal: string) => {
+      const trimmed = goal.trim();
+      if (!trimmed) return;
+      const handle = tabHandles.current.get(activeTabId);
+      if (!handle) return;
+      // The CTA lives in the active chat tab's empty state, so send the build
+      // request right there. The prompt names the skill so the agent loads
+      // scientific-pipeline-builder rather than improvising a pipeline.
+      setView("chat");
+      await handle.sendQuick(
+        `Use the scientific-pipeline-builder skill to build a pipeline for: ${trimmed}`,
+      );
+    },
+    [activeTabId],
+  );
 
   const handleFileSelect = useCallback((path: string) => {
     sandbox.selectFile(path);

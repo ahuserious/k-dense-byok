@@ -309,6 +309,13 @@ else
         else
             echo "    ⚠ Model overlay script not found at $MODELS_SCRIPT — building with stock models."
         fi
+        DEBRAND_SCRIPT="$PWD/server/seed/archon-rebrand/apply-debrand.sh"
+        if [ -f "$DEBRAND_SCRIPT" ]; then
+            echo "    Applying K-Dense de-brand overlay (embed nav cleanup + theme match)..."
+            sh "$DEBRAND_SCRIPT" "$ARCHON_DIR" || echo "    ⚠ De-brand overlay failed — continuing without the embed cleanup."
+        else
+            echo "    ⚠ De-brand overlay script not found at $DEBRAND_SCRIPT — building without the embed cleanup."
+        fi
         echo "    Installing Archon packages and building the web bundle (first run only)..."
         if (cd "$ARCHON_DIR" && bun install && bun run build:web); then
             : > "$ARCHON_DIR/.archon-web-built"

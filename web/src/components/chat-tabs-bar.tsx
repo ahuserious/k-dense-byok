@@ -337,7 +337,7 @@ export function ChatTabsBar({
             <>
               <b>DAG Pipelines</b>
               <br />
-              Run and monitor the workflows the Archon engine knows about.
+              Run or customize saved pipelines
             </>
           }
         >

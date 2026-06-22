@@ -28,10 +28,21 @@ import {
   TerminalIcon,
   BotIcon,
   BrainCircuitIcon,
+  WorkflowIcon,
 } from "lucide-react";
 import { SubagentsPanel } from "@/components/subagents-panel";
 import { useProjects } from "@/lib/use-projects";
 import { apiFetch } from "@/lib/projects";
+import {
+  ARCHON_EFFORTS,
+  getArchonConfig,
+  getArchonProviders,
+  getArchonAuthProviders,
+  updateArchonAssistants,
+  type ArchonAssistantDefaults,
+  type ArchonEffort,
+  type ArchonProvider,
+} from "@/lib/archon-config";
 import {
   FUSION_DEFAULTS_VERSION,
   fusionPanelModels,
@@ -733,6 +744,246 @@ function McpServersPanel() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Pipelines panel — surfaces Archon's own assistant/model/effort config (and,
+// when available, its per-vendor provider keys) by calling Archon's REST API
+// directly. The assistant/model/effort settings work without a
+// TOKEN_ENCRYPTION_KEY; key management only appears when Archon reports it's
+// enabled (otherwise we show a documented read-only note).
+// ---------------------------------------------------------------------------
+
+// Claude model picker mirrors Archon's SettingsPage (sonnet/opus/haiku); codex/pi take a
+// free-text model id since the catalog is open-ended (e.g. gpt-5.3-codex, Pi backends).
+const CLAUDE_MODELS = ["sonnet", "opus", "haiku"] as const;
+
+function PipelinesPanel() {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  // Editable config state.
+  const [assistant, setAssistant] = useState("claude");
+  const [assistants, setAssistants] = useState<Record<string, ArchonAssistantDefaults>>({});
+  const [providers, setProviders] = useState<ArchonProvider[]>([]);
+
+  // Provider-key availability (separate Archon store, gated on TOKEN_ENCRYPTION_KEY).
+  const [keysEnabled, setKeysEnabled] = useState<boolean | null>(null);
+  const [connectedVendors, setConnectedVendors] = useState<string[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    Promise.all([getArchonConfig(), getArchonProviders(), getArchonAuthProviders()])
+      .then(([config, provs, auth]) => {
+        if (cancelled) return;
+        setAssistant(config.assistant ?? "claude");
+        setAssistants(config.assistants ?? {});
+        setProviders(provs);
+        setKeysEnabled(auth.enabled);
+        setConnectedVendors((auth.connections ?? []).map((c) => c.provider));
+      })
+      .catch((exc) => {
+        if (!cancelled) {
+          setError(
+            exc instanceof Error
+              ? exc.message
+              : "Couldn't reach Archon — start the sidecar to edit pipeline settings.",
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Update one field of the active assistant's defaults in local state.
+  const patchActive = useCallback(
+    (patch: Partial<ArchonAssistantDefaults>) => {
+      setAssistants((prev) => ({
+        ...prev,
+        [assistant]: { ...prev[assistant], ...patch },
+      }));
+      setSaved(false);
+    },
+    [assistant],
+  );
+
+  const handleSave = useCallback(async () => {
+    setSaving(true);
+    setError(null);
+    setSaved(false);
+    try {
+      await updateArchonAssistants({ assistant, assistants });
+      setSaved(true);
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  }, [assistant, assistants]);
+
+  // Fall back to the canonical trio if Archon didn't return a provider list.
+  const providerOptions =
+    providers.length > 0
+      ? providers
+      : [
+          { id: "claude", displayName: "Claude Code" },
+          { id: "pi", displayName: "Pi" },
+          { id: "codex", displayName: "Codex" },
+        ];
+
+  const activeDefaults = assistants[assistant] ?? {};
+
+  return (
+    <div className="flex h-full flex-col gap-4 overflow-y-auto">
+      <div>
+        <h3 className="text-sm font-medium">Pipelines</h3>
+        <p className="text-xs text-muted-foreground mt-1">
+          Settings for the Archon engine that runs your pipelines. These write to
+          Archon&apos;s own config — the assistant that drives pipeline steps plus its default
+          model and reasoning effort.
+        </p>
+      </div>
+
+      {error && (
+        <div className="rounded-lg border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <p className="text-xs text-muted-foreground">Loading…</p>
+      ) : (
+        <div className="flex flex-col gap-5">
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs font-medium">Default assistant</label>
+            <select
+              value={assistant}
+              onChange={(e) => {
+                setAssistant(e.target.value);
+                setSaved(false);
+              }}
+              className="h-8 rounded-md border bg-transparent px-2 text-xs"
+            >
+              {providerOptions.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.displayName}
+                </option>
+              ))}
+            </select>
+            <p className="text-[11px] text-muted-foreground leading-relaxed">
+              Which agent drives pipeline steps. Pi fronts ~20 LLM backends; Claude is the
+              Claude Code SDK provider.
+            </p>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs font-medium">
+              Default model
+              <span className="ml-1 font-normal text-muted-foreground">
+                ({assistant})
+              </span>
+            </label>
+            {assistant === "claude" ? (
+              <select
+                value={activeDefaults.model ?? ""}
+                onChange={(e) => patchActive({ model: e.target.value })}
+                className="h-8 rounded-md border bg-transparent px-2 text-xs"
+              >
+                <option value="">Archon default</option>
+                {CLAUDE_MODELS.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <Input
+                value={activeDefaults.model ?? ""}
+                placeholder={assistant === "codex" ? "gpt-5.3-codex" : "model id"}
+                className="h-8 text-xs"
+                onChange={(e) => patchActive({ model: e.target.value })}
+              />
+            )}
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs font-medium">Reasoning effort</label>
+            <select
+              value={activeDefaults.modelReasoningEffort ?? ""}
+              onChange={(e) =>
+                patchActive({
+                  modelReasoningEffort: (e.target.value || undefined) as
+                    | ArchonEffort
+                    | undefined,
+                })
+              }
+              className="h-8 rounded-md border bg-transparent px-2 text-xs"
+            >
+              <option value="">Archon default</option>
+              {ARCHON_EFFORTS.map((eff) => (
+                <option key={eff} value={eff}>
+                  {eff}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              className="text-xs"
+              disabled={saving}
+              onClick={() => void handleSave()}
+            >
+              {saving ? "Saving…" : "Save"}
+            </Button>
+            {saved && (
+              <span className="text-[11px] text-emerald-600 dark:text-emerald-400">
+                Saved to Archon config.
+              </span>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-2 border-t pt-4">
+            <h4 className="text-xs font-medium">Archon provider keys</h4>
+            {keysEnabled ? (
+              <div className="flex flex-col gap-1.5">
+                <p className="text-[11px] text-muted-foreground leading-relaxed">
+                  Connected vendors:{" "}
+                  {connectedVendors.length > 0
+                    ? connectedVendors.join(", ")
+                    : "none"}
+                  . These are Archon&apos;s own per-vendor keys (separate from Kady&apos;s
+                  API keys tab). Manage them in Archon&apos;s settings or via{" "}
+                  <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
+                    archon ai key set
+                  </code>
+                  .
+                </p>
+              </div>
+            ) : (
+              <p className="text-[11px] text-muted-foreground leading-relaxed">
+                Per-vendor key management is disabled on this Archon server (no{" "}
+                <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
+                  TOKEN_ENCRYPTION_KEY
+                </code>
+                ). The assistant, model, and effort settings above still apply. Set that
+                env on the Archon server to manage encrypted provider keys.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function SettingsDialog({
   open,
   onOpenChange,
@@ -744,7 +995,7 @@ export function SettingsDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         className={cn(
-          "sm:max-w-2xl h-[min(560px,80dvh)] flex flex-col gap-0 p-0 overflow-hidden"
+          "sm:max-w-4xl h-[min(560px,80dvh)] flex flex-col gap-0 p-0 overflow-hidden"
         )}
       >
         <DialogHeader className="px-6 pt-6 pb-4 border-b">
@@ -792,6 +1043,13 @@ export function SettingsDialog({
               Fusion
             </TabsTrigger>
             <TabsTrigger
+              value="pipelines"
+              className="justify-start gap-2 px-3 text-xs w-full"
+            >
+              <WorkflowIcon className="size-3.5" />
+              Pipelines
+            </TabsTrigger>
+            <TabsTrigger
               value="appearance"
               className="justify-start gap-2 px-3 text-xs w-full"
             >
@@ -811,6 +1069,9 @@ export function SettingsDialog({
           </TabsContent>
           <TabsContent value="appearance" className="flex-1 min-h-0 p-5">
             <AppearancePanel />
+          </TabsContent>
+          <TabsContent value="pipelines" className="flex-1 min-h-0 p-5 overflow-y-auto">
+            <PipelinesPanel />
           </TabsContent>
           <TabsContent value="fusion" className="flex-1 min-h-0 p-5 overflow-y-auto">
             <FusionPanel />
