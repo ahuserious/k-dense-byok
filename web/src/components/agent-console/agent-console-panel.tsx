@@ -1,113 +1,93 @@
 // danbot-byok — web/src/components/agent-console/agent-console-panel.tsx
 //
-// The "Agent Console" shell, ported from agent-control-plane's App.tsx. Polls the
-// same-origin console API for loops + runs every ~2s, surfaces the active loop in a
-// LiveLoopPanel, exposes a StartLoopForm, and shows the flat run history.
-// React-19 port: "use client", the same-origin console client (no import.meta.env),
-// @/ aliased imports, and the raw .app/.header/.stats/.banner CSS rebuilt with
-// Tailwind + the ui/ Card primitives.
+// The "Agent Console" view: surfaces Archon's own real console UI inside Kady via a
+// full-height iframe, rather than rebuilding a synthetic loop/run dashboard. danbot owns
+// the chat + cost UI; Archon owns goal-loop orchestration and the console that observes it.
+// When the Archon sidecar is down the iframe would just show a connection error, so we
+// health-gate it (matching the Pipeline Builder panel) and offer a link-out + reload instead.
 //
-// Not wired into the app nav yet — that's a later phase. This just renders standalone.
+// Mirrors pipeline-builder-panel.tsx exactly: same health gate (pipelineHealth, which probes
+// the same Archon sidecar), reload-by-remount, "Open in new tab" link-out, and iframe shape.
 
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { listLoops, listRuns } from "@/lib/console";
-import type { Loop, Run } from "@/lib/console-types";
-import { LiveLoopPanel } from "@/components/agent-console/live-loop-panel";
-import { RunHistoryTable } from "@/components/agent-console/run-history-table";
-import { StartLoopForm } from "@/components/agent-console/start-loop-form";
+import { pipelineHealth } from "@/lib/pipelines";
 
-const POLL_MS = 2000;
+// Where Archon's web UI is served. Overridable so the embed works regardless of the port
+// the sidecar was pinned to.
+const ARCHON_URL = process.env.NEXT_PUBLIC_ARCHON_URL ?? "http://localhost:3091";
+
+// Archon's redesigned console (the default UI; "/" hard-redirects here) lives under /console.
+const CONSOLE_URL = `${ARCHON_URL}/console`;
 
 export function AgentConsolePanel() {
-  const [loops, setLoops] = useState<Loop[]>([]);
-  const [runs, setRuns] = useState<Run[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [healthy, setHealthy] = useState<boolean | null>(null);
+  // Bumping this key remounts the iframe, which is how you force-reload an embedded
+  // cross-origin frame in React (we can't read/poke its contentWindow across origins).
+  const [reloadKey, setReloadKey] = useState(0);
 
-  const refresh = useCallback(async () => {
-    try {
-      const [l, r] = await Promise.all([listLoops(), listRuns()]);
-      setLoops(l);
-      setRuns(r);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
+  const checkHealth = useCallback(async () => {
+    setHealthy(null);
+    setHealthy(await pipelineHealth());
   }, []);
 
   useEffect(() => {
-    void refresh();
-    const t = setInterval(() => void refresh(), POLL_MS);
-    return () => clearInterval(t);
-  }, [refresh]);
+    void checkHealth();
+  }, [checkHealth]);
 
-  // The "live" loop is the first active one, else the most recently updated.
-  const active =
-    loops.find((l) =>
-      ["running", "awaiting_approval", "paused", "pending"].includes(l.status),
-    ) ?? loops[0];
-  const activeRuns = active
-    ? runs
-        .filter((r) => r.loop_id === active.id)
-        .sort((a, b) => a.iteration - b.iteration)
-    : [];
-
-  // Pi on a Kimi subscription is flat-rate, so cost.total is always 0.
-  // Tokens are the real usage signal, so that's what the dashboard surfaces.
-  const totalTokens = runs.reduce(
-    (sum, r) => sum + (r.input_tokens ?? 0) + (r.output_tokens ?? 0),
-    0,
-  );
+  // Re-check health and remount the iframe so the console reloads from a clean state.
+  const reload = useCallback(() => {
+    setReloadKey((previous) => previous + 1);
+    void checkHealth();
+  }, [checkHealth]);
 
   return (
-    <div className="flex h-full flex-col gap-4 overflow-auto p-4">
-      <header className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h2 className="text-sm font-semibold">Agent Console</h2>
-          <p className="text-xs text-muted-foreground">
-            Long-running Pi loops, observed. Every run stored in the console index.
-          </p>
-        </div>
-        <div className="flex gap-4">
-          <Stat label="Loops" value={String(loops.length)} />
-          <Stat label="Runs" value={String(runs.length)} />
-          <Stat label="Total tokens" value={totalTokens.toLocaleString()} />
-        </div>
-      </header>
+    <div className="flex h-full flex-col gap-4 p-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="text-sm font-semibold">Agent Console</h2>
+        <span
+          className={
+            "rounded px-1.5 py-0.5 text-[11px] " +
+            (healthy === null
+              ? "bg-muted text-muted-foreground"
+              : healthy
+                ? "bg-emerald-500/15 text-emerald-600"
+                : "bg-red-500/15 text-red-600")
+          }
+        >
+          {healthy === null ? "checking…" : healthy ? "engine online" : "engine offline"}
+        </span>
+        <a
+          href={CONSOLE_URL}
+          target="_blank"
+          rel="noreferrer"
+          className="ml-auto rounded-md border px-2.5 py-1 text-xs hover:bg-muted/50"
+        >
+          Open in new tab ↗
+        </a>
+        <button
+          type="button"
+          onClick={reload}
+          className="rounded-md border px-2.5 py-1 text-xs hover:bg-muted/50"
+        >
+          Reload
+        </button>
+      </div>
 
-      {error && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          API error: {error}
-        </div>
+      {healthy === false ? (
+        <p className="text-xs text-muted-foreground">
+          The Agent Console engine (Archon) isn&apos;t reachable, so the console can&apos;t load.
+          Start the Archon sidecar, then Reload — or use “Open in new tab” to reach it directly.
+        </p>
+      ) : (
+        <iframe
+          key={reloadKey}
+          src={CONSOLE_URL}
+          title="Agent Console"
+          className="min-h-0 w-full flex-1 rounded-md border"
+        />
       )}
-
-      <StartLoopForm onStarted={refresh} />
-
-      <section className="flex flex-col gap-2">
-        <h3 className="text-xs font-semibold text-muted-foreground">Live loop</h3>
-        {active ? (
-          <LiveLoopPanel loop={active} runs={activeRuns} onAction={refresh} />
-        ) : (
-          <p className="text-xs text-muted-foreground">
-            No loops yet. Start one above.
-          </p>
-        )}
-      </section>
-
-      <section className="flex flex-col gap-2">
-        <h3 className="text-xs font-semibold text-muted-foreground">Run history</h3>
-        <RunHistoryTable runs={runs} />
-      </section>
-    </div>
-  );
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex flex-col items-end">
-      <span className="text-base font-semibold tabular-nums">{value}</span>
-      <span className="text-[11px] text-muted-foreground">{label}</span>
     </div>
   );
 }

@@ -18,7 +18,16 @@ const ARCHON_URL = process.env.NEXT_PUBLIC_ARCHON_URL ?? "http://localhost:3091"
 // Archon's visual builder lives under its legacy workflows route.
 const BUILDER_URL = `${ARCHON_URL}/legacy/workflows/builder`;
 
-export function PipelineBuilderPanel() {
+// Build the builder src, optionally deep-linking a specific workflow so the canvas opens
+// with it loaded. Archon's builder reads the workflow to open from the `?edit=` query param
+// (WorkflowBuilder.tsx auto-loads it on mount); the name is URL-encoded to mirror Archon's
+// own WorkflowCard deep-link.
+function builderSrc(workflowName?: string): string {
+  if (!workflowName) return BUILDER_URL;
+  return `${BUILDER_URL}?edit=${encodeURIComponent(workflowName)}`;
+}
+
+export function PipelineBuilderPanel({ workflowName }: { workflowName?: string } = {}) {
   const [healthy, setHealthy] = useState<boolean | null>(null);
   // Bumping this key remounts the iframe, which is how you force-reload an embedded
   // cross-origin frame in React (we can't read/poke its contentWindow across origins).
@@ -56,7 +65,7 @@ export function PipelineBuilderPanel() {
           {healthy === null ? "checking…" : healthy ? "engine online" : "engine offline"}
         </span>
         <a
-          href={BUILDER_URL}
+          href={builderSrc(workflowName)}
           target="_blank"
           rel="noreferrer"
           className="ml-auto rounded-md border px-2.5 py-1 text-xs hover:bg-muted/50"
@@ -79,8 +88,10 @@ export function PipelineBuilderPanel() {
         </p>
       ) : (
         <iframe
-          key={reloadKey}
-          src={BUILDER_URL}
+          // Include workflowName in the remount key so switching which pipeline is being
+          // edited reloads the canvas with the new ?edit= target.
+          key={`${reloadKey}:${workflowName ?? ""}`}
+          src={builderSrc(workflowName)}
           title="Pipeline Builder"
           className="min-h-0 w-full flex-1 rounded-md border"
         />

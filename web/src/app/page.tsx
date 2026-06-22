@@ -17,6 +17,7 @@ import { useSessionCost } from "@/lib/use-session-cost";
 import { useProjectCost } from "@/lib/use-project-cost";
 import { APP_VERSION, isVersioned, useUpdateCheck } from "@/lib/version";
 import { useSkills } from "@/lib/use-skills";
+import { useModels } from "@/lib/use-models";
 import { flattenFiles, useSandbox } from "@/lib/use-sandbox";
 import { onProjectChange } from "@/lib/projects";
 import {
@@ -74,6 +75,9 @@ export default function ChatPage() {
   const sandbox = useSandbox(false);
   const { updateAvailable } = useUpdateCheck();
   const { skills: allSkills } = useSkills();
+  // Merged model catalogue (same source the chat picker uses). Used to pick a default
+  // model when launching a pipeline run into a freshly-opened chat tab.
+  const { models } = useModels();
   const { resolvedTheme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
   const [panelOpen, setPanelOpen] = useState(true);
@@ -91,6 +95,9 @@ export default function ChatPage() {
   const [view, setView] = useState<
     "chat" | "workflows" | "pipelines" | "pipeline-builder" | "agent-console"
   >("chat");
+  // When the user clicks "Edit" on a pipeline, this names the workflow the embedded
+  // Pipeline Builder should deep-link open (via Archon's ?edit= param). null = blank canvas.
+  const [builderWorkflowName, setBuilderWorkflowName] = useState<string | null>(null);
   // Mirror of tabs in a ref so synchronous handlers can read length without
   // putting impure logic inside a setState updater (which strict mode runs
   // twice for purity testing).
@@ -104,6 +111,12 @@ export default function ChatPage() {
   // strip badges (streaming spinner, message count) for the active tab.
   const [tabsMeta, setTabsMeta] = useState<Record<string, ChatTabMeta>>({});
   const tabHandles = useRef<Map<string, ChatTabHandle | null>>(new Map());
+  // A pipeline run waiting for its freshly-created chat tab to mount + register its
+  // imperative handle. handleRunPipeline opens the tab and parks the run here; the effect
+  // below flushes it once the tab's handle appears in tabHandles. See handleRunPipeline.
+  const pendingPipelineRun = useRef<{ tabId: string; prompt: string; model: Model } | null>(
+    null,
+  );
   // Stable per-tab ref callbacks so React doesn't repeatedly clear+set the
   // tab handle map on every render (inline `ref={(h) => ...}` would).
   const tabRefCallbacks = useRef<
@@ -239,6 +252,8 @@ export default function ChatPage() {
         setTabs([{ id, title: defaultTabTitle(0) }]);
         setActiveTabId(id);
         setView("chat");
+        setBuilderWorkflowName(null);
+        pendingPipelineRun.current = null;
         setCostRefreshKey((k) => k + 1);
       }),
     [],
@@ -338,8 +353,61 @@ export default function ChatPage() {
   // ------------------------------------------------------------------
 
   const handleStitchPipeline = useCallback(() => {
+    setBuilderWorkflowName(null);
     setView("pipeline-builder");
   }, []);
+
+  // ------------------------------------------------------------------
+  // Pipeline actions (from the Pipelines panel).
+  //   - Edit: open the embedded Pipeline Builder with that workflow deep-linked.
+  //   - Run:  open a FRESH chat tab and drive the pipeline run inside it.
+  // ------------------------------------------------------------------
+
+  const handleEditPipeline = useCallback((name: string) => {
+    setBuilderWorkflowName(name);
+    setView("pipeline-builder");
+  }, []);
+
+  // Run a pipeline in a brand-new chat tab. We can't call the new tab's launchWorkflow
+  // synchronously here: the <ChatTab> must first mount and register its imperative handle
+  // (via the ref callback) before tabHandles has an entry for it. So we mint the tab id
+  // outside any setState updater (strict-mode-safe, mirroring newTab), append the tab,
+  // make it active, and park the run in pendingPipelineRun. The flush effect below fires
+  // once the new tab has registered its handle and dispatches launchWorkflow.
+  const handleRunPipeline = useCallback(
+    (name: string) => {
+      if (tabsRef.current.length >= MAX_CHAT_TABS) return;
+      const defaultModel = models.find((m) => m.default) ?? models[0];
+      if (!defaultModel) return; // no models loaded yet; nothing to run with
+      const id = makeTabId();
+      // The chat-driven run: ask Kady's agent to execute the named Archon pipeline. The
+      // agent has the Archon pipeline tooling available, so this visibly runs in the chat
+      // (streaming the run), unlike the old out-of-process runPipeline() call.
+      const prompt = `Run the Archon pipeline named "${name}" and report its results.`;
+      pendingPipelineRun.current = { tabId: id, prompt, model: defaultModel };
+      setTabs((prev) =>
+        prev.length >= MAX_CHAT_TABS
+          ? prev
+          : [...prev, { id, title: `Run: ${name}` }],
+      );
+      setActiveTabId(id);
+      setView("chat");
+    },
+    [models],
+  );
+
+  // Flush a parked pipeline run once its chat tab has mounted and registered its handle.
+  // Depending on `tabs` makes this run right after the new <ChatTab> commits; we still
+  // guard on the handle being present (it registers during the same commit via its ref
+  // callback) and retry on the next tabs change if it isn't yet.
+  useEffect(() => {
+    const pending = pendingPipelineRun.current;
+    if (!pending) return;
+    const handle = tabHandles.current.get(pending.tabId);
+    if (!handle) return;
+    pendingPipelineRun.current = null;
+    void handle.launchWorkflow(pending.prompt, pending.model, [], []);
+  }, [tabs]);
 
   const handleCreateGoalWorkflow = useCallback(async (goal: string) => {
     const trimmed = goal.trim();
@@ -585,7 +653,12 @@ export default function ChatPage() {
             onRename={renameTab}
             onSelectWorkflows={() => setView("workflows")}
             onSelectPipelines={() => setView("pipelines")}
-            onSelectPipelineBuilder={() => setView("pipeline-builder")}
+            onSelectPipelineBuilder={() => {
+              // The generic "Pipeline Builder" tab opens the blank canvas; per-pipeline
+              // Edit (handleEditPipeline) is what deep-links a specific workflow.
+              setBuilderWorkflowName(null);
+              setView("pipeline-builder");
+            }}
             onSelectAgentConsole={() => setView("agent-console")}
             activeSessionId={activeSessionId}
             canExport={(activeMeta?.userMessageCount ?? 0) > 0}
@@ -627,14 +700,18 @@ export default function ChatPage() {
           {/* Pipelines view — the Archon workflow engine (list + builder link). */}
           {view === "pipelines" && (
             <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
-              <PipelinesPanel />
+              <PipelinesPanel
+                onRunPipeline={handleRunPipeline}
+                onEditPipeline={handleEditPipeline}
+              />
             </div>
           )}
 
-          {/* Pipeline Builder view — Archon's visual builder, embedded. */}
+          {/* Pipeline Builder view — Archon's visual builder, embedded. When the user
+              clicked "Edit" on a pipeline, builderWorkflowName deep-links it open. */}
           {view === "pipeline-builder" && (
             <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
-              <PipelineBuilderPanel />
+              <PipelineBuilderPanel workflowName={builderWorkflowName ?? undefined} />
             </div>
           )}
 

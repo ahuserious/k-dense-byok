@@ -3,38 +3,36 @@
 // The "Pipelines" view: a native list of the workflows the Archon engine knows about,
 // an engine-health indicator that degrades gracefully when Archon is down, and a link
 // out to Archon's own visual workflow builder (which Kady surfaces rather than rebuilds).
-// Editing happens in Archon's builder; danbot lists + (later) runs/monitors them natively.
+// Per-pipeline actions: Run opens a fresh Kady chat and drives the pipeline there; Edit
+// opens the pipeline in the embedded Pipeline Builder canvas. Both are handled by the
+// page shell (page.tsx) so they can touch chat-tab + view state.
 
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { listPipelines, pipelineHealth, runPipeline, type PipelineSummary } from "@/lib/pipelines";
-import { useModels } from "@/lib/use-models";
+import { useCallback, useEffect, useState } from "react";
+import { listPipelines, pipelineHealth, type PipelineSummary } from "@/lib/pipelines";
 
 // Where Archon's web UI (incl. its workflow builder) is served. Overridable so the link
 // works regardless of the port the sidecar was pinned to.
 const ARCHON_URL = process.env.NEXT_PUBLIC_ARCHON_URL ?? "http://localhost:3091";
 
-export function PipelinesPanel() {
+// Archon's visual builder lives under its legacy workflows route. Linking at the bare root
+// would land on the redesigned console (Archon redirects "/" → "/console"), NOT the builder,
+// so we point at the explicit builder path.
+const BUILDER_URL = `${ARCHON_URL}/legacy/workflows/builder`;
+
+export function PipelinesPanel({
+  onRunPipeline,
+  onEditPipeline,
+}: {
+  /** Open a new Kady chat tab and run the named pipeline in it. */
+  onRunPipeline: (name: string) => void;
+  /** Switch to the Pipeline Builder view with the named pipeline loaded. */
+  onEditPipeline: (name: string) => void;
+}) {
   const [healthy, setHealthy] = useState<boolean | null>(null);
   const [pipelines, setPipelines] = useState<PipelineSummary[]>([]);
   const [loading, setLoading] = useState(true);
-  const [runningPipeline, setRunningPipeline] = useState<string | null>(null);
-
-  // Source the model list from the SAME hook the chat picker uses, so a pipeline run
-  // uses Kady's merged catalogue. Fusion entries (m.isFusion) are filtered out: their
-  // panel pricing is reconstructed in-process from the user's saved presets and can't be
-  // rebuilt by Archon Pi out-of-process, so they'd run un-priced there.
-  const { models } = useModels();
-  const pipelineModels = useMemo(() => models.filter((m) => !m.isFusion), [models]);
-  const [selectedModel, setSelectedModel] = useState("");
-
-  // Default the selector to the catalogue's default (or first) once models load.
-  useEffect(() => {
-    if (selectedModel || pipelineModels.length === 0) return;
-    const fallback = pipelineModels.find((m) => m.default) ?? pipelineModels[0];
-    setSelectedModel(fallback.id);
-  }, [pipelineModels, selectedModel]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -47,26 +45,6 @@ export function PipelinesPanel() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
-
-  // Kick off a run with the chosen Kady model ref. Archon ties a run to a conversation +
-  // a kick-off message; we mint a per-run conversation id so concurrent runs don't collide.
-  const handleRun = useCallback(
-    async (pipelineName: string) => {
-      setRunningPipeline(pipelineName);
-      try {
-        const conversationId = `pipeline-run-${Date.now()}`;
-        await runPipeline(
-          pipelineName,
-          conversationId,
-          `Run pipeline: ${pipelineName}`,
-          selectedModel || undefined,
-        );
-      } finally {
-        setRunningPipeline(null);
-      }
-    },
-    [selectedModel],
-  );
 
   return (
     <div className="flex h-full flex-col gap-4 overflow-auto p-4">
@@ -85,7 +63,7 @@ export function PipelinesPanel() {
           {healthy === null ? "checking…" : healthy ? "engine online" : "engine offline"}
         </span>
         <a
-          href={ARCHON_URL}
+          href={BUILDER_URL}
           target="_blank"
           rel="noreferrer"
           className="ml-auto rounded-md border px-2.5 py-1 text-xs hover:bg-muted/50"
@@ -99,24 +77,6 @@ export function PipelinesPanel() {
         >
           Refresh
         </button>
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2">
-        <label htmlFor="pipeline-model" className="text-[11px] text-muted-foreground">
-          Run model
-        </label>
-        <select
-          id="pipeline-model"
-          value={selectedModel}
-          onChange={(e) => setSelectedModel(e.target.value)}
-          className="max-w-[18rem] rounded-md border bg-background px-2 py-1 text-xs"
-        >
-          {pipelineModels.map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.label} ({m.provider})
-            </option>
-          ))}
-        </select>
       </div>
 
       {healthy === false && (
@@ -145,11 +105,17 @@ export function PipelinesPanel() {
               </div>
               <button
                 type="button"
-                onClick={() => void handleRun(pipeline.name)}
-                disabled={runningPipeline !== null}
-                className="rounded-md border px-2.5 py-1 text-xs hover:bg-muted/50 disabled:opacity-50"
+                onClick={() => onEditPipeline(pipeline.name)}
+                className="rounded-md border px-2.5 py-1 text-xs hover:bg-muted/50"
               >
-                {runningPipeline === pipeline.name ? "Running…" : "Run"}
+                Edit
+              </button>
+              <button
+                type="button"
+                onClick={() => onRunPipeline(pipeline.name)}
+                className="rounded-md border px-2.5 py-1 text-xs hover:bg-muted/50"
+              >
+                Run
               </button>
             </li>
           ))}

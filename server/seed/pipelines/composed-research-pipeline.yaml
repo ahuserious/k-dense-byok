@@ -1,0 +1,656 @@
+name: composed-research-pipeline
+description: |
+  A single Archon DAG that COMPOSES three real Kady WorkflowsPanel templates into
+  one end-to-end research pipeline, chained as sequential dependent phases:
+
+    1. literature-search   (Kady "Literature Search")  -> lit-review
+    2. explore-data +      (Kady "Explore My Data" +    -> eda  -> stats
+       statistical-analysis      "Statistical Analysis")
+    3. write-review-article(Kady "Write a Review Article"-> synthesis
+       / write-paper             / "Write a Paper")
+
+  Built with the scientific-pipeline-builder method: a reasoning-boosted planning
+  node, each substantive phase followed by the mandatory 3x adversarial
+  fresh-context verify block (PASS/FAIL gate before the next phase runs), human
+  approval gates after planning and before final synthesis, a per-phase Scribe
+  node that writes a reproducible log, and a final synthesis + Scribe.
+
+  Variables: $ARGUMENTS is the run message (the research question + topic);
+  $<nodeId>.output is an upstream node's output; $ARTIFACTS_DIR is the run's
+  artifacts directory. Upload the dataset to the sandbox before running the EDA
+  phase (the explore-data / statistical-analysis templates require files).
+provider: pi
+interactive: true
+
+nodes:
+  # ───────────────────────────────────────────────────────────────
+  # PHASE 0 — PLAN (reasoning-boosted experiment design)
+  # KADY-BOOST: fusion-direct (model pinned to the Fusion panel+judge alias)
+  # ───────────────────────────────────────────────────────────────
+  - id: plan
+    prompt: |
+      Research request: $ARGUMENTS
+
+      You are leading a research project that will run as a pipeline of three
+      phases: (1) a literature search, (2) exploratory + statistical analysis of
+      an uploaded dataset, and (3) a written synthesis. Restate the request in
+      your own words, then produce a concrete plan:
+        - the scientific question and any sub-questions,
+        - the search topic to drive the literature phase,
+        - the dataset(s)/inputs expected for the analysis phase,
+        - the specific comparisons/tests the analysis should run,
+        - the intended final deliverable (review article or manuscript),
+        - the success criteria and the expected artifacts.
+      Note any assumptions explicitly. Save the plan to $ARTIFACTS_DIR/plan.md.
+    model: openrouter/openrouter/fusion
+    skills: [hypothesis-generation, scientific-critical-thinking]
+
+  - id: plan-verify-1
+    prompt: |
+      ADVERSARIAL VERIFICATION (fresh context, attempt 1 of 3).
+      The phase "plan" had this goal:
+        <goal>
+        Turn the research request into a concrete, complete plan covering the
+        question, the literature-search topic, the analysis inputs and tests,
+        the final deliverable, success criteria, and expected artifacts.
+        </goal>
+      Here is what it produced:
+        <output>
+        $plan.output
+        </output>
+      Re-derive whether the output actually achieves the goal. Hunt for missing
+      phases, unscoped topics, undefined success criteria, and unstated
+      assumptions. Be adversarial — FAIL it if the plan would not let the next
+      phases run unambiguously.
+      Respond with exactly "PASS" or "FAIL: <reasons>".
+    model: openrouter/anthropic/claude-opus-4.8
+    context: fresh
+    depends_on: [plan]
+    output_format:
+      type: object
+      properties:
+        verdict: { type: string }
+      required: [verdict]
+
+  - id: plan-verify-2
+    prompt: |
+      ADVERSARIAL VERIFICATION (fresh context, attempt 2 of 3).
+      Goal of phase "plan":
+        <goal>
+        Turn the research request into a concrete, complete plan covering the
+        question, the literature-search topic, the analysis inputs and tests,
+        the final deliverable, success criteria, and expected artifacts.
+        </goal>
+      Output produced:
+        <output>
+        $plan.output
+        </output>
+      Independently re-check. Do NOT trust the prior verifier. Respond with
+      exactly "PASS" or "FAIL: <reasons>".
+    model: openrouter/anthropic/claude-opus-4.8
+    context: fresh
+    depends_on: [plan-verify-1]
+    output_format:
+      type: object
+      properties:
+        verdict: { type: string }
+      required: [verdict]
+
+  - id: plan-verify-3
+    prompt: |
+      ADVERSARIAL VERIFICATION (fresh context, attempt 3 of 3 — final gate).
+      Goal of phase "plan":
+        <goal>
+        Turn the research request into a concrete, complete plan covering the
+        question, the literature-search topic, the analysis inputs and tests,
+        the final deliverable, success criteria, and expected artifacts.
+        </goal>
+      Output produced:
+        <output>
+        $plan.output
+        </output>
+      Final independent re-check. Respond with exactly "PASS" or
+      "FAIL: <reasons>".
+    model: openrouter/anthropic/claude-opus-4.8
+    context: fresh
+    depends_on: [plan-verify-2]
+    output_format:
+      type: object
+      properties:
+        verdict: { type: string }
+      required: [verdict]
+
+  # Approval gate AFTER planning (review the design before spending compute)
+  - id: gate-after-plan
+    approval:
+      message: |
+        Review the research plan above (and the three independent verifier
+        verdicts). Approve to start the literature search and analysis, or reject
+        with guidance to revise the plan.
+      capture_response: true
+      on_reject:
+        prompt: |
+          The reviewer rejected the plan with this feedback:
+          $REJECTION_REASON
+
+          Revise the plan in $ARTIFACTS_DIR/plan.md to address the feedback and
+          summarize what you changed.
+        max_attempts: 3
+    depends_on: [plan-verify-3]
+    when: "$plan-verify-3.output.verdict == 'PASS'"
+
+  # ───────────────────────────────────────────────────────────────
+  # PHASE 1 — LITERATURE REVIEW  (composes Kady "Literature Search" template)
+  # ───────────────────────────────────────────────────────────────
+  - id: lit-review
+    prompt: |
+      Search the literature on the topic scoped in the plan below. Query multiple
+      real databases (e.g., PubMed, Google Scholar, Semantic Scholar, Web of
+      Science, arXiv) via web search. (1) Find the most relevant and highly cited
+      papers, prioritizing recent work while including landmark studies.
+      (2) Summarize the key findings of each, distinguishing primary research
+      from reviews and other secondary sources. (3) Identify major themes and
+      points of consensus, (4) note controversies and conflicting evidence, and
+      (5) highlight gaps in current knowledge. Cite every claim with a real,
+      verifiable reference (title, authors, year, venue, and DOI or URL); never
+      fabricate citations or DOIs, and flag anything you could not verify. Report
+      your search scope, databases, and date. Save a structured bibliography as a
+      well-named Markdown file under $ARTIFACTS_DIR/ for preview and download,
+      and summarize the findings briefly in chat.
+
+      Plan (for the scoped topic and sub-questions): $plan.output
+    model: openrouter/anthropic/claude-opus-4.8
+    skills: [literature-review, citation-management, parallel-web]
+    depends_on: [gate-after-plan]
+
+  - id: lit-review-verify-1
+    prompt: |
+      ADVERSARIAL VERIFICATION (fresh context, attempt 1 of 3).
+      The phase "lit-review" had this goal:
+        <goal>
+        Produce a cited, verifiable literature synthesis on the planned topic:
+        relevant + landmark papers, key findings, themes/consensus,
+        controversies, and knowledge gaps — every claim backed by a real,
+        checkable reference, with search scope and date reported.
+        </goal>
+      Here is what it produced:
+        <output>
+        $lit-review.output
+        </output>
+      Re-derive whether the output achieves the goal. Hunt especially for
+      fabricated or unverifiable citations/DOIs, claims without references,
+      missing gap analysis, and an unreported search scope. Be adversarial — FAIL
+      it if any citation looks invented or any major claim is unsupported.
+      Respond with exactly "PASS" or "FAIL: <reasons>".
+    model: openrouter/anthropic/claude-opus-4.8
+    context: fresh
+    depends_on: [lit-review]
+    output_format:
+      type: object
+      properties:
+        verdict: { type: string }
+      required: [verdict]
+
+  - id: lit-review-verify-2
+    prompt: |
+      ADVERSARIAL VERIFICATION (fresh context, attempt 2 of 3).
+      Goal of phase "lit-review":
+        <goal>
+        Produce a cited, verifiable literature synthesis on the planned topic:
+        relevant + landmark papers, key findings, themes/consensus,
+        controversies, and knowledge gaps — every claim backed by a real,
+        checkable reference, with search scope and date reported.
+        </goal>
+      Output produced:
+        <output>
+        $lit-review.output
+        </output>
+      Independently re-check. Do NOT trust the prior verifier. Respond with
+      exactly "PASS" or "FAIL: <reasons>".
+    model: openrouter/anthropic/claude-opus-4.8
+    context: fresh
+    depends_on: [lit-review-verify-1]
+    output_format:
+      type: object
+      properties:
+        verdict: { type: string }
+      required: [verdict]
+
+  - id: lit-review-verify-3
+    prompt: |
+      ADVERSARIAL VERIFICATION (fresh context, attempt 3 of 3 — final gate).
+      Goal of phase "lit-review":
+        <goal>
+        Produce a cited, verifiable literature synthesis on the planned topic:
+        relevant + landmark papers, key findings, themes/consensus,
+        controversies, and knowledge gaps — every claim backed by a real,
+        checkable reference, with search scope and date reported.
+        </goal>
+      Output produced:
+        <output>
+        $lit-review.output
+        </output>
+      Final independent re-check. Respond with exactly "PASS" or
+      "FAIL: <reasons>".
+    model: openrouter/anthropic/claude-opus-4.8
+    context: fresh
+    depends_on: [lit-review-verify-2]
+    output_format:
+      type: object
+      properties:
+        verdict: { type: string }
+      required: [verdict]
+
+  # Scribe for the literature phase (reproducible log; off the critical path)
+  - id: lit-review-scribe
+    prompt: |
+      Write a reproducible log of the "lit-review" phase to
+      $ARTIFACTS_DIR/scribe/lit-review.md. Record, exactly:
+        - every search query/command run (verbatim),
+        - the databases queried and the search scope + date,
+        - source provenance for each cited paper (title, authors, year, DOI/URL),
+        - the synthesis method applied,
+        - the findings produced (themes, controversies, gaps).
+      The goal: someone could re-run this phase from your log alone.
+      Phase output to summarize: $lit-review.output
+    model: openrouter/anthropic/claude-opus-4.8
+    skills: [markdown-mermaid-writing, citation-management]
+    depends_on: [lit-review]
+
+  # ───────────────────────────────────────────────────────────────
+  # PHASE 2a — EDA  (composes Kady "Explore My Data" template)
+  # Gated on the literature phase passing its 3x verify block.
+  # ───────────────────────────────────────────────────────────────
+  - id: eda
+    prompt: |
+      Perform a rigorous exploratory data analysis on the uploaded dataset.
+      (1) Inspect structure: rows, columns, dtypes, and memory; preview
+      head/tail. (2) Quantify missingness per column and visualize its pattern;
+      note likely mechanisms. (3) Compute descriptive statistics for numeric and
+      categorical features, including cardinality and class balance.
+      (4) Visualize distributions (histograms, boxplots) and pairwise
+      relationships; compute a correlation matrix (Pearson and Spearman).
+      (5) Flag anomalies, outliers, duplicates, constant columns, skew, and
+      potential leakage or data-quality issues. State assumptions if context is
+      missing. Set and report a random seed. Deliverables: save figures as PNG,
+      summary tables as CSV, and a concise findings report as Markdown under
+      $ARTIFACTS_DIR/eda/; then summarize key patterns in chat, name the files,
+      and note limitations.
+
+      Use the plan and the literature context to focus the EDA on the variables
+      that matter for the research question.
+      Plan: $plan.output
+      Literature context: $lit-review.output
+    model: openrouter/anthropic/claude-opus-4.8
+    skills: [exploratory-data-analysis, scientific-visualization, polars]
+    depends_on: [lit-review-verify-3]
+    when: "$lit-review-verify-3.output.verdict == 'PASS'"
+
+  - id: eda-verify-1
+    prompt: |
+      ADVERSARIAL VERIFICATION (fresh context, attempt 1 of 3).
+      The phase "eda" had this goal:
+        <goal>
+        Rigorously characterize the uploaded dataset: structure, missingness,
+        descriptive stats, distributions, Pearson+Spearman correlations, and
+        anomalies/outliers/leakage — with a reported random seed and saved
+        figures/tables/report.
+        </goal>
+      Here is what it produced:
+        <output>
+        $eda.output
+        </output>
+      Re-derive whether the output achieves the goal. Hunt for unreported seeds,
+      missingness ignored, correlations claimed without both Pearson and Spearman,
+      anomalies/leakage overlooked, and figures/tables that were claimed but not
+      actually saved. Be adversarial — FAIL it if the characterization is
+      incomplete or unsupported. Respond with exactly "PASS" or "FAIL: <reasons>".
+    model: openrouter/anthropic/claude-opus-4.8
+    context: fresh
+    depends_on: [eda]
+    output_format:
+      type: object
+      properties:
+        verdict: { type: string }
+      required: [verdict]
+
+  - id: eda-verify-2
+    prompt: |
+      ADVERSARIAL VERIFICATION (fresh context, attempt 2 of 3).
+      Goal of phase "eda":
+        <goal>
+        Rigorously characterize the uploaded dataset: structure, missingness,
+        descriptive stats, distributions, Pearson+Spearman correlations, and
+        anomalies/outliers/leakage — with a reported random seed and saved
+        figures/tables/report.
+        </goal>
+      Output produced:
+        <output>
+        $eda.output
+        </output>
+      Independently re-check. Do NOT trust the prior verifier. Respond with
+      exactly "PASS" or "FAIL: <reasons>".
+    model: openrouter/anthropic/claude-opus-4.8
+    context: fresh
+    depends_on: [eda-verify-1]
+    output_format:
+      type: object
+      properties:
+        verdict: { type: string }
+      required: [verdict]
+
+  - id: eda-verify-3
+    prompt: |
+      ADVERSARIAL VERIFICATION (fresh context, attempt 3 of 3 — final gate).
+      Goal of phase "eda":
+        <goal>
+        Rigorously characterize the uploaded dataset: structure, missingness,
+        descriptive stats, distributions, Pearson+Spearman correlations, and
+        anomalies/outliers/leakage — with a reported random seed and saved
+        figures/tables/report.
+        </goal>
+      Output produced:
+        <output>
+        $eda.output
+        </output>
+      Final independent re-check. Respond with exactly "PASS" or
+      "FAIL: <reasons>".
+    model: openrouter/anthropic/claude-opus-4.8
+    context: fresh
+    depends_on: [eda-verify-2]
+    output_format:
+      type: object
+      properties:
+        verdict: { type: string }
+      required: [verdict]
+
+  # ───────────────────────────────────────────────────────────────
+  # PHASE 2b — STATISTICAL ANALYSIS (composes Kady "Statistical Analysis")
+  # KADY-BOOST: council-tool — named-persona deliberation before answering.
+  # Gated on the EDA phase passing its 3x verify block.
+  # ───────────────────────────────────────────────────────────────
+  - id: stats
+    prompt: |
+      AI COUNCIL DELIBERATION — convene a 3-persona council and debate before you
+      answer. Personas:
+        1. Statistician — scrutinize test choice, assumptions, effect sizes,
+           intervals, and multiple-comparison correction.
+        2. Methodologist — judge whether the design supports the inference; hunt
+           confounds, leakage, and pseudo-replication.
+        3. Skeptic — argue the null and alternative explanations for any result.
+      Use the `council` tool to run the deliberation, then synthesize the
+      council's verdict into the analysis below.
+
+      Run appropriate statistical analyses on the uploaded data, informed by the
+      EDA findings. First confirm schema, missingness, distributions, and group
+      sizes. For each analysis: (1) state the null and alternative hypotheses,
+      (2) check test assumptions (normality, variance homogeneity, independence)
+      and pick a suitable parametric or non-parametric test, (3) run the test,
+      (4) report test statistics, exact p-values, confidence intervals, and
+      standardized effect sizes, (5) correct for multiple comparisons where
+      applicable, (6) interpret results honestly with caveats. Set and report a
+      random seed. Deliverables: save figures as PNG, a results table as CSV, and
+      a Markdown findings report under $ARTIFACTS_DIR/stats/; summarize in chat,
+      name files, and state limitations.
+
+      EDA findings: $eda.output
+      Plan (hypotheses and intended comparisons): $plan.output
+    model: openrouter/anthropic/claude-opus-4.8
+    allowed_tools: [Read, Write, Edit, Bash, council]
+    skills: [statistical-analysis, statsmodels, scikit-learn]
+    depends_on: [eda-verify-3]
+    when: "$eda-verify-3.output.verdict == 'PASS'"
+
+  - id: stats-verify-1
+    prompt: |
+      ADVERSARIAL VERIFICATION (fresh context, attempt 1 of 3).
+      The phase "stats" had this goal:
+        <goal>
+        Run the right statistical tests for the question: explicit hypotheses,
+        checked assumptions, correct parametric/non-parametric choice, reported
+        statistics + exact p-values + CIs + effect sizes, multiple-comparison
+        correction, an honest interpretation, and a reported random seed.
+        </goal>
+      Here is what it produced:
+        <output>
+        $stats.output
+        </output>
+      Re-derive whether the output achieves the goal. Hunt for the wrong test for
+      the data, unchecked assumptions, missing effect sizes or CIs, p-hacking or
+      uncorrected multiple comparisons, and over-stated conclusions. Be
+      adversarial — FAIL it if the inference does not hold up.
+      Respond with exactly "PASS" or "FAIL: <reasons>".
+    model: openrouter/anthropic/claude-opus-4.8
+    context: fresh
+    depends_on: [stats]
+    output_format:
+      type: object
+      properties:
+        verdict: { type: string }
+      required: [verdict]
+
+  - id: stats-verify-2
+    prompt: |
+      ADVERSARIAL VERIFICATION (fresh context, attempt 2 of 3).
+      Goal of phase "stats":
+        <goal>
+        Run the right statistical tests for the question: explicit hypotheses,
+        checked assumptions, correct parametric/non-parametric choice, reported
+        statistics + exact p-values + CIs + effect sizes, multiple-comparison
+        correction, an honest interpretation, and a reported random seed.
+        </goal>
+      Output produced:
+        <output>
+        $stats.output
+        </output>
+      Independently re-check. Do NOT trust the prior verifier. Respond with
+      exactly "PASS" or "FAIL: <reasons>".
+    model: openrouter/anthropic/claude-opus-4.8
+    context: fresh
+    depends_on: [stats-verify-1]
+    output_format:
+      type: object
+      properties:
+        verdict: { type: string }
+      required: [verdict]
+
+  - id: stats-verify-3
+    prompt: |
+      ADVERSARIAL VERIFICATION (fresh context, attempt 3 of 3 — final gate).
+      Goal of phase "stats":
+        <goal>
+        Run the right statistical tests for the question: explicit hypotheses,
+        checked assumptions, correct parametric/non-parametric choice, reported
+        statistics + exact p-values + CIs + effect sizes, multiple-comparison
+        correction, an honest interpretation, and a reported random seed.
+        </goal>
+      Output produced:
+        <output>
+        $stats.output
+        </output>
+      Final independent re-check. Respond with exactly "PASS" or
+      "FAIL: <reasons>".
+    model: openrouter/anthropic/claude-opus-4.8
+    context: fresh
+    depends_on: [stats-verify-2]
+    output_format:
+      type: object
+      properties:
+        verdict: { type: string }
+      required: [verdict]
+
+  # Scribe for the analysis phase (covers both EDA and stats; off critical path)
+  - id: analysis-scribe
+    prompt: |
+      Write a reproducible log of the analysis phase (EDA + statistics) to
+      $ARTIFACTS_DIR/scribe/analysis.md. Record, exactly:
+        - every script/command run for both EDA and the statistical tests
+          (verbatim), including the random seed(s),
+        - data provenance (uploaded file names, versions, any cleaning steps),
+        - the methods applied (which tests, why, assumption checks),
+        - the results produced (figures, tables, statistics, p-values, effect
+          sizes).
+      The goal: someone could re-run the whole analysis phase from your log alone.
+      EDA output: $eda.output
+      Statistics output: $stats.output
+    model: openrouter/anthropic/claude-opus-4.8
+    skills: [markdown-mermaid-writing, citation-management]
+    depends_on: [stats]
+
+  # Approval gate BEFORE final synthesis (sign off on results before write-up)
+  - id: gate-before-synthesis
+    approval:
+      message: |
+        Review the literature synthesis and the analysis results above (all three
+        verifier chains passed). Approve to write up the final review article /
+        manuscript, or reject with guidance to revise before synthesis.
+      capture_response: true
+      on_reject:
+        prompt: |
+          The reviewer rejected the results before synthesis with this feedback:
+          $REJECTION_REASON
+
+          Address the feedback against the EDA and statistics outputs, re-run or
+          re-interpret as needed, and summarize what you changed.
+        max_attempts: 3
+    depends_on: [stats-verify-3]
+    when: "$stats-verify-3.output.verdict == 'PASS'"
+
+  # ───────────────────────────────────────────────────────────────
+  # PHASE 3 — SYNTHESIS  (composes Kady "Write a Review Article" + "Write a
+  # Paper": a narrative synthesis grounded in BOTH the literature and the
+  # analysis results). KADY-BOOST: fusion-direct on the final write-up.
+  # ───────────────────────────────────────────────────────────────
+  - id: synthesis
+    prompt: |
+      Write the final synthesis as a narrative research article that integrates
+      the literature review with this study's own analysis results. Organize the
+      body into clear thematic sections with a short introduction (scope and
+      significance) and a conclusion. Where you report this study's findings, give
+      the exact statistics (test, p-value, CI, effect size) and reference the
+      relevant figure/table from the analysis phase; where you situate them
+      against prior work, cite real papers from the literature phase. Identify
+      points of consensus, open controversies, methodological trends, the gap this
+      study addresses, limitations (of the literature, the data, and the
+      analysis), and concrete future directions.
+
+      Report only results actually present in the analysis outputs; never
+      fabricate data, statistics, or citations. Flag with [VERIFY] anything you
+      could not confirm and [CITATION NEEDED] any claim that still needs a real
+      reference. Save the article (with a reference list and figure/table
+      captions) as a well-named Markdown file under $ARTIFACTS_DIR/ for preview
+      and download, and give a brief summary in chat.
+
+      Literature synthesis: $lit-review.output
+      EDA findings: $eda.output
+      Statistical results: $stats.output
+      Plan / objective: $plan.output
+    model: openrouter/openrouter/fusion
+    skills: [scientific-writing, citation-management]
+    depends_on: [gate-before-synthesis]
+
+  - id: synthesis-verify-1
+    prompt: |
+      ADVERSARIAL VERIFICATION (fresh context, attempt 1 of 3).
+      The phase "synthesis" had this goal:
+        <goal>
+        Produce a narrative research article that integrates the literature with
+        this study's analysis: thematic sections, this study's findings reported
+        with exact statistics and figure/table references, prior work cited to
+        real papers, plus consensus/controversies/gap/limitations/future work —
+        no fabricated data or citations.
+        </goal>
+      Here is what it produced:
+        <output>
+        $synthesis.output
+        </output>
+      Re-derive whether the output achieves the goal. Hunt for statistics that do
+      not match the analysis outputs, fabricated or unverifiable citations,
+      missing limitations, and interpretation that overstates the evidence. Be
+      adversarial — FAIL it if the write-up misrepresents the literature or the
+      results. Respond with exactly "PASS" or "FAIL: <reasons>".
+    model: openrouter/anthropic/claude-opus-4.8
+    context: fresh
+    depends_on: [synthesis]
+    output_format:
+      type: object
+      properties:
+        verdict: { type: string }
+      required: [verdict]
+
+  - id: synthesis-verify-2
+    prompt: |
+      ADVERSARIAL VERIFICATION (fresh context, attempt 2 of 3).
+      Goal of phase "synthesis":
+        <goal>
+        Produce a narrative research article that integrates the literature with
+        this study's analysis: thematic sections, this study's findings reported
+        with exact statistics and figure/table references, prior work cited to
+        real papers, plus consensus/controversies/gap/limitations/future work —
+        no fabricated data or citations.
+        </goal>
+      Output produced:
+        <output>
+        $synthesis.output
+        </output>
+      Independently re-check. Do NOT trust the prior verifier. Respond with
+      exactly "PASS" or "FAIL: <reasons>".
+    model: openrouter/anthropic/claude-opus-4.8
+    context: fresh
+    depends_on: [synthesis-verify-1]
+    output_format:
+      type: object
+      properties:
+        verdict: { type: string }
+      required: [verdict]
+
+  - id: synthesis-verify-3
+    prompt: |
+      ADVERSARIAL VERIFICATION (fresh context, attempt 3 of 3 — final gate).
+      Goal of phase "synthesis":
+        <goal>
+        Produce a narrative research article that integrates the literature with
+        this study's analysis: thematic sections, this study's findings reported
+        with exact statistics and figure/table references, prior work cited to
+        real papers, plus consensus/controversies/gap/limitations/future work —
+        no fabricated data or citations.
+        </goal>
+      Output produced:
+        <output>
+        $synthesis.output
+        </output>
+      Final independent re-check. Respond with exactly "PASS" or
+      "FAIL: <reasons>".
+    model: openrouter/anthropic/claude-opus-4.8
+    context: fresh
+    depends_on: [synthesis-verify-2]
+    output_format:
+      type: object
+      properties:
+        verdict: { type: string }
+      required: [verdict]
+
+  # ───────────────────────────────────────────────────────────────
+  # FINAL SCRIBE — reproducible log of the whole pipeline. Runs only after the
+  # synthesis passes its 3x verify block.
+  # ───────────────────────────────────────────────────────────────
+  - id: final-scribe
+    prompt: |
+      Write the final reproducible log for the entire pipeline to
+      $ARTIFACTS_DIR/scribe/pipeline.md. Stitch together the per-phase scribe
+      logs and record, end to end:
+        - the original research request and the plan,
+        - the literature search (queries, databases, scope, date, references),
+        - the analysis (datasets, seed, EDA + statistical methods, results),
+        - the synthesis (final article file, key claims and their evidence),
+        - every artifact path produced under $ARTIFACTS_DIR/.
+      The goal: a reader could reproduce the whole study from this single log.
+      Inputs:
+        Plan: $plan.output
+        Literature scribe context: $lit-review-scribe.output
+        Analysis scribe context: $analysis-scribe.output
+        Final article: $synthesis.output
+    model: openrouter/anthropic/claude-opus-4.8
+    skills: [markdown-mermaid-writing, citation-management]
+    depends_on: [synthesis-verify-3]
+    when: "$synthesis-verify-3.output.verdict == 'PASS'"
