@@ -1,8 +1,10 @@
 "use client";
 
 import {
+  BoxesIcon,
   DownloadIcon,
   FileTextIcon,
+  GaugeIcon,
   LoaderCircleIcon,
   MessageSquareTextIcon,
   PencilIcon,
@@ -35,7 +37,7 @@ export interface ChatTabDescriptor {
 export interface ChatTabsBarProps {
   tabs: ChatTabDescriptor[];
   activeTabId: string;
-  view: "chat" | "workflows" | "pipelines";
+  view: "chat" | "workflows" | "pipelines" | "pipeline-builder" | "agent-console";
   maxTabs: number;
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
@@ -43,6 +45,8 @@ export interface ChatTabsBarProps {
   onRename: (id: string, title: string) => void;
   onSelectWorkflows: () => void;
   onSelectPipelines: () => void;
+  onSelectPipelineBuilder: () => void;
+  onSelectAgentConsole: () => void;
   /** Session id of the active tab, for reproducibility export. */
   activeSessionId?: string | null;
   /** Whether the active tab has any messages worth exporting. */
@@ -131,6 +135,8 @@ export function ChatTabsBar({
   onRename,
   onSelectWorkflows,
   onSelectPipelines,
+  onSelectPipelineBuilder,
+  onSelectAgentConsole,
   activeSessionId,
   canExport = false,
 }: ChatTabsBarProps) {
@@ -326,19 +332,75 @@ export function ChatTabsBar({
             Workflows
           </button>
         </InfoTooltip>
-        <button
-          onClick={onSelectPipelines}
-          type="button"
-          className={cn(
-            "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors",
-            view === "pipelines"
-              ? "bg-muted text-foreground"
-              : "text-muted-foreground hover:text-foreground hover:bg-muted/50",
-          )}
+        <InfoTooltip
+          content={
+            <>
+              <b>DAG Pipelines</b>
+              <br />
+              Run and monitor the workflows the Archon engine knows about.
+            </>
+          }
         >
-          <WorkflowIcon className="size-3.5" />
-          Pipelines
-        </button>
+          <button
+            onClick={onSelectPipelines}
+            type="button"
+            className={cn(
+              "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors",
+              view === "pipelines"
+                ? "bg-muted text-foreground"
+                : "text-muted-foreground hover:text-foreground hover:bg-muted/50",
+            )}
+          >
+            <WorkflowIcon className="size-3.5" />
+            DAG Pipelines
+          </button>
+        </InfoTooltip>
+        <InfoTooltip
+          content={
+            <>
+              <b>Pipeline Builder</b>
+              <br />
+              Compose and edit pipelines visually in Archon&apos;s builder.
+            </>
+          }
+        >
+          <button
+            onClick={onSelectPipelineBuilder}
+            type="button"
+            className={cn(
+              "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors",
+              view === "pipeline-builder"
+                ? "bg-muted text-foreground"
+                : "text-muted-foreground hover:text-foreground hover:bg-muted/50",
+            )}
+          >
+            <BoxesIcon className="size-3.5" />
+            Pipeline Builder
+          </button>
+        </InfoTooltip>
+        <InfoTooltip
+          content={
+            <>
+              <b>Agent Console</b>
+              <br />
+              Watch long-running goal loops and the full run history.
+            </>
+          }
+        >
+          <button
+            onClick={onSelectAgentConsole}
+            type="button"
+            className={cn(
+              "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors",
+              view === "agent-console"
+                ? "bg-muted text-foreground"
+                : "text-muted-foreground hover:text-foreground hover:bg-muted/50",
+            )}
+          >
+            <GaugeIcon className="size-3.5" />
+            Agent Console
+          </button>
+        </InfoTooltip>
       </div>
     </div>
   );

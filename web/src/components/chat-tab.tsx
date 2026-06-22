@@ -44,12 +44,24 @@ import {
   CheckIcon,
   CopyIcon,
   DatabaseIcon,
+  GitBranchIcon,
   ListOrderedIcon,
   PaperclipIcon,
   SparklesIcon,
+  TargetIcon,
   XIcon,
 } from "lucide-react";
 import { cn, formatUsd } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { InfoTooltip } from "@/components/ui/info-tooltip";
 import {
   forwardRef,
@@ -723,6 +735,88 @@ export interface ChatTabMeta {
   userMessageCount: number;
 }
 
+/**
+ * Two quick-action CTAs shown under the empty-state prompt. "Stitch workflows
+ * into a pipeline" routes straight to the visual builder; "Create a goal-based
+ * workflow" collects a goal in a small dialog and hands it to the parent, which
+ * starts an orchestrated loop and opens the Agent Console.
+ */
+function EmptyStateCtas({
+  onStitchPipeline,
+  onCreateGoalWorkflow,
+}: {
+  onStitchPipeline: () => void;
+  onCreateGoalWorkflow: (goal: string) => void;
+}) {
+  const [goalOpen, setGoalOpen] = useState(false);
+  const [goal, setGoal] = useState("");
+
+  const submitGoal = () => {
+    const trimmed = goal.trim();
+    if (!trimmed) return;
+    onCreateGoalWorkflow(trimmed);
+    setGoal("");
+    setGoalOpen(false);
+  };
+
+  return (
+    <div className="flex flex-wrap items-center justify-center gap-2">
+      <button
+        type="button"
+        onClick={onStitchPipeline}
+        className="flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+      >
+        <GitBranchIcon className="size-3.5" />
+        Stitch workflows into a pipeline
+      </button>
+      <button
+        type="button"
+        onClick={() => setGoalOpen(true)}
+        className="flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+      >
+        <TargetIcon className="size-3.5" />
+        Create a goal-based workflow
+      </button>
+
+      <Dialog open={goalOpen} onOpenChange={setGoalOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Create a goal-based workflow</DialogTitle>
+            <DialogDescription>
+              Describe the goal. A long-running orchestrated loop will pursue it
+              and stream its progress in the Agent Console.
+            </DialogDescription>
+          </DialogHeader>
+          <Input
+            autoFocus
+            placeholder="e.g. Build a CLI todo app with tests"
+            value={goal}
+            onChange={(e) => setGoal(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                submitGoal();
+              }
+            }}
+          />
+          <DialogFooter>
+            <Button
+              variant="outline"
+              type="button"
+              onClick={() => setGoalOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button type="button" onClick={submitGoal} disabled={!goal.trim()}>
+              Start goal loop
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
 export interface ChatTabHandle {
   /**
    * Send a workflow-style prompt into this tab. Used by the Workflows panel
@@ -760,6 +854,10 @@ export interface ChatTabProps {
   budgetTotalUsd: number;
   budgetLimitUsd: number | null;
   onMetaChange: (tabId: string, meta: ChatTabMeta) => void;
+  /** Route the shell to the visual Pipeline Builder (empty-state CTA). */
+  onStitchPipeline: () => void;
+  /** Start a goal-based loop on the console and open the Agent Console. */
+  onCreateGoalWorkflow: (goal: string) => void;
 }
 
 export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
@@ -775,6 +873,8 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
     budgetTotalUsd,
     budgetLimitUsd,
     onMetaChange,
+    onStitchPipeline,
+    onCreateGoalWorkflow,
   },
   ref,
 ) {
@@ -958,10 +1058,18 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
       <Conversation className="flex-1">
         <ConversationContent className="mx-auto w-full max-w-full px-4">
           {messages.length === 0 ? (
-            <ConversationEmptyState
-              title="What can I help you with?"
-              description="I can research topics, write code, and analyze data."
-            />
+            <ConversationEmptyState>
+              <div className="space-y-1">
+                <h3 className="font-medium text-sm">What can I help you with?</h3>
+                <p className="text-muted-foreground text-sm">
+                  I can research topics, write code, and analyze data.
+                </p>
+              </div>
+              <EmptyStateCtas
+                onStitchPipeline={onStitchPipeline}
+                onCreateGoalWorkflow={onCreateGoalWorkflow}
+              />
+            </ConversationEmptyState>
           ) : (
             messages.map((message) => (
               <Message from={message.role} key={message.id}>

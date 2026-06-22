@@ -24,6 +24,17 @@ export interface SessionCostSummary {
   agentUsd: number;
   subagentUsd: number;
   entries: CostEntry[];
+  /**
+   * Portion of this session's cost that the server priced off the Fusion floor
+   * ("estimated") rather than from a real provider invoice. Optional — older
+   * sessions and non-Fusion turns omit it. When > 0 the cost pill surfaces an
+   * "estimated" badge so users know the figure is a floor, not a final bill.
+   */
+  estimatedUsd?: number;
+  /** Cost attributed to workflow/pipeline turns, if the server reports it. */
+  workflowUsd?: number;
+  /** Cost attributed to verification passes, if the server reports it. */
+  verifyUsd?: number;
 }
 
 const EMPTY: SessionCostSummary = {

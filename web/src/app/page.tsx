@@ -8,6 +8,9 @@ import { ChatTabsBar, type ChatTabDescriptor } from "@/components/chat-tabs-bar"
 import { SettingsDialog } from "@/components/settings-dialog";
 import { WorkflowsPanel } from "@/components/workflows-panel";
 import { PipelinesPanel } from "@/components/pipelines-panel";
+import { PipelineBuilderPanel } from "@/components/pipeline-builder-panel";
+import { AgentConsolePanel } from "@/components/agent-console/agent-console-panel";
+import { startLoop } from "@/lib/console";
 import { ProjectSwitcher } from "@/components/project-switcher";
 import { SessionCostPill } from "@/components/session-cost-pill";
 import { useSessionCost } from "@/lib/use-session-cost";
@@ -85,7 +88,9 @@ export default function ChatPage() {
     { id: initialTabId, title: defaultTabTitle(0) },
   ]);
   const [activeTabId, setActiveTabId] = useState<string>(() => initialTabId);
-  const [view, setView] = useState<"chat" | "workflows" | "pipelines">("chat");
+  const [view, setView] = useState<
+    "chat" | "workflows" | "pipelines" | "pipeline-builder" | "agent-console"
+  >("chat");
   // Mirror of tabs in a ref so synchronous handlers can read length without
   // putting impure logic inside a setState updater (which strict mode runs
   // twice for purity testing).
@@ -325,6 +330,31 @@ export default function ChatPage() {
     [activeTabId],
   );
 
+  // ------------------------------------------------------------------
+  // Chat empty-state CTAs.
+  //   - "Stitch workflows into a pipeline" just routes to the visual builder.
+  //   - "Create a goal-based workflow" starts an orchestrated goal loop on the
+  //     console backend and switches to the Agent Console to watch it.
+  // ------------------------------------------------------------------
+
+  const handleStitchPipeline = useCallback(() => {
+    setView("pipeline-builder");
+  }, []);
+
+  const handleCreateGoalWorkflow = useCallback(async (goal: string) => {
+    const trimmed = goal.trim();
+    if (!trimmed) return;
+    // Surface the console view first so the new loop is visible as it starts;
+    // startLoop's positional signature is (goal, maxIterations, mode).
+    setView("agent-console");
+    try {
+      await startLoop(trimmed, 10, "orchestrated");
+    } catch {
+      // The Agent Console polls and will surface any backend error itself;
+      // nothing actionable to do here beyond having switched the view.
+    }
+  }, []);
+
   const handleFileSelect = useCallback((path: string) => {
     sandbox.selectFile(path);
   }, [sandbox]);
@@ -555,6 +585,8 @@ export default function ChatPage() {
             onRename={renameTab}
             onSelectWorkflows={() => setView("workflows")}
             onSelectPipelines={() => setView("pipelines")}
+            onSelectPipelineBuilder={() => setView("pipeline-builder")}
+            onSelectAgentConsole={() => setView("agent-console")}
             activeSessionId={activeSessionId}
             canExport={(activeMeta?.userMessageCount ?? 0) > 0}
           />
@@ -576,6 +608,8 @@ export default function ChatPage() {
               budgetTotalUsd={projectCost.budget.totalUsd}
               budgetLimitUsd={projectCost.budget.limitUsd}
               onMetaChange={handleMetaChange}
+              onStitchPipeline={handleStitchPipeline}
+              onCreateGoalWorkflow={handleCreateGoalWorkflow}
             />
           ))}
 
@@ -594,6 +628,20 @@ export default function ChatPage() {
           {view === "pipelines" && (
             <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
               <PipelinesPanel />
+            </div>
+          )}
+
+          {/* Pipeline Builder view — Archon's visual builder, embedded. */}
+          {view === "pipeline-builder" && (
+            <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
+              <PipelineBuilderPanel />
+            </div>
+          )}
+
+          {/* Agent Console view — long-running goal loops + run history. */}
+          {view === "agent-console" && (
+            <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
+              <AgentConsolePanel />
             </div>
           )}
         </div>

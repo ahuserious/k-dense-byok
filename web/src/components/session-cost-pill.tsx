@@ -192,6 +192,19 @@ export function SessionCostPill({
           <div className="mt-2">
             <CostRow label="Agent" costUsd={summary.agentUsd} />
           </div>
+          {(summary.estimatedUsd ?? 0) > 0 && (
+            <div className="mt-2 flex items-center justify-between rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-700 dark:text-amber-400">
+              <span className="flex items-center gap-1">
+                <span className="rounded bg-amber-500/20 px-1 py-0.5 font-medium uppercase tracking-wide">
+                  estimated
+                </span>
+                <span>Fusion turn priced off the floor</span>
+              </span>
+              <span className="font-mono tabular-nums">
+                {formatUsd(summary.estimatedUsd ?? 0)}
+              </span>
+            </div>
+          )}
         </div>
 
         <div className="max-h-60 overflow-y-auto p-2">
