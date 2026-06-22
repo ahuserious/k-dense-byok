@@ -56,7 +56,9 @@ import {
   type LoopRecord,
   type RunRecord,
 } from "./runs-index.ts";
-import { createSession } from "./session-registry.ts";
+import { createSession, getModelRegistry } from "./session-registry.ts";
+import { resolveModel } from "./models.ts";
+import { DEFAULT_MODEL_ID } from "../config.ts";
 
 const ORCHESTRATOR_TOOLS = ["read", "ls", "find", "grep"]; // read-only: it decides, it does not build
 const MAX_FANOUT = 4; // most parallel worker agents the orchestrator may spawn per round
@@ -312,6 +314,18 @@ async function runIterationPi(
 
   const paths = resolvePaths(projectId);
   const session = await createSession(projectId, paths);
+
+  // Pin a valid, current model on the fresh session instead of inheriting the
+  // project's saved default — that default can be a stale/deprecated ref (e.g. a
+  // removed model id) that 400s at OpenRouter and silently fails the whole loop.
+  // Mirrors how the /run handler sets the per-run model. (A future per-loop model
+  // would override DEFAULT_MODEL_ID here.)
+  try {
+    await session.setModel(resolveModel(DEFAULT_MODEL_ID, getModelRegistry()));
+  } catch (err) {
+    // If resolution fails, fall back to the session's own default rather than abort.
+    void err;
+  }
 
   // Restrict to read-only tools for the orchestrator, like the /run handler's
   // fusion path. Save the real set and restore it in the finally so nothing

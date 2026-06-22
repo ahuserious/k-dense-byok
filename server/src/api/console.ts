@@ -26,16 +26,15 @@
 import type { FastifyInstance } from "fastify";
 import { currentProjectId } from "../scope.ts";
 import {
-  createLoop,
   getLoop,
   listLoops,
   listRuns,
   listRunsForLoop,
-  updateLoop,
   type LoopMode,
   type LoopRecord,
   type RunRecord,
 } from "../agent/runs-index.ts";
+import { pauseLoop, resumeLoop, startLoop, stopLoop } from "../agent/goal-loop.ts";
 
 // How many runs the unfiltered /console/runs feed returns. The store sorts
 // newest-first, so this is the most-recent N. Matches the spirit of ACP's
@@ -147,21 +146,17 @@ export async function registerConsoleRoutes(app: FastifyInstance): Promise<void>
         reply.code(404);
         return { detail: "No such loop" };
       }
-      // Preserve ACP's "approve N more rounds" semantics: lift the iteration cap
-      // so the loop has headroom past where it parked. maxIterations is fixed at
-      // creation in the persisted doc, so we can't extend it via updateLoop's
-      // mutable set — flag this as a known limitation of the persistence-only
-      // path (the real engine raised the cap; see file header TODO).
+      // Preserve ACP's "approve N more rounds" semantics: resumeLoop lifts the
+      // iteration cap by extraIterations and re-kicks the engine.
       const extraIterations = clampInt((req.body ?? {}).extraIterations, 1, 100, 5);
-      void extraIterations; // reserved for the loop engine; cap is immutable here.
-      const updated = updateLoop(projectId, req.params.id, { status: "running" });
+      const updated = resumeLoop(projectId, req.params.id, extraIterations);
       return toClientLoop(updated ?? existing);
     },
   );
 
   app.post<{ Params: { id: string } }>("/console/loops/:id/pause", async (req, reply) => {
     const projectId = currentProjectId();
-    const updated = updateLoop(projectId, req.params.id, { status: "paused" });
+    const updated = pauseLoop(projectId, req.params.id);
     if (!updated) {
       reply.code(404);
       return { detail: "No such loop" };
@@ -171,7 +166,7 @@ export async function registerConsoleRoutes(app: FastifyInstance): Promise<void>
 
   app.post<{ Params: { id: string } }>("/console/loops/:id/stop", async (req, reply) => {
     const projectId = currentProjectId();
-    const updated = updateLoop(projectId, req.params.id, { status: "stopped" });
+    const updated = stopLoop(projectId, req.params.id);
     if (!updated) {
       reply.code(404);
       return { detail: "No such loop" };
@@ -181,15 +176,12 @@ export async function registerConsoleRoutes(app: FastifyInstance): Promise<void>
 }
 
 /**
- * Create a goal loop. The loop doc is persisted (so it shows in the console and
- * survives restart), but NO agent runs are dispatched: the loop execution engine
- * (the goal-loop.ts port of agent-control-plane's loop.ts) is not present in this
- * server yet. Status defaults to 'pending' so the parked loop is visible without
- * pretending it is running.
- *
- * TODO(goal-loop): once agent/goal-loop.ts exists, replace createLoop here with
- * `startLoop({ goal, mode, maxIterations })` so the engine mints the loop, sets
- * status 'running', and begins dispatching orchestrator/worker runs.
+ * Create a goal loop and start the engine. startLoop (agent/goal-loop.ts, the port
+ * of agent-control-plane's loop.ts) mints the loop doc, sets status 'running', and
+ * dispatches orchestrator/worker (or ralph) runs against Kady's in-process Pi. It
+ * captures projectId explicitly and passes it into the detached runLoop, so the
+ * async execution does not depend on the request's AsyncLocalStorage scope (which
+ * is gone once this handler returns).
  */
 async function startLoopHandler(
   req: { body?: { goal?: string; mode?: string; maxIterations?: unknown } },
@@ -203,7 +195,7 @@ async function startLoopHandler(
   }
   const maxIterations = clampInt(body.maxIterations, 1, 100, 10);
   const mode: LoopMode = body.mode === "ralph" ? "ralph" : "orchestrated";
-  const loop = createLoop(currentProjectId(), { goal, mode, maxIterations });
+  const loop = startLoop({ projectId: currentProjectId(), goal, mode, maxIterations });
   reply.code(201);
   return toClientLoop(loop);
 }
