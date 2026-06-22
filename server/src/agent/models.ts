@@ -228,17 +228,16 @@ export function resolveModel(
 ): Model<Api> {
   const usingDefault = !ref || !ref.trim();
   const r = usingDefault ? DEFAULT_MODEL_ID.trim() : ref.trim();
-  // A "fusion/<id>" ref is the synthetic selector entry; resolve it to the real
-  // openrouter/fusion Model, priced by the panel sum. The bare string ref can't
-  // carry the panel prices, so the fusionConfig must be threaded in by the
-  // caller (the /run handler). Throws if it wasn't — never proceed at $0.
+  // A "fusion/<id>" ref is the synthetic selector entry for OpenRouter Fusion.
+  // With its panel config threaded in by the caller (the /run handler) we price
+  // by the analysis-panel sum (most accurate). Without it — a stale ref, or any
+  // path that can't thread the config — we degrade to OpenRouter's native Fusion
+  // auto-panel priced at the isFusion cost floor: never $0 (budget-safety
+  // invariant G1) and never a hard crash. (buildFusionModel still throws when a
+  // *supplied* config has no priceable panel models — that's a genuine misconfig
+  // the caller should abort on, not a missing-config fallback.)
   if (r.startsWith("fusion/")) {
-    if (!fusionConfig) {
-      throw new Error(
-        `Fusion model ref "${r}" requires its fusionConfig to be passed for pricing.`,
-      );
-    }
-    return buildFusionModel(fusionConfig);
+    return fusionConfig ? buildFusionModel(fusionConfig) : buildOpenRouterModel(FUSION_MODEL_ID);
   }
   if (r.startsWith("ollama/")) {
     return buildOllamaModel(r.slice("ollama/".length));
@@ -248,15 +247,12 @@ export function resolveModel(
   if (usingDefault && DEFAULT_MODEL_PROVIDER.toLowerCase() === "ollama") {
     return buildOllamaModel(r);
   }
-  // Fusion refs arrive in a few shapes: the picker's user-defined panels as
-  // "fusion/<configId>", and the canonical "openrouter/fusion" / "openrouter/openrouter/fusion".
-  // They all run OpenRouter's Fusion meta-model, so resolve them to its real slug — this
-  // gives a valid API id AND routes through the isFusion cost path (never $0). The panel's
-  // experts/reasoning_effort are a frontend feature today; forwarding them into the Fusion
-  // request body is a tracked follow-up. Until then a Fusion selection runs Fusion's own
-  // auto-selected panel.
+  // The canonical Fusion slugs ("openrouter/fusion" / "openrouter/openrouter/fusion"
+  // / bare "fusion") all run OpenRouter's Fusion meta-model, so resolve them to its
+  // real slug — a valid API id routed through the isFusion cost path (never $0).
+  // ("fusion/<id>" picker refs are handled above, with config-aware pricing.)
   const stripped = stripOpenRouter(r);
-  if (r.startsWith("fusion/") || stripped === "fusion" || stripped === "openrouter/fusion") {
+  if (stripped === "fusion" || stripped === "openrouter/fusion") {
     return buildOpenRouterModel(FUSION_MODEL_ID);
   }
   const orId = stripped;

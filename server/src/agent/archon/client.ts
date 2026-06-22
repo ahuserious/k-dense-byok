@@ -87,7 +87,16 @@ export async function listRuns(): Promise<unknown> {
 export async function getRun(runId: string): Promise<unknown> {
   return archonFetch(`/api/workflows/runs/${encodeURIComponent(runId)}`);
 }
-export async function resumeRun(runId: string, body: unknown): Promise<unknown> {
+/**
+ * Resume a `failed`/`paused` run. NOTE (verified against Archon v0.4.1 routes):
+ * Archon's resume endpoint takes NO request body — it replays the run's original
+ * `user_message` and skips already-completed nodes. There is no seam to inject a
+ * new prompt or pick a starting node, so `body` is accepted for call-site symmetry
+ * but is effectively ignored by Archon. To restart with a *new* prompt (the rescue
+ * path), start a fresh run via `runWorkflow`, or feed text through a paused gate via
+ * `approveRun`/`rejectRun`.
+ */
+export async function resumeRun(runId: string, body?: unknown): Promise<unknown> {
   return archonFetch(`/api/workflows/runs/${encodeURIComponent(runId)}/resume`, {
     method: "POST",
     body: JSON.stringify(body ?? {}),
@@ -95,6 +104,35 @@ export async function resumeRun(runId: string, body: unknown): Promise<unknown> 
 }
 export async function cancelRun(runId: string): Promise<unknown> {
   return archonFetch(`/api/workflows/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" });
+}
+/** Abandon a non-terminal run (marks it cancelled). No request body. */
+export async function abandonRun(runId: string): Promise<unknown> {
+  return archonFetch(`/api/workflows/runs/${encodeURIComponent(runId)}/abandon`, { method: "POST" });
+}
+/**
+ * Approve a run paused at an approval/capture-response gate. The `comment` becomes
+ * `$<node-id>.output` / `$LOOP_USER_INPUT` for the continuing run — the only seam
+ * for injecting new text into an in-flight run (used by the rescue path).
+ */
+export async function approveRun(runId: string, comment?: string): Promise<unknown> {
+  return archonFetch(`/api/workflows/runs/${encodeURIComponent(runId)}/approve`, {
+    method: "POST",
+    body: JSON.stringify(comment !== undefined ? { comment } : {}),
+  });
+}
+/**
+ * Reject a run paused at an approval gate. The `reason` becomes `$REJECTION_REASON`
+ * for the node's `on_reject` retry prompt (up to maxAttempts, default 3).
+ */
+export async function rejectRun(runId: string, reason?: string): Promise<unknown> {
+  return archonFetch(`/api/workflows/runs/${encodeURIComponent(runId)}/reject`, {
+    method: "POST",
+    body: JSON.stringify(reason !== undefined ? { reason } : {}),
+  });
+}
+/** Delete a terminal run record. */
+export async function deleteRun(runId: string): Promise<unknown> {
+  return archonFetch(`/api/workflows/runs/${encodeURIComponent(runId)}`, { method: "DELETE" });
 }
 
 // --- cost reconciliation ----------------------------------------------------

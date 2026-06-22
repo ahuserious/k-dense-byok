@@ -77,17 +77,26 @@ export function addTurnUsage(
   tally.total += input + output + cacheRead + cacheWrite;
 }
 
+export type CostRole = "agent" | "subagent" | "council" | "workflow" | "verify";
+
 export interface CostEntry {
   entryId: string;
   ts: number;
   sessionId: string;
-  role: "agent" | "subagent" | "council" | "workflow";
+  role: CostRole;
   model: string;
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
   cachedTokens: number;
   costUsd: number;
+  /**
+   * Whether costUsd is the provider's billed figure or a conservative estimate
+   * (e.g. an OpenRouter Fusion turn priced off the cost floor, which can't be
+   * computed from the `-1` variable-pricing sentinel). Optional + additive;
+   * readers treat a missing value as "billed".
+   */
+  costStatus?: "billed" | "estimated";
 }
 
 function costsPath(sessionId: string, projectId?: string): string {
@@ -106,7 +115,8 @@ export function recordRun(args: {
   model: string;
   before: CostSnapshot;
   after: CostSnapshot;
-  role?: "agent" | "subagent" | "council" | "workflow";
+  role?: CostRole;
+  costStatus?: "billed" | "estimated";
   projectId?: string;
 }): CostEntry | null {
   const delta = snapshotDelta(args.before, args.after);
@@ -117,7 +127,8 @@ export function recordRun(args: {
     totalTokens: delta.total,
     cachedTokens: delta.cacheRead,
   };
-  // Nothing happened (no tokens, no cost) → skip the row.
+  // Nothing happened (no tokens, no cost) → skip the row. An estimated row
+  // always carries a positive costUsd (the floor), so it is never dropped here.
   if (d.totalTokens === 0 && d.costUsd === 0) return null;
 
   const entry: CostEntry = {
@@ -127,6 +138,7 @@ export function recordRun(args: {
     role: args.role ?? "agent",
     model: args.model,
     ...d,
+    costStatus: args.costStatus ?? "billed",
   };
   const file = costsPath(args.sessionId, args.projectId);
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -210,6 +222,9 @@ export interface SessionCostSummary {
   agentUsd: number;
   subagentUsd: number;
   councilUsd: number;
+  workflowUsd: number;
+  verifyUsd: number;
+  estimatedUsd: number;
   entries: CostEntry[];
 }
 
@@ -220,14 +235,31 @@ export function sessionCostSummary(sessionId: string, projectId?: string): Sessi
   let agentUsd = 0;
   let subagentUsd = 0;
   let councilUsd = 0;
+  let workflowUsd = 0;
+  let verifyUsd = 0;
+  let estimatedUsd = 0;
   for (const e of entries) {
     totalUsd += e.costUsd;
     totalTokens += e.totalTokens;
+    if (e.costStatus === "estimated") estimatedUsd += e.costUsd;
     if (e.role === "subagent") subagentUsd += e.costUsd;
     else if (e.role === "council") councilUsd += e.costUsd;
-    else agentUsd += e.costUsd; // agent + (for now) workflow rows
+    else if (e.role === "workflow") workflowUsd += e.costUsd;
+    else if (e.role === "verify") verifyUsd += e.costUsd;
+    else agentUsd += e.costUsd;
   }
-  return { sessionId, totalUsd, totalTokens, agentUsd, subagentUsd, councilUsd, entries };
+  return {
+    sessionId,
+    totalUsd,
+    totalTokens,
+    agentUsd,
+    subagentUsd,
+    councilUsd,
+    workflowUsd,
+    verifyUsd,
+    estimatedUsd,
+    entries,
+  };
 }
 
 export type BudgetState = "ok" | "warn" | "exceeded";
