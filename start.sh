@@ -302,6 +302,13 @@ else
         else
             echo "    ⚠ Rebrand overlay script not found at $REBRAND_SCRIPT — building with stock branding."
         fi
+        MODELS_SCRIPT="$PWD/server/seed/archon-rebrand/apply-archon-models.sh"
+        if [ -f "$MODELS_SCRIPT" ]; then
+            echo "    Applying Archon model overlay (Opus 4.8 1M + Fable 5 + Pi via OpenRouter)..."
+            sh "$MODELS_SCRIPT" "$ARCHON_DIR" || echo "    ⚠ Model overlay failed — continuing with stock models."
+        else
+            echo "    ⚠ Model overlay script not found at $MODELS_SCRIPT — building with stock models."
+        fi
         echo "    Installing Archon packages and building the web bundle (first run only)..."
         if (cd "$ARCHON_DIR" && bun install && bun run build:web); then
             : > "$ARCHON_DIR/.archon-web-built"

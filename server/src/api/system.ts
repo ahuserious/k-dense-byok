@@ -3,8 +3,10 @@
  * (local model discovery), and /sandbox/init (heavier per-project bootstrap).
  * /health and /config live in index.ts.
  */
+import fs from "node:fs";
+import path from "node:path";
 import type { FastifyInstance } from "fastify";
-import { OLLAMA_BASE_URL } from "../config.ts";
+import { OLLAMA_BASE_URL, REPO_ROOT } from "../config.ts";
 import { activePaths } from "../projects.ts";
 import { listProjectSkills, seedProjectSkills } from "../agent/skills.ts";
 import { syncSandboxVenv } from "../sandbox-seed.ts";
@@ -12,6 +14,21 @@ import { syncSandboxVenv } from "../sandbox-seed.ts";
 const GITHUB_REPO = "K-Dense-AI/k-dense-byok";
 const VERSION_CACHE_TTL_MS = 60 * 60 * 1000; // re-check at most once per hour
 let versionCache: { ts: number; latestVersion: string | null } | null = null;
+
+// Kady's canonical model catalogue (the same `web/src/data/models.json` that the chat
+// model picker and the Pi agent's pricing both read). Exposed so the Pipeline Builder
+// (Archon) and any other out-of-process client can drive their model lists from the
+// SAME list as chat instead of maintaining a divergent copy. Read once and cached in
+// memory — the file is shipped with the build and doesn't change at runtime.
+const MODELS_CATALOGUE_PATH = path.join(REPO_ROOT, "web", "src", "data", "models.json");
+let modelsCatalogueCache: unknown[] | null = null;
+
+function loadModelsCatalogue(): unknown[] {
+  if (modelsCatalogueCache) return modelsCatalogueCache;
+  const raw = JSON.parse(fs.readFileSync(MODELS_CATALOGUE_PATH, "utf-8")) as unknown[];
+  modelsCatalogueCache = Array.isArray(raw) ? raw : [];
+  return modelsCatalogueCache;
+}
 
 export async function registerSystemRoutes(app: FastifyInstance): Promise<void> {
   // Server-side proxy for the "latest release" check. Doing the GitHub fetch
@@ -49,6 +66,25 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
     } catch {
       versionCache = { ts: now, latestVersion: null };
       return { latestVersion: null };
+    }
+  });
+
+  // The single Kady-owned model catalogue endpoint. Project-agnostic (no active-project
+  // dependency) and cache-friendly so Archon/clients can poll cheaply and stay in lockstep
+  // with the chat model list. Returns the raw catalogue array (the `Model` UI shape:
+  // {id, label, provider, pricing, ...}), exactly what `useModels()` merges from.
+  app.get("/models/catalogue", async (_req, reply) => {
+    try {
+      const models = loadModelsCatalogue();
+      reply.header("Cache-Control", "public, max-age=3600");
+      return { models };
+    } catch (err) {
+      // Missing/unreadable catalogue: answer 200 with an empty list so a client can
+      // degrade gracefully rather than crash. Surface the cause in logs.
+      reply.log.warn(
+        `[models] Failed to read catalogue at ${MODELS_CATALOGUE_PATH}: ${(err as Error).message}`,
+      );
+      return { models: [] as unknown[] };
     }
   });
 

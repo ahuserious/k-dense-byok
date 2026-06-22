@@ -84,7 +84,23 @@ export async function registerPipelineRoutes(app: FastifyInstance): Promise<void
   // --- run lifecycle (proxied) ---
   app.post<{ Params: { name: string } }>("/pipelines/:name/run", async (req, reply) => {
     try {
-      return await archon.runWorkflow(req.params.name, req.body);
+      // If the client picked a Kady model (the chat-merged catalogue, a "openrouter/..."
+      // ref), thread it into Archon's run options as `requestOptions.model` so Archon Pi
+      // resolves the SAME model chat would. The body shape is otherwise loose/unknown, so
+      // we pass it through untouched aside from lifting `model` into requestOptions.
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const { model, ...rest } = body;
+      const runBody =
+        typeof model === "string" && model.length > 0
+          ? {
+              ...rest,
+              requestOptions: {
+                ...((rest.requestOptions as Record<string, unknown> | undefined) ?? {}),
+                model,
+              },
+            }
+          : body;
+      return await archon.runWorkflow(req.params.name, runBody);
     } catch (err) {
       return mapError(reply, err);
     }

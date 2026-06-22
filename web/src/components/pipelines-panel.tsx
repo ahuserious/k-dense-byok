@@ -7,8 +7,9 @@
 
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { listPipelines, pipelineHealth, type PipelineSummary } from "@/lib/pipelines";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { listPipelines, pipelineHealth, runPipeline, type PipelineSummary } from "@/lib/pipelines";
+import { useModels } from "@/lib/use-models";
 
 // Where Archon's web UI (incl. its workflow builder) is served. Overridable so the link
 // works regardless of the port the sidecar was pinned to.
@@ -18,6 +19,22 @@ export function PipelinesPanel() {
   const [healthy, setHealthy] = useState<boolean | null>(null);
   const [pipelines, setPipelines] = useState<PipelineSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [runningPipeline, setRunningPipeline] = useState<string | null>(null);
+
+  // Source the model list from the SAME hook the chat picker uses, so a pipeline run
+  // uses Kady's merged catalogue. Fusion entries (m.isFusion) are filtered out: their
+  // panel pricing is reconstructed in-process from the user's saved presets and can't be
+  // rebuilt by Archon Pi out-of-process, so they'd run un-priced there.
+  const { models } = useModels();
+  const pipelineModels = useMemo(() => models.filter((m) => !m.isFusion), [models]);
+  const [selectedModel, setSelectedModel] = useState("");
+
+  // Default the selector to the catalogue's default (or first) once models load.
+  useEffect(() => {
+    if (selectedModel || pipelineModels.length === 0) return;
+    const fallback = pipelineModels.find((m) => m.default) ?? pipelineModels[0];
+    setSelectedModel(fallback.id);
+  }, [pipelineModels, selectedModel]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -30,6 +47,26 @@ export function PipelinesPanel() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // Kick off a run with the chosen Kady model ref. Archon ties a run to a conversation +
+  // a kick-off message; we mint a per-run conversation id so concurrent runs don't collide.
+  const handleRun = useCallback(
+    async (pipelineName: string) => {
+      setRunningPipeline(pipelineName);
+      try {
+        const conversationId = `pipeline-run-${Date.now()}`;
+        await runPipeline(
+          pipelineName,
+          conversationId,
+          `Run pipeline: ${pipelineName}`,
+          selectedModel || undefined,
+        );
+      } finally {
+        setRunningPipeline(null);
+      }
+    },
+    [selectedModel],
+  );
 
   return (
     <div className="flex h-full flex-col gap-4 overflow-auto p-4">
@@ -64,6 +101,24 @@ export function PipelinesPanel() {
         </button>
       </div>
 
+      <div className="flex flex-wrap items-center gap-2">
+        <label htmlFor="pipeline-model" className="text-[11px] text-muted-foreground">
+          Run model
+        </label>
+        <select
+          id="pipeline-model"
+          value={selectedModel}
+          onChange={(e) => setSelectedModel(e.target.value)}
+          className="max-w-[18rem] rounded-md border bg-background px-2 py-1 text-xs"
+        >
+          {pipelineModels.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.label} ({m.provider})
+            </option>
+          ))}
+        </select>
+      </div>
+
       {healthy === false && (
         <p className="text-xs text-muted-foreground">
           The Pipelines engine (Archon) isn&apos;t reachable. Start the Archon sidecar, then Refresh.
@@ -79,13 +134,23 @@ export function PipelinesPanel() {
       ) : (
         <ul className="flex flex-col gap-2">
           {pipelines.map((pipeline) => (
-            <li key={pipeline.name} className="rounded-md border p-2">
-              <div className="font-mono text-xs font-medium">{pipeline.name}</div>
-              {pipeline.description && (
-                <div className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">
-                  {pipeline.description}
-                </div>
-              )}
+            <li key={pipeline.name} className="flex items-start gap-2 rounded-md border p-2">
+              <div className="min-w-0 flex-1">
+                <div className="font-mono text-xs font-medium">{pipeline.name}</div>
+                {pipeline.description && (
+                  <div className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">
+                    {pipeline.description}
+                  </div>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleRun(pipeline.name)}
+                disabled={runningPipeline !== null}
+                className="rounded-md border px-2.5 py-1 text-xs hover:bg-muted/50 disabled:opacity-50"
+              >
+                {runningPipeline === pipeline.name ? "Running…" : "Run"}
+              </button>
             </li>
           ))}
         </ul>

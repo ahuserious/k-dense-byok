@@ -45,15 +45,23 @@ export async function listPipelines(): Promise<PipelineSummary[]> {
     .filter((pipeline) => pipeline.name.length > 0);
 }
 
-/** Trigger a pipeline run. Archon ties a run to a conversation + a kick-off message. */
+/**
+ * Trigger a pipeline run. Archon ties a run to a conversation + a kick-off message.
+ *
+ * `model` is an optional Kady model ref (e.g. "openrouter/anthropic/claude-opus-4.8")
+ * sourced from the SAME merged catalogue the chat picker uses, so a pipeline run can
+ * use Kady's model list. When provided it's forwarded in the run body; the Kady proxy
+ * threads it through to Archon's run options so Archon Pi resolves the chosen model.
+ */
 export async function runPipeline(
   name: string,
   conversationId: string,
   message: string,
+  model?: string,
 ): Promise<unknown> {
   const res = await apiFetch(
     `/pipelines/${encodeURIComponent(name)}/run`,
-    jsonPost({ conversationId, message }),
+    jsonPost({ conversationId, message, ...(model ? { model } : {}) }),
   );
   return res.json();
 }
