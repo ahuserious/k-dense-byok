@@ -83,8 +83,15 @@ interface ModelReply {
   tokens: { input: number; output: number; total: number };
 }
 
-/** One OpenRouter chat completion with usage accounting; returns text + billed cost. */
-async function chat(
+/**
+ * One OpenRouter chat completion with usage accounting; returns text + billed cost.
+ *
+ * Exported so other in-process features (e.g. the adversarial verifier) can reuse the
+ * exact same OpenRouter call path — id normalization (drops "openrouter/" + an effort
+ * suffix) and usage parsing — instead of re-deriving it and drifting. It is still the
+ * council's own primitive; nothing about this exports the council's orchestration.
+ */
+export async function chat(
   model: string,
   messages: ChatMessage[],
   signal?: AbortSignal,
