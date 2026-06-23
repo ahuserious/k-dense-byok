@@ -9,7 +9,8 @@ import { SettingsDialog } from "@/components/settings-dialog";
 import { WorkflowsPanel } from "@/components/workflows-panel";
 import { PipelinesPanel } from "@/components/pipelines-panel";
 import { PipelineBuilderPanel } from "@/components/pipeline-builder-panel";
-import { AgentConsolePanel } from "@/components/agent-console/agent-console-panel";
+import { ConsolePanel } from "@/components/console/console-panel";
+import { ChatRail } from "@/components/chat-rail";
 import { ProjectSwitcher } from "@/components/project-switcher";
 import { SessionCostPill } from "@/components/session-cost-pill";
 import { useSessionCost } from "@/lib/use-session-cost";
@@ -92,11 +93,25 @@ export default function ChatPage() {
   ]);
   const [activeTabId, setActiveTabId] = useState<string>(() => initialTabId);
   const [view, setView] = useState<
-    "chat" | "workflows" | "pipelines" | "pipeline-builder" | "agent-console"
+    "chat" | "workflows" | "pipelines" | "dag-builder" | "console"
   >("chat");
   // When the user clicks "Edit" on a pipeline, this names the workflow the embedded
-  // Pipeline Builder should deep-link open (via Archon's ?edit= param). null = blank canvas.
+  // DAG Builder should deep-link open (via Archon's ?edit= param). null = blank canvas.
   const [builderWorkflowName, setBuilderWorkflowName] = useState<string | null>(null);
+  // The DAG Builder + Console embed cross-origin iframes (Archon :3091, Raindrop :5899).
+  // We mount each on FIRST visit and then keep it mounted (toggling display) so switching
+  // views is instant and doesn't reload the embedded SPA — the old panels remounted the
+  // iframe on every view switch, which is what made them flash blank / "look flaky". We
+  // mount on first visit (not at startup) so a cold page load doesn't fire 3 cross-origin
+  // frame loads at once.
+  const [visitedBuilder, setVisitedBuilder] = useState(false);
+  const [visitedConsole, setVisitedConsole] = useState(false);
+  // Far-right collapsible chat rail (KADY chat available across all views).
+  const [railOpen, setRailOpen] = useState(false);
+  useEffect(() => {
+    if (view === "dag-builder") setVisitedBuilder(true);
+    if (view === "console") setVisitedConsole(true);
+  }, [view]);
   // Mirror of tabs in a ref so synchronous handlers can read length without
   // putting impure logic inside a setState updater (which strict mode runs
   // twice for purity testing).
@@ -252,6 +267,8 @@ export default function ChatPage() {
         setActiveTabId(id);
         setView("chat");
         setBuilderWorkflowName(null);
+        setVisitedBuilder(false);
+        setVisitedConsole(false);
         pendingPipelineRun.current = null;
         setCostRefreshKey((k) => k + 1);
       }),
@@ -353,7 +370,7 @@ export default function ChatPage() {
 
   const handleStitchPipeline = useCallback(() => {
     setBuilderWorkflowName(null);
-    setView("pipeline-builder");
+    setView("dag-builder");
   }, []);
 
   // ------------------------------------------------------------------
@@ -364,7 +381,7 @@ export default function ChatPage() {
 
   const handleEditPipeline = useCallback((name: string) => {
     setBuilderWorkflowName(name);
-    setView("pipeline-builder");
+    setView("dag-builder");
   }, []);
 
   // Run a pipeline in a brand-new chat tab. We can't call the new tab's launchWorkflow
@@ -654,13 +671,14 @@ export default function ChatPage() {
             onNew={newTab}
             onRename={renameTab}
             onSelectWorkflows={() => setView("workflows")}
-            onSelectPipelines={() => {
-              // "DAG Pipelines" opens Archon's canvas / YAML editor (the Pipeline Builder).
-              // The legacy list view ("pipelines") is intentionally no longer reachable.
+            // "DAG Pipelines" = the list of saved pipelines (incl. the default Archon ones).
+            onSelectPipelines={() => setView("pipelines")}
+            // "DAG Builder" = Archon's visual workflow builder canvas (blank, no deep-link).
+            onSelectDagBuilder={() => {
               setBuilderWorkflowName(null);
-              setView("pipeline-builder");
+              setView("dag-builder");
             }}
-            onSelectAgentConsole={() => setView("agent-console")}
+            onSelectConsole={() => setView("console")}
             activeSessionId={activeSessionId}
             canExport={(activeMeta?.userMessageCount ?? 0) > 0}
           />
@@ -698,7 +716,9 @@ export default function ChatPage() {
             </div>
           )}
 
-          {/* Pipelines view — the Archon workflow engine (list + builder link). */}
+          {/* DAG Pipelines view — a native list of the workflows Archon knows about
+              (incl. the default Archon ones); Run opens a fresh chat, Edit opens the
+              DAG Builder with the pipeline deep-linked. Cheap to (re)mount. */}
           {view === "pipelines" && (
             <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
               <PipelinesPanel
@@ -708,21 +728,49 @@ export default function ChatPage() {
             </div>
           )}
 
-          {/* Pipeline Builder view — Archon's visual builder, embedded. When the user
-              clicked "Edit" on a pipeline, builderWorkflowName deep-links it open. */}
-          {view === "pipeline-builder" && (
-            <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
+          {/* DAG Builder view — Archon's visual builder, embedded. When the user clicked
+              "Edit" on a pipeline, builderWorkflowName deep-links it open. Mounted on first
+              visit and kept mounted (display toggled) so returning is instant — see
+              visitedBuilder. Inline display (not the `hidden` attr / `hidden` class) so the
+              `flex` layout doesn't override it. */}
+          {visitedBuilder && (
+            <div
+              className="min-h-0 flex-1 flex-col overflow-hidden"
+              style={{ display: view === "dag-builder" ? "flex" : "none" }}
+            >
               <PipelineBuilderPanel workflowName={builderWorkflowName ?? undefined} />
             </div>
           )}
 
-          {/* Agent Console view — long-running goal loops + run history. */}
-          {view === "agent-console" && (
-            <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
-              <AgentConsolePanel />
+          {/* Console view — Agents (Archon console) + Raindrop (Workshop) sub-tabs.
+              Same mount-on-first-visit + keep-mounted treatment as the DAG Builder. */}
+          {visitedConsole && (
+            <div
+              className="min-h-0 flex-1 flex-col overflow-hidden"
+              style={{ display: view === "console" ? "flex" : "none" }}
+            >
+              <ConsolePanel />
             </div>
           )}
         </div>
+
+        {/* Far-right collapsible chat rail — a real KADY chat (force-loading the
+            archon + scientific-pipeline-builder skills) available across all views. */}
+        <ChatRail
+          open={railOpen}
+          onToggle={setRailOpen}
+          allFiles={allFiles}
+          uploadFiles={sandbox.uploadFiles}
+          onSandboxRefresh={handleSandboxRefresh}
+          onTurnComplete={handleTurnComplete}
+          allSkills={allSkills}
+          budgetState={projectCost.budget.state}
+          budgetTotalUsd={projectCost.budget.totalUsd}
+          budgetLimitUsd={projectCost.budget.limitUsd}
+          onMetaChange={handleMetaChange}
+          onStitchPipeline={handleStitchPipeline}
+          onCreateGoalWorkflow={handleCreateGoalWorkflow}
+        />
 
       </div>
 

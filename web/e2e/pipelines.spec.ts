@@ -5,13 +5,14 @@
 
 import { test, expect } from "@playwright/test";
 
-test("Pipelines tab lists Archon workflows", async ({ page }) => {
+test("DAG Pipelines tab lists Archon workflows", async ({ page }) => {
   await page.goto("http://localhost:3000/", { waitUntil: "domcontentloaded" });
   await page.getByRole("button", { name: "New chat tab" }).waitFor({ timeout: 90_000 });
 
-  await page.getByRole("button", { name: "Pipelines" }).click();
+  await page.getByRole("button", { name: "DAG Pipelines", exact: true }).click();
 
-  await expect(page.getByText("engine online")).toBeVisible({ timeout: 15_000 });
-  // A bundled Archon workflow surfaced through the Kady proxy.
-  await expect(page.getByText("archon-issue-review-full")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("engine online")).toBeVisible({ timeout: 30_000 });
+  // A bundled Archon workflow surfaced through the Kady proxy (the list fetch can be
+  // slow under suite load, so allow generous time).
+  await expect(page.getByText("archon-issue-review-full")).toBeVisible({ timeout: 30_000 });
 });

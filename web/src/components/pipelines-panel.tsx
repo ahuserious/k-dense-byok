@@ -11,10 +11,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { listPipelines, pipelineHealth, type PipelineSummary } from "@/lib/pipelines";
-
-// Where Archon's web UI (incl. its workflow builder) is served. Overridable so the link
-// works regardless of the port the sidecar was pinned to.
-const ARCHON_URL = process.env.NEXT_PUBLIC_ARCHON_URL ?? "http://localhost:3091";
+import { ARCHON_URL } from "@/lib/embed-config";
 
 // Archon's visual builder lives under its legacy workflows route. Linking at the bare root
 // would land on the redesigned console (Archon redirects "/" → "/console"), NOT the builder,
@@ -49,7 +46,7 @@ export function PipelinesPanel({
   return (
     <div className="flex h-full flex-col gap-4 overflow-auto p-4">
       <div className="flex flex-wrap items-center gap-2">
-        <h2 className="text-sm font-semibold">Pipelines</h2>
+        <h2 className="text-sm font-semibold">DAG Pipelines</h2>
         <span
           className={
             "rounded px-1.5 py-0.5 text-[11px] " +

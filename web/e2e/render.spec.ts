@@ -11,7 +11,7 @@ test("app shell renders the core controls", async ({ page }) => {
 
   await expect(page.getByText(/\$\d+\.\d{2}/).first(), "cost pill [46]").toBeVisible();
   await expect(page.getByText("AGENTS.md").first(), "file tree [53]").toBeVisible();
-  await expect(page.getByRole("button", { name: "Workflows" }), "workflows launcher [54]").toBeVisible();
+  await expect(page.getByRole("button", { name: "Workflows", exact: true }), "workflows launcher [54]").toBeVisible();
   await expect(page.getByRole("button", { name: "Open settings" }), "settings button [55]").toBeVisible();
   await expect(page.getByRole("button", { name: "Chat 1", exact: true }), "tab bar [56]").toBeVisible();
   await expect(page.getByPlaceholder(/Ask Kady/), "chat input [15]").toBeVisible();

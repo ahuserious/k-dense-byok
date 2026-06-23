@@ -11,7 +11,7 @@
 // the Archon server; when it's absent the endpoint returns enabled:false and we surface a
 // read-only note instead of key-management UI.
 
-const ARCHON_URL = process.env.NEXT_PUBLIC_ARCHON_URL ?? "http://localhost:3091";
+import { ARCHON_URL } from "./embed-config";
 
 /** Reasoning-effort levels Archon accepts for modelReasoningEffort. */
 export const ARCHON_EFFORTS = [

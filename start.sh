@@ -198,6 +198,13 @@ echo
 echo "Starting services..."
 echo
 
+# Point the in-process Pi agent at the LOCAL Raindrop Workshop so its runs show up in
+# the Console's "Raindrop" tab. Local-only: with no RAINDROP_WRITE_KEY set, the Raindrop
+# extension ships traces ONLY to this localhost daemon (nothing egresses). Exported before
+# the backend launch so the server inherits it. The Workshop daemon itself is (re)started
+# in Step 8 below; the trace endpoint is the same port.
+export RAINDROP_LOCAL_DEBUGGER="${RAINDROP_LOCAL_DEBUGGER:-http://127.0.0.1:${RAINDROP_PORT:-5899}/v1/}"
+
 echo "  → Backend on port $BACKEND_PORT (Pi agent, TypeScript)"
 (cd server && npm run start) &
 BACKEND_PID=$!
@@ -219,10 +226,11 @@ cleanup() {
             pkill -TERM -P "$BACKEND_PID" 2>/dev/null || true
             pkill -TERM -P "$FRONTEND_PID" 2>/dev/null || true
             [ -n "$ARCHON_PID" ] && pkill -TERM -P "$ARCHON_PID" 2>/dev/null || true
+            [ -n "$RAINDROP_PID" ] && pkill -TERM -P "$RAINDROP_PID" 2>/dev/null || true
         }
-        # ARCHON_PID is only set when start.sh launched the sidecar itself; a
-        # reused (already-running) Archon is intentionally left alone.
-        kill "$BACKEND_PID" "$FRONTEND_PID" ${ARCHON_PID:+"$ARCHON_PID"} 2>/dev/null || true
+        # ARCHON_PID / RAINDROP_PID are only set when start.sh launched that
+        # sidecar itself; a reused (already-running) instance is left alone.
+        kill "$BACKEND_PID" "$FRONTEND_PID" ${ARCHON_PID:+"$ARCHON_PID"} ${RAINDROP_PID:+"$RAINDROP_PID"} 2>/dev/null || true
     fi
     wait 2>/dev/null || true
     exit "${1:-0}"
@@ -363,6 +371,68 @@ else
             echo "  → Pipeline Builder (Archon) launched on :$ARCHON_PORT (curl unavailable — skipping health check)."
         fi
     fi
+fi
+
+# ---- Step 8: Raindrop Workshop (local agent-trace debugger) ----
+# Powers the Console's "Raindrop" tab. Entirely local + non-fatal, mirroring the
+# Archon block: reuse an already-running Workshop, else launch the daemon if the
+# `raindrop` binary is present. No cloud write key is set, so nothing egresses.
+
+RAINDROP_PORT="${RAINDROP_PORT:-5899}"
+RAINDROP_URL="http://127.0.0.1:$RAINDROP_PORT"
+# Prefer a `raindrop` on PATH; fall back to the default install location.
+RAINDROP_BIN="$(command -v raindrop 2>/dev/null || true)"
+[ -z "$RAINDROP_BIN" ] && [ -x "$HOME/.raindrop/bin/raindrop" ] && RAINDROP_BIN="$HOME/.raindrop/bin/raindrop"
+
+raindrop_health_ok() {
+    command -v curl &>/dev/null || return 1
+    curl -sf --max-time 2 -o /dev/null "$RAINDROP_URL" 2>/dev/null
+}
+
+echo
+if raindrop_health_ok; then
+    echo "  → Raindrop Workshop already running on :$RAINDROP_PORT — reusing it."
+elif [ -n "$RAINDROP_BIN" ]; then
+    echo "  → Raindrop Workshop on port $RAINDROP_PORT (local trace debugger)..."
+    # `raindrop workshop serve` is the headless daemon (no browser tab); the running
+    # instance on this machine uses exactly that. Local-only DB at ~/.raindrop.
+    ( RAINDROP_WORKSHOP_PORT="$RAINDROP_PORT" "$RAINDROP_BIN" workshop serve ) &
+    RAINDROP_PID=$!
+    if command -v curl &>/dev/null; then
+        raindrop_i=0
+        until raindrop_health_ok; do
+            if ! kill -0 "$RAINDROP_PID" 2>/dev/null; then
+                echo "  ⚠ Raindrop Workshop exited during startup (Kady is unaffected)."
+                RAINDROP_PID=""
+                break
+            fi
+            raindrop_i=$((raindrop_i + 1))
+            if [ "$raindrop_i" -ge 15 ]; then
+                echo "  ⚠ Raindrop Workshop didn't report healthy within ~15s — it may still be starting."
+                break
+            fi
+            sleep 1
+        done
+        raindrop_health_ok && echo "  Raindrop Workshop ready on :$RAINDROP_PORT"
+    else
+        echo "  → Raindrop Workshop launched on :$RAINDROP_PORT (curl unavailable — skipping health check)."
+    fi
+elif [ "${KADY_INSTALL_RAINDROP:-0}" = "1" ]; then
+    # Opt-in auto-install (the OSS one-liner). Off by default since it pipes a
+    # remote script to a shell; the Console's Raindrop tab degrades gracefully
+    # without it.
+    echo "  → Installing Raindrop Workshop (KADY_INSTALL_RAINDROP=1)..."
+    if command -v curl &>/dev/null && curl -fsSL https://raindrop.sh/install | bash; then
+        RAINDROP_BIN="$(command -v raindrop 2>/dev/null || echo "$HOME/.raindrop/bin/raindrop")"
+        ( RAINDROP_WORKSHOP_PORT="$RAINDROP_PORT" "$RAINDROP_BIN" workshop serve ) &
+        RAINDROP_PID=$!
+        echo "  → Raindrop Workshop launched on :$RAINDROP_PORT"
+    else
+        echo "  ⚠ Raindrop Workshop install failed (Kady is unaffected)."
+    fi
+else
+    echo "  → Raindrop Workshop not found — the Console's Raindrop tab will show a setup hint."
+    echo "    Install it (OSS, local): curl -fsSL https://raindrop.sh/install | bash  (or set KADY_INSTALL_RAINDROP=1)."
 fi
 
 echo

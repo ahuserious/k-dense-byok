@@ -856,8 +856,15 @@ export interface ChatTabProps {
   onMetaChange: (tabId: string, meta: ChatTabMeta) => void;
   /** Route the shell to the visual Pipeline Builder (empty-state CTA). */
   onStitchPipeline: () => void;
-  /** Start a goal-based loop on the console and open the Agent Console. */
+  /** Start a goal-based loop on the console and open the Console. */
   onCreateGoalWorkflow: (goal: string) => void;
+  /**
+   * Skills this tab should always use (the chat rail passes archon +
+   * scientific-pipeline-builder). When set, the FIRST message of the tab's
+   * session is prefixed with a one-time directive naming them, so the agent
+   * reliably reaches for them. Omitted for normal tabs (no behavior change).
+   */
+  preloadSkills?: string[];
 }
 
 export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
@@ -875,6 +882,7 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
     onMetaChange,
     onStitchPipeline,
     onCreateGoalWorkflow,
+    preloadSkills,
   },
   ref,
 ) {
@@ -882,6 +890,8 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
   const isStreaming = status === "streaming" || status === "submitted";
 
   const prevMessageCount = useRef(0);
+  // Whether this tab's preloadSkills directive has been injected yet (once per session).
+  const primedRef = useRef(false);
 
   // Per-tab settings
   const [selectedModel, setSelectedModel] = useState<Model>(DEFAULT_MODEL);
@@ -964,8 +974,16 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
   const handleSubmit = useCallback(
     async ({ text }: { text: string }) => {
       if (budgetState === "exceeded") return;
-      const trimmed = (text ?? "").trim();
+      let trimmed = (text ?? "").trim();
       if (!trimmed) return;
+      // Force-load directive: on the FIRST message of a preload-configured tab (the
+      // chat rail), prepend a one-time directive naming the skills it should use. This
+      // flows into both the enqueue and the direct-send paths below. The skills are
+      // already seeded in the sandbox; this just makes the agent reach for them.
+      if (preloadSkills && preloadSkills.length > 0 && !primedRef.current) {
+        primedRef.current = true;
+        trimmed = `[For this conversation, use these skills whenever relevant: ${preloadSkills.join(", ")}.]\n\n${trimmed}`;
+      }
       if (isStreaming) {
         if (messageQueue.length >= MAX_QUEUE) return;
         const rawText = trimmed.split("\n")[0];
@@ -1008,6 +1026,7 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
       isStreaming,
       messageQueue.length,
       budgetState,
+      preloadSkills,
     ],
   );
 

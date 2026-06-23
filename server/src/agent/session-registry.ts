@@ -29,6 +29,25 @@ import { makeSubagentLedgerExtension, subagentsExtensionPath } from "./subagent-
 import { makeFusionRequestExtension } from "./fusion-bridge.ts";
 import { WEB_ACCESS_TOOLS, ensureWebAccess } from "./web-access-bridge.ts";
 import { BUILTIN_TOOLS } from "./tools.ts";
+// Raindrop Workshop observability (the Console's "Raindrop" tab). This Pi extension
+// mirrors agent runs/turns/LLM/tool spans to the LOCAL Workshop daemon ONLY — it ships
+// to the cloud only if RAINDROP_WRITE_KEY is set (we never set it), and disables itself
+// silently when neither RAINDROP_LOCAL_DEBUGGER nor a write key is present. Local-only by
+// default => no egress. See start.sh, which exports RAINDROP_LOCAL_DEBUGGER.
+import raindropExtension from "@raindrop-ai/pi-agent/extension";
+
+/**
+ * Raindrop's extension as a fault-isolated ExtensionFactory: if it throws on load
+ * (e.g. a config read in an odd cwd), we swallow it so a tracing hiccup can never
+ * break session creation. Observability is best-effort by design.
+ */
+const raindropTracingFactory = (pi: Parameters<typeof raindropExtension>[0]): void => {
+  try {
+    raindropExtension(pi);
+  } catch (err) {
+    console.warn("[raindrop] tracing disabled:", (err as Error).message);
+  }
+};
 
 // pi-subagents runs each delegation as a child `pi` CLI process. The binary
 // ships with our pi-coding-agent dependency; make sure spawn("pi") resolves
@@ -98,6 +117,8 @@ async function build(
       // Rewrites the outgoing provider body to an OpenRouter Fusion request when
       // the /run handler stashed a Fusion config for this session (setFusionConfig).
       makeFusionRequestExtension(() => holder.session?.sessionId ?? ""),
+      // Mirror this session's runs/spans to the local Raindrop Workshop (no cloud).
+      raindropTracingFactory,
     ],
   });
   await resourceLoader.reload();

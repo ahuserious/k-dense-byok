@@ -41,6 +41,12 @@ export const OLLAMA_BASE_URL =
 export const ARCHON_BASE_URL =
   process.env.ARCHON_BASE_URL ?? "http://localhost:3091";
 
+/** Base URL of the local Raindrop Workshop UI (the OSS agent-trace debugger), surfaced
+ *  in the Console's "Raindrop" tab. Local-only; the Kady /raindrop/health route proxies
+ *  to it so the tab can degrade gracefully (the browser can't probe it cross-origin). */
+export const RAINDROP_BASE_URL =
+  process.env.RAINDROP_BASE_URL ?? "http://localhost:5899";
+
 /** Whether Modal-style remote compute is configured (kept for /config parity). */
 export function modalConfigured(): boolean {
   return Boolean(process.env.MODAL_TOKEN_ID && process.env.MODAL_TOKEN_SECRET);

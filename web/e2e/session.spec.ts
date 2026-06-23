@@ -23,8 +23,8 @@ test("no fatal console errors / rejections during a normal session [58]", async 
   await page.getByText("Claude Opus 4.8").first().click(); // open + close the model picker
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "New chat tab" }).click();
-  await page.getByRole("button", { name: "Workflows" }).click();
-  await page.getByRole("button", { name: "Pipelines" }).click();
+  await page.getByRole("button", { name: "Workflows", exact: true }).click();
+  await page.getByRole("button", { name: "DAG Pipelines", exact: true }).click();
   await page.waitForTimeout(1500);
 
   const fatal = errors.filter((e) => !BENIGN.test(e));

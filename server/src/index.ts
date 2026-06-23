@@ -25,6 +25,7 @@ import { registerCredentialRoutes } from "./api/credentials.ts";
 import { registerAgentRoutes } from "./api/agents.ts";
 import { registerPipelineRoutes } from "./api/pipelines.ts";
 import { registerConsoleRoutes } from "./api/console.ts";
+import { registerRaindropRoutes } from "./api/raindrop.ts";
 import { reconcileInterruptedLoops } from "./agent/runs-index.ts";
 
 function readCookie(req: FastifyRequest, name: string): string | undefined {
@@ -103,6 +104,7 @@ export async function buildApp() {
   await registerAgentRoutes(app);
   await registerPipelineRoutes(app);
   await registerConsoleRoutes(app);
+  await registerRaindropRoutes(app);
 
   // Best-effort: on boot no goal loop is actually executing (in-flight loop state
   // doesn't survive a restart), so flag any loop still 'running'/'pending' as

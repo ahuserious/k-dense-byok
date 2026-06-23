@@ -56,9 +56,8 @@ test("tab bar opens a new chat tab [56]", async () => {
 });
 
 test("Workflows launcher opens [54]", async () => {
-  await page.getByRole("button", { name: "Workflows" }).click();
-  // The launcher may be a dialog, popover, menu, or Radix open-state container.
-  await expect(
-    page.locator('[role="dialog"], [role="menu"], [role="listbox"], [data-state="open"]').first(),
-  ).toBeVisible({ timeout: 8_000 });
+  await page.getByRole("button", { name: "Workflows", exact: true }).click();
+  // Workflows is an inline panel (a searchable template grid), not a popup — its
+  // "Search workflows…" box is the stable signal that the view opened.
+  await expect(page.getByPlaceholder(/Search workflows/i)).toBeVisible({ timeout: 8_000 });
 });

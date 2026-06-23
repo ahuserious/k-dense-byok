@@ -17,12 +17,12 @@ test("console project rail is a compact dropdown, no Settings/Workflows/Old-UI",
   await page.screenshot({ path: `${SHOTS}/01-console-compact-rail.png`, fullPage: true });
 });
 
-test("builder canvas has a chat pop-out affordance", async ({ page }) => {
+test("builder canvas no longer hosts the in-canvas chat pop-out (moved to Kady's chat rail)", async ({ page }) => {
   await page.goto("http://localhost:3091/legacy/workflows/builder", { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(1500);
-  // The CanvasChatPopout mounts a floating trigger (button) labelled/aria'd "Chat".
-  await expect(
-    page.getByRole("button", { name: /chat/i }).first(),
-  ).toBeVisible({ timeout: 10000 });
-  await page.screenshot({ path: `${SHOTS}/02-builder-chat-popout.png`, fullPage: true });
+  // The old CanvasChatPopout (a floating "Chat" pill) is disabled — chat now lives in
+  // Kady's far-right collapsible chat rail (see dag-ui.spec.ts). So the canvas must NOT
+  // render a "Chat" trigger anymore.
+  await expect(page.getByRole("button", { name: /^chat$/i })).toHaveCount(0);
+  await page.screenshot({ path: `${SHOTS}/02-builder-no-popout.png`, fullPage: true });
 });
