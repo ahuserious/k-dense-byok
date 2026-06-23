@@ -739,10 +739,12 @@ export default function ChatPage() {
           )}
         </div>
 
-        {/* Collapsible chat rail — scoped to the DAG Builder, where the KADY agent
-            composes pipelines (force-loading archon + scientific-pipeline-builder). */}
-        {view === "dag-builder" && (
+        {/* Collapsible chat rail — scoped to the DAG Builder. Mounted on first visit and
+            kept mounted (hidden when away) so the chat session/stream survives leaving and
+            returning to the view. */}
+        {visitedBuilder && (
           <ChatRail
+            visible={view === "dag-builder"}
             open={railOpen}
             onToggle={setRailOpen}
             allFiles={allFiles}

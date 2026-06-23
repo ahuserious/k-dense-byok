@@ -30,6 +30,9 @@ const RAIL_SKILLS = ["archon", "scientific-pipeline-builder"];
 const STORAGE_KEY = "kady.chatRail.open";
 
 export interface ChatRailProps {
+  /** Whether the rail's view (DAG Builder) is active. When false the rail is hidden
+   *  (display:none) but stays mounted so its chat session/stream persists. */
+  visible: boolean;
   open: boolean;
   onToggle: (open: boolean) => void;
   // ChatTab passthrough — the same shared sandbox/state the main tabs receive.
@@ -49,6 +52,7 @@ export interface ChatRailProps {
 }
 
 export function ChatRail({
+  visible,
   open,
   onToggle,
   allFiles,
@@ -65,14 +69,15 @@ export function ChatRail({
 }: ChatRailProps) {
   const chatTabRef = useRef<ChatTabHandle>(null);
 
-  // Send a message to the rail's chat, retrying briefly until the ChatTab's imperative
-  // handle has registered (it mounts a tick after the rail opens).
-  const sendToRail = useCallback((message: string) => {
+  // Append (stack) a line into the rail's chat input — NOT send — retrying briefly until
+  // the ChatTab's imperative handle has registered (it mounts a tick after the rail opens).
+  // The user reviews the stacked stages, then sends once to build the pipeline YAML.
+  const appendToRail = useCallback((line: string) => {
     let tries = 0;
     const attempt = () => {
       const handle = chatTabRef.current;
       if (handle) {
-        void handle.sendQuick(message);
+        handle.appendToInput(line);
         return;
       }
       if (tries++ < 15) setTimeout(attempt, 100);
@@ -97,14 +102,16 @@ export function ChatRail({
     const msg = composeMessageRef?.current;
     if (msg) {
       composeMessageRef.current = null;
-      sendToRail(msg);
+      appendToRail(msg);
     }
-  }, [composeNonce, composeMessageRef, sendToRail]);
+  }, [composeNonce, composeMessageRef, appendToRail]);
 
   return (
     <div
       className={cn(
-        "flex h-full shrink-0 flex-col border-l bg-background transition-[width] duration-200 ease-out",
+        "h-full shrink-0 flex-col border-l bg-background transition-[width] duration-200 ease-out",
+        // Hidden (but mounted) when away from the DAG Builder so the chat persists.
+        visible ? "flex" : "hidden",
         open ? "w-[400px]" : "w-9",
       )}
     >
@@ -116,7 +123,7 @@ export function ChatRail({
               Chat
             </span>
             <div className="flex items-center gap-1">
-              <DagComposePopover allSkills={allSkills} onCompose={sendToRail} />
+              <DagComposePopover allSkills={allSkills} onStack={appendToRail} />
               <button
                 type="button"
                 onClick={() => onToggle(false)}

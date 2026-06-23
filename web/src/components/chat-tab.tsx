@@ -330,6 +330,7 @@ function ChatInput({
   onAddFile,
   onRemoveFile,
   onClearFiles,
+  appendRef,
   onSubmit,
   isStreaming,
   agentStatus,
@@ -353,6 +354,8 @@ function ChatInput({
   onAddFile: (path: string) => void;
   onRemoveFile: (path: string) => void;
   onClearFiles: () => void;
+  /** The ChatTab handle's appendToInput bridge — we register a controller-backed appender. */
+  appendRef: React.MutableRefObject<((text: string) => void) | null>;
   onSubmit: Parameters<typeof PromptInput>[0]["onSubmit"];
   isStreaming: boolean;
   agentStatus: string;
@@ -373,6 +376,20 @@ function ChatInput({
 }) {
   const budgetBlocked = budgetState === "exceeded";
   const controller = usePromptInputController();
+
+  // Bridge the imperative handle's appendToInput → the prompt-input controller. Re-registered
+  // every render so the closure always reads/writes the latest input value. Stacks each
+  // appended item on its own line (for the DAG Builder compose popover).
+  useEffect(() => {
+    appendRef.current = (text: string) => {
+      const current = controller.textInput.value;
+      const sep = current.trim() ? "\n" : "";
+      controller.textInput.setInput(current + sep + text);
+    };
+    return () => {
+      appendRef.current = null;
+    };
+  });
 
   const handleFilesUpload = useCallback(async (files: FileList | File[], paths?: string[]) => {
     const uploaded = await onUploadFiles(files, paths);
@@ -750,6 +767,12 @@ export interface ChatTabHandle {
    */
   sendQuick: (prompt: string) => Promise<void>;
   /**
+   * Append a line to the chat input (stacking) WITHOUT sending it. Used by the DAG
+   * Builder compose popover so a user can stack several pipeline stages and submit
+   * them together (one pipeline-build turn), rather than firing each immediately.
+   */
+  appendToInput: (text: string) => void;
+  /**
    * Cancel the in-flight turn (if any). Called by the parent when a tab
    * is closed while streaming, so the agent doesn't keep running with
    * nowhere to render its output.
@@ -802,6 +825,10 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
   const prevMessageCount = useRef(0);
   // Whether this tab's preloadSkills directive has been injected yet (once per session).
   const primedRef = useRef(false);
+  // Bridge so the imperative handle (defined here, OUTSIDE PromptInputProvider) can append
+  // to the input textarea: <ChatInput> (inside the provider) registers a closure over its
+  // prompt-input controller into this ref. See appendToInput on the handle.
+  const appendInputRef = useRef<((text: string) => void) | null>(null);
 
   // Per-tab settings
   const [selectedModel, setSelectedModel] = useState<Model>(DEFAULT_MODEL);
@@ -950,6 +977,7 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
         if (budgetState === "exceeded") return;
         await send(prompt, selectedModel.id, undefined, selectedModel.fusionConfig);
       },
+      appendToInput: (text: string) => appendInputRef.current?.(text),
       launchWorkflow: async (prompt, model, suggestedSkills, uploadedFiles) => {
         if (budgetState === "exceeded") return;
         setSelectedModel(model);
@@ -1065,6 +1093,7 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
             onAddFile={addAttachedFile}
             onRemoveFile={removeAttachedFile}
             onClearFiles={clearAttachedFiles}
+            appendRef={appendInputRef}
             onSubmit={handleSubmit}
             isStreaming={isStreaming}
             agentStatus={status}

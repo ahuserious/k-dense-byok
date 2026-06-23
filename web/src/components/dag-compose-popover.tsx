@@ -1,11 +1,10 @@
 // danbot-byok — web/src/components/dag-compose-popover.tsx
 //
-// The DAG Builder "+" / compose popover (lives in the chat rail). It is the
-// "stitch workflows into a pipeline" entry point: pick a k-dense workflow, a skill,
-// or a database to add as a pipeline stage, or apply a one-click pipeline suggestion.
-// Each choice sends a natural-language compose instruction to the rail's KADY agent
-// (which has the archon + scientific-pipeline-builder skills) to actually edit the
-// current pipeline — robust + testable, vs. hand-surgery on Archon's canvas.
+// The DAG Builder "Add to pipeline" popover (lives in the chat rail). It STACKS pipeline
+// stages into the chat input rather than sending each one — pick several workflows /
+// skills / databases / protections, review the stacked list in the chat, then send once.
+// The rail's KADY agent (archon + scientific-pipeline-builder) turns the stack into the
+// pipeline YAML in a single build turn.
 
 "use client";
 
@@ -20,88 +19,68 @@ import databasesData from "@/data/databases.json";
 
 const ALL_WORKFLOWS = workflowsData as Workflow[];
 const ALL_DATABASES = databasesData as Database[];
+const MAX_PER_SECTION = 5;
 
-// One-click pipeline-building suggestions (the asks: verification, custom output, arxiv).
-const SUGGESTIONS: { label: string; message: string }[] = [
-  {
-    label: "Add verification loops & error checking",
-    message:
-      "Add 3× adversarial verification loops and error checking after each substantive stage of the current pipeline (each verifier re-reads the stage goal + output and emits PASS/FAIL; the next stage gates on PASS).",
-  },
-  {
-    label: "Create a custom formatted output",
-    message:
-      "Add a final node to the current pipeline that produces a custom formatted output (let me specify the format).",
-  },
-  {
-    label: "Post to arXiv when done",
-    message:
-      "Add a final node to the current pipeline that posts the finished results to arXiv when the pipeline completes.",
-  },
+// One-click pipeline-shaping suggestions.
+const SUGGESTIONS: { label: string; line: string }[] = [
+  { label: "Add verification loops & error checking", line: "Add 3× adversarial verification + error checking after each substantive stage (gate the next stage on PASS)." },
+  { label: "Create a custom formatted output", line: "Add a final stage that produces a custom formatted output." },
+  { label: "Post to arXiv when done", line: "Add a final stage that posts the results to arXiv when the pipeline completes." },
+];
+
+// Background-agent protections (stop protection / context-rot / caffeinate).
+const PROTECTIONS: { label: string; line: string }[] = [
+  { label: "Stop protection (rescue watchdog)", line: "Add stop protection: a background rescue watchdog that detects stalls/timeouts and re-grounds the agent instead of giving up." },
+  { label: "Context-rot detection", line: "Add context-rot detection: watch for goal drift / near-duplicate outputs and refresh context when it degrades." },
+  { label: "Caffeinate (keep awake)", line: "Keep the machine awake (caffeinate) for the duration of the run so long pipelines don't sleep." },
 ];
 
 export function DagComposePopover({
   allSkills,
-  onCompose,
+  onStack,
 }: {
   allSkills: Skill[];
-  /** Send a compose instruction to the rail's KADY agent. */
-  onCompose: (message: string) => void;
+  /** Append a stage/protection line to the chat input (stacking, no send). */
+  onStack: (line: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
+  const [stacked, setStacked] = useState(0);
 
   const query = q.toLowerCase().trim();
+  const match = (s: string) => s.toLowerCase().includes(query);
   const workflows = useMemo(
-    () =>
-      (query
-        ? ALL_WORKFLOWS.filter(
-            (w) =>
-              w.name.toLowerCase().includes(query) ||
-              w.description.toLowerCase().includes(query),
-          )
-        : ALL_WORKFLOWS
-      ).slice(0, 8),
+    () => (query ? ALL_WORKFLOWS.filter((w) => match(w.name) || match(w.description)) : ALL_WORKFLOWS).slice(0, MAX_PER_SECTION),
     [query],
   );
   const skills = useMemo(
-    () =>
-      (query
-        ? allSkills.filter(
-            (s) =>
-              s.name.toLowerCase().includes(query) ||
-              s.description.toLowerCase().includes(query),
-          )
-        : allSkills
-      ).slice(0, 8),
+    () => (query ? allSkills.filter((s) => match(s.name) || match(s.description)) : allSkills).slice(0, MAX_PER_SECTION),
     [allSkills, query],
   );
   const databases = useMemo(
-    () =>
-      (query
-        ? ALL_DATABASES.filter(
-            (d) =>
-              d.name.toLowerCase().includes(query) ||
-              d.description.toLowerCase().includes(query),
-          )
-        : ALL_DATABASES
-      ).slice(0, 8),
+    () => (query ? ALL_DATABASES.filter((d) => match(d.name) || match(d.description)) : ALL_DATABASES).slice(0, MAX_PER_SECTION),
     [query],
   );
 
-  const compose = (message: string) => {
-    onCompose(message);
-    setOpen(false);
-    setQ("");
+  // Append + keep the popover open so several items can be stacked in a row.
+  const stack = (line: string) => {
+    onStack(line);
+    setStacked((n) => n + 1);
   };
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover
+      open={open}
+      onOpenChange={(o) => {
+        setOpen(o);
+        if (!o) setStacked(0);
+      }}
+    >
       <PopoverTrigger asChild>
         <button
           type="button"
           aria-label="Add to pipeline"
-          title="Add a workflow, skill, or database to the pipeline"
+          title="Stack workflows, skills, databases & protections into the pipeline"
           className="flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
         >
           <PlusIcon className="size-3.5" />
@@ -116,69 +95,51 @@ export function DagComposePopover({
               autoFocus
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder="Search pipelines, skills, databases…"
+              placeholder="Search to filter…"
               className="w-full rounded-md border bg-background py-1.5 pl-8 pr-2 text-xs outline-none focus:border-primary"
             />
           </div>
         </div>
-        <div className="max-h-[60vh] overflow-y-auto p-1.5 text-xs">
-          <ComposeSection title="Suggestions">
+        <div className="max-h-[44vh] overflow-y-auto p-1.5 text-xs">
+          <Section title="Suggestions">
             {SUGGESTIONS.map((s) => (
-              <ComposeItem key={s.label} label={s.label} onClick={() => compose(s.message)} />
+              <Item key={s.label} label={s.label} onClick={() => stack(s.line)} />
             ))}
-          </ComposeSection>
-
-          <ComposeSection title="Workflows">
+          </Section>
+          <Section title="Background protections">
+            {PROTECTIONS.map((p) => (
+              <Item key={p.label} label={p.label} onClick={() => stack(p.line)} />
+            ))}
+          </Section>
+          <Section title="Workflows">
             {workflows.map((w) => (
-              <ComposeItem
-                key={w.id}
-                label={w.name}
-                hint={w.description}
-                onClick={() =>
-                  compose(
-                    `Use the scientific-pipeline-builder and archon skills to add the "${w.name}" workflow as a stage to the current pipeline. Workflow purpose: ${w.description}`,
-                  )
-                }
-              />
+              <Item key={w.id} label={w.name} hint={w.description}
+                onClick={() => stack(`Add a stage that runs the "${w.name}" workflow (${w.description}).`)} />
             ))}
-          </ComposeSection>
-
-          <ComposeSection title="Skills">
+          </Section>
+          <Section title="Skills">
             {skills.map((s) => (
-              <ComposeItem
-                key={s.id}
-                label={s.name}
-                hint={s.description}
-                onClick={() =>
-                  compose(
-                    `Add a node to the current pipeline that uses the "${s.name}" skill.`,
-                  )
-                }
-              />
+              <Item key={s.id} label={s.name} hint={s.description}
+                onClick={() => stack(`Add a node that uses the "${s.name}" skill.`)} />
             ))}
-          </ComposeSection>
-
-          <ComposeSection title="Databases">
+          </Section>
+          <Section title="Databases">
             {databases.map((d) => (
-              <ComposeItem
-                key={d.id}
-                label={d.name}
-                hint={d.description}
-                onClick={() =>
-                  compose(
-                    `Add a data-acquisition node to the current pipeline that queries the "${d.name}" database (${d.url}).`,
-                  )
-                }
-              />
+              <Item key={d.id} label={d.name} hint={d.description}
+                onClick={() => stack(`Add a data-acquisition node querying the "${d.name}" database (${d.url}).`)} />
             ))}
-          </ComposeSection>
+          </Section>
+        </div>
+        <div className="flex items-center justify-between border-t px-2.5 py-1.5 text-[11px] text-muted-foreground">
+          <span>{stacked > 0 ? `${stacked} stacked in chat` : "Stacks into the chat"}</span>
+          <span>edit &amp; send to build the YAML</span>
         </div>
       </PopoverContent>
     </Popover>
   );
 }
 
-function ComposeSection({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="mb-1.5">
       <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -189,15 +150,7 @@ function ComposeSection({ title, children }: { title: string; children: React.Re
   );
 }
 
-function ComposeItem({
-  label,
-  hint,
-  onClick,
-}: {
-  label: string;
-  hint?: string;
-  onClick: () => void;
-}) {
+function Item({ label, hint, onClick }: { label: string; hint?: string; onClick: () => void }) {
   return (
     <button
       type="button"

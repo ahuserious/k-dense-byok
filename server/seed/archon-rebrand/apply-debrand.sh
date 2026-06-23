@@ -369,22 +369,26 @@ else
        "(set \`defaultAssistant: pi\` by hand; env DEFAULT_AI_ASSISTANT=pi still applies)" >&2
 fi
 
-# --- (10) BuilderToolbar: hide the Provider/harness selector (keep Model) -----
-# The DAG Builder keeps Model selection but hides the Provider dropdown — the executing
-# assistant is pinned to Pi (pi-kady) via defaultAssistant. We wrap the stock <select>
-# in {false && (...)} so its provider/onProviderChange/providers props stay referenced
-# (no unused-var build break). Idempotent via the inserted marker.
+# --- (10) BuilderToolbar: hide Provider + Model selectors, rename "workflow"→"pipeline" --
+# Full-file overlay (like ProjectRail/CanvasChatPopout): the toolbar got several Kady-specific
+# edits — provider AND model selectors hidden (assistant pinned to Pi/pi-kady; per-step model
+# lives on the node inspector), and "Load workflow"/"Workflows" relabeled to pipeline. A
+# deterministic copy is more robust than stacking perl patches. Idempotent (the copy carries
+# the provider-select-hidden-kady marker; a fresh stock toolbar lacks it).
 BUILDER_TOOLBAR="$WEB/src/components/workflows/BuilderToolbar.tsx"
+TOOLBAR_SRC="$OVERLAY_DIR/console/BuilderToolbar.tsx"
 if [ ! -f "$BUILDER_TOOLBAR" ]; then
-  echo "  [BuilderToolbar] not found at $BUILDER_TOOLBAR — skipping provider-select hide" >&2
+  echo "  [BuilderToolbar] target not found at $BUILDER_TOOLBAR — skipping" >&2
+elif [ ! -f "$TOOLBAR_SRC" ]; then
+  echo "  ERROR [BuilderToolbar] overlay source missing: $TOOLBAR_SRC" >&2
 elif grep -q "provider-select-hidden-kady" "$BUILDER_TOOLBAR"; then
-  echo "  [BuilderToolbar] provider selector already hidden — skipping"
+  echo "  [BuilderToolbar] already overlaid (provider+model hidden) — skipping"
 else
-  perl -0777 -pi -e 's{<select\s+value=\{provider \?\? \x27\x27\}.*?</select>}{\{/* provider-select-hidden-kady: assistant pinned to Pi (pi-kady) via config */\}\n          \{false && (\n$&\n          )\}}s' "$BUILDER_TOOLBAR"
+  cp "$TOOLBAR_SRC" "$BUILDER_TOOLBAR"
   if grep -q "provider-select-hidden-kady" "$BUILDER_TOOLBAR"; then
-    echo "  [BuilderToolbar] provider selector hidden (Model selection kept)"
+    echo "  [BuilderToolbar] overlaid: provider + model hidden, 'workflow'→'pipeline' labels"
   else
-    echo "  ERROR [BuilderToolbar] provider-select hide did not apply — check the perl pattern" >&2
+    echo "  ERROR [BuilderToolbar] overlay copy did not take — check $TOOLBAR_SRC" >&2
   fi
 fi
 

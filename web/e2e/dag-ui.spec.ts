@@ -62,10 +62,14 @@ test("DAG Builder opens the canvas defaulting to composed-research-pipeline + ch
   await page.screenshot({ path: `${SHOTS}/03-dag-builder.png`, fullPage: true });
 });
 
-test("Console embeds the Archon console directly (no sub-tabs)", async ({ page }) => {
+test("Console is a NATIVE Kady run feed (not an Archon iframe)", async ({ page }) => {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await nav(page, "Console").click();
-  await expect(page.locator('iframe[title="Console"]')).toHaveAttribute("src", /:3091\/console/, { timeout: 20000 });
+  // Native panel: a Refresh control + either the runs table or the empty-state — and
+  // crucially NO Archon iframe (the old embed only showed Archon runs, never fired KADY agents).
+  await expect(page.getByRole("button", { name: "Refresh" })).toBeVisible({ timeout: 15000 });
+  await expect(page.getByText(/No agent runs yet|run/i).first()).toBeVisible();
+  await expect(page.locator('iframe[title="Console"]')).toHaveCount(0);
   await page.screenshot({ path: `${SHOTS}/04-console.png`, fullPage: true });
 });
 
