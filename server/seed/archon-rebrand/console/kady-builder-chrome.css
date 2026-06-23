@@ -1,0 +1,45 @@
+/* kady-raindrop-chrome — black/mono DAG-Builder chrome overlay.
+ *
+ * Appended to Archon's packages/web/src/index.css (last :root wins). Retargets the
+ * builder CHROME (toolbar, panels, inspector, library, inputs) to a neutral near-black
+ * Raindrop palette and switches the font to monospace. INTENTIONALLY LEFT ALONE:
+ *   - --node-* (node type colors stay as-is — keep the color coding)
+ *   - --background is only de-tinted, not darkened to pure black, so the ReactFlow
+ *     canvas background stays visually similar.
+ */
+:root {
+  /* Chrome surfaces → neutral near-black (drop the blue hue 260) */
+  --surface: oklch(0.16 0 0);
+  --surface-elevated: oklch(0.20 0 0);
+  --surface-inset: oklch(0.10 0 0);
+  --surface-hover: oklch(0.22 0 0);
+  --border-bright: oklch(0.34 0 0);
+  --card: oklch(0.16 0 0);
+  --popover: oklch(0.16 0 0);
+  --secondary: oklch(0.20 0 0);
+  --muted: oklch(0.20 0 0);
+  --accent: oklch(0.24 0 0);
+  --accent-hover: oklch(0.30 0 0);
+  --accent-muted: oklch(0.24 0 0);
+  --accent-bright: oklch(0.80 0 0);
+  /* Neutralize the blue primary/ring toward mono gray (node colors are untouched) */
+  --primary: oklch(0.82 0 0);
+  --primary-foreground: oklch(0.12 0 0);
+  --ring: oklch(0.55 0 0);
+  --border: oklch(0.26 0 0);
+  --input: oklch(0.26 0 0);
+  --sidebar: oklch(0.14 0 0);
+  --sidebar-primary: oklch(0.82 0 0);
+  --sidebar-accent: oklch(0.22 0 0);
+  --sidebar-border: oklch(0.26 0 0);
+  /* Canvas background: keep dark, just de-tint (was 0.14 0.005 260) */
+  --background: oklch(0.13 0 0);
+  --foreground: oklch(0.90 0 0);
+  --text-primary: oklch(0.90 0 0);
+}
+
+/* Monospace chrome (Raindrop aesthetic). The builder uses the `font-sans` utility
+ * everywhere, which resolves to this var. */
+@theme inline {
+  --font-sans: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+}

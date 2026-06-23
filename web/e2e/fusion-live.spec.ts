@@ -10,7 +10,11 @@ test("a new Fusion config appears in the picker without reload [61 live]", async
   await page.getByRole("button", { name: "New chat tab" }).waitFor({ timeout: 90_000 });
 
   await page.getByRole("button", { name: "Open settings" }).click();
-  await page.getByRole("dialog").getByText("Fusion", { exact: true }).click();
+  // 30s absorbs the Next dev-server's first-interaction compile of the settings chunk.
+  await page.getByRole("dialog").waitFor({ timeout: 30_000 });
+  await page.getByRole("tab", { name: "Fusion" }).click();
+  // The add-config form is behind a collapsible toggle — expand it first.
+  await page.getByRole("button", { name: /Add Fusion config/i }).click();
   await page.getByPlaceholder(/Config name/).fill("Live Fusion");
   await page.getByRole("button", { name: "Add", exact: true }).click();
 

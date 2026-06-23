@@ -392,4 +392,22 @@ else
   fi
 fi
 
+# --- (11) Builder chrome: black/mono Raindrop palette (canvas bg + node colors kept) ---
+# Append our chrome override to the global index.css the DAG Builder reads. Neutralizes the
+# chrome surfaces toward near-black + monospace; leaves --node-* and (mostly) --background
+# alone so the canvas + node colors stay similar. Marker-guarded (idempotent).
+INDEX_CSS="$WEB/src/index.css"
+CHROME_SRC="$OVERLAY_DIR/console/kady-builder-chrome.css"
+if [ ! -f "$INDEX_CSS" ]; then
+  echo "  [builder-chrome] index.css not found at $INDEX_CSS — skipping" >&2
+elif [ ! -f "$CHROME_SRC" ]; then
+  echo "  ERROR [builder-chrome] overlay source missing: $CHROME_SRC" >&2
+elif grep -q "kady-raindrop-chrome" "$INDEX_CSS"; then
+  echo "  [builder-chrome] black/mono chrome already applied — skipping"
+else
+  printf "\n" >> "$INDEX_CSS"
+  cat "$CHROME_SRC" >> "$INDEX_CSS"
+  echo "  [builder-chrome] appended black/mono chrome override to index.css"
+fi
+
 echo "De-brand complete."

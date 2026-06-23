@@ -10,10 +10,15 @@ test("Fusion config creation saves to fusionConfigs [60]", async ({ page }) => {
   await page.getByRole("button", { name: "New chat tab" }).waitFor({ timeout: 90_000 });
 
   await page.getByRole("button", { name: "Open settings" }).click();
-  await page.getByRole("dialog").getByText("Fusion", { exact: true }).click();
+  // 30s absorbs the Next dev-server's first-interaction compile of the settings chunk.
+  await page.getByRole("dialog").waitFor({ timeout: 30_000 });
+  // Use the stable tab role (getByText flakes during the dialog open animation).
+  await page.getByRole("tab", { name: "Fusion" }).click();
+  // The add-config form is behind a collapsible toggle — expand it first.
+  await page.getByRole("button", { name: /Add Fusion config/i }).click();
 
   const nameInput = page.getByPlaceholder(/Config name/);
-  await expect(nameInput).toBeVisible({ timeout: 10_000 });
+  await expect(nameInput).toBeVisible({ timeout: 30_000 });
   await nameInput.fill("E2E Test Fusion");
   await page.getByRole("button", { name: "Add", exact: true }).click();
 
