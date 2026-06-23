@@ -106,13 +106,13 @@ function cloneCatalogue(): { skillsDir: string; tmpRoot: string } | null {
  */
 export function seedProjectSkills(paths: ProjectPaths, allowRemote = true): number {
   const dest = paths.skillsDir;
-  if (countSkillDirs(dest) > 0) {
-    // Already seeded (e.g. legacy project): still ensure the Archon mirror exists.
-    seedArchonSkills(paths);
-    return countSkillDirs(dest);
-  }
 
   const seedDir = committedSeedSkillsDir();
+  // Always top up from the committed catalogue (non-clobbering) so EXISTING
+  // projects pick up newly-added skills (e.g. scientific-pipeline-builder, archon),
+  // not only freshly-created ones — copySkillDirs never overwrites a customized
+  // skill. (Previously this short-circuited when the dir was already populated,
+  // so legacy projects never received catalogue additions.)
   if (countSkillDirs(seedDir) > 0) {
     copySkillDirs(seedDir, dest);
   }

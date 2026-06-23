@@ -204,7 +204,7 @@ verbatim, substituting the phase node id and goal.
 
 ---
 
-## Output artifact and validation
+## Output artifact, validation, save, and hand-off
 
 Write a single valid Archon workflow YAML to:
 
@@ -217,21 +217,44 @@ where `<slug>` is a kebab-case slug of the research goal (e.g.
 `<sandbox>`; if you don't know it, ask, or default to `.archon/workflows/`
 under the working directory.
 
-**Before declaring done, validate it.** POST the YAML to the Kady pipelines
-validate endpoint and only finish when it returns clean:
+The Kady backend runs on `http://localhost:8000` and proxies the Archon engine.
+Both endpoints below take a `{ "definition": <workflow-object> }` envelope — turn
+your YAML into that JSON with `yq -o=json '.' <slug>.yaml` (or any YAML→JSON tool).
+
+**1. Validate** — only finish when it returns `{"valid":true}`:
 
 ```bash
-curl -sS -X POST http://localhost:8787/pipelines/validate \
+curl -sS -X POST http://localhost:8000/pipelines/validate \
   -H 'content-type: application/json' \
-  --data-binary @<(yq -o=json '.' "<sandbox>/.archon/workflows/<slug>.yaml")
+  -d "{\"definition\": $(yq -o=json '.' <slug>.yaml)}"
 ```
 
-(Adjust host/port to the running Kady server.) If `yq` isn't available, convert
-the YAML to JSON another way, or pass the workflow object as the JSON body. Fix
-every error the validator reports and re-validate until it's clean — Archon
-validation checks YAML syntax, DAG cycles, unknown `$nodeId.output` refs,
-exactly-one node-type-field per node, and that all referenced `skills:`
-directories exist. Then tell the user the file path and how to run it.
+Fix every error and re-validate — validation checks YAML syntax, DAG cycles,
+unknown `$nodeId.output` refs, exactly-one node-type-field per node, and that all
+referenced `skills:` directories exist.
+
+**2. Save it so it appears in the UI** — PUT it to the proxy so the engine
+registers it and it shows in the **DAG Pipelines** tab:
+
+```bash
+curl -sS -X PUT http://localhost:8000/pipelines/<slug> \
+  -H 'content-type: application/json' \
+  -d "{\"definition\": $(yq -o=json '.' <slug>.yaml)}"
+```
+
+**3. Hand off — tell the user BOTH of these, verbatim in spirit:**
+
+> ✅ Your pipeline **`<slug>`** is built, validated, and saved — it's now
+> **viewable in the DAG Pipelines tab** (open it there to view/edit it on the canvas).
+>
+> ▶️ **Run it in a _new_ chat, not this one.** This conversation is now large from
+> building the pipeline, so running it here would bloat the context window and
+> degrade the run. Open a fresh chat and start it there — the run gets its own
+> clean conversation. (Programmatic form: `POST /pipelines/<slug>/run` with body
+> `{ "conversationId": "<a new id>", "message": "<the task>", "model": "<a model ref>" }`.)
+
+**Do NOT auto-run the pipeline in the current conversation** — emitting + saving +
+handing off is the end of this skill's job.
 
 ---
 
