@@ -28,6 +28,16 @@
 #       chatbot defaults to Pi (k-dense-byok pi-coding-agent) while claude-code
 #       remains a selectable option. (DEFAULT_AI_ASSISTANT=pi in start.sh is the
 #       env fallback; this makes it explicit at the config seam.)
+#   (8) Replace the console's wide resizable left rail (ProjectRail) with a
+#       compact top-left project dropdown (switch project + add project), and
+#       drop the bottom Settings/Workflows/Old-UI nav rows. Full-file overlay
+#       from console/ProjectRail.tsx.
+#   (9) Surface chat as a floating pop-out INSIDE the legacy builder canvas
+#       (chat is no longer a nav tab — see step 2). Installs
+#       console/CanvasChatPopout.tsx into the web src and patches
+#       WorkflowBuilder.tsx to import + mount it inside the canvas wrapper. The
+#       pop-out EMBEDS the production <ChatInterface> (no iframe), reusing the
+#       builder's existing createConversation pattern.
 
 set -eu
 
@@ -40,13 +50,18 @@ WORKFLOWS_PAGE="$WEB/src/routes/WorkflowsPage.tsx"
 MAIN_TSX="$WEB/src/main.tsx"
 CONSOLE_THEME="$WEB/src/experiments/console/theme.css"
 LAYOUT_TSX="$WEB/src/components/layout/Layout.tsx"
+PROJECT_RAIL="$WEB/src/experiments/console/components/ProjectRail.tsx"
+WORKFLOW_BUILDER="$WEB/src/components/workflows/WorkflowBuilder.tsx"
+# Destination for the floating canvas chat pop-out we install (created by us —
+# NOT a preflight target since a fresh clone won't have it yet).
+CANVAS_CHAT_POPOUT="$WEB/src/components/workflows/CanvasChatPopout.tsx"
 
 # ARCHON_HOME mirrors Archon's own resolution (default ~/.archon).
 ARCHON_HOME="${ARCHON_HOME:-$HOME/.archon}"
 CONFIG_YAML="$ARCHON_HOME/config.yaml"
 
 # --- preflight: fail fast if the clone or any target is missing -------------
-for f in "$TOPNAV" "$WORKFLOWS_PAGE" "$MAIN_TSX" "$CONSOLE_THEME" "$LAYOUT_TSX"; do
+for f in "$TOPNAV" "$WORKFLOWS_PAGE" "$MAIN_TSX" "$CONSOLE_THEME" "$LAYOUT_TSX" "$PROJECT_RAIL" "$WORKFLOW_BUILDER"; do
   if [ ! -f "$f" ]; then
     echo "ERROR: expected file not found: $f" >&2
     echo "Is '$ARCHON_DIR' a valid Archon clone (and is the overlay intact)?" >&2
@@ -184,6 +199,85 @@ if grep -q "import { Plus } from 'lucide-react';" "$WORKFLOWS_PAGE"; then
   echo "  [WorkflowsPage] dropped now-unused Plus import"
 else
   echo "  [WorkflowsPage] Plus import already clean (skip)"
+fi
+
+# --- (8) ProjectRail: compact project dropdown ------------------------------
+# Replace the wide resizable left rail (project list + filter + resize handle +
+# bottom Settings/Workflows/Old-UI nav) with a compact top-left project
+# dropdown. This is a full-file overlay (the rewrite drops the Settings/Workflow/
+# ArrowLeft icon imports + RailNavLink, so a whole-file swap is cleaner and more
+# robust than perl surgery). Guard on a sentinel unique to the new version so
+# re-runs are a no-op even after the source ProjectRail is re-cloned fresh.
+RAIL_SRC="$OVERLAY_DIR/console/ProjectRail.tsx"
+if [ ! -f "$RAIL_SRC" ]; then
+  echo "  ERROR [ProjectRail] overlay source missing: $RAIL_SRC" >&2
+  exit 1
+fi
+if grep -q 'Compact project switcher' "$PROJECT_RAIL"; then
+  echo "  [ProjectRail] already the compact dropdown (skip)"
+else
+  cp "$RAIL_SRC" "$PROJECT_RAIL"
+  if grep -q 'Compact project switcher' "$PROJECT_RAIL"; then
+    echo "  [ProjectRail] installed compact project dropdown (replaced wide rail)"
+  else
+    echo "  ERROR [ProjectRail] copy did not take — check $RAIL_SRC" >&2
+    exit 1
+  fi
+fi
+
+# --- (9) CanvasChatPopout: floating chat pop-out inside the builder canvas ---
+# Chat is no longer a nav tab (step 2). Install the floating pop-out component
+# and wire it into the legacy builder canvas so chat is reachable in-canvas.
+#
+# 9a. Copy the component into the web src. Idempotent: cp overwrites, then we
+#     verify a sentinel unique to the component is present.
+POPOUT_SRC="$OVERLAY_DIR/console/CanvasChatPopout.tsx"
+if [ ! -f "$POPOUT_SRC" ]; then
+  echo "  ERROR [CanvasChatPopout] overlay source missing: $POPOUT_SRC" >&2
+  exit 1
+fi
+cp "$POPOUT_SRC" "$CANVAS_CHAT_POPOUT"
+if grep -q 'export function CanvasChatPopout' "$CANVAS_CHAT_POPOUT"; then
+  echo "  [CanvasChatPopout] installed component ($CANVAS_CHAT_POPOUT)"
+else
+  echo "  ERROR [CanvasChatPopout] copy did not take — check $POPOUT_SRC" >&2
+  exit 1
+fi
+
+# 9b. Patch WorkflowBuilder.tsx: add the import (after the YamlCodeView import)
+#     and mount <CanvasChatPopout> inside the canvas wrapper (right after the
+#     <WorkflowCanvas .../> close tag). Both edits are guarded so re-runs skip.
+if grep -q "import { CanvasChatPopout } from './CanvasChatPopout';" "$WORKFLOW_BUILDER"; then
+  echo "  [WorkflowBuilder] CanvasChatPopout import already present (skip)"
+else
+  # Use ~ as the s/// delimiter so the literal { } braces in the import text
+  # aren't read as perl delimiters.
+  perl -0pi -e "s~(import \{ YamlCodeView \} from './YamlCodeView';\n)~\${1}import { CanvasChatPopout } from './CanvasChatPopout';\n~" "$WORKFLOW_BUILDER"
+  if grep -q "import { CanvasChatPopout } from './CanvasChatPopout';" "$WORKFLOW_BUILDER"; then
+    echo "  [WorkflowBuilder] added CanvasChatPopout import"
+  else
+    echo "  ERROR [WorkflowBuilder] could not add import — YamlCodeView import anchor changed; edit by hand" >&2
+    exit 1
+  fi
+fi
+
+if grep -q '<CanvasChatPopout' "$WORKFLOW_BUILDER"; then
+  echo "  [WorkflowBuilder] CanvasChatPopout already mounted in canvas (skip)"
+else
+  # Anchor on the WorkflowCanvas close tag (`commands={commandList}` then `/>`),
+  # which sits inside the `relative` canvas wrapper. Insert the pop-out right
+  # after it so it anchors to the canvas viewport. We capture the indentation of
+  # the `/>` line ($2) — that is the sibling-child indent the <WorkflowCanvas>
+  # opening tag uses, NOT the deeper prop indent. The `s///` is non-global so it
+  # hits only the FIRST `commands={commandList} … />` (WorkflowCanvas), never the
+  # later NodeInspector block. Use ~ delimiter so JSX braces are literal.
+  perl -0777 -pi -e "s~(\n[ ]*commands=\{commandList\}\n([ ]*)/>\n)~\${1}\${2}{/* Floating chat pop-out, anchored to the canvas viewport */}\n\${2}<CanvasChatPopout selectedProjectId={selectedProjectId} />\n~s" "$WORKFLOW_BUILDER"
+  if grep -q '<CanvasChatPopout selectedProjectId={selectedProjectId} />' "$WORKFLOW_BUILDER"; then
+    echo "  [WorkflowBuilder] mounted <CanvasChatPopout> inside the canvas wrapper"
+  else
+    echo "  ERROR [WorkflowBuilder] could not mount pop-out — WorkflowCanvas anchor changed; edit by hand" >&2
+    exit 1
+  fi
 fi
 
 # --- (6) theme: keep Archon's own colors, just remove the purple --------------
