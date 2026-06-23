@@ -44,11 +44,9 @@ import {
   CheckIcon,
   CopyIcon,
   DatabaseIcon,
-  GitBranchIcon,
   ListOrderedIcon,
   PaperclipIcon,
   SparklesIcon,
-  TargetIcon,
   XIcon,
 } from "lucide-react";
 import { cn, formatUsd } from "@/lib/utils";
@@ -735,88 +733,6 @@ export interface ChatTabMeta {
   userMessageCount: number;
 }
 
-/**
- * Two quick-action CTAs shown under the empty-state prompt. "Stitch workflows
- * into a pipeline" routes straight to the visual builder; "Build a pipeline"
- * collects a goal in a small dialog and hands it to the parent, which sends a
- * chat message that triggers the scientific-pipeline-builder skill.
- */
-function EmptyStateCtas({
-  onStitchPipeline,
-  onCreateGoalWorkflow,
-}: {
-  onStitchPipeline: () => void;
-  onCreateGoalWorkflow: (goal: string) => void;
-}) {
-  const [goalOpen, setGoalOpen] = useState(false);
-  const [goal, setGoal] = useState("");
-
-  const submitGoal = () => {
-    const trimmed = goal.trim();
-    if (!trimmed) return;
-    onCreateGoalWorkflow(trimmed);
-    setGoal("");
-    setGoalOpen(false);
-  };
-
-  return (
-    <div className="flex flex-wrap items-center justify-center gap-2">
-      <button
-        type="button"
-        onClick={onStitchPipeline}
-        className="flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
-      >
-        <GitBranchIcon className="size-3.5" />
-        Stitch workflows into a pipeline
-      </button>
-      <button
-        type="button"
-        onClick={() => setGoalOpen(true)}
-        className="flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
-      >
-        <TargetIcon className="size-3.5" />
-        Build a pipeline
-      </button>
-
-      <Dialog open={goalOpen} onOpenChange={setGoalOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Build a pipeline</DialogTitle>
-            <DialogDescription>
-              Describe the goal. Kady will use the scientific-pipeline-builder
-              skill in this chat to design a pipeline for it.
-            </DialogDescription>
-          </DialogHeader>
-          <Input
-            autoFocus
-            placeholder="e.g. RNA-seq differential expression from raw FASTQ"
-            value={goal}
-            onChange={(e) => setGoal(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                submitGoal();
-              }
-            }}
-          />
-          <DialogFooter>
-            <Button
-              variant="outline"
-              type="button"
-              onClick={() => setGoalOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button type="button" onClick={submitGoal} disabled={!goal.trim()}>
-              Build pipeline
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
-  );
-}
-
 export interface ChatTabHandle {
   /**
    * Send a workflow-style prompt into this tab. Used by the Workflows panel
@@ -854,10 +770,6 @@ export interface ChatTabProps {
   budgetTotalUsd: number;
   budgetLimitUsd: number | null;
   onMetaChange: (tabId: string, meta: ChatTabMeta) => void;
-  /** Route the shell to the visual Pipeline Builder (empty-state CTA). */
-  onStitchPipeline: () => void;
-  /** Start a goal-based loop on the console and open the Console. */
-  onCreateGoalWorkflow: (goal: string) => void;
   /**
    * Skills this tab should always use (the chat rail passes archon +
    * scientific-pipeline-builder). When set, the FIRST message of the tab's
@@ -880,8 +792,6 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
     budgetTotalUsd,
     budgetLimitUsd,
     onMetaChange,
-    onStitchPipeline,
-    onCreateGoalWorkflow,
     preloadSkills,
   },
   ref,
@@ -1084,10 +994,6 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
                   I can research topics, write code, and analyze data.
                 </p>
               </div>
-              <EmptyStateCtas
-                onStitchPipeline={onStitchPipeline}
-                onCreateGoalWorkflow={onCreateGoalWorkflow}
-              />
             </ConversationEmptyState>
           ) : (
             messages.map((message) => (

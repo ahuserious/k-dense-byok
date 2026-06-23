@@ -6,11 +6,13 @@ import type { Model } from "@/components/model-selector";
 import { ChatTab, type ChatTabHandle, type ChatTabMeta } from "@/components/chat-tab";
 import { ChatTabsBar, type ChatTabDescriptor } from "@/components/chat-tabs-bar";
 import { SettingsDialog } from "@/components/settings-dialog";
-import { WorkflowsPanel } from "@/components/workflows-panel";
+import { WorkflowsPanel, type Workflow } from "@/components/workflows-panel";
 import { PipelinesPanel } from "@/components/pipelines-panel";
 import { PipelineBuilderPanel } from "@/components/pipeline-builder-panel";
 import { ConsolePanel } from "@/components/console/console-panel";
+import { RaindropPanel } from "@/components/raindrop-panel";
 import { ChatRail } from "@/components/chat-rail";
+import { TopNavBar, type AppView } from "@/components/top-nav-bar";
 import { ProjectSwitcher } from "@/components/project-switcher";
 import { SessionCostPill } from "@/components/session-cost-pill";
 import { useSessionCost } from "@/lib/use-session-cost";
@@ -21,8 +23,6 @@ import { useModels } from "@/lib/use-models";
 import { flattenFiles, useSandbox } from "@/lib/use-sandbox";
 import { onProjectChange } from "@/lib/projects";
 import {
-  PanelLeftCloseIcon,
-  PanelLeftIcon,
   SettingsIcon,
   SunIcon,
   MoonIcon,
@@ -92,12 +92,11 @@ export default function ChatPage() {
     { id: initialTabId, title: defaultTabTitle(0) },
   ]);
   const [activeTabId, setActiveTabId] = useState<string>(() => initialTabId);
-  const [view, setView] = useState<
-    "chat" | "workflows" | "pipelines" | "dag-builder" | "console"
-  >("chat");
-  // When the user clicks "Edit" on a pipeline, this names the workflow the embedded
-  // DAG Builder should deep-link open (via Archon's ?edit= param). null = blank canvas.
-  const [builderWorkflowName, setBuilderWorkflowName] = useState<string | null>(null);
+  const [view, setView] = useState<AppView>("chat");
+  // The pipeline the embedded DAG Builder deep-links open (Archon ?edit= param). Defaults
+  // to the composed-research-pipeline; "Edit" on a saved pipeline overrides it.
+  const [builderWorkflowName, setBuilderWorkflowName] =
+    useState<string | null>("composed-research-pipeline");
   // The DAG Builder + Console embed cross-origin iframes (Archon :3091, Raindrop :5899).
   // We mount each on FIRST visit and then keep it mounted (toggling display) so switching
   // views is instant and doesn't reload the embedded SPA — the old panels remounted the
@@ -106,11 +105,13 @@ export default function ChatPage() {
   // frame loads at once.
   const [visitedBuilder, setVisitedBuilder] = useState(false);
   const [visitedConsole, setVisitedConsole] = useState(false);
-  // Far-right collapsible chat rail (KADY chat available across all views).
+  const [visitedRaindrop, setVisitedRaindrop] = useState(false);
+  // Far-right collapsible chat rail — now scoped to the DAG Builder view only.
   const [railOpen, setRailOpen] = useState(false);
   useEffect(() => {
     if (view === "dag-builder") setVisitedBuilder(true);
     if (view === "console") setVisitedConsole(true);
+    if (view === "raindrop") setVisitedRaindrop(true);
   }, [view]);
   // Mirror of tabs in a ref so synchronous handlers can read length without
   // putting impure logic inside a setState updater (which strict mode runs
@@ -266,9 +267,10 @@ export default function ChatPage() {
         setTabs([{ id, title: defaultTabTitle(0) }]);
         setActiveTabId(id);
         setView("chat");
-        setBuilderWorkflowName(null);
+        setBuilderWorkflowName("composed-research-pipeline");
         setVisitedBuilder(false);
         setVisitedConsole(false);
+        setVisitedRaindrop(false);
         pendingPipelineRun.current = null;
         setCostRefreshKey((k) => k + 1);
       }),
@@ -368,10 +370,6 @@ export default function ChatPage() {
   //     triggers the scientific-pipeline-builder skill for the given goal.
   // ------------------------------------------------------------------
 
-  const handleStitchPipeline = useCallback(() => {
-    setBuilderWorkflowName(null);
-    setView("dag-builder");
-  }, []);
 
   // ------------------------------------------------------------------
   // Pipeline actions (from the Pipelines panel).
@@ -382,6 +380,21 @@ export default function ChatPage() {
   const handleEditPipeline = useCallback((name: string) => {
     setBuilderWorkflowName(name);
     setView("dag-builder");
+  }, []);
+
+  // "Add to DAG builder" on a workflow card: jump to the DAG Builder, open the chat
+  // rail, and stash a compose instruction for the rail's KADY agent (which has the
+  // archon + scientific-pipeline-builder skills) to stitch the workflow into the
+  // current pipeline. The flush effect dispatches it once the rail's handle registers.
+  const pendingComposeMsg = useRef<string | null>(null);
+  const [composeNonce, setComposeNonce] = useState(0);
+  const handleAddToBuilder = useCallback((w: Workflow) => {
+    pendingComposeMsg.current =
+      `Use the scientific-pipeline-builder and archon skills to add the "${w.name}" ` +
+      `workflow as a stage to the current pipeline. Workflow purpose: ${w.description}`;
+    setRailOpen(true);
+    setView("dag-builder");
+    setComposeNonce((n) => n + 1);
   }, []);
 
   // Run a pipeline in a brand-new chat tab. We can't call the new tab's launchWorkflow
@@ -425,23 +438,6 @@ export default function ChatPage() {
     void handle.launchWorkflow(pending.prompt, pending.model, [], []);
   }, [tabs]);
 
-  const handleCreateGoalWorkflow = useCallback(
-    async (goal: string) => {
-      const trimmed = goal.trim();
-      if (!trimmed) return;
-      const handle = tabHandles.current.get(activeTabId);
-      if (!handle) return;
-      // The CTA lives in the active chat tab's empty state, so send the build
-      // request right there. The prompt names the skill so the agent loads
-      // scientific-pipeline-builder rather than improvising a pipeline.
-      setView("chat");
-      await handle.sendQuick(
-        `Use the scientific-pipeline-builder skill to build a pipeline for: ${trimmed}`,
-      );
-    },
-    [activeTabId],
-  );
-
   const handleFileSelect = useCallback((path: string) => {
     sandbox.selectFile(path);
   }, [sandbox]);
@@ -469,6 +465,10 @@ export default function ChatPage() {
       })),
     [tabs, tabsMeta],
   );
+
+  // The sandbox (file tree + preview) is a Chat-view concern — every other surface
+  // (Workflows / DAG Pipelines / DAG Builder / Console / Raindrop) gets full width.
+  const sandboxVisible = panelOpen && view === "chat";
 
   return (
     <div className="flex h-dvh flex-col">
@@ -529,36 +529,6 @@ export default function ChatPage() {
           />
           <InfoTooltip
             content={
-              panelOpen ? (
-                <>
-                  <b>Hide sandbox</b>
-                  <br />
-                  Collapse the file tree and preview panes to focus on the chat.
-                </>
-              ) : (
-                <>
-                  <b>Show sandbox</b>
-                  <br />
-                  Open the agent&apos;s working directory with the file tree and
-                  inline previews.
-                </>
-              )
-            }
-          >
-            <button
-              onClick={() => setPanelOpen((v) => !v)}
-              aria-label={panelOpen ? "Hide sandbox" : "Show sandbox"}
-              className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            >
-              {panelOpen ? (
-                <PanelLeftCloseIcon className="size-4" />
-              ) : (
-                <PanelLeftIcon className="size-4" />
-              )}
-            </button>
-          </InfoTooltip>
-          <InfoTooltip
-            content={
               <>
                 <b>Settings</b>
                 <br />
@@ -598,11 +568,15 @@ export default function ChatPage() {
         </div>
       </header>
 
-      {/* Main content area — three columns: file tree | preview | chat */}
+      {/* Primary top navigation: one tab per surface (Chat + agent surfaces). */}
+      <TopNavBar view={view} onSelect={setView} />
+
+      {/* Main content. The sandbox (file tree + preview) shows only in Chat view;
+          every other surface gets the full width. */}
       <div className={cn("flex flex-1 overflow-hidden", isResizing && "select-none")}>
 
-        {/* Left: file tree */}
-        {panelOpen && (
+        {/* Left: file tree (Chat view only) */}
+        {sandboxVisible && (
           <div className="shrink-0 overflow-hidden" style={{ width: treeWidth }}>
             <FileTreePanel
               tree={sandbox.tree}
@@ -633,10 +607,10 @@ export default function ChatPage() {
         )}
 
         {/* Drag handle: tree ↔ preview */}
-        {panelOpen && <ResizeHandle onMouseDown={startDrag("tree")} />}
+        {sandboxVisible && <ResizeHandle onMouseDown={startDrag("tree")} />}
 
         {/* Middle: file preview with tabs */}
-        {panelOpen && (
+        {sandboxVisible && (
           <div className="flex-1 min-w-0 overflow-hidden">
             <FilePreviewPanel
               tabs={sandbox.tabs}
@@ -653,35 +627,36 @@ export default function ChatPage() {
         )}
 
         {/* Drag handle: preview ↔ chat */}
-        {panelOpen && <ResizeHandle onMouseDown={startDrag("chat")} />}
+        {sandboxVisible && <ResizeHandle onMouseDown={startDrag("chat")} />}
 
-        {/* Right: chat / workflows — fills all space when sandbox is hidden */}
+        {/* Right column: the chat tabs + active surface. Fixed width next to the
+            sandbox in Chat view; full width everywhere else. */}
         <div
-          className={`flex flex-col border-l overflow-hidden ${panelOpen ? "shrink-0" : "flex-1"}`}
-          style={{ width: panelOpen ? chatWidth : undefined }}
+          className={cn(
+            "flex flex-col overflow-hidden",
+            sandboxVisible ? "shrink-0 border-l" : "flex-1",
+          )}
+          style={{ width: sandboxVisible ? chatWidth : undefined }}
         >
 
-          <ChatTabsBar
-            tabs={tabDescriptors}
-            activeTabId={activeTabId}
-            view={view}
-            maxTabs={MAX_CHAT_TABS}
-            onSelect={selectTab}
-            onClose={closeTab}
-            onNew={newTab}
-            onRename={renameTab}
-            onSelectWorkflows={() => setView("workflows")}
-            // "DAG Pipelines" = the list of saved pipelines (incl. the default Archon ones).
-            onSelectPipelines={() => setView("pipelines")}
-            // "DAG Builder" = Archon's visual workflow builder canvas (blank, no deep-link).
-            onSelectDagBuilder={() => {
-              setBuilderWorkflowName(null);
-              setView("dag-builder");
-            }}
-            onSelectConsole={() => setView("console")}
-            activeSessionId={activeSessionId}
-            canExport={(activeMeta?.userMessageCount ?? 0) > 0}
-          />
+          {/* Chat-tabs strip (Chat view only) — moved down from the old pill row, with
+              the relocated hide-sandbox toggle, leaving room for many chat tabs. */}
+          {view === "chat" && (
+            <ChatTabsBar
+              tabs={tabDescriptors}
+              activeTabId={activeTabId}
+              view={view}
+              maxTabs={MAX_CHAT_TABS}
+              onSelect={selectTab}
+              onClose={closeTab}
+              onNew={newTab}
+              onRename={renameTab}
+              panelOpen={panelOpen}
+              onTogglePanel={() => setPanelOpen((v) => !v)}
+              activeSessionId={activeSessionId}
+              canExport={(activeMeta?.userMessageCount ?? 0) > 0}
+            />
+          )}
 
           {/* Chat tabs — all kept mounted so background streams continue.
               Each ChatTab hides itself with `display: none` when inactive. */}
@@ -700,8 +675,6 @@ export default function ChatPage() {
               budgetTotalUsd={projectCost.budget.totalUsd}
               budgetLimitUsd={projectCost.budget.limitUsd}
               onMetaChange={handleMetaChange}
-              onStitchPipeline={handleStitchPipeline}
-              onCreateGoalWorkflow={handleCreateGoalWorkflow}
             />
           ))}
 
@@ -711,6 +684,7 @@ export default function ChatPage() {
               <WorkflowsPanel
                 onLaunch={handleWorkflowLaunch}
                 onUploadFiles={sandbox.uploadFiles}
+                onAddToBuilder={handleAddToBuilder}
                 budgetBlocked={projectCost.budget.state === "exceeded"}
               />
             </div>
@@ -752,25 +726,38 @@ export default function ChatPage() {
               <ConsolePanel />
             </div>
           )}
+
+          {/* Raindrop view — the local Workshop trace debugger (:5899), mounted on first
+              visit then kept mounted (display toggled). */}
+          {visitedRaindrop && (
+            <div
+              className="min-h-0 flex-1 flex-col overflow-hidden"
+              style={{ display: view === "raindrop" ? "flex" : "none" }}
+            >
+              <RaindropPanel />
+            </div>
+          )}
         </div>
 
-        {/* Far-right collapsible chat rail — a real KADY chat (force-loading the
-            archon + scientific-pipeline-builder skills) available across all views. */}
-        <ChatRail
-          open={railOpen}
-          onToggle={setRailOpen}
-          allFiles={allFiles}
-          uploadFiles={sandbox.uploadFiles}
-          onSandboxRefresh={handleSandboxRefresh}
-          onTurnComplete={handleTurnComplete}
-          allSkills={allSkills}
-          budgetState={projectCost.budget.state}
-          budgetTotalUsd={projectCost.budget.totalUsd}
-          budgetLimitUsd={projectCost.budget.limitUsd}
-          onMetaChange={handleMetaChange}
-          onStitchPipeline={handleStitchPipeline}
-          onCreateGoalWorkflow={handleCreateGoalWorkflow}
-        />
+        {/* Collapsible chat rail — scoped to the DAG Builder, where the KADY agent
+            composes pipelines (force-loading archon + scientific-pipeline-builder). */}
+        {view === "dag-builder" && (
+          <ChatRail
+            open={railOpen}
+            onToggle={setRailOpen}
+            allFiles={allFiles}
+            uploadFiles={sandbox.uploadFiles}
+            onSandboxRefresh={handleSandboxRefresh}
+            onTurnComplete={handleTurnComplete}
+            allSkills={allSkills}
+            budgetState={projectCost.budget.state}
+            budgetTotalUsd={projectCost.budget.totalUsd}
+            budgetLimitUsd={projectCost.budget.limitUsd}
+            onMetaChange={handleMetaChange}
+            composeMessageRef={pendingComposeMsg}
+            composeNonce={composeNonce}
+          />
+        )}
 
       </div>
 

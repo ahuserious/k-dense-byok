@@ -369,4 +369,23 @@ else
        "(set \`defaultAssistant: pi\` by hand; env DEFAULT_AI_ASSISTANT=pi still applies)" >&2
 fi
 
+# --- (10) BuilderToolbar: hide the Provider/harness selector (keep Model) -----
+# The DAG Builder keeps Model selection but hides the Provider dropdown — the executing
+# assistant is pinned to Pi (pi-kady) via defaultAssistant. We wrap the stock <select>
+# in {false && (...)} so its provider/onProviderChange/providers props stay referenced
+# (no unused-var build break). Idempotent via the inserted marker.
+BUILDER_TOOLBAR="$WEB/src/components/workflows/BuilderToolbar.tsx"
+if [ ! -f "$BUILDER_TOOLBAR" ]; then
+  echo "  [BuilderToolbar] not found at $BUILDER_TOOLBAR — skipping provider-select hide" >&2
+elif grep -q "provider-select-hidden-kady" "$BUILDER_TOOLBAR"; then
+  echo "  [BuilderToolbar] provider selector already hidden — skipping"
+else
+  perl -0777 -pi -e 's{<select\s+value=\{provider \?\? \x27\x27\}.*?</select>}{\{/* provider-select-hidden-kady: assistant pinned to Pi (pi-kady) via config */\}\n          \{false && (\n$&\n          )\}}s' "$BUILDER_TOOLBAR"
+  if grep -q "provider-select-hidden-kady" "$BUILDER_TOOLBAR"; then
+    echo "  [BuilderToolbar] provider selector hidden (Model selection kept)"
+  else
+    echo "  ERROR [BuilderToolbar] provider-select hide did not apply — check the perl pattern" >&2
+  fi
+fi
+
 echo "De-brand complete."

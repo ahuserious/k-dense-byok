@@ -3,15 +3,13 @@
 import {
   DownloadIcon,
   FileTextIcon,
-  GaugeIcon,
-  LayersIcon,
   LoaderCircleIcon,
   MessageSquareTextIcon,
-  NetworkIcon,
+  PanelLeftCloseIcon,
+  PanelLeftIcon,
   PencilIcon,
   PlusIcon,
   TerminalIcon,
-  WorkflowIcon,
   XIcon,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -38,19 +36,15 @@ export interface ChatTabDescriptor {
 export interface ChatTabsBarProps {
   tabs: ChatTabDescriptor[];
   activeTabId: string;
-  view: "chat" | "workflows" | "pipelines" | "dag-builder" | "console";
+  view: "chat" | "workflows" | "pipelines" | "dag-builder" | "console" | "raindrop";
   maxTabs: number;
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
   onNew: () => void;
   onRename: (id: string, title: string) => void;
-  onSelectWorkflows: () => void;
-  /** Open the DAG Pipelines list (saved pipelines, incl. the default Archon ones). */
-  onSelectPipelines: () => void;
-  /** Open the DAG Builder — Archon's visual workflow builder canvas. */
-  onSelectDagBuilder: () => void;
-  /** Open the Console (Agents + Raindrop sub-tabs). */
-  onSelectConsole: () => void;
+  /** Sandbox (file tree + preview) visibility toggle — relocated here from the header. */
+  panelOpen: boolean;
+  onTogglePanel: () => void;
   /** Session id of the active tab, for reproducibility export. */
   activeSessionId?: string | null;
   /** Whether the active tab has any messages worth exporting. */
@@ -137,10 +131,8 @@ export function ChatTabsBar({
   onClose,
   onNew,
   onRename,
-  onSelectWorkflows,
-  onSelectPipelines,
-  onSelectDagBuilder,
-  onSelectConsole,
+  panelOpen,
+  onTogglePanel,
   activeSessionId,
   canExport = false,
 }: ChatTabsBarProps) {
@@ -308,101 +300,35 @@ export function ChatTabsBar({
       </div>
 
       <div className="shrink-0 flex items-center gap-1 pl-2 border-l">
-        {view === "chat" && canExport && activeSessionId && (
-          <ExportMenu sessionId={activeSessionId} />
-        )}
+        {canExport && activeSessionId && <ExportMenu sessionId={activeSessionId} />}
         <InfoTooltip
           content={
-            <>
-              <b>Workflows</b>
-              <br />
-              Pre-built scientific pipelines (e.g. RNA-seq, literature
-              review). Pick a template, attach inputs, and launch — they
-              run in the active chat tab.
-            </>
+            panelOpen ? (
+              <>
+                <b>Hide sandbox</b>
+                <br />
+                Collapse the file tree and preview panes for full-page chat.
+              </>
+            ) : (
+              <>
+                <b>Show sandbox</b>
+                <br />
+                Open the agent&apos;s working directory with the file tree and inline previews.
+              </>
+            )
           }
         >
           <button
-            onClick={onSelectWorkflows}
+            onClick={onTogglePanel}
             type="button"
-            className={cn(
-              "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors",
-              view === "workflows"
-                ? "bg-muted text-foreground"
-                : "text-muted-foreground hover:text-foreground hover:bg-muted/50",
-            )}
+            aria-label={panelOpen ? "Hide sandbox" : "Show sandbox"}
+            className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
           >
-            <WorkflowIcon className="size-3.5" />
-            Workflows
-          </button>
-        </InfoTooltip>
-        <InfoTooltip
-          content={
-            <>
-              <b>DAG Pipelines</b>
-              <br />
-              Browse and run saved pipelines — including the default Archon ones.
-            </>
-          }
-        >
-          <button
-            onClick={onSelectPipelines}
-            type="button"
-            className={cn(
-              "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors",
-              view === "pipelines"
-                ? "bg-muted text-foreground"
-                : "text-muted-foreground hover:text-foreground hover:bg-muted/50",
+            {panelOpen ? (
+              <PanelLeftCloseIcon className="size-3.5" />
+            ) : (
+              <PanelLeftIcon className="size-3.5" />
             )}
-          >
-            <LayersIcon className="size-3.5" />
-            DAG Pipelines
-          </button>
-        </InfoTooltip>
-        <InfoTooltip
-          content={
-            <>
-              <b>DAG Builder</b>
-              <br />
-              Open the visual workflow builder (Archon canvas) to design a pipeline.
-            </>
-          }
-        >
-          <button
-            onClick={onSelectDagBuilder}
-            type="button"
-            className={cn(
-              "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors",
-              view === "dag-builder"
-                ? "bg-muted text-foreground"
-                : "text-muted-foreground hover:text-foreground hover:bg-muted/50",
-            )}
-          >
-            <NetworkIcon className="size-3.5" />
-            DAG Builder
-          </button>
-        </InfoTooltip>
-        <InfoTooltip
-          content={
-            <>
-              <b>Console</b>
-              <br />
-              Watch agents and workflows in progress, with their run traces (Raindrop).
-            </>
-          }
-        >
-          <button
-            onClick={onSelectConsole}
-            type="button"
-            className={cn(
-              "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors",
-              view === "console"
-                ? "bg-muted text-foreground"
-                : "text-muted-foreground hover:text-foreground hover:bg-muted/50",
-            )}
-          >
-            <GaugeIcon className="size-3.5" />
-            Console
           </button>
         </InfoTooltip>
       </div>

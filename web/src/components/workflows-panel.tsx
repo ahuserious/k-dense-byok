@@ -59,6 +59,7 @@ import {
   PresentationIcon,
   RefreshCwIcon,
   ReplyIcon,
+  PlusIcon,
   RocketIcon,
   RouteIcon,
   RssIcon,
@@ -523,10 +524,13 @@ function LaunchDialog({
 export function WorkflowsPanel({
   onLaunch,
   onUploadFiles,
+  onAddToBuilder,
   budgetBlocked = false,
 }: {
   onLaunch: (prompt: string, model: Model, suggestedSkills: string[], uploadedFiles: string[]) => void;
   onUploadFiles?: (files: FileList | File[], paths?: string[]) => Promise<string[]>;
+  /** Add this workflow to the DAG Builder as a pipeline stage (opens the builder). */
+  onAddToBuilder?: (workflow: Workflow) => void;
   budgetBlocked?: boolean;
 }) {
   const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null);
@@ -583,17 +587,19 @@ export function WorkflowsPanel({
           />
         </div>
 
-        <div className="flex gap-1.5 overflow-x-auto pb-0.5 scrollbar-none">
+        {/* Category jump links — de-bubbled (no pill background/border) and wrapped so
+            they all fit without horizontal scrolling. Colored text is kept per category. */}
+        <div className="flex flex-wrap gap-x-3 gap-y-1">
           {visibleCategories.map((cat) => (
             <button
               key={cat.id}
               onClick={() => scrollToCategory(cat.id)}
               className={cn(
-                "shrink-0 rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors",
-                CATEGORY_BG[cat.id]
+                "text-[11px] font-medium transition-opacity hover:opacity-80",
+                CATEGORY_ICON_COLOR[cat.id],
               )}
             >
-              <span className={CATEGORY_ICON_COLOR[cat.id]}>{cat.label}</span>
+              {cat.label}
             </button>
           ))}
         </div>
@@ -618,30 +624,46 @@ export function WorkflowsPanel({
                     const bgClass = CATEGORY_BG[w.category] ?? "";
                     const iconColor = CATEGORY_ICON_COLOR[w.category] ?? "text-muted-foreground";
                     return (
-                      <button
+                      <div
                         key={w.id}
-                        onClick={() => setSelectedWorkflow(w)}
                         className={cn(
-                          "flex items-start gap-3 rounded-xl border px-3.5 py-3 text-left transition-all",
+                          "group flex items-start gap-3 rounded-xl border px-3.5 py-3 transition-all",
                           bgClass
                         )}
                       >
-                        <WorkflowIcon name={w.icon} className={cn("mt-0.5 size-4 shrink-0", iconColor)} />
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-sm font-medium text-foreground">{w.name}</span>
-                            {w.requiresFiles && (
-                              <span className="inline-flex items-center gap-0.5 rounded-full bg-amber-500/10 px-1.5 py-px text-[9px] font-medium text-amber-600 dark:text-amber-400 border border-amber-500/20">
-                                <UploadIcon className="size-2.5" />
-                                Needs user data
-                              </span>
-                            )}
+                        <button
+                          type="button"
+                          onClick={() => setSelectedWorkflow(w)}
+                          className="flex min-w-0 flex-1 items-start gap-3 text-left"
+                        >
+                          <WorkflowIcon name={w.icon} className={cn("mt-0.5 size-4 shrink-0", iconColor)} />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-sm font-medium text-foreground">{w.name}</span>
+                              {w.requiresFiles && (
+                                <span className="inline-flex items-center gap-0.5 rounded-full bg-amber-500/10 px-1.5 py-px text-[9px] font-medium text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                                  <UploadIcon className="size-2.5" />
+                                  Needs user data
+                                </span>
+                              )}
+                            </div>
+                            <p className="mt-0.5 text-xs text-muted-foreground leading-relaxed line-clamp-2">
+                              {w.description}
+                            </p>
                           </div>
-                          <p className="mt-0.5 text-xs text-muted-foreground leading-relaxed line-clamp-2">
-                            {w.description}
-                          </p>
-                        </div>
-                      </button>
+                        </button>
+                        {onAddToBuilder && (
+                          <button
+                            type="button"
+                            onClick={() => onAddToBuilder(w)}
+                            title="Add to DAG Builder as a pipeline stage"
+                            className="mt-0.5 flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium text-muted-foreground opacity-0 transition-opacity hover:bg-foreground/10 hover:text-foreground group-hover:opacity-100"
+                          >
+                            <PlusIcon className="size-3" />
+                            Add to DAG builder
+                          </button>
+                        )}
+                      </div>
                     );
                   })}
                 </div>

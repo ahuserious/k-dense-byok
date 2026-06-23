@@ -373,16 +373,17 @@ else
     fi
 fi
 
-# ---- Step 8: Raindrop Workshop (local agent-trace debugger) ----
-# Powers the Console's "Raindrop" tab. Entirely local + non-fatal, mirroring the
-# Archon block: reuse an already-running Workshop, else launch the daemon if the
-# `raindrop` binary is present. No cloud write key is set, so nothing egresses.
+# ---- Step 8: Raindrop Workshop (local agent-trace debugger, editable fork) ----
+# Powers the Console's "Raindrop" tab and is built from the sibling raindrop-slim
+# checkout (the "Ask Claude Code" pill + cloud links are stripped at the source).
+# Mirrors the Archon block: reuse an already-healthy Workshop on :5899, else build
+# once (marker-guarded) and launch the daemon. Entirely local + non-fatal — no cloud
+# write key is set, so nothing egresses.
+# Clone: https://github.com/ahuserious/raindrop-slim  →  ../raindrop-slim
 
 RAINDROP_PORT="${RAINDROP_PORT:-5899}"
 RAINDROP_URL="http://127.0.0.1:$RAINDROP_PORT"
-# Prefer a `raindrop` on PATH; fall back to the default install location.
-RAINDROP_BIN="$(command -v raindrop 2>/dev/null || true)"
-[ -z "$RAINDROP_BIN" ] && [ -x "$HOME/.raindrop/bin/raindrop" ] && RAINDROP_BIN="$HOME/.raindrop/bin/raindrop"
+RAINDROP_DIR="${RAINDROP_DIR:-$PWD/../raindrop-slim}"
 
 raindrop_health_ok() {
     command -v curl &>/dev/null || return 1
@@ -392,47 +393,47 @@ raindrop_health_ok() {
 echo
 if raindrop_health_ok; then
     echo "  → Raindrop Workshop already running on :$RAINDROP_PORT — reusing it."
-elif [ -n "$RAINDROP_BIN" ]; then
-    echo "  → Raindrop Workshop on port $RAINDROP_PORT (local trace debugger)..."
-    # `raindrop workshop serve` is the headless daemon (no browser tab); the running
-    # instance on this machine uses exactly that. Local-only DB at ~/.raindrop.
-    ( RAINDROP_WORKSHOP_PORT="$RAINDROP_PORT" "$RAINDROP_BIN" workshop serve ) &
-    RAINDROP_PID=$!
-    if command -v curl &>/dev/null; then
-        raindrop_i=0
-        until raindrop_health_ok; do
-            if ! kill -0 "$RAINDROP_PID" 2>/dev/null; then
-                echo "  ⚠ Raindrop Workshop exited during startup (Kady is unaffected)."
-                RAINDROP_PID=""
-                break
-            fi
-            raindrop_i=$((raindrop_i + 1))
-            if [ "$raindrop_i" -ge 15 ]; then
-                echo "  ⚠ Raindrop Workshop didn't report healthy within ~15s — it may still be starting."
-                break
-            fi
-            sleep 1
-        done
-        raindrop_health_ok && echo "  Raindrop Workshop ready on :$RAINDROP_PORT"
-    else
-        echo "  → Raindrop Workshop launched on :$RAINDROP_PORT (curl unavailable — skipping health check)."
-    fi
-elif [ "${KADY_INSTALL_RAINDROP:-0}" = "1" ]; then
-    # Opt-in auto-install (the OSS one-liner). Off by default since it pipes a
-    # remote script to a shell; the Console's Raindrop tab degrades gracefully
-    # without it.
-    echo "  → Installing Raindrop Workshop (KADY_INSTALL_RAINDROP=1)..."
-    if command -v curl &>/dev/null && curl -fsSL https://raindrop.sh/install | bash; then
-        RAINDROP_BIN="$(command -v raindrop 2>/dev/null || echo "$HOME/.raindrop/bin/raindrop")"
-        ( RAINDROP_WORKSHOP_PORT="$RAINDROP_PORT" "$RAINDROP_BIN" workshop serve ) &
-        RAINDROP_PID=$!
-        echo "  → Raindrop Workshop launched on :$RAINDROP_PORT"
-    else
-        echo "  ⚠ Raindrop Workshop install failed (Kady is unaffected)."
-    fi
+elif [ ! -d "$RAINDROP_DIR" ]; then
+    echo "  → Raindrop Workshop fork not found at $RAINDROP_DIR — skipping (clone ahuserious/raindrop-slim to enable)."
+elif ! command -v bun &>/dev/null; then
+    echo "  ⚠ Raindrop Workshop fork found but 'bun' is not installed — skipping (Kady is unaffected)."
 else
-    echo "  → Raindrop Workshop not found — the Console's Raindrop tab will show a setup hint."
-    echo "    Install it (OSS, local): curl -fsSL https://raindrop.sh/install | bash  (or set KADY_INSTALL_RAINDROP=1)."
+    echo "  → Raindrop Workshop on port $RAINDROP_PORT (building if needed)..."
+    # One-time UI build, marker-guarded (app/dist/index.html) so repeat starts are fast.
+    if [ ! -f "$RAINDROP_DIR/app/dist/index.html" ]; then
+        echo "    Installing packages and building the UI bundle (first run only)..."
+        if ! (cd "$RAINDROP_DIR" && bun install && bun run build:ui); then
+            echo "  ⚠ Raindrop Workshop build failed — skipping (Kady is unaffected)."
+        fi
+    fi
+    if [ -f "$RAINDROP_DIR/app/dist/index.html" ]; then
+        (
+            cd "$RAINDROP_DIR" && \
+            RAINDROP_WORKSHOP_PORT="$RAINDROP_PORT" \
+            RAINDROP_WORKSHOP_DB_PATH="$HOME/.raindrop/raindrop_workshop.db" \
+            bun run start
+        ) &
+        RAINDROP_PID=$!
+        if command -v curl &>/dev/null; then
+            raindrop_i=0
+            until raindrop_health_ok; do
+                if ! kill -0 "$RAINDROP_PID" 2>/dev/null; then
+                    echo "  ⚠ Raindrop Workshop exited during startup (Kady is unaffected)."
+                    RAINDROP_PID=""
+                    break
+                fi
+                raindrop_i=$((raindrop_i + 1))
+                if [ "$raindrop_i" -ge 20 ]; then
+                    echo "  ⚠ Raindrop Workshop didn't report healthy within ~20s — it may still be starting."
+                    break
+                fi
+                sleep 1
+            done
+            raindrop_health_ok && echo "  Raindrop Workshop ready on :$RAINDROP_PORT"
+        else
+            echo "  → Raindrop Workshop launched on :$RAINDROP_PORT (curl unavailable — skipping health check)."
+        fi
+    fi
 fi
 
 echo

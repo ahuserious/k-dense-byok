@@ -1,27 +1,28 @@
 // danbot-byok — web/src/components/chat-rail.tsx
 //
-// A collapsible chat docked as a vertical rail on the FAR RIGHT of the page,
-// available across all views (Workflows / DAG Pipelines / DAG Builder / Console)
-// so you can talk to KADY without leaving the visual builder or the console. It
-// replaces the old chat popout that lived INSIDE the Archon builder iframe (which
-// couldn't host Kady's model selector or load Kady skills).
+// A collapsible chat docked as a vertical rail on the FAR RIGHT of the DAG Builder
+// (scoped to that view in page.tsx). It's where you compose a pipeline by talking to
+// KADY — and where the "Add to pipeline" popover (workflows / skills / databases /
+// suggestions) sends its compose instructions. It replaces the old chat popout that
+// lived INSIDE the Archon builder iframe (which couldn't host Kady's model selector
+// or load Kady skills).
 //
-// It is "wired the same way as the rest of the agents": it renders a real
-// <ChatTab> (same Pi session, same ModelSelector, same tools/cost), just in a
-// narrow drawer. The one extra is `preloadSkills` — the rail's session always
-// reaches for `archon` + `scientific-pipeline-builder` (see ChatTab.preloadSkills).
+// It is "wired the same way as the rest of the agents": it renders a real <ChatTab>
+// (same Pi session, model selector, tools, cost), with `preloadSkills` so the session
+// always reaches for `archon` + `scientific-pipeline-builder`.
 //
-// Collapsed → a thin vertical strip you click to slide the panel open; open/closed
-// is persisted in localStorage. The ChatTab stays mounted while collapsed (just
-// display:none via isActive) so an in-flight turn keeps streaming.
+// Collapsed → a thin vertical strip you click to slide the panel open; open/closed is
+// persisted in localStorage. The ChatTab stays mounted while collapsed so an in-flight
+// turn keeps streaming.
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { ChevronRightIcon, MessageSquareTextIcon, XIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { ChatTab, type ChatTabMeta } from "@/components/chat-tab";
+import { ChatTab, type ChatTabHandle, type ChatTabMeta } from "@/components/chat-tab";
 import type { Skill } from "@/components/skills-selector";
+import { DagComposePopover } from "@/components/dag-compose-popover";
 
 // A dedicated, stable tab id for the rail's session (kept out of the main tab strip).
 const RAIL_TAB_ID = "rail-chat";
@@ -41,8 +42,10 @@ export interface ChatRailProps {
   budgetTotalUsd: number;
   budgetLimitUsd: number | null;
   onMetaChange: (tabId: string, meta: ChatTabMeta) => void;
-  onStitchPipeline: () => void;
-  onCreateGoalWorkflow: (goal: string) => void;
+  /** A compose instruction parked by "Add to DAG builder"; flushed to the chat on bump. */
+  composeMessageRef?: RefObject<string | null>;
+  /** Bumped by the parent each time a new composeMessageRef is parked. */
+  composeNonce?: number;
 }
 
 export function ChatRail({
@@ -57,9 +60,26 @@ export function ChatRail({
   budgetTotalUsd,
   budgetLimitUsd,
   onMetaChange,
-  onStitchPipeline,
-  onCreateGoalWorkflow,
+  composeMessageRef,
+  composeNonce,
 }: ChatRailProps) {
+  const chatTabRef = useRef<ChatTabHandle>(null);
+
+  // Send a message to the rail's chat, retrying briefly until the ChatTab's imperative
+  // handle has registered (it mounts a tick after the rail opens).
+  const sendToRail = useCallback((message: string) => {
+    let tries = 0;
+    const attempt = () => {
+      const handle = chatTabRef.current;
+      if (handle) {
+        void handle.sendQuick(message);
+        return;
+      }
+      if (tries++ < 15) setTimeout(attempt, 100);
+    };
+    attempt();
+  }, []);
+
   // Hydrate persisted open/closed once on mount (localStorage is client-only).
   useEffect(() => {
     const saved = window.localStorage.getItem(STORAGE_KEY);
@@ -70,6 +90,17 @@ export function ChatRail({
     window.localStorage.setItem(STORAGE_KEY, open ? "1" : "0");
   }, [open]);
 
+  // Flush a parked compose instruction (from a workflow card's "Add to DAG builder").
+  // Keyed on composeNonce so it fires even when the rail was already open.
+  useEffect(() => {
+    if (!composeNonce) return;
+    const msg = composeMessageRef?.current;
+    if (msg) {
+      composeMessageRef.current = null;
+      sendToRail(msg);
+    }
+  }, [composeNonce, composeMessageRef, sendToRail]);
+
   return (
     <div
       className={cn(
@@ -79,24 +110,28 @@ export function ChatRail({
     >
       {open ? (
         <>
-          <div className="flex shrink-0 items-center justify-between border-b px-3 py-1.5">
+          <div className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-1.5">
             <span className="flex items-center gap-1.5 text-xs font-medium text-foreground">
               <MessageSquareTextIcon className="size-3.5" />
               Chat
             </span>
-            <button
-              type="button"
-              onClick={() => onToggle(false)}
-              aria-label="Collapse chat rail"
-              title="Collapse chat"
-              className="rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            >
-              <XIcon className="size-3.5" />
-            </button>
+            <div className="flex items-center gap-1">
+              <DagComposePopover allSkills={allSkills} onCompose={sendToRail} />
+              <button
+                type="button"
+                onClick={() => onToggle(false)}
+                aria-label="Collapse chat rail"
+                title="Collapse chat"
+                className="rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                <XIcon className="size-3.5" />
+              </button>
+            </div>
           </div>
           {/* The real KADY chat — preloadSkills makes this session reach for the
               archon + scientific-pipeline-builder skills. */}
           <ChatTab
+            ref={chatTabRef}
             tabId={RAIL_TAB_ID}
             isActive={open}
             allFiles={allFiles}
@@ -108,8 +143,6 @@ export function ChatRail({
             budgetTotalUsd={budgetTotalUsd}
             budgetLimitUsd={budgetLimitUsd}
             onMetaChange={onMetaChange}
-            onStitchPipeline={onStitchPipeline}
-            onCreateGoalWorkflow={onCreateGoalWorkflow}
             preloadSkills={RAIL_SKILLS}
           />
         </>
