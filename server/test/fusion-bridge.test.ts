@@ -51,10 +51,11 @@ describe("buildFusionRequestBody", () => {
         temperature: 0.6,
       },
     ]);
-    // No conflicting top-level reasoning/temperature fields.
+    // Top-level params drive the OUTER (fuser) call: exactly one canonical
+    // reasoning object plus the preset temperature — never a raw reasoning_effort.
     expect("reasoning_effort" in out).toBe(false);
-    expect("reasoning" in out).toBe(false);
-    expect("temperature" in out).toBe(false);
+    expect(out.reasoning).toEqual({ effort: "xhigh" });
+    expect(out.temperature).toBe(0.6);
     // Base payload preserved + not mutated.
     expect(out.messages).toBe(basePayload.messages);
     expect(out.stream).toBe(true);
@@ -62,22 +63,34 @@ describe("buildFusionRequestBody", () => {
     expect("plugins" in basePayload).toBe(false);
   });
 
-  it("normalises effort inside the plugin and strips top-level reasoning + alias", () => {
+  it("normalises effort in plugin and top-level, replacing Pi's own reasoning fields", () => {
     const withReasoning = { ...basePayload, reasoning: { effort: "low" }, reasoning_effort: "low" };
     const out = buildFusionRequestBody(withReasoning, { ...fusionConfig, reasoning_effort: "medium" });
     const plugin = (out.plugins as Array<Record<string, unknown>>)[0];
     expect(plugin.reasoning).toEqual({ effort: "medium" });
-    expect("reasoning" in out).toBe(false);
+    expect(out.reasoning).toEqual({ effort: "medium" });
     expect("reasoning_effort" in out).toBe(false);
   });
 
-  it("omits temperature from the plugin when the preset has none", () => {
+  it("omits temperature everywhere when the preset has none", () => {
     const noTemp = { ...fusionConfig };
     delete (noTemp as { temperature?: number }).temperature;
-    const out = buildFusionRequestBody(basePayload, noTemp);
+    const out = buildFusionRequestBody({ ...basePayload, temperature: 0.2 }, noTemp);
     expect(out.model).toBe("openrouter/fusion");
     const plugin = (out.plugins as Array<Record<string, unknown>>)[0];
     expect("temperature" in plugin).toBe(false);
+    // Pi's own temperature is stripped too — the fusion turn runs the preset's
+    // sampling config (or provider defaults), not the previous model's.
+    expect("temperature" in out).toBe(false);
+  });
+
+  it("strips Pi's reasoning without adding one when the preset has no effort", () => {
+    const noEffort = { ...fusionConfig };
+    delete (noEffort as { reasoning_effort?: string }).reasoning_effort;
+    const out = buildFusionRequestBody({ ...basePayload, reasoning: { effort: "low" } }, noEffort);
+    expect("reasoning" in out).toBe(false);
+    const plugin = (out.plugins as Array<Record<string, unknown>>)[0];
+    expect("reasoning" in plugin).toBe(false);
   });
 
   it("returns the base payload unchanged when there is no fusionConfig", () => {

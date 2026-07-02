@@ -56,14 +56,20 @@ function normalizeEffort(effort: string): string {
  *
  * Uses OpenRouter's Fusion *router* form (docs: routing/routers/fusion-router):
  * model "openrouter/fusion" + a single `plugins:[{id:"fusion", ...}]` carrying
- * the panel (analysis_models), judge (model), preset, max_tool_calls, and —
- * crucially — `reasoning`/`temperature` INSIDE the plugin (top-level reasoning
- * 400s against Pi's own reasoning.effort). Fusion is a server tool the model
- * chooses to call, and the plugin only injects it when the caller isn't sending
- * its own `tools`; Pi always does, so we drop the tools array and set
- * `tool_choice:"required"` to force deterministic fusion on every message of a
- * Fusion preset. (This drops Pi's local agentic tools for the fusion turn — the
- * panel runs web search server-side.)
+ * the panel (analysis_models), judge (model), preset, max_tool_calls, and
+ * `reasoning`/`temperature` INSIDE the plugin — the router forwards those to
+ * the panel calls (and reasoning to the judge; the judge's temperature is
+ * pinned to 0 server-side). The OUTER call — the fuser that writes the final
+ * answer — does NOT read plugin params, so the preset's reasoning/temperature
+ * are also set top-level, REPLACING Pi's own copies: exactly one canonical
+ * `reasoning` object is sent (the 400 this code used to guard against came
+ * from the preset's raw `reasoning_effort` coexisting with Pi's
+ * `reasoning.effort`, not from top-level reasoning per se). Fusion is a server
+ * tool the model chooses to call, and the plugin only injects it when the
+ * caller isn't sending its own `tools`; Pi always does, so we drop the tools
+ * array and set `tool_choice:"required"` to force deterministic fusion on
+ * every message of a Fusion preset. (This drops Pi's local agentic tools for
+ * the fusion turn — the panel runs web search server-side.)
  */
 export function buildFusionRequestBody(
   basePayload: Record<string, unknown>,
@@ -74,10 +80,14 @@ export function buildFusionRequestBody(
   const plugins = Array.isArray(fusionConfig.plugins) ? fusionConfig.plugins : [];
   const plugin = { ...((plugins[0] as Record<string, unknown> | undefined) ?? { id: "fusion" }) };
 
-  // Move the preset's reasoning/temperature INSIDE the fusion plugin (the router
-  // applies them to the panel + judge); normalise the effort to OpenRouter's set.
-  if (fusionConfig.reasoning_effort !== undefined) {
-    plugin.reasoning = { effort: normalizeEffort(String(fusionConfig.reasoning_effort)) };
+  // Copy the preset's reasoning/temperature INSIDE the fusion plugin (the router
+  // forwards them to the panel + judge); normalise the effort to OpenRouter's set.
+  const effort =
+    fusionConfig.reasoning_effort !== undefined
+      ? normalizeEffort(String(fusionConfig.reasoning_effort))
+      : undefined;
+  if (effort !== undefined) {
+    plugin.reasoning = { effort };
   }
   if (fusionConfig.temperature !== undefined) {
     plugin.temperature = fusionConfig.temperature;
@@ -100,11 +110,19 @@ export function buildFusionRequestBody(
   // only when the caller isn't managing tools, and with tool_choice:"required" +
   // that single tool, fusion runs deterministically.
   delete next.tools;
-  // Reasoning/temperature now live inside the plugin; remove any top-level copies
-  // so OpenRouter never sees conflicting reasoning fields.
+  // Top-level params drive the OUTER call (the fuser writing the final answer),
+  // which never reads the plugin's copies. Replace Pi's reasoning fields with
+  // the preset's single canonical `reasoning` object — sending both a raw
+  // `reasoning_effort` and `reasoning.effort` is what 400s.
   delete next.reasoning;
   delete next.reasoning_effort;
   delete next.temperature;
+  if (effort !== undefined) {
+    next.reasoning = { effort };
+  }
+  if (fusionConfig.temperature !== undefined) {
+    next.temperature = fusionConfig.temperature;
+  }
   return next;
 }
 

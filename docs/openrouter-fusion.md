@@ -29,7 +29,7 @@ A Fusion run threads from the picker to a real `openrouter/fusion` request and b
 
 Presets are defined in `web/src/lib/fusion-presets.ts` as `DEFAULT_FUSION_CONFIGS` — each a `{ id, name, note, config }` where `config` is the serialized Fusion request body. `loadFusionConfigs()` reads the user's saved presets from `localStorage` (key `fusionConfigs`), falling back to the built-ins; a `FUSION_DEFAULTS_VERSION` bump re-seeds new/updated built-ins while preserving user-added presets.
 
-`web/src/lib/use-models.ts` turns each preset into a synthetic picker entry with id `fusion/<presetId>`, provider `"Openrouter Fusion"`, the preset's DRACO `note`, and a **combined price = the sum of the panel models' catalogue prices** (so a two-Opus panel correctly shows double Opus pricing).
+`web/src/lib/use-models.ts` turns each preset into a synthetic picker entry with id `fusion/<presetId>`, provider `"Openrouter Fusion"`, the preset's DRACO `note`, and a **combined price = the sum of the panel models' catalogue prices plus twice the judge's** — a fusion turn bills N panel calls + 2 judge-model calls (the structured analysis and, under the `openrouter/fusion` alias, the outer call that writes the final answer). So a two-Opus panel judged by Opus shows 4× Opus pricing.
 
 ### 2. The run request (frontend → server)
 
@@ -39,7 +39,7 @@ When a `fusion/*` model is selected, `web/src/lib/use-agent.ts` includes the pre
 
 `server/src/api/sessions.ts` detects a `fusion/`-prefixed model and, for that turn:
 
-- resolves it via `resolveModel(model, registry, fusionConfig)` → `buildFusionModel()` (`server/src/agent/models.ts`), which builds an `openrouter/fusion` Pi `Model` **priced at the summed panel cost** (it refuses to run a $0-priced fusion model, so the spend cap always accrues);
+- resolves it via `resolveModel(model, registry, fusionConfig)` → `buildFusionModel()` (`server/src/agent/models.ts`), which builds an `openrouter/fusion` Pi `Model` **priced at the summed panel cost plus twice the judge's** (it refuses to run a $0-priced fusion model, so the spend cap always accrues);
 - stashes the `fusionConfig` for the session (`setFusionConfig`);
 - **empties Pi's local tool registry** with `session.setActiveToolsByName([])`, restored in a `finally` so non-fusion runs are unaffected.
 
@@ -60,17 +60,19 @@ That last step is load-bearing: Pi executes a model's returned tool calls by nam
     "analysis_models": ["...panel..."],
     "model": "<judge>",                              // synthesizer
     "max_tool_calls": 16,
-    "reasoning": { "effort": "xhigh" },              // reasoning + temperature live INSIDE the plugin
-    "temperature": 1
-  }]
+    "reasoning": { "effort": "xhigh" },              // forwarded to the panel + judge
+    "temperature": 1                                   // panel only — the judge always runs at temp 0
+  }],
+  "reasoning": { "effort": "xhigh" },                  // outer (fuser) call — writes the final answer
+  "temperature": 1
 }
 ```
 
-Reasoning and temperature are placed **inside the plugin** (a top-level `reasoning_effort` collides with Pi's own `reasoning.effort` and 400s). OpenRouter runs the panel server-side (each panel model with web search/fetch), the judge synthesizes, and the result streams back through Pi's normal SSE path.
+Reasoning and temperature are set **both inside the plugin** (forwarded to the panel; reasoning also reaches the judge — its temperature is pinned to 0 server-side) **and top-level** for the outer fuser call that writes the final answer. Pi's own reasoning fields are replaced with the preset's single canonical `reasoning` object (sending a raw `reasoning_effort` alongside `reasoning.effort` is what 400s). OpenRouter runs the panel server-side (each panel model with web search/fetch), the judge analyzes, the fuser synthesizes, and the result streams back through Pi's normal SSE path.
 
 ## Pricing & the spend cap
 
-Pi computes session cost from the resolved `Model.cost`, so the synthetic `openrouter/fusion` model carries the **summed panel pricing** and a Fusion run accrues against the project `spendLimitUsd` like any other. The catalogue lookup (`catalogueEntryFor` in `models.ts`) also strips OpenRouter reasoning-effort suffixes (`-xhigh`/`-high`/…) so suffixed ids price as their base model instead of $0 — without that, the cap would be blind to them. The displayed cost is an **estimate** from `web/src/data/models.json`; OpenRouter's actual multi-model bill may differ.
+Pi computes session cost from the resolved `Model.cost`, so the synthetic `openrouter/fusion` model carries the **summed panel pricing plus twice the judge's** (per OpenRouter's fusion-router docs, a fusion turn runs "N panel calls + 1 judge call in addition to your normal request", and under the router alias the outer request also runs the judge model) and a Fusion run accrues against the project `spendLimitUsd` like any other. The catalogue lookup (`catalogueEntryFor` in `models.ts`) also strips OpenRouter reasoning-effort suffixes (`-xhigh`/`-high`/…) so suffixed ids price as their base model instead of $0 — without that, the cap would be blind to them. The displayed cost is an **estimate** from `web/src/data/models.json`; OpenRouter's actual multi-model bill may differ.
 
 ## Managing presets (Settings → Fusion)
 
@@ -91,4 +93,4 @@ The **Fusion** tab in Settings lists your presets and an **Add Fusion config +**
 - `web/src/components/settings-dialog.tsx` — the Settings → Fusion management UI
 - `server/src/api/sessions.ts` — fusion detection, config stash, tool-registry disable
 - `server/src/agent/fusion-bridge.ts` — the `before_provider_request` body rewrite
-- `server/src/agent/models.ts` — `buildFusionModel` (summed-panel pricing) + `catalogueEntryFor`
+- `server/src/agent/models.ts` — `buildFusionModel` (panel + 2× judge pricing) + `catalogueEntryFor`

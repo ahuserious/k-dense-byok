@@ -157,6 +157,18 @@ export function fusionPanelModels(cfg: Record<string, unknown>): string[] {
   return Array.isArray(legacy) ? (legacy as string[]) : [];
 }
 
+/**
+ * Judge model id for a parsed Fusion body (`plugins[0].model`), if set. The
+ * judge is billed for TWO calls per fusion turn — the structured analysis and,
+ * under the `openrouter/fusion` alias, the outer request that writes the final
+ * answer — so pricing must count it twice on top of the panel sum.
+ */
+export function fusionJudgeModel(cfg: Record<string, unknown>): string | undefined {
+  const plugins = cfg.plugins as Array<Record<string, unknown>> | undefined;
+  const judge = plugins?.[0]?.model;
+  return typeof judge === "string" ? judge : undefined;
+}
+
 // Ids of built-in presets that shipped in earlier versions and are retired now.
 // They're dropped on migration so they don't linger as fake "user" configs.
 const RETIRED_DEFAULT_IDS = new Set(["research-fusion", "frontier-council", "budget-trio"]);

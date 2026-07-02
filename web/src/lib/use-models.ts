@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import staticModels from "@/data/models.json";
 import type { Model } from "@/components/model-selector";
 import { apiFetch, onProjectChange } from "@/lib/projects";
-import { fusionPanelModels, loadFusionConfigs } from "@/lib/fusion-presets";
+import { fusionJudgeModel, fusionPanelModels, loadFusionConfigs } from "@/lib/fusion-presets";
 
 const OPENROUTER_MODELS = staticModels as Model[];
 
@@ -86,22 +86,37 @@ export function useModels(): UseModelsReturn {
       }
 
       const panel = fusionPanelModels(cfg);
+      const judge = fusionJudgeModel(cfg);
       const reasoning = (cfg.reasoning_effort as string) || "standard";
 
-      // Combined input/output price = sum of the panel models' catalogue prices.
+      // Combined input/output price = sum of the panel models' catalogue prices
+      // plus TWICE the judge's (analysis call + the outer call that writes the
+      // final answer — both run the judge model under the openrouter/fusion alias).
       let totalPrompt = 0;
       let totalCompletion = 0;
       const missing: string[] = [];
-      for (const modelId of panel) {
+      const priceOf = (modelId: string) => {
         const cleanId = modelId.replace(/^openrouter\//, "");
-        const found = OPENROUTER_MODELS.find(
+        return OPENROUTER_MODELS.find(
           (m) => m.id === `openrouter/${cleanId}` || m.id === modelId,
         );
+      };
+      for (const modelId of panel) {
+        const found = priceOf(modelId);
         if (found) {
           totalPrompt += found.pricing.prompt;
           totalCompletion += found.pricing.completion;
         } else {
-          missing.push(cleanId);
+          missing.push(modelId.replace(/^openrouter\//, ""));
+        }
+      }
+      if (judge) {
+        const found = priceOf(judge);
+        if (found) {
+          totalPrompt += 2 * found.pricing.prompt;
+          totalCompletion += 2 * found.pricing.completion;
+        } else {
+          missing.push(`${judge.replace(/^openrouter\//, "")} (judge)`);
         }
       }
 
@@ -121,7 +136,7 @@ export function useModels(): UseModelsReturn {
         modality: "text->text",
         description:
           `OpenRouter Fusion • ${panelNames} • ${reasoning} reasoning` +
-          `\n$${totalPrompt.toFixed(2)} in / $${totalCompletion.toFixed(2)} out per 1M tok (combined)` +
+          `\n$${totalPrompt.toFixed(2)} in / $${totalCompletion.toFixed(2)} out per 1M tok (panel + 2× judge)` +
           noteLine +
           missingLine,
         isFusion: true,

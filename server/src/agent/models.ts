@@ -134,15 +134,29 @@ function fusionPanelModels(fusionConfig: Record<string, unknown>): string[] {
   return Array.isArray(panel) ? (panel as string[]) : [];
 }
 
+/** Judge model id out of a Fusion request body (`plugins[0].model`), if set. */
+function fusionJudgeModel(fusionConfig: Record<string, unknown>): string | undefined {
+  const plugins = fusionConfig.plugins as Array<Record<string, unknown>> | undefined;
+  const judge = plugins?.[0]?.model;
+  return typeof judge === "string" ? judge : undefined;
+}
+
 /**
  * Build the Pi Model for an OpenRouter Fusion run. The id is "openrouter/fusion"
  * (the wire model the extension rewrites the body to), but its cost MUST be the
- * SUM of the analysis panel models' catalogue prices — otherwise Pi ledgers the
- * turn at $0 (cost flows from model.cost, not the rewritten HTTP body) and the
- * project spend cap is silently bypassed.
+ * SUM of the panel models' catalogue prices PLUS TWICE the judge's — otherwise
+ * Pi ledgers the turn at $0 (cost flows from model.cost, not the rewritten HTTP
+ * body) and the project spend cap is silently bypassed.
  *
- * Throws if the catalogue priced none of the panel models, so the caller can
- * abort the run rather than proceed with a $0-priced (cap-bypassing) Fusion model.
+ * Why twice the judge: per OpenRouter's fusion-router docs, a fusion turn runs
+ * "N panel calls + 1 judge call in addition to your normal request", and under
+ * the `openrouter/fusion` alias the outer request (the fuser that writes the
+ * final answer) resolves to the judge model — so the judge model is billed for
+ * two calls per turn (analysis + final synthesis). Panel-only pricing modeled
+ * ~3× a solo completion where the docs say to expect ~4-5×.
+ *
+ * Throws if the catalogue priced none of the panel/judge models, so the caller
+ * can abort the run rather than proceed with a $0-priced (cap-bypassing) model.
  */
 export function buildFusionModel(fusionConfig: Record<string, unknown>): Model<Api> {
   let costInput = 0;
@@ -155,10 +169,17 @@ export function buildFusionModel(fusionConfig: Record<string, unknown>): Model<A
     costOutput += entry.costOutput;
     priced++;
   }
+  const judgeId = fusionJudgeModel(fusionConfig);
+  const judgeEntry = judgeId ? catalogueEntryFor(stripOpenRouter(judgeId)) : undefined;
+  if (judgeEntry) {
+    costInput += 2 * judgeEntry.costInput;
+    costOutput += 2 * judgeEntry.costOutput;
+    priced++;
+  }
   if (priced === 0 || (costInput === 0 && costOutput === 0)) {
     throw new Error(
-      "Fusion panel has no priceable models in the catalogue; refusing to run a " +
-        "$0-priced Fusion model (spend cap would be bypassed).",
+      "Fusion panel/judge has no priceable models in the catalogue; refusing to " +
+        "run a $0-priced Fusion model (spend cap would be bypassed).",
     );
   }
   return {
