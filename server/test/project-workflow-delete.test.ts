@@ -21,9 +21,21 @@ const disposeWorkflowSession = vi.fn(async (
   _options: DisposeWorkflowDelegationSessionOptions = {},
 ) => {});
 const assertHostedFusionProjectQuiescent = vi.fn((_projectId?: string) => {});
+const supervisorQuiesceProject = vi.fn(async (projectId: string) => ({
+  projectId,
+  quiescent: true as const,
+  cancelledAttempts: 0,
+}));
 const app = Fastify();
 await registerProjectRoutes(app, {
   workflowController: { quiesceProject, releaseProjectQuiesce },
+  disposeWorkflowSession,
+  assertHostedFusionProjectQuiescent,
+});
+const supervisorApp = Fastify();
+await registerProjectRoutes(supervisorApp, {
+  workflowController: { quiesceProject, releaseProjectQuiesce },
+  workflowSupervisor: { quiesceProject: supervisorQuiesceProject },
   disposeWorkflowSession,
   assertHostedFusionProjectQuiescent,
 });
@@ -142,10 +154,17 @@ beforeEach(() => {
   disposeWorkflowSession.mockReset();
   disposeWorkflowSession.mockResolvedValue(undefined);
   assertHostedFusionProjectQuiescent.mockReset();
+  supervisorQuiesceProject.mockReset();
+  supervisorQuiesceProject.mockImplementation(async (projectId: string) => ({
+    projectId,
+    quiescent: true,
+    cancelledAttempts: 0,
+  }));
 });
 
 afterAll(async () => {
   await app.close();
+  await supervisorApp.close();
   fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
 });
 
@@ -166,6 +185,58 @@ describe("project deletion owns the DAG lifecycle", () => {
     });
     expect(assertHostedFusionProjectQuiescent).toHaveBeenCalledWith("delete-me");
     expect(getProject("delete-me")).toBeNull();
+  });
+
+  it("drains the workflow controller before the supervisor quiesces remote owners", async () => {
+    createProject({ name: "Supervised deletion", projectId: "supervised-delete" });
+    const ordering: string[] = [];
+    quiesceProject.mockImplementationOnce(async (projectId: string) => {
+      ordering.push("controller");
+      return { projectId, cancellationRequested: [], drained: true };
+    });
+    supervisorQuiesceProject.mockImplementationOnce(async (projectId: string) => {
+      ordering.push("supervisor");
+      return { projectId, quiescent: true, cancelledAttempts: 0 };
+    });
+
+    const response = await supervisorApp.inject({
+      method: "DELETE",
+      url: "/projects/supervised-delete",
+    });
+
+    expect(response.statusCode).toBe(204);
+    expect(ordering).toEqual(["controller", "supervisor"]);
+    expect(supervisorQuiesceProject).toHaveBeenCalledWith(
+      "supervised-delete",
+      "project-delete",
+    );
+    expect(assertHostedFusionProjectQuiescent).not.toHaveBeenCalled();
+    expect(disposeWorkflowSession).not.toHaveBeenCalled();
+    expect(getProject("supervised-delete")).toBeNull();
+  });
+
+  it("preserves project state when the supervisor refuses remote quiescence", async () => {
+    createProject({ name: "Remote owner busy", projectId: "remote-owner-busy" });
+    supervisorQuiesceProject.mockRejectedValueOnce(
+      new Error("Project remote-owner-busy still has supervised Pi ownership."),
+    );
+
+    const response = await supervisorApp.inject({
+      method: "DELETE",
+      url: "/projects/remote-owner-busy",
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().detail).toMatch(/supervised Pi ownership/);
+    expect(quiesceProject).toHaveBeenCalledWith("remote-owner-busy");
+    expect(supervisorQuiesceProject).toHaveBeenCalledWith(
+      "remote-owner-busy",
+      "project-delete",
+    );
+    expect(assertHostedFusionProjectQuiescent).not.toHaveBeenCalled();
+    expect(disposeWorkflowSession).not.toHaveBeenCalled();
+    expect(releaseProjectQuiesce).toHaveBeenCalledWith("remote-owner-busy");
+    expect(getProject("remote-owner-busy")?.id).toBe("remote-owner-busy");
   });
 
   it("preserves project state while a hosted Fusion provider session is quarantined", async () => {

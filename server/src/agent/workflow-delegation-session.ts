@@ -63,6 +63,23 @@ function assertProjectIdentity(projectId: string, paths: ProjectPaths): void {
   }
 }
 
+/**
+ * Prepare the immutable child-runtime boundary before any budget admission.
+ * The out-of-process workflow supervisor and the embedded fallback both use
+ * this exact seeding/trust check so transport placement cannot change which
+ * Pi packages a DAG leaf is allowed to load.
+ */
+export function prepareWorkflowDelegationProject(
+  projectId: string,
+  paths: ProjectPaths,
+): void {
+  assertProjectIdentity(projectId, paths);
+  seedAgentFiles(paths);
+  ensureWebAccess(paths);
+  seedDagFusionPackage(paths);
+  assertDagFusionPackageSeeded(paths);
+}
+
 async function buildWorkflowDelegationSession(
   projectId: string,
   paths: ProjectPaths,
@@ -73,10 +90,7 @@ async function buildWorkflowDelegationSession(
   // Child Pi processes discover their project-scoped specialist roster and
   // package resources from the sandbox. These seeders are idempotent and do
   // not make the host session an ordinary persistent chat.
-  seedAgentFiles(paths);
-  ensureWebAccess(paths);
-  seedDagFusionPackage(paths);
-  assertDagFusionPackageSeeded(paths);
+  prepareWorkflowDelegationProject(projectId, paths);
 
   const bridge = createDagFusionWorkflowSessionBridge();
   const settingsManager = SettingsManager.inMemory({

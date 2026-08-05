@@ -890,70 +890,64 @@ export async function runHostedOpenRouterFusion(
       );
 
       if (acknowledgement.status !== "fulfilled") {
-        if (!activeAbort) {
-          // This can only be reached if a session violates its isIdle contract
-          // after a settled prompt. Preserve the same fail-closed error even
-          // though there is no meaningful abort promise to quarantine.
-          cleanupError ??= acknowledgement.status === "rejected"
-            ? acknowledgement.error
-            : new Error("Hosted Fusion quiescence acknowledgement timed out.");
-        } else {
-          registerHostedFusionQuarantine({
-            projectId: request.projectId,
-            identity: request.identity,
-            session: ownedSession,
-            promptPromise: promptForQuiescence,
-            abortPromise: activeAbort,
-            reason: acknowledgement.status === "rejected"
-              ? "ack-rejected"
-              : "ack-timeout",
-            dependencies,
-          });
-          const acknowledgementError = acknowledgement.status === "rejected"
-            ? acknowledgement.error
-            : new Error(
-                `Hosted Fusion cancellation was not acknowledged within ${dependencies.cancellationAckTimeoutMs}ms.`,
-              );
-          const cancellationFailure = new HostedFusionError(
-            "HOSTED_FUSION_CANCELLATION_UNCONFIRMED",
-            "Hosted Fusion could not prove provider quiescence; Kady retained the exact temporary session and blocked further hosted Fusion work for this project.",
-            false,
-            {
-              cause: primaryError === undefined
-                ? acknowledgementError
-                : new AggregateError(
-                    [primaryError, acknowledgementError],
-                    "Hosted Fusion execution ended without confirmed cancellation.",
-                  ),
-            },
-          );
-          if (!reconciliationStarted) {
-            try {
-              // No partial receipt can safely release the reservation while a
-              // provider request remains quarantined. Omitting usage charges
-              // the full pre-reserved compound envelope exactly once.
-              await reconcileOnce({
-                identity: request.identity,
-                reason: "protocol-error",
-                responseStatus: "failed",
-                progress: usageProgress(undefined, providerStarted, duration()),
-              });
-            } catch (reconciliationError) {
-              throw new HostedFusionError(
-                "HOSTED_FUSION_CANCELLATION_UNCONFIRMED",
-                "Hosted Fusion cancellation was not confirmed and its reservation could not be reconciled; both ownership and the budget remain fail-closed.",
-                false,
-                {
-                  cause: new AggregateError(
-                    [cancellationFailure, reconciliationError],
-                    "Hosted Fusion cancellation and reconciliation both failed.",
-                  ),
-                },
-              );
-            }
+        registerHostedFusionQuarantine({
+          projectId: request.projectId,
+          identity: request.identity,
+          session: ownedSession,
+          promptPromise: promptForQuiescence,
+          // A settled prompt can still violate Pi's isIdle contract without an
+          // abort having been issued. Quarantine must retain that exact session
+          // too; the rejected-release path will make one process-owned retry.
+          abortPromise: activeAbort ?? Promise.resolve(),
+          reason: acknowledgement.status === "rejected"
+            ? "ack-rejected"
+            : "ack-timeout",
+          dependencies,
+        });
+        const acknowledgementError = acknowledgement.status === "rejected"
+          ? acknowledgement.error
+          : new Error(
+              `Hosted Fusion cancellation was not acknowledged within ${dependencies.cancellationAckTimeoutMs}ms.`,
+            );
+        const cancellationFailure = new HostedFusionError(
+          "HOSTED_FUSION_CANCELLATION_UNCONFIRMED",
+          "Hosted Fusion could not prove provider quiescence; Kady retained the exact temporary session and blocked further hosted Fusion work for this project.",
+          false,
+          {
+            cause: primaryError === undefined
+              ? acknowledgementError
+              : new AggregateError(
+                  [primaryError, acknowledgementError],
+                  "Hosted Fusion execution ended without confirmed cancellation.",
+                ),
+          },
+        );
+        if (!reconciliationStarted) {
+          try {
+            // No partial receipt can safely release the reservation while a
+            // provider request remains quarantined. Omitting usage charges
+            // the full pre-reserved compound envelope exactly once.
+            await reconcileOnce({
+              identity: request.identity,
+              reason: "protocol-error",
+              responseStatus: "failed",
+              progress: usageProgress(undefined, providerStarted, duration()),
+            });
+          } catch (reconciliationError) {
+            throw new HostedFusionError(
+              "HOSTED_FUSION_CANCELLATION_UNCONFIRMED",
+              "Hosted Fusion cancellation was not confirmed and its reservation could not be reconciled; both ownership and the budget remain fail-closed.",
+              false,
+              {
+                cause: new AggregateError(
+                  [cancellationFailure, reconciliationError],
+                  "Hosted Fusion cancellation and reconciliation both failed.",
+                ),
+              },
+            );
           }
-          throw cancellationFailure;
         }
+        throw cancellationFailure;
       }
 
       // The provider prompt has settled, every issued abort fulfilled, and Pi

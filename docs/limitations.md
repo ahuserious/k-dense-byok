@@ -55,19 +55,25 @@ user-provided Lake project immutable. Unsandboxed Lean is unavailable on native
 Windows because reliable descendant-process cancellation is not yet implemented.
 
 The integration branch's DAG Pi-leaf and hosted OpenRouter Fusion cancellation
-quarantines are also process-local. Graceful DAG-leaf cancellation retains the
-exact Delegation V2 tuple and dedicated session until a fully validated exact
-terminal response arrives. Hosted Fusion retains its exact temporary Pi session
-and Fusion configuration until its prompt settles, abort fulfils, and the
-session reports idle. Malformed or missing acknowledgement cannot release
-either owner; new admission, project deletion, and graceful shutdown are
-blocked meanwhile. After abnormal backend death, however, neither runtime has a
-durable reattachment handle that proves provider work stopped. Kady can recover
-durable workflow state and charge the fail-closed reservation, but accounting
-is not proof of stop. Durable abnormal-restart ownership recovery is therefore
-an unresolved **P0 release gate** for DAG leaf and hosted Fusion execution.
-Ordinary launcher shutdown is graceful and has no automatic force-kill timer;
-pressing Ctrl+C a second time explicitly chooses this unsafe abnormal-death path.
+quarantines live in a detached, authenticated workflow-supervisor process rather
+than Fastify. Graceful cancellation retains the exact Delegation V2 tuple or
+temporary hosted-Fusion session until a fully validated terminal response,
+prompt settlement, abort fulfilment, and idle state establish quiescence. A
+dropped backend control or operation socket triggers that same exact
+cancellation. The supervisor durably settles the reservation before replying,
+so backend death cannot strand observed usage merely because the IPC response
+was lost. A replacement backend drains the inherited supervisor and launches a
+fresh one before workflow recovery.
+
+This does not make an external provider reattachable. If the supervisor process
+or host machine itself is killed while ownership is running, its content-free
+journal can prove only that dispatch started, not that provider work stopped.
+Startup therefore turns the record into a durable quarantine and refuses new
+workflow admission. Removing that quarantine by hand would be an explicit
+unsafe operator action. Ordinary launcher shutdown has no automatic force-kill
+timer; pressing Ctrl+C a second time explicitly chooses an unsafe path and may
+leave or kill the detached owner depending on the platform and termination
+mechanism.
 
 ### Installed skills are instructions, not data
 

@@ -70,9 +70,11 @@ Kady is designed to carry out research work, not only answer questions. You rema
   ordinary Agent nodes execute through the pinned Dynamic Workflows kernel,
   while compound nodes retain Kady's typed multi-slot executor and receipts.
   Child compaction lifecycle metadata is audited structurally without storing
-  transcript or summary text. Abnormal backend death cannot yet reattach and
-  prove quiescence for an in-flight quarantined Pi child, which remains a P0
-  production DAG-leaf and release gate. The narrow exported
+  transcript or summary text. A detached, authenticated workflow supervisor
+  owns Pi and hosted-Fusion leaves outside the Fastify process, settles their
+  durable budget holds before replying, and cancels/drains exact owners when a
+  backend disappears. A supervisor or host-machine crash still fails closed on
+  uncertain ownership rather than pretending that provider work stopped. The narrow exported
   `dag-fusion-drive` API is implemented but remains private and release-blocked.
   See the [architecture and status guide](./docs/dag-workflows.md) and
   [stacked-PR readiness checklist](./docs/dag-workflows-pr-plan.md).

@@ -506,9 +506,9 @@ async function stopAll(code) {
     }
   }
   log("  Waiting for owned work to quiesce. Press Ctrl+C again only to force an unsafe exit.");
-  // There is intentionally no elapsed-time SIGKILL. Hosted provider ownership
-  // can outlive its 5s caller acknowledgement window; normal shutdown waits for
-  // the direct backend process to complete app.close().
+  // There is intentionally no elapsed-time SIGKILL. The backend's app.close()
+  // drains the detached workflow supervisor, whose provider ownership can
+  // outlive a caller acknowledgement window.
   const allExited = Promise.all(children.map(waitForOwnedTree));
   await allExited;
   process.exit(code);
