@@ -58,6 +58,24 @@ Kady is designed to carry out research work, not only answer questions. You rema
 
 ### Run several lines of work at once — and return later
 
+- **Build bounded DAG Workflows (integration branch).** The `dynamic-fusion-graph`
+  branch adds a visual DAG Builder, durable backend runner with a Console,
+  Raindrop DAG-run and ordinary-chat session tabs, separate Builder, rescue, and
+  log-analysis helpers, plus typed Research, Council, Kady panel Fusion (including
+  local and configured OpenAI-compatible models), hosted OpenRouter Fusion,
+  Best-of-N, evidence-gate, and Lean behaviors. Lean writes
+  run-scoped host artifacts and remains disabled unless a server owner explicitly
+  accepts its unsandboxed same-user filesystem/network authority.
+  Branch runs use Kady's owned graph runner and bounded Pi leaf sessions;
+  ordinary Agent nodes execute through the pinned Dynamic Workflows kernel,
+  while compound nodes retain Kady's typed multi-slot executor and receipts.
+  Child compaction lifecycle metadata is audited structurally without storing
+  transcript or summary text. Abnormal backend death cannot yet reattach and
+  prove quiescence for an in-flight quarantined Pi child, which remains a P0
+  production DAG-leaf and release gate. The narrow exported
+  `dag-fusion-drive` API is implemented but remains private and release-blocked.
+  See the [architecture and status guide](./docs/dag-workflows.md) and
+  [stacked-PR readiness checklist](./docs/dag-workflows-pr-plan.md).
 - **Projects are independent research workspaces.** Each project has its own files, chats, notebook, model choices, tags, archive state, and spending policy. Several projects can run at the same time, and the project directory shows which ones are running, finished, waiting for your input, blocked, or errored.
 - **Use up to 10 parallel chat tabs per project.** Each tab has its own conversation, model, thinking level, compute choice, attachments, draft, queue, and cost, while all tabs share the project's files.
 - **Refresh without losing your place.** Open projects, tabs, drafts, queued messages, panel sizes, open files, and active turns are restored after a browser refresh or browser-tab closure. A live turn reconnects to the same run and continues streaming as long as the Kady backend remains running. Completed conversations stay on disk and can be reopened from Chat history.
@@ -135,6 +153,9 @@ All guides live in the [`docs/`](./docs) folder:
 | [Local models](./docs/local-models-ollama.md) | Run everything on free local models (Ollama or any OpenAI-compatible server), no API keys required |
 | [Model selection](./docs/model-selection.md) | OpenRouter, Pi subscription, NVIDIA NIM, Ollama, model refs, and billing behavior |
 | [OpenRouter Fusion](./docs/openrouter-fusion.md) | Multi-model deliberation presets — what they are and how the integration works |
+| [DAG Workflows](./docs/dag-workflows.md) | Integration-branch architecture, implemented surfaces, and deferred boundaries |
+| [Legacy DAG-Pipelines migration](./docs/dag-workflows-legacy-migration.md) | Safe YAML preview subset, manual-translation blockers, and archive-only run policy |
+| [DAG Workflows PR plan](./docs/dag-workflows-pr-plan.md) | Reviewable stacked-PR slices, acceptance gates, and verification commands |
 | [Architecture](./docs/architecture.md) | How the two local services fit together (for the technically curious) |
 | [Contributing workflows](./docs/contributing-workflows.md) | Add new workflow templates to the library |
 | [Known limitations](./docs/limitations.md) | Rough edges to be aware of in the current beta |
