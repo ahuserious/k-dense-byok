@@ -155,8 +155,11 @@ state directory under the OS temporary root, and startup fails closed naming
 `KADY_WORKFLOW_SUPERVISOR_SOCKET` if even that does not fit. Prompts, results,
 credentials, and error text are not stored in the operation journal. IPC frames, concurrent connections, aggregate
 unread bytes, provider-operation replay identities, and journal records all have
-fixed capacities; saturation fails closed while lifecycle control remains
-available for inspection, quiescence, and shutdown. If the supervisor process
+fixed capacities and saturation fails closed. Replay identities reserve
+capacity for lifecycle control, but the connection limit does **not**: lifecycle
+requests open their own connections, so a supervisor saturated to its connection
+capacity can also refuse inspection, quiescence, and shutdown. Reserving
+connection capacity for lifecycle control is an open hardening item. If the supervisor process
 or host itself dies
 while a record is running, a new supervisor converts that record to durable
 quarantine and refuses attachment/admission because no public Pi/provider handle
