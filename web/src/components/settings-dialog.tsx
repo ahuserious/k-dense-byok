@@ -30,6 +30,7 @@ import {
   CheckCircle2Icon,
   AlertCircleIcon,
   LoaderCircleIcon,
+  NetworkIcon,
   ExternalLinkIcon,
   CloudIcon,
 } from "lucide-react";
@@ -589,6 +590,39 @@ function AppearancePanel() {
   );
 }
 
+function PipelinesPanel() {
+  return (
+    <div className="flex h-full flex-col gap-4 overflow-y-auto">
+      <div>
+        <h3 className="text-sm font-medium">DAG Runtime</h3>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Runtime ownership for DAG Workflows and Pipelines.
+        </p>
+      </div>
+
+      <div className="rounded-lg border bg-muted/10 p-4">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-xs font-medium">Pipeline runtime</span>
+          <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-300">
+            Active
+          </span>
+        </div>
+        <p className="mt-2 text-sm font-semibold">Pi (Kady)</p>
+        <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+          Kady owns the typed graph, durable runner, limits, and receipts. Model
+          requests resolve through the main Kady Pi runtime and shared authentication
+          store; bounded leaf work runs in a separate workflow-only Pi session.
+        </p>
+        <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+          Configure hosted OpenRouter or Kady-owned local/OpenAI-compatible/
+          OpenRouter/OAuth Fusion per node in DAG Builder. Unsupported exact
+          requests fail visibly.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 export function SettingsDialog({
   open,
   onOpenChange,
@@ -662,6 +696,13 @@ export function SettingsDialog({
               Fusion
             </TabsTrigger>
             <TabsTrigger
+              value="pipelines"
+              className="justify-start gap-2 px-3 text-xs w-full"
+            >
+              <NetworkIcon className="size-3.5" />
+              Pipelines
+            </TabsTrigger>
+            <TabsTrigger
               value="appearance"
               className="justify-start gap-2 px-3 text-xs w-full"
             >
@@ -690,6 +731,9 @@ export function SettingsDialog({
           </TabsContent>
           <TabsContent value="fusion" className="flex-1 min-h-0 p-5 overflow-y-auto">
             <FusionPanel />
+          </TabsContent>
+          <TabsContent value="pipelines" className="flex-1 min-h-0 p-5">
+            <PipelinesPanel />
           </TabsContent>
         </Tabs>
       </DialogContent>

@@ -37,6 +37,23 @@ describe("SettingsDialog", () => {
     expect(screen.getByRole("tab", { name: /skills/i })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /specialists/i })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /connectors/i })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /pipelines/i })).toBeInTheDocument();
+  });
+
+  it("identifies the active, Kady-owned pipeline runtime as Pi (Kady)", async () => {
+    const user = userEvent.setup();
+    render(<SettingsDialog open onOpenChange={() => {}} />);
+
+    await user.click(screen.getByRole("tab", { name: "Pipelines" }));
+
+    expect(screen.getByRole("heading", { name: "DAG Runtime" })).toBeInTheDocument();
+    expect(screen.getByText("Pi (Kady)")).toBeInTheDocument();
+    expect(screen.getByText("Active")).toBeInTheDocument();
+    expect(screen.getByText(/Kady owns the typed graph/i)).toBeInTheDocument();
+    expect(screen.getByText(
+      /Kady-owned local\/OpenAI-compatible\/\s*OpenRouter\/OAuth/i,
+    )).toBeInTheDocument();
+    expect(screen.queryByText(/Pi \(community\)/i)).not.toBeInTheDocument();
   });
 
   it("saves Modal credentials as a tested pair and broadcasts the change", async () => {
