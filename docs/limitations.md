@@ -35,13 +35,39 @@ Kady supports Pi OAuth for OpenAI Codex (ChatGPT Plus/Pro), Anthropic (Claude Pr
 - **Reference price is not an invoice.** For OpenAI Codex, Copilot, and xAI, Kady tracks tokens and Pi's list-price equivalent but excludes it from project spend caps. Check the provider for actual quota or overage status.
 - **Anthropic OAuth is different.** Pi documents third-party Claude subscription access as metered extra per-token usage. Kady treats that amount as project spend and applies the cap.
 - **Direct-provider entries require OAuth.** Ambient OpenAI, Anthropic, Copilot, or xAI API keys are not presented as subscription access; use OpenRouter for the supported API-key path.
-- **Some features still require OpenRouter.** Fusion and server-side speech transcription are not authorized by subscription logins.
+- **Some features still require OpenRouter.** The chat picker's hosted OpenRouter Fusion and server-side speech transcription are not authorized by subscription logins. DAG Workflows also offers Kady-panel Fusion with exact supported OAuth, Ollama, configured OpenAI-compatible, or OpenRouter models.
 
 ## Local shell trust boundary
 
 Kady's agent intentionally has a powerful local shell so it can install scientific packages, run analyses, and create artifacts. The shell runs as your operating-system user; it is not an OS-level security boundary. File permissions such as `0600` prevent other users from reading credentials, but cannot prevent a process running as you from reading your own `.env`, `~/.kady`, or other local secrets.
 
 Kady instructs newly created project agents never to inspect or transmit credentials, but instructions are not a substitute for isolation against malicious prompt injection. Do not ask Kady to process adversarial files with secrets accessible to the same account. Use an OS sandbox, container, VM, or separate user account when working with untrusted content or when a stronger credential boundary is required.
+
+The integration branch's optional Lean workflow verifier follows the same
+boundary. It is disabled by default. Setting
+`KADY_ALLOW_UNSANDBOXED_LEAN=1` explicitly permits reviewed or model-assisted
+Lean source to execute as the Kady OS user, including that user's filesystem and
+network authority; this setting is not a sandbox. Kady removes provider keys and
+other ambient secrets from the verifier environment and pins/checks Mathlib, but
+those checks do not isolate same-user code. Only the Mathlib checkout receives
+the pre/post revision, tree, and cleanliness checks; they do not make the entire
+user-provided Lake project immutable. Unsandboxed Lean is unavailable on native
+Windows because reliable descendant-process cancellation is not yet implemented.
+
+The integration branch's DAG Pi-leaf and hosted OpenRouter Fusion cancellation
+quarantines are also process-local. Graceful DAG-leaf cancellation retains the
+exact Delegation V2 tuple and dedicated session until a fully validated exact
+terminal response arrives. Hosted Fusion retains its exact temporary Pi session
+and Fusion configuration until its prompt settles, abort fulfils, and the
+session reports idle. Malformed or missing acknowledgement cannot release
+either owner; new admission, project deletion, and graceful shutdown are
+blocked meanwhile. After abnormal backend death, however, neither runtime has a
+durable reattachment handle that proves provider work stopped. Kady can recover
+durable workflow state and charge the fail-closed reservation, but accounting
+is not proof of stop. Durable abnormal-restart ownership recovery is therefore
+an unresolved **P0 release gate** for DAG leaf and hosted Fusion execution.
+Ordinary launcher shutdown is graceful and has no automatic force-kill timer;
+pressing Ctrl+C a second time explicitly chooses this unsafe abnormal-death path.
 
 ### Installed skills are instructions, not data
 
