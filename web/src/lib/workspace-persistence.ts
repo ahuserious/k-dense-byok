@@ -10,6 +10,14 @@ import type { Skill } from "@/lib/use-skills";
 
 export const WORKSPACE_SCHEMA_VERSION = 1;
 export const WORKSPACE_STORAGE_KEY = "kady:workspace:v1";
+export const WORKSPACE_VIEWS = [
+  "chat",
+  "workflows",
+  "dag-workflows",
+  "dag-builder",
+  "console",
+  "raindrop",
+] as const;
 
 const DB_NAME = "kady-workspace";
 const DB_VERSION = 1;
@@ -18,7 +26,7 @@ const MAX_TABS = 10;
 const MAX_QUEUE = 5;
 
 export type WorkspaceScreen = "projects" | "workspace";
-export type WorkspaceView = "chat" | "workflows";
+export type WorkspaceView = (typeof WORKSPACE_VIEWS)[number];
 
 export interface PromptDraftAttachment {
   id: string;
@@ -167,6 +175,12 @@ function boundedNumber(value: unknown, fallback: number, min: number, max: numbe
   return typeof value === "number" && Number.isFinite(value)
     ? Math.max(min, Math.min(max, value))
     : fallback;
+}
+
+function sanitizeWorkspaceView(value: unknown): WorkspaceView {
+  return WORKSPACE_VIEWS.includes(value as WorkspaceView)
+    ? value as WorkspaceView
+    : "chat";
 }
 
 function sanitizeObjectArray<T extends { id: string }>(value: unknown): T[] {
@@ -339,7 +353,7 @@ function sanitizeStoredProject(value: unknown): StoredProjectState | null {
   return {
     tabs,
     activeTabId,
-    view: value.view === "workflows" ? "workflows" : "chat",
+    view: sanitizeWorkspaceView(value.view),
     showNotebook,
     showCompute: !showNotebook && value.showCompute === true,
     computeScope: value.computeScope === "session" ? "session" : "project",
