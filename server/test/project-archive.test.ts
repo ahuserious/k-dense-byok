@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { buffer as consumeBuffer } from "node:stream/consumers";
 import AdmZip from "adm-zip";
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/index.ts";
 import { PROJECTS_ROOT } from "../src/config.ts";
 import {
@@ -14,6 +14,11 @@ import {
   type NotebookEntry,
 } from "../src/agent/notebook-store.ts";
 import { writeNotebookAnnotations } from "../src/agent/notebook-annotations.ts";
+import {
+  createSession,
+  disposeProjectSessions,
+  getOrCreateProfileSession,
+} from "../src/agent/session-registry.ts";
 import {
   buildProjectArchive,
   type ProjectArchiveOptions,
@@ -27,8 +32,13 @@ beforeEach(() => {
 });
 
 afterAll(async () => {
+  disposeProjectSessions("default");
   await app.close();
   fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
+});
+
+afterEach(() => {
+  disposeProjectSessions("default");
 });
 
 function zipText(zip: AdmZip, entry: string): string {
@@ -71,7 +81,61 @@ function message(role: string, text: string) {
   };
 }
 
+type PersistedAgentSession = Awaited<ReturnType<typeof createSession>>;
+
+function persistAgentMessage(
+  paths: ReturnType<typeof ensureProjectExists>,
+  session: PersistedAgentSession,
+  text: string,
+): void {
+  session.sessionManager.appendMessage({
+    role: "user",
+    content: [{ type: "text", text }],
+    timestamp: 1_000,
+  } as never);
+  const sessionFile = session.sessionManager.getSessionFile() ??
+    path.join(paths.sessionsDir, `${session.sessionId}.jsonl`);
+  fs.mkdirSync(paths.sessionsDir, { recursive: true });
+  fs.writeFileSync(
+    sessionFile,
+    [session.sessionManager.getHeader(), ...session.sessionManager.getEntries()]
+      .map((entry) => JSON.stringify(entry))
+      .join("\n") + "\n",
+    { encoding: "utf8", mode: 0o600 },
+  );
+}
+
 describe("buildProjectArchive", () => {
+  it("excludes server-bound helper sessions from the production archive inventory", async () => {
+    const paths = ensureProjectExists("default");
+    const main = await createSession("default", paths);
+    main.setSessionName("Archive main chat");
+    persistAgentMessage(paths, main, "This ordinary chat must be exported.");
+
+    const helper = await getOrCreateProfileSession(
+      "default",
+      paths,
+      "dag-builder",
+      { kind: "workflow", id: "archive-workflow@1" },
+    );
+    persistAgentMessage(paths, helper, "This internal helper transcript must stay private.");
+
+    const buffer = await finishArchive({
+      paths,
+      projectName: "Helper exclusion test",
+    });
+    const zip = new AdmZip(buffer);
+    const names = zip.getEntries().map((entry) => entry.entryName);
+
+    expect(names).toContain(`chat-history/raw/${main.sessionId}.jsonl`);
+    expect(names).toContain(`chat-history/markdown/${main.sessionId}.md`);
+    expect(names).not.toContain(`chat-history/raw/${helper.sessionId}.jsonl`);
+    expect(names).not.toContain(`chat-history/markdown/${helper.sessionId}.md`);
+    const manifest = JSON.parse(zipText(zip, "chat-history/manifest.json"));
+    expect(manifest.sessions.map((session: { id: string }) => session.id))
+      .toEqual([main.sessionId]);
+  });
+
   it("keeps visible sandbox files and adds raw/readable non-empty chats", async () => {
     const paths = resolvePaths("default");
     fs.mkdirSync(paths.sessionsDir, { recursive: true });

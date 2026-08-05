@@ -17,6 +17,7 @@
  *         .pi/skills/                     per-project Pi skills
  *         .pi/sessions/                   Pi JSONL session files
  *         .kady/runs/<sessionId>/costs.jsonl   cost ledger
+ *         .kady/workflows/budget/reservations/ durable DAG budget records
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -52,6 +53,11 @@ export interface ProjectPaths {
   runsDir: string;
   notebookDir: string;
   provenanceDir: string;
+  workflowsDir: string;
+  workflowDefinitionsDir: string;
+  workflowRunsDir: string;
+  workflowBudgetDir: string;
+  workflowReservationsDir: string;
   modalDir: string;
   modalJobsDir: string;
   modalReservationsDir: string;
@@ -118,6 +124,8 @@ export function resolvePaths(projectId: string): ProjectPaths {
   }
   const sandbox = path.join(root, "sandbox");
   const kadyDir = path.join(sandbox, ".kady");
+  const workflowsDir = path.join(kadyDir, "workflows");
+  const workflowBudgetDir = path.join(workflowsDir, "budget");
   const modalDir = path.join(kadyDir, "modal");
   const piDir = path.join(sandbox, ".pi");
   return {
@@ -130,6 +138,11 @@ export function resolvePaths(projectId: string): ProjectPaths {
     runsDir: path.join(kadyDir, "runs"),
     notebookDir: path.join(kadyDir, "notebook"),
     provenanceDir: path.join(kadyDir, "provenance"),
+    workflowsDir,
+    workflowDefinitionsDir: path.join(workflowsDir, "definitions"),
+    workflowRunsDir: path.join(workflowsDir, "runs"),
+    workflowBudgetDir,
+    workflowReservationsDir: path.join(workflowBudgetDir, "reservations"),
     modalDir,
     modalJobsDir: path.join(modalDir, "jobs"),
     modalReservationsDir: path.join(modalDir, "reservations"),

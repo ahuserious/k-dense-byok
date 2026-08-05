@@ -5,7 +5,7 @@ import {
   type RunActivity,
   type RunActivityState,
 } from "./agent/run-broker.ts";
-import { listSessions } from "./agent/session-registry.ts";
+import { listMainSessions } from "./agent/session-registry.ts";
 import { projectCostSummary } from "./cost/ledger.ts";
 import {
   getProject,
@@ -58,7 +58,7 @@ export function summarizeProjectActivity({
   return summary;
 }
 
-type ListedSession = Awaited<ReturnType<typeof listSessions>>[number];
+type ListedSession = Awaited<ReturnType<typeof listMainSessions>>[number];
 const historicalOutcomeCache = new Map<
   string,
   { modifiedMs: number; state: RunActivityState | null }
@@ -105,7 +105,7 @@ async function activityForProject(projectId: string): Promise<ProjectActivitySum
     limit !== null &&
     limit > 0 &&
     projectCostSummary(projectId).totalUsd >= limit;
-  const sessions = await listSessions(resolvePaths(projectId));
+  const sessions = await listMainSessions(resolvePaths(projectId));
   const retained = runBroker.activityForProject(projectId);
   const newestSession = sessions
     .filter((session) => session.messageCount > 0)

@@ -1,0 +1,47 @@
+{
+  "name": "dag-fusion-drive",
+  "version": "0.1.0-dev.0",
+  "private": true,
+  "type": "module",
+  "types": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./compaction-audit": "./compaction-audit.ts",
+    "./delegation-host": "./delegation-host.ts",
+    "./runtime-contract": "./runtime-contract.ts"
+  },
+  "description": "Kady's nonvisual typed DAG and model-fusion Pi package (incubating).",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ahuserious/k-dense-byok.git",
+    "directory": "server/pi-packages/dag-fusion-drive"
+  },
+  "bugs": {
+    "url": "https://github.com/ahuserious/k-dense-byok/issues"
+  },
+  "files": [
+    "*.md",
+    "*.ts",
+    "skills/**/SKILL.md",
+    "skills/**/scripts/*.mjs"
+  ],
+  "keywords": [
+    "pi-package",
+    "dag",
+    "workflow",
+    "model-fusion",
+    "lean4"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "pi": {
+    "extensions": ["./index.ts"],
+    "skills": ["./skills"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.83.0 <0.84.0",
+    "pi-subagents": ">=0.40.0 <0.41.0"
+  }
+}

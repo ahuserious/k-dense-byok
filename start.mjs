@@ -341,8 +341,21 @@ async function killTree(pid) {
 async function freePort(port, label) {
   for (const pid of listenersOn(port)) {
     if (ownedByThisRepo(pid)) {
-      log(`  Stopping a leftover Kady process on port ${port} (PID ${pid})...`);
-      await killTree(pid);
+      if (label === "backend") {
+        // A PID disappearing after SIGTERM cannot prove an older backend ran
+        // app.close(); it may simply have taken the default signal and orphaned
+        // provider work. Only the launcher that owns its IPC channel may ask it
+        // to stop gracefully, so a new launcher refuses replacement.
+        fail(
+          `\n  ${sym.err} A Kady backend is already running on port ${port} (PID ${pid}).\n` +
+            "    Return to its original Kady terminal and stop it there. If that terminal\n" +
+            "    reports quarantined work, wait for acknowledgement; pressing Ctrl+C there\n" +
+            "    a second time explicitly chooses the unsafe force-exit path.",
+        );
+      } else {
+        log(`  Stopping a leftover Kady process on port ${port} (PID ${pid})...`);
+        await killTree(pid);
+      }
     } else {
       fail(
         `\n  ${sym.err} Port ${port} is already in use by: ${processName(pid)} (PID ${pid}).\n` +
@@ -362,16 +375,55 @@ let shuttingDown = false;
  *  signal-killed child keeps exitCode === null and sets signalCode). */
 const gone = (child) => child.exitCode !== null || child.signalCode !== null;
 
-function startService(label, dir, npmArgs) {
+function ownedTreeGone(child) {
+  if (isWin) return gone(child);
+  try {
+    process.kill(-child.pid, 0);
+    return false;
+  } catch (error) {
+    return error?.code === "ESRCH";
+  }
+}
+
+async function waitForOwnedTree(child) {
+  while (!ownedTreeGone(child)) await sleep(100);
+}
+
+function startService(label, dir, npmArgs, options = {}) {
   log(`  ${sym.arrow} ${label}`);
   const cwd = path.join(repoRoot, dir);
-  const child = isWin
-    ? // One command string through cmd.exe: required for npm.cmd (see run()),
-      // and taskkill /T reaps the whole tree on shutdown.
-      spawn(["npm", ...npmArgs].join(" "), { cwd, stdio: "inherit", shell: true })
-    : // Own process group so Ctrl+C in the terminal reaches only the
-      // launcher, which then tears the groups down in order.
-      spawn("npm", npmArgs, { cwd, stdio: "inherit", detached: true });
+  const directArgs = options.directBackend
+    ? [path.join(cwd, "node_modules", "tsx", "dist", "cli.mjs"), "src/index.ts"]
+    : options.directFrontend
+      ? [
+          path.join(cwd, "node_modules", "next", "dist", "bin", "next"),
+          ...(options.serviceArgs ?? []),
+        ]
+      : null;
+  const child = directArgs
+    ? spawn(
+        process.execPath,
+        directArgs,
+        {
+          cwd,
+          stdio: options.directBackend
+            ? ["inherit", "inherit", "inherit", "ipc"]
+            : "inherit",
+          detached: !isWin,
+        },
+      )
+    : isWin
+      ? // One command string through cmd.exe: required for npm.cmd (see run()),
+        // and taskkill /T reaps the whole tree on shutdown.
+        spawn(["npm", ...npmArgs].join(" "), { cwd, stdio: "inherit", shell: true })
+      : // Own process group so Ctrl+C in the terminal reaches only the
+        // launcher, which then tears the groups down in order.
+        spawn("npm", npmArgs, { cwd, stdio: "inherit", detached: true });
+  child.kadyRole = options.directBackend
+    ? "backend"
+    : options.directFrontend
+      ? "frontend"
+      : "service";
   children.push(child);
   // Fires for both exit-code and signal deaths, during boot and after.
   child.on("exit", () => {
@@ -387,17 +439,62 @@ function startService(label, dir, npmArgs) {
 }
 
 async function stopAll(code) {
-  if (shuttingDown) return;
+  if (shuttingDown) {
+    log(`\n  ${sym.warn} Second shutdown signal received — forcing unsafe process termination.`);
+    for (const child of children) {
+      if (ownedTreeGone(child)) continue;
+      if (isWin) {
+        capture("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
+        continue;
+      }
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* already gone */
+        }
+      }
+    }
+    process.exit(code === 0 ? 1 : code);
+  }
   shuttingDown = true;
   log("\nShutting down...");
-  if (isWin) {
-    for (const child of children) {
-      if (!gone(child)) capture("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
-    }
-    process.exit(code);
-  }
   for (const child of children) {
-    if (gone(child)) continue;
+    if (ownedTreeGone(child)) continue;
+    if (child.kadyRole === "backend") {
+      if (!child.connected) {
+        console.error(`  ${sym.err} The backend IPC channel is unavailable.`);
+        console.error("    Kady will keep the backend alive; press Ctrl+C again only to force it.");
+        continue;
+      }
+      try {
+        child.send({ type: "kady-shutdown" }, (error) => {
+          if (error) {
+            console.error(
+              `  ${sym.err} Could not deliver graceful shutdown to the backend: ${error.message}`,
+            );
+            console.error("    Kady will keep the backend alive; press Ctrl+C again only to force it.");
+          }
+        });
+        continue;
+      } catch {
+        console.error(`  ${sym.err} Could not deliver graceful shutdown to the backend.`);
+        console.error("    Kady will keep the backend alive; press Ctrl+C again only to force it.");
+        continue;
+      }
+    }
+    if (isWin) {
+      // The frontend owns no model/provider work, so stopping that tree is safe
+      // on the first request. The protected backend is handled only by IPC.
+      const stopped = capture("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
+      if (stopped === null) {
+        console.error(`  ${sym.warn} Windows could not stop the frontend process tree.`);
+        console.error("    Press Ctrl+C again to retry forced cleanup.");
+      }
+      continue;
+    }
     try {
       process.kill(-child.pid, "SIGTERM");
     } catch {
@@ -408,19 +505,12 @@ async function stopAll(code) {
       }
     }
   }
-  // Grace period, then make sure nothing survives holding the ports.
-  const allExited = Promise.all(
-    children.map((c) => (gone(c) ? null : new Promise((r) => c.once("exit", r)))),
-  );
-  await Promise.race([allExited, sleep(3000)]);
-  for (const child of children) {
-    if (gone(child)) continue;
-    try {
-      process.kill(-child.pid, "SIGKILL");
-    } catch {
-      /* already gone */
-    }
-  }
+  log("  Waiting for owned work to quiesce. Press Ctrl+C again only to force an unsafe exit.");
+  // There is intentionally no elapsed-time SIGKILL. Hosted provider ownership
+  // can outlive its 5s caller acknowledgement window; normal shutdown waits for
+  // the direct backend process to complete app.close().
+  const allExited = Promise.all(children.map(waitForOwnedTree));
+  await allExited;
   process.exit(code);
 }
 
@@ -497,10 +587,18 @@ log("");
 
 log("Starting services...");
 log("");
-startService(`Backend on port ${BACKEND_PORT} (Pi agent, TypeScript)`, "server", ["run", "start"]);
-startService(`Frontend on port ${FRONTEND_PORT} (Next.js UI)`, "web", [
-  "run", "dev", "--", "-p", String(FRONTEND_PORT),
-]);
+startService(
+  `Backend on port ${BACKEND_PORT} (Pi agent, TypeScript)`,
+  "server",
+  [],
+  { directBackend: true },
+);
+startService(
+  `Frontend on port ${FRONTEND_PORT} (Next.js UI)`,
+  "web",
+  [],
+  { directFrontend: true, serviceArgs: ["dev", "-p", String(FRONTEND_PORT)] },
+);
 
 process.on("SIGINT", () => stopAll(0));
 process.on("SIGTERM", () => stopAll(0));
