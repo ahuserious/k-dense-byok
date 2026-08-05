@@ -15,6 +15,8 @@ import type { ProjectPaths } from "../src/projects.ts";
 import {
   createKadyWorkflowNodeExecutor,
   KADY_WORKFLOW_READ_ONLY_AGENT,
+  type KadyHostedFusionTransportOptions,
+  type KadySupervisedDelegateOptions,
   type KadyWorkflowUsageAdmission,
   type KadyWorkflowUsageReserver,
   type TrustedLeanVerifier,
@@ -44,6 +46,9 @@ import type {
   HostedOpenRouterFusionResult,
 } from "../src/workflows/hosted-fusion.ts";
 import { trustedLeanArtifactPaths } from "../src/workflows/lean4-artifacts.ts";
+import type {
+  SupervisedWorkflowBudgetDescriptorV1,
+} from "../src/workflows/supervised-budget.ts";
 
 const TEST_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "kady-node-executor-"));
 
@@ -294,7 +299,7 @@ function completedReceipt(
 
 type HostCall = {
   request: OwnedDelegationV2Request;
-  options: DelegateDagFusionNodeOptions;
+  options: KadySupervisedDelegateOptions;
 };
 
 class FakeHost {
@@ -391,6 +396,7 @@ function executorFor(
     ) => Promise<ResolvedWorkflowModel>;
     runHostedFusion?: (
       request: HostedOpenRouterFusionRequest,
+      transport?: KadyHostedFusionTransportOptions,
     ) => Promise<HostedOpenRouterFusionResult>;
     assertChildRuntimeReady?: (paths: ProjectPaths) => void;
     readCompactionAudit?: (
@@ -443,6 +449,19 @@ const analysis = (answer: string) => ({
   uncertainties: [],
 });
 
+function supervisedDescriptor(slotId: string): SupervisedWorkflowBudgetDescriptorV1 {
+  return {
+    version: 1,
+    reservationId: `wbres_${createHash("sha256").update(slotId).digest("hex").slice(0, 32)}`,
+    runId: "wfrun_executor-test",
+    executionId: "dagx_executor-test",
+    attempt: 1,
+    slotId,
+    provider: "openrouter",
+    authType: "api_key",
+  };
+}
+
 describe("production Kady DAG node executor", () => {
   it("records exact resolution before an explicit read-only Delegation V2 call", async () => {
     const node: WorkflowNode = {
@@ -460,13 +479,14 @@ describe("production Kady DAG node executor", () => {
     });
     const events: string[] = [];
     const reconciled = vi.fn();
+    const descriptor = supervisedDescriptor("agent");
     let admission: KadyWorkflowUsageAdmission | undefined;
     const host = new FakeHost([analysis("supported")], events);
     const result = await executorFor(host, document, {
-      reconcileUsage: reconciled,
-      onReserve: (value) => {
+      reserveUsage: (value) => {
         admission = value;
         events.push(`reserve:${value.slotId}`);
+        return { descriptor, reconcile: reconciled };
       },
     })(
       contextFor(document, events),
@@ -492,6 +512,7 @@ describe("production Kady DAG node executor", () => {
       result: { kind: "structured" },
     });
     expect(host.calls[0].options.limits).toEqual({ maxTokens: 2_000, maxCostUsd: 0 });
+    expect(host.calls[0].options.supervisedBudget).toEqual(descriptor);
     expect(admission).toMatchObject({
       slotId: "agent",
       maxTokens: 2_000,
@@ -865,7 +886,14 @@ describe("production Kady DAG node executor", () => {
     };
     const events: string[] = [];
     const host = new FakeHost([incomplete, complete, complete], events);
-    const result = await executorFor(host, document)(contextFor(document, events));
+    const descriptors = new Map<string, SupervisedWorkflowBudgetDescriptorV1>();
+    const result = await executorFor(host, document, {
+      reserveUsage: (item) => {
+        const descriptor = supervisedDescriptor(item.slotId);
+        descriptors.set(item.slotId, descriptor);
+        return { descriptor, reconcile() {} };
+      },
+    })(contextFor(document, events));
 
     expect(host.calls.map((call) => call.request.nodeId.split(":").at(-1))).toEqual([
       "research-iteration-1",
@@ -875,6 +903,10 @@ describe("production Kady DAG node executor", () => {
     expect(events.indexOf("declare:research-iteration-2")).toBeLessThan(
       events.indexOf("record:research-iteration-2"),
     );
+    expect(host.calls.map((call) => call.options.supervisedBudget)).toEqual([
+      descriptors.get("research-iteration-1"),
+      descriptors.get("research-iteration-2"),
+    ]);
     expect(result.output).toMatchObject({ goalMet: true, iterations: 2 });
   });
 
@@ -1902,10 +1934,16 @@ describe("production Kady DAG node executor", () => {
     const admissions: KadyWorkflowUsageAdmission[] = [];
     const events: string[] = [];
     const reconciled = vi.fn();
+    const descriptor = supervisedDescriptor("fusion-hosted-compound");
     const hostedCalls: HostedOpenRouterFusionRequest[] = [];
-    const runHostedFusion = vi.fn(async (request: HostedOpenRouterFusionRequest) => {
+    const hostedTransports: Array<KadyHostedFusionTransportOptions | undefined> = [];
+    const runHostedFusion = vi.fn(async (
+      request: HostedOpenRouterFusionRequest,
+      transport?: KadyHostedFusionTransportOptions,
+    ) => {
       events.push("hosted-provider");
       hostedCalls.push(request);
+      hostedTransports.push(transport);
       const usage = {
         input: 100,
         output: 50,
@@ -1934,10 +1972,10 @@ describe("production Kady DAG node executor", () => {
 
     const result = await executorFor(host, document, {
       runHostedFusion,
-      reconcileUsage: reconciled,
-      onReserve: (admission) => {
-        admissions.push(admission);
-        events.push(`reserve:${admission.slotId}`);
+      reserveUsage: (item) => {
+        admissions.push(item);
+        events.push(`reserve:${item.slotId}`);
+        return { descriptor, reconcile: reconciled };
       },
     })(contextFor(document, events));
 
@@ -1951,6 +1989,7 @@ describe("production Kady DAG node executor", () => {
       "hosted-provider",
     ]);
     expect(runHostedFusion).toHaveBeenCalledOnce();
+    expect(hostedTransports).toEqual([{ supervisedBudget: descriptor }]);
     expect(hostedCalls[0].resolved.members.map((member) => member.receipt.resolved)).toEqual([
       expect.objectContaining({ provider: "openrouter", model: "vendor/one", runtime: "openrouter-fusion" }),
       expect.objectContaining({ provider: "openrouter", model: "vendor/two", runtime: "openrouter-fusion" }),

@@ -19,6 +19,7 @@
  */
 import fs from "node:fs";
 import { createRequire } from "node:module";
+import path from "node:path";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { boundedMapSet, boundedSetAdd } from "../bounded.ts";

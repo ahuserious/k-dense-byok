@@ -35,12 +35,14 @@ import { disposeWorkflowDelegationSession } from "../agent/workflow-delegation-s
 import type { WorkflowRunController } from "../workflows/controller.ts";
 import { assertNoHostedFusionQuarantine } from "../workflows/hosted-fusion.ts";
 import { workflowStore } from "../workflows/store.ts";
+import type { WorkflowSupervisorClient } from "../workflows/supervisor/client.ts";
 
 export interface RegisterProjectRoutesOptions {
   workflowController?: Pick<
     WorkflowRunController,
     "quiesceProject" | "releaseProjectQuiesce"
   >;
+  workflowSupervisor?: Pick<WorkflowSupervisorClient, "quiesceProject">;
   disposeWorkflowSession?: typeof disposeWorkflowDelegationSession;
   assertHostedFusionProjectQuiescent?: typeof assertNoHostedFusionQuarantine;
 }
@@ -239,9 +241,13 @@ export async function registerProjectRoutes(
           "Project deletion requires the DAG workflow controller while workflow runs are active.",
         );
       }
-      (options.assertHostedFusionProjectQuiescent ?? assertNoHostedFusionQuarantine)(
-        projectId,
-      );
+      if (options.workflowSupervisor) {
+        await options.workflowSupervisor.quiesceProject(projectId, "project-delete");
+      } else {
+        (options.assertHostedFusionProjectQuiescent ?? assertNoHostedFusionQuarantine)(
+          projectId,
+        );
+      }
       const activeRuns = runBroker.activeForProject(projectId);
       for (const run of activeRuns) run.requestAbort();
       // Remote jobs are project-owned and their metadata lives under the
@@ -249,10 +255,12 @@ export async function registerProjectRoutes(
       await modalJobManager.cancelProject(projectId);
       await abortProjectSessions(projectId);
       await Promise.all(activeRuns.map((run) => run.waitForCompletion()));
-      await (options.disposeWorkflowSession ?? disposeWorkflowDelegationSession)(
-        projectId,
-        { rejectIfOwnedLeaves: true },
-      );
+      if (!options.workflowSupervisor) {
+        await (options.disposeWorkflowSession ?? disposeWorkflowDelegationSession)(
+          projectId,
+          { rejectIfOwnedLeaves: true },
+        );
+      }
       disposeProjectSessions(projectId);
       await disposeMcpClients(projectId);
       withProjectLifecycleLock(projectId, () => {

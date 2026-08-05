@@ -124,13 +124,22 @@ const validStats = {
 class FakeHostedSession {
   readonly sessionId = "hosted-session";
   readonly state: { errorMessage?: string } = {};
-  isIdle = true;
+  private idle = true;
+  idleReadImplementation: (() => boolean) | undefined;
   text = "Fused answer with material caveats.";
   stats = structuredClone(validStats);
   promptError: Error | undefined;
   promptImplementation: (() => Promise<void>) | undefined;
 
   constructor(private readonly events: string[]) {}
+
+  get isIdle(): boolean {
+    return this.idleReadImplementation?.() ?? this.idle;
+  }
+
+  set isIdle(value: boolean) {
+    this.idle = value;
+  }
 
   async prompt(): Promise<void> {
     this.events.push("prompt");
@@ -490,6 +499,54 @@ describe("hosted OpenRouter Fusion", () => {
     await vi.waitFor(() => expect(hostedFusionQuarantineSnapshot(projectId)).toEqual([]));
     expect(events).toContain("clear-config");
     expect(events).toContain("dispose");
+  });
+
+  it("retains a settled session that reports non-idle instead of disposing uncertain ownership", async () => {
+    const events: string[] = [];
+    const session = new FakeHostedSession(events);
+    let idleReadCount = 0;
+    let releaseAbortRetry: (() => void) | undefined;
+    session.promptImplementation = async () => undefined;
+    session.idleReadImplementation = () => {
+      idleReadCount += 1;
+      // The first cleanup read requires an abort, but the read inside
+      // beginSessionAbort transiently reports idle. The definitive check after
+      // prompt settlement reports active again and must retain ownership.
+      return idleReadCount === 2;
+    };
+    session.abort = async () => {
+      events.push("abort-retry");
+      await new Promise<void>((resolve) => {
+        releaseAbortRetry = () => {
+          session.idleReadImplementation = undefined;
+          session.isIdle = true;
+          resolve();
+        };
+      });
+    };
+    const reconcileUsage = vi.fn(async () => {
+      events.push("reconcile");
+    });
+    const projectId = "hosted-fusion-settled-non-idle";
+
+    await expect(runHostedOpenRouterFusion(
+      request(fusion(), reconcileUsage, undefined, projectId),
+      fakeDependencies(session, events),
+    )).rejects.toMatchObject({
+      code: "HOSTED_FUSION_CANCELLATION_UNCONFIRMED",
+    });
+
+    expect(reconcileUsage).toHaveBeenCalledOnce();
+    expect(reconcileUsage.mock.calls[0][0]).not.toHaveProperty("usage");
+    expect(hostedFusionQuarantineSnapshot(projectId)).toHaveLength(1);
+    expect(events).toContain("abort-retry");
+    expect(events).not.toContain("clear-config");
+    expect(events).not.toContain("dispose");
+
+    releaseAbortRetry?.();
+    await vi.waitFor(() => expect(hostedFusionQuarantineSnapshot(projectId)).toEqual([]));
+    expect(events.indexOf("abort-retry")).toBeLessThan(events.indexOf("clear-config"));
+    expect(events.indexOf("clear-config")).toBeLessThan(events.indexOf("dispose"));
   });
 
   it("settles a never-acknowledged cancellation within the bound and blocks admission until late quiescence", async () => {

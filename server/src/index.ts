@@ -39,7 +39,6 @@ import { workflowStore } from "./workflows/store.ts";
 import {
   assertNoHostedFusionQuarantine,
   DEFAULT_HOSTED_FUSION_CANCELLATION_ACK_TIMEOUT_MS,
-  hostedFusionQuarantineSnapshot,
   waitForHostedFusionQuarantines,
 } from "./workflows/hosted-fusion.ts";
 import {
@@ -50,6 +49,11 @@ import { startAutomaticSkillSync } from "./agent/skills-sync.ts";
 import { modalJobManager } from "./modal/manager.ts";
 import { syncHelperVenv } from "./helpers-env.ts";
 import { configureHttpProxy } from "./http-proxy.ts";
+import {
+  ensureWorkflowSupervisor,
+  type WorkflowSupervisorClient,
+} from "./workflows/supervisor/client.ts";
+import type { WorkflowSupervisorSnapshot } from "./workflows/supervisor/protocol.ts";
 
 function readCookie(req: FastifyRequest, name: string): string | undefined {
   const raw = req.headers.cookie;
@@ -82,6 +86,17 @@ function resolveProjectId(req: FastifyRequest): string {
 export interface BuildAppOptions {
   /** Omit for production execution; pass null only for queued-storage tests. */
   workflowController?: WorkflowRunController | null;
+  /** Production passes the already-attached detached workflow owner. */
+  workflowSupervisor?: Pick<
+    WorkflowSupervisorClient,
+    | "nodeExecutorDependencies"
+    | "quiesceProject"
+    | "reloadCredentials"
+    | "shutdown"
+    | "snapshot"
+  > | null;
+  /** Records remote ownership state for safe shutdown diagnostics. */
+  onWorkflowSupervisorSnapshot?(snapshot: WorkflowSupervisorSnapshot): void;
 }
 
 export async function buildApp(options: BuildAppOptions = {}) {
@@ -94,6 +109,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
   });
   const workflowController = options.workflowController === undefined
     ? createProductionWorkflowController({
+      ...(options.workflowSupervisor
+        ? { nodeExecutorDependencies: options.workflowSupervisor.nodeExecutorDependencies() }
+        : {}),
       onError: ({ projectId, runId, error }) => {
         app.log.error(
           { projectId, runId, ...workflowControllerErrorLogFields(error) },
@@ -154,13 +172,19 @@ export async function buildApp(options: BuildAppOptions = {}) {
 
   await registerProjectRoutes(app, {
     workflowController: workflowController ?? undefined,
+    workflowSupervisor: options.workflowSupervisor ?? undefined,
   });
   await registerSessionRoutes(app);
   await registerSandboxRoutes(app);
   await registerSkillRoutes(app);
   await registerSystemRoutes(app);
   await registerMcpRoutes(app);
-  await registerCredentialRoutes(app);
+  await registerCredentialRoutes(
+    app,
+    options.workflowSupervisor
+      ? { reloadCredentials: (keys) => options.workflowSupervisor!.reloadCredentials(keys) }
+      : {},
+  );
   await registerAgentRoutes(app);
   await registerSpeechRoutes(app);
   await registerModalRoutes(app);
@@ -169,10 +193,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
     controller: workflowController ?? undefined,
   });
 
-  // Budget reconciliation is fail-closed: an expired hold with no observable
-  // terminal usage is charged at its reserved maximum before graph/run state is
-  // recovered. This is accounting protection, not proof that a process-local
-  // pi-subagents child stopped; abnormal child reattachment remains a P0 gate.
+  // Production attaches to and drains any inherited detached owner before
+  // buildApp runs. Budget reconciliation can therefore charge only reservations
+  // whose supervisor-side settlement really is absent before graph recovery.
   for (const project of listProjects()) {
     try {
       const staleReservations = await reconcileStaleWorkflowBudgetReservations(
@@ -247,6 +270,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
     // for actual controller idleness before concluding no hosted owner can
     // still enter quarantine after the check below.
     await workflowController?.waitForIdle();
+    if (options.workflowSupervisor) return;
     // A late acknowledgement may arrive after the bounded caller has already
     // failed closed. Graceful shutdown retains the process and exact owner
     // until that quarantine releases or its release attempt visibly fails.
@@ -254,6 +278,55 @@ export async function buildApp(options: BuildAppOptions = {}) {
     assertNoHostedFusionQuarantine();
     await disposeAllWorkflowDelegationSessions();
   });
+
+  if (options.workflowSupervisor) {
+    // Fastify's close hooks run only after close() has marked the app closing;
+    // onClose runs after the HTTP listener is gone. Guard the close boundary
+    // itself so a detached owner can refuse without taking the API down or
+    // irreversibly closing the local workflow controller.
+    const closeFastify = app.close.bind(app);
+    let closePromise: Promise<undefined> | undefined;
+    let supervisorShutdownComplete = false;
+    app.close = ((closeListener?: (error?: Error) => void) => {
+      if (!closePromise) {
+        const currentClose = (async (): Promise<undefined> => {
+          if (!supervisorShutdownComplete) {
+            try {
+              options.onWorkflowSupervisorSnapshot?.(
+                await options.workflowSupervisor!.snapshot(),
+              );
+              await options.workflowSupervisor!.shutdown("backend-shutdown");
+              supervisorShutdownComplete = true;
+            } catch (error) {
+              // Retain the control lease and refresh diagnostics while Fastify
+              // is still listening. A later explicit close may retry the guard.
+              try {
+                options.onWorkflowSupervisorSnapshot?.(
+                  await options.workflowSupervisor!.snapshot(),
+                );
+              } catch {
+                // The original shutdown failure remains authoritative.
+              }
+              throw error;
+            }
+          }
+          return closeFastify();
+        })();
+        closePromise = currentClose;
+        void currentClose.catch(() => {
+          if (closePromise === currentClose) closePromise = undefined;
+        });
+      }
+      if (!closeListener) return closePromise;
+      void closePromise.then(
+        () => closeListener(),
+        (error: unknown) => closeListener(
+          error instanceof Error ? error : new Error(String(error)),
+        ),
+      );
+      return undefined;
+    }) as typeof app.close;
+  }
 
   return app;
 }
@@ -289,10 +362,13 @@ if (isMain) {
     }
     pendingShutdownReason = reason;
   };
+  const signalHandlers = new Map<NodeJS.Signals, () => void>();
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
-    process.on(signal, () => queueOrRequestShutdown(signal));
+    const handler = () => queueOrRequestShutdown(signal);
+    signalHandlers.set(signal, handler);
+    process.on(signal, handler);
   }
-  process.on("message", (message: unknown) => {
+  const onLauncherMessage = (message: unknown) => {
     if (
       typeof message === "object" &&
       message !== null &&
@@ -300,69 +376,135 @@ if (isMain) {
     ) {
       queueOrRequestShutdown("launcher-ipc");
     }
-  });
+  };
+  process.on("message", onLauncherMessage);
 
-  // Before anything makes an outbound request: Node's fetch ignores
-  // HTTP_PROXY/HTTPS_PROXY on its own, so a proxied network would otherwise
-  // only be used by the child `pi` processes that run subagents.
-  const proxy = configureHttpProxy();
-  syncHelperVenv(); // best-effort; previews degrade gracefully if it fails
-  const app = await buildApp();
-  const shutdown = createGracefulShutdownCoordinator({
-    close: () => app.close(),
-    onStart: (reason) => {
-      app.log.info({ reason }, "graceful Kady shutdown requested");
-    },
-    onComplete: (reason) => {
-      app.log.info({ reason }, "graceful Kady shutdown completed");
-    },
-    onRefused: (reason, error) => {
-      app.log.error(
-        {
-          reason,
-          quarantines: hostedFusionQuarantineSnapshot(),
-          ...workflowControllerErrorLogFields(error),
-        },
-        "graceful shutdown refused to discard process-owned work; Kady remains alive. Send a second signal only to force an unsafe exit",
-      );
-    },
-    onRepeated: (reason) => {
-      app.log.warn(
-        { reason, quarantines: hostedFusionQuarantineSnapshot() },
-        "graceful Kady shutdown is already pending or refused; duplicate backend shutdown delivery was ignored",
-      );
-    },
-    onForced: (reason) => {
-      app.log.error(
-        { reason, quarantines: hostedFusionQuarantineSnapshot() },
-        "forcing unsafe standalone Kady shutdown after a second explicit signal",
-      );
-    },
-    forceOnRepeated: typeof process.send !== "function",
-  });
-  requestShutdown = shutdown.request;
-
-  if (proxy.enabled) {
-    app.log.info(
-      { httpProxy: proxy.httpProxy, httpsProxy: proxy.httpsProxy, noProxy: proxy.noProxy },
-      "routing outbound HTTP through the configured proxy",
-    );
-  }
-  if (pendingShutdownReason) {
-    shutdown.request(pendingShutdownReason);
-  } else {
+  let initializingSupervisor: WorkflowSupervisorClient | undefined;
+  const initialized = await (async () => {
     try {
-      const addr = await app.listen({ port: PORT, host: HOST });
-      if (shutdown.state() === "idle") {
-        app.log.info(`kady-server listening on ${addr}`);
-        process.send?.({ type: "kady-ready", address: addr });
-        startAutomaticSkillSync(app.log);
-      }
+      // Before anything makes an outbound request: Node's fetch ignores
+      // HTTP_PROXY/HTTPS_PROXY on its own, so a proxied network would otherwise
+      // only be used by the child `pi` processes that run subagents.
+      const proxy = configureHttpProxy();
+      initializingSupervisor = await ensureWorkflowSupervisor();
+      let lastSupervisorSnapshot = await initializingSupervisor.snapshot();
+      syncHelperVenv(); // best-effort; previews degrade gracefully if it fails
+      const app = await buildApp({
+        workflowSupervisor: initializingSupervisor,
+        onWorkflowSupervisorSnapshot: (snapshot) => {
+          lastSupervisorSnapshot = snapshot;
+        },
+      });
+      return {
+        app,
+        proxy,
+        supervisorDiagnostics: () => ({
+          workflowSupervisor: lastSupervisorSnapshot,
+        }),
+      };
     } catch (error) {
-      if (shutdown.state() === "idle") {
-        app.log.error(error);
-        process.exit(1);
+      if (initializingSupervisor) {
+        try {
+          await initializingSupervisor.shutdown("backend-shutdown");
+        } catch {
+          // A retained owner must stay detached and attachable for the next
+          // backend; release this failed bootstrap's control lease.
+          await initializingSupervisor.close();
+        }
+      }
+      process.stderr.write(
+        `Kady backend initialization failed: ${JSON.stringify(
+          workflowControllerErrorLogFields(error),
+        )}\n`,
+      );
+      process.exitCode = 1;
+      return undefined;
+    }
+  })();
+
+  if (initialized) {
+    const { app, proxy, supervisorDiagnostics } = initialized;
+    const shutdown = createGracefulShutdownCoordinator({
+      close: () => app.close(),
+      onStart: (reason) => {
+        app.log.info({ reason }, "graceful Kady shutdown requested");
+      },
+      onComplete: (reason) => {
+        app.log.info({ reason }, "graceful Kady shutdown completed");
+      },
+      onRefused: (reason, error) => {
+        app.log.error(
+          {
+            reason,
+            ...supervisorDiagnostics(),
+            ...workflowControllerErrorLogFields(error),
+          },
+          "graceful shutdown refused to discard supervised work; Kady remains alive. Send a second signal only to force an unsafe exit",
+        );
+      },
+      onRepeated: (reason) => {
+        app.log.warn(
+          { reason, ...supervisorDiagnostics() },
+          "graceful Kady shutdown is already pending or refused; duplicate backend shutdown delivery was ignored",
+        );
+      },
+      onForced: (reason) => {
+        app.log.error(
+          { reason, ...supervisorDiagnostics() },
+          "forcing unsafe standalone Kady shutdown after a second explicit signal",
+        );
+      },
+      forceOnRepeated: typeof process.send !== "function",
+    });
+    requestShutdown = shutdown.request;
+
+    if (proxy.enabled) {
+      app.log.info(
+        { httpProxy: proxy.httpProxy, httpsProxy: proxy.httpsProxy, noProxy: proxy.noProxy },
+        "routing outbound HTTP through the configured proxy",
+      );
+    }
+    if (pendingShutdownReason) {
+      shutdown.request(pendingShutdownReason);
+    } else {
+      try {
+        const addr = await app.listen({ port: PORT, host: HOST });
+        if (shutdown.state() === "idle") {
+          app.log.info(`kady-server listening on ${addr}`);
+          process.send?.({ type: "kady-ready", address: addr });
+          startAutomaticSkillSync(app.log);
+        }
+      } catch (error) {
+        if (shutdown.state() === "idle") {
+          app.log.error(
+            { ...supervisorDiagnostics(), ...workflowControllerErrorLogFields(error) },
+            "Kady backend failed to listen",
+          );
+          try {
+            await app.close();
+          } catch (closeError) {
+            app.log.error(
+              {
+                ...supervisorDiagnostics(),
+                ...workflowControllerErrorLogFields(closeError),
+              },
+              "Kady startup cleanup retained supervised work",
+            );
+          }
+          process.exitCode = 1;
+        }
       }
     }
+  } else {
+    // The failed bootstrap above already released any supervisor control lease,
+    // so nothing is owned. Both the installed signal handlers and the launcher's
+    // IPC channel keep libuv referenced, so without releasing them this process
+    // would sit forever on an empty event loop and its caller would read the
+    // startup failure as a hang instead of an exit code.
+    for (const [signal, handler] of signalHandlers) {
+      process.off(signal, handler);
+    }
+    process.off("message", onLauncherMessage);
+    if (process.connected) process.disconnect();
   }
 }

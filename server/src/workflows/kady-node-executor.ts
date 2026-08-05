@@ -58,12 +58,14 @@ import {
   WORKFLOW_EVIDENCE_POLICY_SLOT_ID,
 } from "./evidence-policy.ts";
 import type {
-  DagFusionDelegationHost,
   DagFusionDelegationReceipt,
   DagFusionDelegationUsageSettlement,
   DelegateDagFusionNodeOptions,
   OwnedDelegationV2Request,
 } from "../../pi-packages/dag-fusion-drive/index.ts";
+import type {
+  SupervisedWorkflowBudgetDescriptorV1,
+} from "./supervised-budget.ts";
 
 export const KADY_WORKFLOW_READ_ONLY_AGENT =
   "dag-workflow-readonly-executor" as const;
@@ -74,7 +76,24 @@ const MAX_NODE_OUTPUT_BYTES = 14 * 1024;
 const MAX_CONTEXT_BYTES = 32 * 1024;
 
 type PlainRecord = Record<string, unknown>;
-type DelegationHost = Pick<DagFusionDelegationHost, "delegate">;
+export interface KadySupervisedDelegateOptions extends DelegateDagFusionNodeOptions {
+  /** Trusted local transport metadata; the embedded Dag Fusion host ignores it. */
+  supervisedBudget?: SupervisedWorkflowBudgetDescriptorV1;
+}
+
+export interface KadyDelegationHostPort {
+  delegate(
+    request: OwnedDelegationV2Request,
+    options: KadySupervisedDelegateOptions,
+  ): Promise<DagFusionDelegationReceipt>;
+}
+
+export interface KadyHostedFusionTransportOptions {
+  /** Trusted local transport metadata; the embedded hosted runner ignores it. */
+  supervisedBudget?: SupervisedWorkflowBudgetDescriptorV1;
+}
+
+type DelegationHost = KadyDelegationHostPort;
 type HostedOpenRouterFusionNode = Extract<WorkflowNode, { kind: "fusion" }> & {
   fusion: Extract<
     Extract<WorkflowNode, { kind: "fusion" }>["fusion"],
@@ -138,6 +157,8 @@ export interface KadyWorkflowUsageAdmission {
 }
 
 export interface KadyWorkflowUsageReservation {
+  /** Present on production reservations; test and alternate reservers may omit it. */
+  descriptor?: SupervisedWorkflowBudgetDescriptorV1;
   /** Called exactly once for every admitted call, including pre-launch failure. */
   reconcile(settlement: DagFusionDelegationUsageSettlement): void | Promise<void>;
 }
@@ -216,7 +237,7 @@ export interface KadyDelegationPolicy {
   toolHardLimit: number;
 }
 
-interface KadyNodeExecutorDependencies {
+export interface KadyNodeExecutorDependencies {
   pathsForProject(projectId: string): ProjectPaths;
   loadManifest(context: WorkflowNodeExecutorContext): ManifestIdentity | Promise<ManifestIdentity>;
   getDelegationSession(
@@ -229,6 +250,7 @@ interface KadyNodeExecutorDependencies {
   ): Promise<ResolvedWorkflowModel>;
   runHostedFusion(
     request: HostedOpenRouterFusionRequest,
+    transport?: KadyHostedFusionTransportOptions,
   ): Promise<HostedOpenRouterFusionResult>;
   assertChildRuntimeReady(paths: ProjectPaths): void;
   readCompactionAudit(sandboxRoot: string, childRunId: string): TrustedDagFusionCompactionAudit;
@@ -241,6 +263,7 @@ interface KadyPreResolvedDelegation {
 }
 
 interface KadyDelegationUsageBridge {
+  descriptor?: SupervisedWorkflowBudgetDescriptorV1;
   reconcile(settlement: DagFusionDelegationUsageSettlement): Promise<void>;
 }
 
@@ -534,7 +557,9 @@ function dependenciesWithDefaults(
     loadManifest: defaultLoadManifest,
     getDelegationSession: getOrCreateWorkflowDelegationSession,
     resolveModel: resolveWorkflowModel,
-    runHostedFusion: runHostedOpenRouterFusion,
+    // The embedded runner has its own dependency-injection second argument;
+    // never let trusted transport metadata reach that testing seam.
+    runHostedFusion: (request) => runHostedOpenRouterFusion(request),
     assertChildRuntimeReady: assertDagFusionPackageSeeded,
     readCompactionAudit: readTrustedDagFusionCompactionAudit,
     now: Date.now,
@@ -1575,12 +1600,16 @@ export function createKadyWorkflowNodeExecutor(
         : (settlement: DagFusionDelegationUsageSettlement) =>
             reservation!.reconcile(settlement);
       let reconciliationStarted = false;
-      const delegateOptions: DelegateDagFusionNodeOptions = {
+      const supervisedBudget = input.usageBridge?.descriptor ?? reservation?.descriptor;
+      const delegateOptions: KadySupervisedDelegateOptions = {
         limits: {
           maxTokens: perCallMaxTokens,
           maxCostUsd: admittedPerCallMaxCostUsd,
         },
         signal: delegationSignal,
+        ...(supervisedBudget === undefined
+          ? {}
+          : { supervisedBudget: structuredClone(supervisedBudget) }),
         reconcileUsage: (settlement) => {
           reconciliationStarted = true;
           return reconcileUsage(settlement);
@@ -1944,6 +1973,13 @@ export function createKadyWorkflowNodeExecutor(
                 }
                 let usageReported = false;
                 const usageBridge: KadyDelegationUsageBridge = {
+                  ...(budgetReservation?.descriptor === undefined
+                    ? {}
+                    : {
+                        descriptor: structuredClone(
+                          budgetReservation.descriptor,
+                        ),
+                      }),
                   reconcile: async (settlement) => {
                     if (settlement.usage && !usageReported) {
                       runOptions?.onUsage?.(
@@ -2148,27 +2184,34 @@ export function createKadyWorkflowNodeExecutor(
       };
 
       try {
-        const result = await dependencies.runHostedFusion({
-          projectId: context.projectId,
-          paths,
-          identity,
-          fusion: node.fusion,
-          resolved,
-          task: boundedTask([
-            ...baseTaskContext(context),
-            `Hosted Fusion goal: ${node.goal}`,
-            `Panel roles: ${boundedContext(node.fusion.members.map((member) => ({
-              memberId: member.id,
-              role: member.role,
-            })))}`,
-            "Return the strongest fused answer. Preserve material disagreement in prose when the hosted panel exposes it.",
-          ]),
-          maxTokens: compoundMaxTokens,
-          maxCostUsd: compoundMaxCostUsd,
-          timeoutMs: remainingMs,
-          signal: nodeSignal.signal,
-          reconcileUsage: reconcile,
-        });
+        const result = await dependencies.runHostedFusion(
+          {
+            projectId: context.projectId,
+            paths,
+            identity,
+            fusion: node.fusion,
+            resolved,
+            task: boundedTask([
+              ...baseTaskContext(context),
+              `Hosted Fusion goal: ${node.goal}`,
+              `Panel roles: ${boundedContext(node.fusion.members.map((member) => ({
+                memberId: member.id,
+                role: member.role,
+              })))}`,
+              "Return the strongest fused answer. Preserve material disagreement in prose when the hosted panel exposes it.",
+            ]),
+            maxTokens: compoundMaxTokens,
+            maxCostUsd: compoundMaxCostUsd,
+            timeoutMs: remainingMs,
+            signal: nodeSignal.signal,
+            reconcileUsage: reconcile,
+          },
+          reservation.descriptor === undefined
+            ? undefined
+            : {
+                supervisedBudget: structuredClone(reservation.descriptor),
+              },
+        );
         if (
           !result || typeof result.text !== "string" || result.text.trim().length === 0 ||
           typeof result.textTruncated !== "boolean" ||

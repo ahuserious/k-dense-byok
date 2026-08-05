@@ -90,4 +90,45 @@ describe("production backend IPC lifecycle", () => {
       fs.rmSync(temporaryRoot, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it("exits with a failure code when the workflow supervisor cannot start", async () => {
+    // Both the installed signal handlers and the launcher's IPC channel keep
+    // libuv referenced. Without releasing them a failed bootstrap sat forever
+    // on an empty event loop, so the launcher read a startup failure as a hang.
+    const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-backend-ipc-fail-"));
+    let child: ChildProcess | undefined;
+    let stderrText = "";
+    try {
+      child = spawn(
+        process.execPath,
+        [path.join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs"), "src/index.ts"],
+        {
+          cwd: process.cwd(),
+          env: {
+            ...process.env,
+            KADY_HOST: "127.0.0.1",
+            KADY_PORT: "0",
+            KADY_PROJECTS_ROOT: path.join(temporaryRoot, "projects"),
+            KADY_PI_AGENT_DIR: path.join(temporaryRoot, "pi-agent"),
+            KADY_SKILLS_CACHE_DIR: path.join(temporaryRoot, "skills-cache"),
+            // No socket of this length can be bound on any supported platform.
+            KADY_WORKFLOW_SUPERVISOR_SOCKET: `/${"s".repeat(200)}.sock`,
+            LOG_LEVEL: "silent",
+          },
+          stdio: ["ignore", "ignore", "pipe", "ipc"],
+        },
+      );
+      child.stderr?.on("data", (chunk) => {
+        stderrText += String(chunk).slice(0, 4_096);
+      });
+
+      expect(await waitForExit(child, () => stderrText)).toBe(1);
+      expect(stderrText).toContain("Kady backend initialization failed");
+    } finally {
+      if (child && child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+      }
+      fs.rmSync(temporaryRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

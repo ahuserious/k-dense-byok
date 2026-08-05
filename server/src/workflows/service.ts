@@ -1,8 +1,6 @@
-import type { LedgerAuthType } from "../cost/billing.ts";
 import {
   billingCountsTowardBudget,
   billingForProvider,
-  normalizeUsageCost,
 } from "../cost/billing.ts";
 import type { DagFusionDelegationUsageSettlement } from "../../pi-packages/dag-fusion-drive/index.ts";
 import {
@@ -11,8 +9,6 @@ import {
   workflowBudgetReservationId,
   type ReserveWorkflowBudgetInput,
   type WorkflowBudgetReservationHandle,
-  type WorkflowBudgetSettlementStatus,
-  type WorkflowBudgetUsageInput,
 } from "./budget.ts";
 import {
   WorkflowRunController,
@@ -21,6 +17,7 @@ import {
 import {
   createKadyWorkflowNodeExecutor,
   type CreateKadyWorkflowNodeExecutorOptions,
+  type KadyNodeExecutorDependencies,
   type KadyWorkflowUsageAdmission,
   type KadyWorkflowUsageReserver,
   type TrustedLeanVerifier,
@@ -28,6 +25,10 @@ import {
 import { createTrustedLeanVerifier } from "./lean4-verifier.ts";
 import type { WorkflowNodeExecutor } from "./runner.ts";
 import type { WorkflowStore } from "./store.ts";
+import {
+  createSupervisedWorkflowBudgetDescriptor,
+  settleWorkflowBudgetInputForDagFusion,
+} from "./supervised-budget.ts";
 
 export const WORKFLOW_BUDGET_SETTLEMENT_GRACE_MS = 30_000;
 
@@ -51,21 +52,8 @@ export interface CreateProductionWorkflowControllerOptions {
   reserveBudget?: ReserveWorkflowBudget;
   leanVerifier?: TrustedLeanVerifier;
   nodeExecutorFactory?: KadyWorkflowNodeExecutorFactory;
-}
-
-function authTypeForAdmission(admission: KadyWorkflowUsageAdmission): LedgerAuthType {
-  switch (admission.modelReceipt.resolved.auth.kind) {
-    case "oauth":
-      return "oauth";
-    case "local":
-    case "custom":
-      return "local";
-    case "api-key":
-      return "api_key";
-    default:
-      // An unknown receipt must not silently bypass a project cap.
-      return "none";
-  }
+  /** Trusted transport overrides, such as the out-of-process workflow supervisor. */
+  nodeExecutorDependencies?: Partial<KadyNodeExecutorDependencies>;
 }
 
 function workflowBudgetLeaseDuration(timeoutMs: number): number {
@@ -76,65 +64,6 @@ function workflowBudgetLeaseDuration(timeoutMs: number): number {
     MAX_WORKFLOW_BUDGET_LEASE_MS,
     Math.max(1_000, timeoutMs + WORKFLOW_BUDGET_SETTLEMENT_GRACE_MS),
   );
-}
-
-function settlementStatus(
-  settlement: DagFusionDelegationUsageSettlement,
-): WorkflowBudgetSettlementStatus {
-  if (
-    settlement.reason === "caller-cancelled" ||
-    settlement.reason === "caller-aborted" ||
-    settlement.responseStatus === "cancelled" ||
-    settlement.responseStatus === "interrupted"
-  ) {
-    return "aborted";
-  }
-  if (
-    settlement.reason === "host-timeout" ||
-    settlement.responseStatus === "timed_out"
-  ) {
-    return "timed-out";
-  }
-  // A provider response is successful only with its auditable terminal usage.
-  // Missing usage remains a failed, maximum-charge reconciliation.
-  if (
-    settlement.reason === "terminal-response" &&
-    settlement.responseStatus === "completed" &&
-    settlement.usage !== undefined
-  ) {
-    return "completed";
-  }
-  return "failed";
-}
-
-function settlementReason(settlement: DagFusionDelegationUsageSettlement): string {
-  const response = settlement.responseStatus ?? "no-response";
-  const usage = settlement.usage ? "observed" : "missing";
-  return `dag-fusion:${settlement.reason}:${response}:usage-${usage}`;
-}
-
-function usageForBudget(
-  settlement: DagFusionDelegationUsageSettlement,
-  admission: KadyWorkflowUsageAdmission,
-): WorkflowBudgetUsageInput | undefined {
-  const usage = settlement.usage;
-  if (!usage) return undefined;
-  const billing = billingForProvider(
-    admission.modelReceipt.resolved.provider,
-    authTypeForAdmission(admission),
-  );
-  const normalizedCost = normalizeUsageCost(usage.cost, billing);
-  return {
-    input: usage.input,
-    output: usage.output,
-    cacheRead: usage.cacheRead,
-    cacheWrite: usage.cacheWrite,
-    // Pi's delegation ceiling counts generated and prompt tokens. Cache
-    // counters are retained for audit, but adding them again would charge the
-    // same logical input twice on providers that report cached prompt tokens.
-    total: usage.input + usage.output,
-    cost: normalizedCost.costUsd,
-  };
 }
 
 function assertSettlementIdentity(
@@ -161,20 +90,30 @@ export function createProductionWorkflowUsageReserver(
   const reserveBudget = options.reserveBudget ?? reserveWorkflowBudget;
 
   return async (admission) => {
+    const reservationId = workflowBudgetReservationId(
+      admission.projectId,
+      admission.runId,
+      admission.executionId,
+      admission.attempt,
+      admission.slotId,
+    );
+    const descriptor = createSupervisedWorkflowBudgetDescriptor({
+      reservationId,
+      runId: admission.runId,
+      executionId: admission.executionId,
+      attempt: admission.attempt,
+      slotId: admission.slotId,
+      provider: admission.modelReceipt.resolved.provider,
+      authKind: admission.modelReceipt.resolved.auth.kind,
+    });
     const billing = billingForProvider(
-      admission.modelReceipt.resolved.provider,
-      authTypeForAdmission(admission),
+      descriptor.provider,
+      descriptor.authType,
     );
     const countsTowardBudget = billingCountsTowardBudget(billing);
     const handle = await reserveBudget({
       projectId: admission.projectId,
-      reservationId: workflowBudgetReservationId(
-        admission.projectId,
-        admission.runId,
-        admission.executionId,
-        admission.attempt,
-        admission.slotId,
-      ),
+      reservationId,
       runId: admission.runId,
       runMaxCostUsd: admission.runMaxCostUsd,
       runMaxTokens: admission.runMaxTokens,
@@ -186,13 +125,12 @@ export function createProductionWorkflowUsageReserver(
     });
 
     return {
+      descriptor,
       async reconcile(settlement) {
         assertSettlementIdentity(admission, settlement);
-        await handle.settle({
-          status: settlementStatus(settlement),
-          usage: usageForBudget(settlement, admission),
-          reason: settlementReason(settlement),
-        });
+        await handle.settle(
+          settleWorkflowBudgetInputForDagFusion(descriptor, settlement),
+        );
       },
     };
   };
@@ -209,6 +147,9 @@ export function createProductionWorkflowController(
   const executeNode = nodeExecutorFactory({
     reserveUsage,
     verifyLean: options.leanVerifier ?? createTrustedLeanVerifier(),
+    ...(options.nodeExecutorDependencies
+      ? { dependencies: options.nodeExecutorDependencies }
+      : {}),
   });
 
   return new WorkflowRunController({

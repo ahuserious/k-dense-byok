@@ -10,21 +10,22 @@
 | Area | Current branch status | Delivery consequence |
 |---|---|---|
 | Typed graph, validation, revisioned definitions | Implemented and tested | Ready for the first PR. |
-| Durable runs, events, leases, cancellation, recovery, resume, budgets | Implemented and tested for graph/run state | Ready after the graph contract. This does not recover process-local Pi child quarantine after abnormal backend death. |
-| Bounded Pi Delegation V2 and dedicated workflow sessions | Implemented and tested for graceful lifecycle | **P0 remains:** public V2 exposes no child PID or durable reattachment handle, so abnormal-restart quarantine recovery is not release-ready. |
-| Research Until Goal, Council, both Fusion modes, Best-of-N, evidence gates, bounded runner retry, Lean | Integrated through Kady's runner and node executor | Lean uses exact host-owned artifacts and is disabled unless the server owner explicitly accepts unsandboxed same-user authority. Writable DAG leaf workspaces remain unsupported. Production DAG-leaf use remains blocked on abnormal-restart ownership recovery. |
+| Durable runs, events, leases, cancellation, recovery, resume, budgets | Implemented and tested for graph/run state | Ready after the graph contract. Supervisor settlement precedes backend recovery. |
+| Bounded Pi Delegation V2, dedicated workflow sessions, detached owner | Implemented and tested for graceful lifecycle, dropped-backend cancellation, durable settlement ordering, and inherited-owner replacement | Land the detached-supervisor slice before production leaf execution. Supervisor/host death remains deliberately fail-closed rather than reattachable. |
+| Research Until Goal, Council, both Fusion modes, Best-of-N, evidence gates, bounded runner retry, Lean | Integrated through Kady's runner and node executor | Lean uses exact host-owned artifacts and is disabled unless the server owner explicitly accepts unsandboxed same-user authority. Writable DAG leaf workspaces remain unsupported. |
 | Dynamic Workflows kernel adapter/compiler | Integrated for ordinary Agent nodes | Compound nodes stay on Kady's direct typed multi-slot executor so partial usage and requested/resolved receipts remain explicit. |
 | Builder, Console runner controls, Raindrop, templates, dedicated helpers, `Pi (Kady)` | Implemented and tested | Ready after backend contracts stabilize. |
 | Legacy DAG-Pipelines compatibility | Preview-only prompt-DAG translator plus an explicit archive-only run boundary | Include with the backend API. Interactive, loop, conditional, all-parent join, and sidecar-run semantics remain manual migrations. |
 | Pre/post-compaction checks | Mandatory structural child lifecycle audit with trusted Kady readback | Records fingerprints/counts only and fails visibly on missing or contradictory audit state; it does not prove semantic summary quality. |
 | Rescue diagnosis and workflow repair | A separate helper can inspect bounded stopped-run context and propose a manual rescue; the runner can retry within policy | **Deferred from automatic execution.** No helper may patch a saved graph or control the runner, and no automatic diagnosis/repair loop exists. |
 | End-to-end workflow provenance | Durable workflow/model/artifact receipts exist, but the public extension/runtime provenance boundary is incomplete | Keep the limitation visible; do not claim package release readiness. |
-| `dag-fusion-drive` | Private development package with a narrow exported Agent/panel-judge graph API, trusted-host adapter, compaction audit, and `byom-dag-fusion` Lean skill | **Publication blocked.** Abnormal-restart child ownership/recovery is an unresolved P0 in addition to Kady lowering/parity, provenance, clean install, packed-artifact review, namespace ownership, and owner approval. |
+| `dag-fusion-drive` | Private development package with a narrow exported Agent/panel-judge graph API, trusted-host adapter, compaction audit, and `byom-dag-fusion` Lean skill | **Publication blocked.** Kady lowering/parity, provenance, clean install, packed-artifact review, namespace ownership, and owner approval remain explicit gates. |
 
 The runner's same-run durable lease prevents duplicate ownership across backend
 processes. The configured global/per-project scheduler concurrency ceilings are
-process-local, so a multi-backend deployment must not present them as a
-cluster-wide capacity guarantee. DAG and Modal reservations share atomic
+process-local, and one authenticated supervisor control lease intentionally
+admits only one backend epoch, so a multi-backend deployment is unsupported.
+DAG and Modal reservations share atomic
 project-cap admission; ordinary chat does not yet declare and pre-reserve a
 worst-case turn cost through that same mechanism.
 
@@ -100,9 +101,8 @@ Base: PR 2.
 - [ ] Exit gate: wrong-owner/stale events are ignored; an exact terminal shape
   validates before quarantine release; missing/malformed acknowledgement
   full-charges, quarantines, and blocks admission/teardown/deletion; ordinary
-  sessions cannot own DAG leaves. Abnormal restart remains blocked until V2
-  exposes a durable child identity/reattachment or another reviewed positive
-  quiescence mechanism—accounting recovery alone is not sufficient.
+  sessions cannot own DAG leaves. This embedded transport PR does not yet claim
+  abnormal-backend survival; that process boundary lands in the next slice.
 
 Focused verification:
 
@@ -116,9 +116,51 @@ npx vitest run \
 npm run typecheck
 ```
 
-### PR 4 — integrated node behaviors and trusted Lean verification
+### PR 4 — detached workflow ownership and crash reconciliation
 
 Base: PR 3.
+
+- [ ] Start one authenticated detached workflow supervisor before budget/run
+  recovery and route both Pi Delegation V2 and hosted Fusion through it.
+- [ ] Bind every operation to the exact project, run, execution, attempt, slot,
+  reservation, provider, auth, backend epoch, and one-shot socket.
+- [ ] Settle the durable workflow reservation before recording terminal
+  ownership or replying; let the backend repeat the same intent idempotently.
+- [ ] Treat an inherited supervisor as drain-only, then replace it so code,
+  credentials, and provider configuration cannot silently remain stale.
+- [ ] Wire remote quiescence into project deletion and graceful shutdown, and
+  reload changed provider ids from local Settings without sending secrets.
+- [ ] Keep the ownership journal content-free and private. A supervisor/host
+  crash with a running record must quarantine and block rather than infer stop.
+  Fixed IPC, connection, unread-byte, provider-identity, and journal capacities
+  must fail closed without making lifecycle control unavailable.
+- [ ] Exit gate: dropping both backend sockets cancels the exact attempt and
+  persists accounting before terminal journal state; ambiguous live PIDs,
+  incompatible runtimes, unconfirmed owners, and replaced socket/state files
+  all fail closed.
+
+Focused verification:
+
+```bash
+cd server
+npx vitest run \
+  test/workflow-supervisor-protocol.test.ts \
+  test/workflow-supervisor-journal.test.ts \
+  test/workflow-supervisor-runtime.test.ts \
+  test/workflow-supervisor-coordinator.test.ts \
+  test/workflow-supervisor-server.test.ts \
+  test/workflow-supervisor-entry.test.ts \
+  test/workflow-supervisor-client.test.ts \
+  test/workflow-supervisor-crash.test.ts \
+  test/workflow-supervisor-app-wiring.test.ts \
+  test/workflow-supervisor-credentials.test.ts \
+  test/project-workflow-delete.test.ts
+npm run typecheck
+```
+
+### PR 5 — integrated node behaviors and trusted Lean verification
+
+Base: PR 4.
 
 - [ ] Wire Agent, Research Until Goal, Council, Kady panel Fusion, hosted
   OpenRouter Fusion, Best-of-N (default 2), evidence gates, bounded runner
@@ -159,9 +201,9 @@ npx vitest run \
 npm run typecheck
 ```
 
-### PR 5 — visual workflows, templates, helpers, and settings
+### PR 6 — visual workflows, templates, helpers, and settings
 
-Base: PR 4.
+Base: PR 5.
 
 - [ ] Add the persistent DAG Workflows view, Builder/canvas/inspector, run
   launch, Console runner controls, and authoritative event polling.
@@ -203,9 +245,9 @@ npx vitest run \
 npx tsc --noEmit
 ```
 
-### PR 6 — private extension extraction and release hardening
+### PR 7 — private extension extraction and release hardening
 
-Base: PR 4 or PR 5, depending on whether package seeding needs UI-visible
+Base: PR 5 or PR 6, depending on whether package seeding needs UI-visible
 metadata. This PR remains private/release-blocked.
 
 - [ ] Review the implemented narrow exported nonvisual Agent/panel-judge graph

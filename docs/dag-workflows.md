@@ -17,9 +17,9 @@ requirements.
 | Surface | Branch status |
 |---|---|
 | Typed graph, validation, revisioned definitions | Implemented and exercised by backend/frontend contract tests. |
-| Durable run events, leases, cancellation, restart recovery, resume | Implemented for graph/run state. Cancellation intent and owner fencing are cross-process; interrupted work resumes only through an explicit control. This does **not** recover an in-memory pi-subagents child quarantine after abnormal backend death; that P0 boundary is described below. |
+| Durable run events, leases, cancellation, restart recovery, resume | Implemented for graph/run state. Cancellation intent and owner fencing are cross-process; interrupted graph work resumes only through an explicit control. A detached workflow supervisor owns unsafe provider/child intervals across backend death. |
 | Project/run token, cost, and model-call ceilings | Implemented with fail-closed durable reservations. Modal and DAG admission share the project-cap lock. |
-| Pi leaf execution | Integrated through a dedicated workflow-only Pi session and owned `pi-subagents` Delegation V2 transport. Graceful lifecycle is tested; abnormal-restart child ownership recovery remains the P0 production/release gate described below. |
+| Pi leaf execution | Integrated through a dedicated workflow-only Pi session and owned `pi-subagents` Delegation V2 transport inside the detached workflow supervisor. Graceful cancellation and dropped-backend settlement are tested. |
 | Research, Council, Kady panel Fusion, best-of-N, evidence gate, Lean | Integrated as typed, bounded node behaviors. Leaf workspaces are deliberately read-only. Lean is host-owned, disabled by default, and requires the explicit unsandboxed server opt-in described below. |
 | Hosted OpenRouter Fusion | Integrated as one exact compound request with separate requested/resolved receipts and no implicit judge fallback. |
 | Dynamic Workflows package kernel | Integrated ordinary Agent nodes use the pinned adapter and trusted single-agent compiler. Compound nodes remain on Kady's typed multi-slot executor so partial usage and per-slot requested/resolved receipts stay visible; the saved graph never becomes package-owned JavaScript. |
@@ -27,7 +27,7 @@ requirements.
 | Legacy DAG-Pipelines state | A preview-only clean-room translator handles the safe prompt-DAG subset. Interactive/loop/join semantics block for manual redesign; legacy runs are archive-only and never presented as resumable native runs. |
 | Automatic rescue | The runner performs bounded policy-controlled retry and exposes manual rescue as a new auditable run. The separate helper can propose a diagnosis, but automatic diagnosis or graph repair is not implemented and a saved graph is never silently rewritten. |
 | Pre/post-compaction checks | Owned child sessions install a mandatory structural lifecycle audit. It records bounded fingerprints/counts rather than transcript or summary text; the trusted Kady reader emits durable checks and routes failures through bounded rescue policy. It does not establish that a summary is semantically complete or correct. |
-| `dag-fusion-drive` package and marketplace release | A narrow exported nonvisual Agent/panel-judge graph API and trusted-host adapter are implemented. The package remains private; abnormal-restart child ownership, Kady lowering/parity, provenance, artifact review, namespace ownership, and explicit publication approval remain release gates. |
+| `dag-fusion-drive` package and marketplace release | A narrow exported nonvisual Agent/panel-judge graph API and trusted-host adapter are implemented. The package remains private; Kady lowering/parity, provenance, artifact review, namespace ownership, and explicit publication approval remain release gates. |
 
 ## Decisions
 
@@ -126,15 +126,42 @@ responses remain rejected. The package host waits `cancellationAckTimeoutMs`
 (5,000 ms by default, configurable from 1-60,000 ms); a local abort signal plus
 reconciliation alone is never reported as provider stop.
 
-The quarantine is process-local because the current public pi-subagents event
-API has no durable cross-process reattachment. Force-killing or restarting a
-quarantined backend therefore cannot establish child quiescence. The
-fail-closed maximum charge remains accounting protection, not proof of stop;
-durable reattachment/recovery is an unresolved **P0 production DAG-leaf and
-package-release blocker**.
-The durable run/controller recovery described in the status table restores
-workflow state and fail-closed accounting only; it must not be read as recovery
-or proof of quiescence for an in-flight quarantined Pi child.
+The quarantine is process-local to a dedicated workflow supervisor, not to the
+Fastify backend. Production starts that detached owner before budget or graph
+recovery. An authenticated control lease binds one backend epoch, while every
+Pi/hosted-Fusion operation uses its own bounded one-shot socket and exact run,
+execution, slot, reservation, provider, and auth identity. If the backend dies,
+socket teardown cancels the exact owned attempts. The supervisor waits for the
+same terminal/quarantine rules above and writes the deterministic budget
+settlement before a content-free ownership-journal settlement or IPC reply.
+The backend repeats the same settlement idempotently when it receives a reply.
+
+A replacement backend treats an inherited supervisor as drain-only: it
+authenticates, waits for exact ownership to settle, shuts that process down, and
+starts a fresh supervisor before stale-budget and graph recovery. This avoids
+reusing stale credentials, code, or provider configuration. Credential Settings
+changes send only provider ids over IPC; the supervisor rereads locally
+persisted values and blocks new admission if reload fails. Project deletion and
+graceful shutdown both require remote quiescence before state or ownership can
+be discarded.
+
+The supervisor keeps private runtime state, a bearer token, logs, and
+content-free operation records under Kady's Pi agent directory (or the explicit
+supervisor override). Its POSIX control socket normally lives beside them, but
+an agent directory deeper than the platform's `sockaddr_un.sun_path` budget
+(104 bytes on macOS, 108 on Linux) cannot host a bindable socket at all. The
+socket then moves to a short private `0700` directory named for that exact
+state directory under the OS temporary root, and startup fails closed naming
+`KADY_WORKFLOW_SUPERVISOR_SOCKET` if even that does not fit. Prompts, results,
+credentials, and error text are not stored in the operation journal. IPC frames, concurrent connections, aggregate
+unread bytes, provider-operation replay identities, and journal records all have
+fixed capacities; saturation fails closed while lifecycle control remains
+available for inspection, quiescence, and shutdown. If the supervisor process
+or host itself dies
+while a record is running, a new supervisor converts that record to durable
+quarantine and refuses attachment/admission because no public Pi/provider handle
+can prove stop. That is a deliberate fail-closed availability boundary, not
+transparent provider reattachment and not permission to delete the journal.
 
 ### Node semantics are typed and bounded
 
@@ -241,13 +268,15 @@ equivalent:
   caller/deadline, then allows 5 seconds for prompt settlement, abort
   acknowledgement, and an idle temporary session. If those three conditions are
   not proven, the call fails visibly and the missing-usage settlement charges
-  the full reserved envelope. Kady retains the exact session and Fusion config
-  in a process-local quarantine; new hosted Fusion admission, project deletion,
+  the full reserved envelope. The workflow supervisor retains the exact session
+  and Fusion config in its own quarantine; new hosted Fusion admission, project deletion,
   and graceful shutdown are blocked until a genuine late acknowledgement lets
-  Kady clear and dispose that owner. This is bounded caller settlement, not
-  proof of stop after abnormal backend death. The cross-platform launcher sends
-  the backend an owned IPC shutdown request and waits without an automatic kill
-  deadline. A second explicit Ctrl+C is the visible unsafe force-exit path.
+  Kady clear and dispose that owner. Backend death drops the authenticated
+  operation/control sockets and therefore triggers the same exact cancellation
+  path; supervisor or host death remains the fail-closed boundary described
+  above. The cross-platform launcher sends the backend an owned IPC shutdown
+  request and waits without an automatic kill deadline. A second explicit
+  Ctrl+C is the visible unsafe force-exit path.
 - **`kady-panel`** runs each selected OpenRouter, supported OAuth, Ollama/local,
   or configured OpenAI-compatible model as an owned Kady leaf, then performs
   Council/judging/synthesis as declared by the node. This is the path that

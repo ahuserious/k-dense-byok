@@ -19,6 +19,10 @@ import {
   createProductionWorkflowUsageReserver,
   workflowControllerErrorLogFields,
 } from "../src/workflows/service.ts";
+import {
+  parseSupervisedWorkflowBudgetDescriptor,
+  settleWorkflowBudgetInputForDagFusion,
+} from "../src/workflows/supervised-budget.ts";
 
 function resetProjects(): void {
   fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
@@ -139,6 +143,22 @@ describe("production workflow usage reservations", () => {
 
     expect(events).toEqual(["reserve", "dispatch"]);
     expect(reservation.reconcile).toBeTypeOf("function");
+    expect(reservation.descriptor).toEqual({
+      version: 1,
+      reservationId: workflowBudgetReservationId(
+        item.projectId,
+        item.runId,
+        item.executionId,
+        item.attempt,
+        item.slotId,
+      ),
+      runId: item.runId,
+      executionId: item.executionId,
+      attempt: item.attempt,
+      slotId: item.slotId,
+      provider: "openrouter",
+      authType: "api_key",
+    });
     expect(captured).toEqual({
       projectId: item.projectId,
       reservationId: workflowBudgetReservationId(
@@ -231,6 +251,50 @@ describe("production workflow usage reservations", () => {
     expect(settleBudget).toHaveBeenCalledWith(expect.objectContaining({
       usage: expect.objectContaining({ cost: 0.25 }),
     }));
+  });
+
+  it("uses the same deterministic settlement intent exposed to the supervisor", async () => {
+    const settleBudget = vi.fn(async () => ({} as never));
+    const item = admission({ provider: "anthropic", authKind: "oauth" });
+    const reservation = await createProductionWorkflowUsageReserver({
+      reserveBudget: vi.fn(async () => fakeBudgetHandle(settleBudget)),
+    })(item);
+    const terminal = settlement(item);
+    if (!reservation.descriptor) throw new Error("production descriptor missing");
+
+    const expectedIntent = settleWorkflowBudgetInputForDagFusion(
+      reservation.descriptor,
+      terminal,
+    );
+    await reservation.reconcile(structuredClone(terminal));
+
+    expect(settleBudget).toHaveBeenCalledOnce();
+    expect(settleBudget).toHaveBeenCalledWith(expectedIntent);
+    expect(JSON.stringify(settleBudget.mock.calls[0][0])).toBe(
+      JSON.stringify(expectedIntent),
+    );
+  });
+
+  it("rejects descriptor extensions and credential-bearing fields", () => {
+    const item = admission();
+    const reservationId = workflowBudgetReservationId(
+      item.projectId,
+      item.runId,
+      item.executionId,
+      item.attempt,
+      item.slotId,
+    );
+    expect(() => parseSupervisedWorkflowBudgetDescriptor({
+      version: 1,
+      reservationId,
+      runId: item.runId,
+      executionId: item.executionId,
+      attempt: item.attempt,
+      slotId: item.slotId,
+      provider: "openrouter",
+      authType: "api_key",
+      profile: "must-not-cross-ipc",
+    })).toThrow(/unexpected fields/);
   });
 
   it("reconciles the same terminal receipt idempotently", async () => {
