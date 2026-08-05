@@ -18,9 +18,9 @@ import {
   type NotebookEntry,
 } from "./agent/notebook-store.ts";
 import { toNotebook } from "./agent/session-export.ts";
-import { listSessions } from "./agent/session-registry.ts";
+import { listMainSessions } from "./agent/session-registry.ts";
 
-type ArchiveSession = Awaited<ReturnType<typeof listSessions>>[number];
+type ArchiveSession = Awaited<ReturnType<typeof listMainSessions>>[number];
 
 export interface ProjectArchiveOptions {
   paths: ProjectPaths;
@@ -286,7 +286,7 @@ export async function buildProjectArchive(
   // the archive to the HTTP response before any stream errors are possible.
   const completeOpts: ProjectArchiveOptions = {
     ...opts,
-    sessions: opts.sessions ?? await listSessions(opts.paths),
+    sessions: opts.sessions ?? await listMainSessions(opts.paths),
   };
   const archive = new ZipArchive({
     forceZip64: true,

@@ -18,7 +18,6 @@
  * session build.
  */
 import fs from "node:fs";
-import path from "node:path";
 import { createRequire } from "node:module";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
@@ -36,7 +35,7 @@ import { isSubscriptionProvider } from "./provider-auth.ts";
 
 const require_ = createRequire(import.meta.url);
 
-/** Entry file of the pi-subagents extension (per its package.json `pi.extensions`). */
+/** Public package entry, which is also the declared Pi extension entry. */
 export function subagentsExtensionPath(): string {
   const dir = subagentsPackageDir();
   const manifest = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")) as {
@@ -570,4 +569,3 @@ export function makeSubagentLedgerExtension(
     });
   };
 }
-

@@ -120,9 +120,31 @@ export function setBuiltinDisabled(paths: ProjectPaths, name: string, disabled: 
   writePiSettings(paths, settings);
 }
 
-/** Marker that initial seeding ran; its presence makes user deletions stick. */
+/** Marker that the original scientific roster was seeded. */
 function seedMarkerPath(paths: ProjectPaths): string {
   return path.join(agentsDir(paths), ".seeded");
+}
+
+const DAG_HELPER_SEED_MIGRATIONS = [
+  {
+    version: 1,
+    names: new Set(["dag-workflow-builder", "raindrop-log-analyst"]),
+  },
+  {
+    version: 2,
+    names: new Set(["dag-workflow-readonly-executor"]),
+  },
+  {
+    version: 3,
+    names: new Set(["dag-workflow-rescue"]),
+  },
+] as const;
+
+function dagHelperSeedMarkerPath(paths: ProjectPaths, version: number): string {
+  return path.join(
+    agentsDir(paths),
+    `.seeded-dag-helpers-v${version}`,
+  );
 }
 
 // --- frontmatter (YAML subset) --------------------------------------------
@@ -361,33 +383,64 @@ export function setSpecialistEnabled(
 // --- seeding ------------------------------------------------------------------
 
 function rosterMarkdown(type: (typeof SUBAGENT_TYPES)[number]): string {
+  const extra: Record<string, string> = {};
+  if (type.timeoutMs !== undefined) extra.timeoutMs = String(type.timeoutMs);
+  if (type.turnBudget !== undefined) {
+    extra.turnBudget = JSON.stringify(type.turnBudget);
+  }
+  if (type.toolBudget !== undefined) {
+    extra.toolBudget = JSON.stringify(type.toolBudget);
+  }
   return serializeAgentMarkdown({
     name: type.name,
     description: type.summary,
+    ...(type.thinking ? { thinking: type.thinking } : {}),
+    ...(type.tools ? { tools: type.tools } : {}),
     systemPromptMode: "append",
     inheritProjectContext: true,
-    inheritSkills: true,
+    inheritSkills: type.inheritSkills ?? true,
+    ...(Object.keys(extra).length > 0 ? { extra } : {}),
     systemPrompt: type.systemPrompt,
   });
 }
 
 /**
- * One-time seeding of the scientific roster into a project. Gated by a marker
- * file so agents the user deleted in the UI stay deleted. Returns the number
- * of files written.
+ * Versioned seeding of the scientific roster into a project. The original
+ * marker preserves every prior deletion; a separate one-shot migration adds
+ * only newly introduced DAG helpers to older projects, then preserves any
+ * later helper deletion too. Returns the number of files written.
  */
 export function seedAgentFiles(paths: ProjectPaths): number {
   const dir = agentsDir(paths);
-  if (fs.existsSync(seedMarkerPath(paths))) return 0;
+  const initialRosterAlreadySeeded = fs.existsSync(seedMarkerPath(paths));
+  const pendingMigrations = DAG_HELPER_SEED_MIGRATIONS.filter(
+    (migration) => !fs.existsSync(dagHelperSeedMarkerPath(paths, migration.version)),
+  );
+  if (initialRosterAlreadySeeded && pendingMigrations.length === 0) return 0;
   fs.mkdirSync(dir, { recursive: true });
   let written = 0;
   for (const type of SUBAGENT_TYPES) {
+    if (
+      initialRosterAlreadySeeded &&
+      !pendingMigrations.some((migration) => migration.names.has(type.name))
+    ) continue;
     const file = path.join(dir, `${type.name}.md`);
-    if (fs.existsSync(file)) continue;
+    const disabledFile = path.join(agentsDisabledDir(paths), `${type.name}.md`);
+    if (fs.existsSync(file) || fs.existsSync(disabledFile)) continue;
     fs.writeFileSync(file, rosterMarkdown(type), "utf-8");
     written++;
   }
-  fs.writeFileSync(seedMarkerPath(paths), new Date().toISOString() + "\n", "utf-8");
+  const seededAt = new Date().toISOString() + "\n";
+  if (!initialRosterAlreadySeeded) {
+    fs.writeFileSync(seedMarkerPath(paths), seededAt, "utf-8");
+  }
+  for (const migration of pendingMigrations) {
+    fs.writeFileSync(
+      dagHelperSeedMarkerPath(paths, migration.version),
+      seededAt,
+      "utf-8",
+    );
+  }
   return written;
 }
 
@@ -404,6 +457,14 @@ export function restoreDefaultAgents(paths: ProjectPaths): string[] {
     if (fs.existsSync(disabledCopy)) fs.rmSync(disabledCopy);
     fs.writeFileSync(path.join(dir, `${type.name}.md`), rosterMarkdown(type), "utf-8");
   }
-  fs.writeFileSync(seedMarkerPath(paths), new Date().toISOString() + "\n", "utf-8");
+  const seededAt = new Date().toISOString() + "\n";
+  fs.writeFileSync(seedMarkerPath(paths), seededAt, "utf-8");
+  for (const migration of DAG_HELPER_SEED_MIGRATIONS) {
+    fs.writeFileSync(
+      dagHelperSeedMarkerPath(paths, migration.version),
+      seededAt,
+      "utf-8",
+    );
+  }
   return SUBAGENT_TYPES.map((t) => t.name);
 }

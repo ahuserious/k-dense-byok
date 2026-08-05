@@ -25,13 +25,30 @@ import { runBroker } from "../agent/run-broker.ts";
 import {
   abortProjectSessions,
   disposeProjectSessions,
-  listSessions,
+  listMainSessions,
 } from "../agent/session-registry.ts";
 import { syncSandboxVenv } from "../sandbox-seed.ts";
 import { listProjectActivities } from "../project-activity.ts";
 import { modalJobManager } from "../modal/manager.ts";
+import { withProjectLifecycleLock } from "../project-lifecycle-lock.ts";
+import { disposeWorkflowDelegationSession } from "../agent/workflow-delegation-session.ts";
+import type { WorkflowRunController } from "../workflows/controller.ts";
+import { assertNoHostedFusionQuarantine } from "../workflows/hosted-fusion.ts";
+import { workflowStore } from "../workflows/store.ts";
 
-export async function registerProjectRoutes(app: FastifyInstance): Promise<void> {
+export interface RegisterProjectRoutesOptions {
+  workflowController?: Pick<
+    WorkflowRunController,
+    "quiesceProject" | "releaseProjectQuiesce"
+  >;
+  disposeWorkflowSession?: typeof disposeWorkflowDelegationSession;
+  assertHostedFusionProjectQuiescent?: typeof assertNoHostedFusionQuarantine;
+}
+
+export async function registerProjectRoutes(
+  app: FastifyInstance,
+  options: RegisterProjectRoutesOptions = {},
+): Promise<void> {
   app.get("/projects", async () => listProjects());
 
   app.get("/projects/activity", async (_req, reply) => {
@@ -142,7 +159,7 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
 
         // Label chats the way the UI does: title, else first message, else id.
         const sessionLabels = new Map<string, string>();
-        for (const info of await listSessions(paths)) {
+        for (const info of await listMainSessions(paths)) {
           const raw = (info.name ?? info.firstMessage ?? info.id ?? "").trim();
           sessionLabels.set(info.id, raw.length > 60 ? raw.slice(0, 57) + "…" : raw || info.id);
         }
@@ -208,6 +225,23 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
       if (projectId === DEFAULT_PROJECT_ID) {
         throw new Error("The default project cannot be deleted");
       }
+      if (options.workflowController) {
+        const workflowDrain = await options.workflowController.quiesceProject(projectId);
+        if (!workflowDrain.drained) {
+          throw new Error(
+            "Project deletion stopped because one or more DAG workflow runs did not terminate before the deadline.",
+          );
+        }
+      } else if (workflowStore.listCancellableRuns(projectId).length > 0) {
+        // `workflowController: null` exists only for storage/API tests. Even in
+        // that mode, deletion must not discard durable work it cannot stop.
+        throw new Error(
+          "Project deletion requires the DAG workflow controller while workflow runs are active.",
+        );
+      }
+      (options.assertHostedFusionProjectQuiescent ?? assertNoHostedFusionQuarantine)(
+        projectId,
+      );
       const activeRuns = runBroker.activeForProject(projectId);
       for (const run of activeRuns) run.requestAbort();
       // Remote jobs are project-owned and their metadata lives under the
@@ -215,16 +249,31 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
       await modalJobManager.cancelProject(projectId);
       await abortProjectSessions(projectId);
       await Promise.all(activeRuns.map((run) => run.waitForCompletion()));
+      await (options.disposeWorkflowSession ?? disposeWorkflowDelegationSession)(
+        projectId,
+        { rejectIfOwnedLeaves: true },
+      );
       disposeProjectSessions(projectId);
       await disposeMcpClients(projectId);
-      deleteProject(projectId);
-      modalJobManager.resumeProject(projectId);
+      withProjectLifecycleLock(projectId, () => {
+        // Quiescing is process-local. Recheck durable state while holding the
+        // same external lock used by every run creator, then keep that lock
+        // through recursive deletion so another backend cannot win the gap.
+        if (workflowStore.listCancellableRuns(projectId).length > 0) {
+          throw new Error(
+            "Project deletion stopped because a DAG workflow run was created by another backend during deletion.",
+          );
+        }
+        deleteProject(projectId);
+      });
       reply.code(204);
       return null;
     } catch (err) {
-      modalJobManager.resumeProject(projectId);
       reply.code(400);
       return { detail: (err as Error).message };
+    } finally {
+      options.workflowController?.releaseProjectQuiesce(projectId);
+      modalJobManager.resumeProject(projectId);
     }
   });
 }

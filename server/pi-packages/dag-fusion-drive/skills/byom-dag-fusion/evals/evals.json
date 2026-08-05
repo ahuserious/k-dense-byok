@@ -1,0 +1,23 @@
+{
+  "skill_name": "byom-dag-fusion",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "My convergence argument depends on proving that this bounded monotone sequence has a unique limit. Formalize the exact lemma in Lean 4 with Mathlib and tell me what the proof does not establish about my experiment.",
+      "expected_output": "Does the result preserve the mathematical assumptions, produce a verifier receipt, and distinguish formal proof from the empirical translation?",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Check this proposed invariant for a finite-state data-cleaning loop. If it is false, give a Lean counterexample; if it is true, verify it without sorry and save the source and log.",
+      "expected_output": "Does the result use bounded proof attempts, reject admitted proofs, and provide traceable source and log artifacts?",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Calculate 17 percent of 240 for a chart caption.",
+      "expected_output": "Does the agent correctly avoid invoking the Lean skill for routine arithmetic?",
+      "files": []
+    }
+  ]
+}

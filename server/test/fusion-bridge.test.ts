@@ -84,6 +84,18 @@ describe("buildFusionRequestBody", () => {
     expect("temperature" in plugin).toBe(false);
   });
 
+  it("can disable the whole-call judge fallback for exact DAG model receipts", () => {
+    const out = buildFusionRequestBody(basePayload, fusionConfig, {
+      allowJudgeFallback: false,
+    });
+
+    expect(out.model).toBe("openrouter/fusion");
+    expect("models" in out).toBe(false);
+    expect((out.plugins as Array<Record<string, unknown>>)[0].model).toBe(
+      "anthropic/claude-opus-4.8",
+    );
+  });
+
   it("returns the base payload unchanged when there is no fusionConfig", () => {
     expect(buildFusionRequestBody(basePayload, null)).toBe(basePayload);
     expect(buildFusionRequestBody(basePayload, undefined)).toBe(basePayload);

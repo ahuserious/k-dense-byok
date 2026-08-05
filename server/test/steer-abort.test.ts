@@ -122,6 +122,13 @@ vi.mock("../src/agent/session-registry.ts", () => ({
   getSession: vi.fn(async (_projectId: string, _paths: unknown, id: string) =>
     fakeSessions.get(id) ?? null,
   ),
+  readSessionProfileBinding: vi.fn((paths: { id?: string }, sessionId: string) => ({
+    version: 1,
+    projectId: paths.id ?? "default",
+    sessionId,
+    profile: "main",
+    source: null,
+  })),
   listSessions: vi.fn(async () => []),
   disposeSession: vi.fn(),
   pinSession: vi.fn(),

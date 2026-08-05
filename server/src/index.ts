@@ -14,7 +14,7 @@ import multipart from "@fastify/multipart";
 import Fastify, { type FastifyRequest } from "fastify";
 import { DEFAULT_PROJECT_ID, HOST, PORT, modalConfigured } from "./config.ts";
 import { isCorsOriginAllowed } from "./cors.ts";
-import { ensureProjectExists, getProject } from "./projects.ts";
+import { ensureProjectExists, getProject, listProjects } from "./projects.ts";
 import { withActiveProject } from "./scope.ts";
 import { registerProjectRoutes } from "./api/projects.ts";
 import { registerSessionRoutes } from "./api/sessions.ts";
@@ -27,6 +27,25 @@ import { registerAgentRoutes } from "./api/agents.ts";
 import { registerSpeechRoutes } from "./api/speech.ts";
 import { registerModalRoutes } from "./api/modal.ts";
 import { registerModelProviderRoutes } from "./api/model-providers.ts";
+import { registerDagWorkflowRoutes } from "./api/dag-workflows.ts";
+import { disposeAllWorkflowDelegationSessions } from "./agent/workflow-delegation-session.ts";
+import type { WorkflowRunController } from "./workflows/controller.ts";
+import { reconcileStaleWorkflowBudgetReservations } from "./workflows/budget.ts";
+import {
+  createProductionWorkflowController,
+  workflowControllerErrorLogFields,
+} from "./workflows/service.ts";
+import { workflowStore } from "./workflows/store.ts";
+import {
+  assertNoHostedFusionQuarantine,
+  DEFAULT_HOSTED_FUSION_CANCELLATION_ACK_TIMEOUT_MS,
+  hostedFusionQuarantineSnapshot,
+  waitForHostedFusionQuarantines,
+} from "./workflows/hosted-fusion.ts";
+import {
+  createGracefulShutdownCoordinator,
+  type GracefulShutdownReason,
+} from "./graceful-shutdown.ts";
 import { startAutomaticSkillSync } from "./agent/skills-sync.ts";
 import { modalJobManager } from "./modal/manager.ts";
 import { syncHelperVenv } from "./helpers-env.ts";
@@ -60,7 +79,12 @@ function resolveProjectId(req: FastifyRequest): string {
   return DEFAULT_PROJECT_ID;
 }
 
-export async function buildApp() {
+export interface BuildAppOptions {
+  /** Omit for production execution; pass null only for queued-storage tests. */
+  workflowController?: WorkflowRunController | null;
+}
+
+export async function buildApp(options: BuildAppOptions = {}) {
   const app = Fastify({
     logger: { level: process.env.LOG_LEVEL ?? "info" },
     // Inline image attachments ride the JSON run body as base64 (up to 12 ×
@@ -68,6 +92,16 @@ export async function buildApp() {
     // reject them.
     bodyLimit: 96 * 1024 * 1024,
   });
+  const workflowController = options.workflowController === undefined
+    ? createProductionWorkflowController({
+      onError: ({ projectId, runId, error }) => {
+        app.log.error(
+          { projectId, runId, ...workflowControllerErrorLogFields(error) },
+          "workflow DAG run controller failed",
+        );
+      },
+    })
+    : options.workflowController;
 
   await app.register(fastifyCors, {
     origin: (origin, cb) => {
@@ -118,7 +152,9 @@ export async function buildApp() {
   app.get("/health", async () => ({ status: "ok" }));
   app.get("/config", async () => ({ modal_configured: modalConfigured() }));
 
-  await registerProjectRoutes(app);
+  await registerProjectRoutes(app, {
+    workflowController: workflowController ?? undefined,
+  });
   await registerSessionRoutes(app);
   await registerSandboxRoutes(app);
   await registerSkillRoutes(app);
@@ -129,11 +165,95 @@ export async function buildApp() {
   await registerSpeechRoutes(app);
   await registerModalRoutes(app);
   await registerModelProviderRoutes(app);
+  await registerDagWorkflowRoutes(app, {
+    controller: workflowController ?? undefined,
+  });
+
+  // Budget reconciliation is fail-closed: an expired hold with no observable
+  // terminal usage is charged at its reserved maximum before graph/run state is
+  // recovered. This is accounting protection, not proof that a process-local
+  // pi-subagents child stopped; abnormal child reattachment remains a P0 gate.
+  for (const project of listProjects()) {
+    try {
+      const staleReservations = await reconcileStaleWorkflowBudgetReservations(
+        project.id,
+      );
+      if (staleReservations.length > 0) {
+        app.log.warn(
+          {
+            projectId: project.id,
+            reservationIds: staleReservations.map((reservation) => reservation.id),
+          },
+          "charged stale workflow budget reservations at their unobserved maximum",
+        );
+      }
+    } catch (error) {
+      app.log.error(
+        { projectId: project.id, ...workflowControllerErrorLogFields(error) },
+        "workflow budget restart reconciliation failed closed",
+      );
+    }
+  }
+
+  const logRecovery = (recovery: ReturnType<WorkflowRunController["recoverProjects"]>[number]) => {
+    if (recovery.interrupted.length > 0) {
+      app.log.info(
+        { projectId: recovery.projectId, runIds: recovery.interrupted },
+        "marked workflow runs interrupted after server restart",
+      );
+    }
+    if (recovery.enqueued.length > 0) {
+      app.log.info(
+        { projectId: recovery.projectId, runIds: recovery.enqueued },
+        "re-enqueued durable workflow runs",
+      );
+    }
+    for (const error of recovery.errors) {
+      app.log.warn(
+        { projectId: recovery.projectId, runId: error.runId },
+        "workflow restart reconciliation could not inspect a run",
+      );
+    }
+  };
+
+  if (workflowController) {
+    for (const recovery of workflowController.startRecoveryLoop(
+      () => listProjects().map((project) => project.id),
+    )) {
+      logRecovery(recovery);
+    }
+  } else {
+    // Explicit storage-only mode never launches queued work, but still makes
+    // abandoned in-flight state visibly resumable for API tests and tools.
+    for (const project of listProjects()) {
+      const recovery = workflowStore.reconcileInterruptedRuns(project.id);
+      logRecovery({ projectId: project.id, enqueued: [], ...recovery });
+    }
+  }
 
   // Reattach durable jobs after routes are available. Recovery schedules
   // active jobs in the background and immediately reconciles any terminal job
   // whose accounting write was interrupted by a prior shutdown.
   await modalJobManager.recoverAllProjects();
+
+  app.addHook("onClose", async () => {
+    await workflowController?.close({
+      // Give every hosted leaf its complete acknowledgement window plus a
+      // scheduling margin before deciding whether shutdown owns quarantine.
+      graceMs: DEFAULT_HOSTED_FUSION_CANCELLATION_ACK_TIMEOUT_MS + 1_000,
+    });
+    // close() is deliberately bounded for embedded/test callers. Production
+    // graceful shutdown has a separate explicit force escape, so it must wait
+    // for actual controller idleness before concluding no hosted owner can
+    // still enter quarantine after the check below.
+    await workflowController?.waitForIdle();
+    // A late acknowledgement may arrive after the bounded caller has already
+    // failed closed. Graceful shutdown retains the process and exact owner
+    // until that quarantine releases or its release attempt visibly fails.
+    await waitForHostedFusionQuarantines();
+    assertNoHostedFusionQuarantine();
+    await disposeAllWorkflowDelegationSessions();
+  });
 
   return app;
 }
@@ -154,26 +274,95 @@ const isMain = (() => {
   }
 })();
 if (isMain) {
+  let requestShutdown: ((reason: GracefulShutdownReason) => void) | undefined;
+  let pendingShutdownReason: GracefulShutdownReason | undefined;
+  const queueOrRequestShutdown = (reason: GracefulShutdownReason) => {
+    if (requestShutdown) {
+      requestShutdown(reason);
+      return;
+    }
+    if (pendingShutdownReason) {
+      // Windows can deliver both the console signal and the launcher's IPC
+      // request. Coalesce both before the coordinator exists; only the parent
+      // launcher owns explicit force termination.
+      return;
+    }
+    pendingShutdownReason = reason;
+  };
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.on(signal, () => queueOrRequestShutdown(signal));
+  }
+  process.on("message", (message: unknown) => {
+    if (
+      typeof message === "object" &&
+      message !== null &&
+      (message as { type?: unknown }).type === "kady-shutdown"
+    ) {
+      queueOrRequestShutdown("launcher-ipc");
+    }
+  });
+
   // Before anything makes an outbound request: Node's fetch ignores
   // HTTP_PROXY/HTTPS_PROXY on its own, so a proxied network would otherwise
   // only be used by the child `pi` processes that run subagents.
   const proxy = configureHttpProxy();
   syncHelperVenv(); // best-effort; previews degrade gracefully if it fails
   const app = await buildApp();
+  const shutdown = createGracefulShutdownCoordinator({
+    close: () => app.close(),
+    onStart: (reason) => {
+      app.log.info({ reason }, "graceful Kady shutdown requested");
+    },
+    onComplete: (reason) => {
+      app.log.info({ reason }, "graceful Kady shutdown completed");
+    },
+    onRefused: (reason, error) => {
+      app.log.error(
+        {
+          reason,
+          quarantines: hostedFusionQuarantineSnapshot(),
+          ...workflowControllerErrorLogFields(error),
+        },
+        "graceful shutdown refused to discard process-owned work; Kady remains alive. Send a second signal only to force an unsafe exit",
+      );
+    },
+    onRepeated: (reason) => {
+      app.log.warn(
+        { reason, quarantines: hostedFusionQuarantineSnapshot() },
+        "graceful Kady shutdown is already pending or refused; duplicate backend shutdown delivery was ignored",
+      );
+    },
+    onForced: (reason) => {
+      app.log.error(
+        { reason, quarantines: hostedFusionQuarantineSnapshot() },
+        "forcing unsafe standalone Kady shutdown after a second explicit signal",
+      );
+    },
+    forceOnRepeated: typeof process.send !== "function",
+  });
+  requestShutdown = shutdown.request;
+
   if (proxy.enabled) {
     app.log.info(
       { httpProxy: proxy.httpProxy, httpsProxy: proxy.httpsProxy, noProxy: proxy.noProxy },
       "routing outbound HTTP through the configured proxy",
     );
   }
-  app
-    .listen({ port: PORT, host: HOST })
-    .then((addr) => {
-      app.log.info(`kady-server listening on ${addr}`);
-      startAutomaticSkillSync(app.log);
-    })
-    .catch((err) => {
-      app.log.error(err);
-      process.exit(1);
-    });
+  if (pendingShutdownReason) {
+    shutdown.request(pendingShutdownReason);
+  } else {
+    try {
+      const addr = await app.listen({ port: PORT, host: HOST });
+      if (shutdown.state() === "idle") {
+        app.log.info(`kady-server listening on ${addr}`);
+        process.send?.({ type: "kady-ready", address: addr });
+        startAutomaticSkillSync(app.log);
+      }
+    } catch (error) {
+      if (shutdown.state() === "idle") {
+        app.log.error(error);
+        process.exit(1);
+      }
+    }
+  }
 }
