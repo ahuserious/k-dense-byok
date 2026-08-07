@@ -523,6 +523,23 @@ class WorkflowSupervisorSocketServerImpl implements WorkflowSupervisorSocketServ
             });
             return;
           }
+          case "cancel": {
+            // Same cancellation the socket-close path already performs; the
+            // difference is only that the operation's own transport survives to
+            // deliver its terminal settlement.
+            const cancelled = this.coordinator.cancelMessage(
+              request.epoch,
+              request.targetMessageId,
+            );
+            sendResponse({
+              version: WORKFLOW_SUPERVISOR_PROTOCOL_VERSION,
+              messageId: request.messageId,
+              ok: true,
+              op: "cancel",
+              result: { targetMessageId: request.targetMessageId, cancelled },
+            });
+            return;
+          }
           case "snapshot": {
             sendResponse({
               version: WORKFLOW_SUPERVISOR_PROTOCOL_VERSION,

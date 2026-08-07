@@ -167,6 +167,65 @@ describe("workflow supervisor journal", () => {
       .not.toHaveProperty("reservationId");
   });
 
+  it("keeps a prepared settlement replayable and refuses a receipt that disagrees", () => {
+    const input = prepareInput("op-write-ahead");
+    journal.prepare(input);
+    journal.markRunning(input.operationId, { ownerId: "async-run", pid: 6001 });
+    const pending = {
+      settlementId: OTHER_DIGEST,
+      status: "aborted" as const,
+      usageComplete: true,
+      budget: {
+        status: "aborted",
+        reason: "dag-fusion:caller-aborted:cancelled:usage-observed",
+        usage: { input: 100, output: 40, cacheRead: 10, cacheWrite: 0, total: 140, cost: 0.25 },
+      },
+    };
+    journal.prepareSettlement(input.operationId, pending);
+    expect(journal.snapshot(input.operationId)).toMatchObject({
+      state: "running",
+      pendingSettlement: pending,
+    });
+
+    // Idempotent replay of the identical intent, conflict on a different one.
+    journal.prepareSettlement(input.operationId, pending);
+    expect(() => journal.prepareSettlement(input.operationId, {
+      ...pending,
+      budget: { ...pending.budget, usage: { ...pending.budget.usage, cost: 9 } },
+    })).toThrowError("already prepared a different settlement");
+    expect(() => journal.recordSettlement(input.operationId, {
+      settlementId: REQUEST_DIGEST,
+      status: "aborted",
+      usageComplete: true,
+    })).toThrowError("settled differently from its prepared settlement");
+
+    // A supervisor that died here leaves the obligation visible to the next one.
+    now += 1;
+    expect(journal.recoverStartup()).toMatchObject({
+      quarantined: [input.operationId],
+      settlementPending: [input.operationId],
+    });
+
+    journal.recordSettlement(input.operationId, {
+      settlementId: pending.settlementId,
+      status: pending.status,
+      usageComplete: pending.usageComplete,
+    });
+    now += 1;
+    expect(journal.recoverStartup().settlementPending).toEqual([]);
+  });
+
+  it("refuses a settlement prepared before the operation is durably running", () => {
+    const input = prepareInput("op-write-ahead-early");
+    journal.prepare(input);
+    expect(() => journal.prepareSettlement(input.operationId, {
+      settlementId: OTHER_DIGEST,
+      status: "aborted",
+      usageComplete: true,
+      budget: { status: "aborted", reason: "dag-fusion:caller-aborted:cancelled:usage-missing" },
+    })).toThrowError("cannot prepare settlement from prepared");
+  });
+
   it("recovers prepared work as unstarted and running work as quarantined", () => {
     journal.prepare(prepareInput("op-prepared"));
     journal.prepare(prepareInput("op-running", { kind: "hosted-fusion" }));
@@ -188,6 +247,7 @@ describe("workflow supervisor journal", () => {
     expect(journal.recoverStartup()).toEqual({
       terminalUnstarted: ["op-prepared"],
       quarantined: ["op-running"],
+      settlementPending: [],
     });
     expect(journal.snapshot("op-prepared")).toMatchObject({
       state: "terminal",
@@ -202,7 +262,11 @@ describe("workflow supervisor journal", () => {
     });
     expect(journal.snapshot("op-terminal")?.state).toBe("terminal");
     expect(journal.snapshot("op-quarantined")?.state).toBe("quarantined");
-    expect(journal.recoverStartup()).toEqual({ terminalUnstarted: [], quarantined: [] });
+    expect(journal.recoverStartup()).toEqual({
+      terminalUnstarted: [],
+      quarantined: [],
+      settlementPending: [],
+    });
   });
 
   it("never records terminal usage for work that was not durably running", () => {
@@ -220,6 +284,7 @@ describe("workflow supervisor journal", () => {
     expect(journal.recoverStartup()).toEqual({
       terminalUnstarted: [input.operationId],
       quarantined: [],
+      settlementPending: [],
     });
     const recovered = journal.snapshot(input.operationId);
     expect(recovered).toMatchObject({

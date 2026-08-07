@@ -259,12 +259,27 @@ function fakeSession(input: {
   };
 }
 
+/**
+ * A settlement that carries real observed usage but is NOT `completed`. The
+ * journal permits a non-completed terminal receipt without a settlement, so
+ * this is the shape that could silently drop usage.
+ */
+function abortedSettlementWithUsage(
+  ownedRequest: OwnedDelegationV2Request,
+): DagFusionDelegationUsageSettlement {
+  return {
+    ...settlement(ownedRequest, "caller-aborted"),
+    usage: usage(),
+  };
+}
+
 function coordinator(
   session: WorkflowDelegationSession,
   overrides: Partial<WorkflowSupervisorCoordinatorDependencies> = {},
+  journalDirectory = path.join(temporaryRoot, "journal"),
 ) {
   const journal = new WorkflowSupervisorJournal({
-    stateDirectory: path.join(temporaryRoot, "journal"),
+    stateDirectory: journalDirectory,
     now: () => 1_000,
   });
   const dependencies: Partial<WorkflowSupervisorCoordinatorDependencies> = {
@@ -306,6 +321,223 @@ function expectCoordinatorCode(code: string) {
 }
 
 describe("workflow supervisor coordinator", () => {
+  // These deliberately use `caller-aborted` — a NON-completed settlement that
+  // still carries observed usage. The journal refuses a `completed` terminal
+  // receipt without a completed settlement all by itself, so a completed
+  // settlement would quarantine even before this fix and prove nothing. A
+  // non-completed outcome is exactly what the journal used to let terminalize
+  // with the usage dropped.
+  it.each([
+    {
+      label: "the durable budget store rejects the settlement",
+      failJournal: false,
+    },
+    {
+      label: "the ownership journal rejects the settlement receipt",
+      failJournal: true,
+    },
+  ])("quarantines rather than terminalizing when $label", async ({ failJournal }) => {
+    const ownedRequest = request();
+    const observed = abortedSettlementWithUsage(ownedRequest);
+    const delegate = vi.fn(async (
+      current: OwnedDelegationV2Request,
+      options: DelegateDagFusionNodeOptions,
+    ) => {
+      await options.reconcileUsage(observed);
+      return receipt(current);
+    });
+    const harness = coordinator(fakeSession({ delegate }), failJournal ? {} : {
+      settleBudget: async () => {
+        throw new Error("budget store is unavailable");
+      },
+    });
+    if (failJournal) {
+      vi.spyOn(harness.journal, "recordSettlement").mockImplementation(() => {
+        throw new Error("journal settlement receipt could not be published");
+      });
+    }
+    await harness.coordinator.attach(1);
+
+    await expect(harness.coordinator.delegate({
+      epoch: 1,
+      messageId: "msg-unpersisted-settlement",
+      projectId: "default",
+      request: ownedRequest,
+      limits: { maxTokens: 1_000, maxCostUsd: 2 },
+      budget: budgetFor(ownedRequest),
+    })).rejects.toSatisfy(expectCoordinatorCode("SUPERVISOR_BUSY"));
+
+    const record = harness.journal.list()[0];
+    expect(record).toMatchObject({
+      state: "quarantined",
+      quarantine: { reasonCode: "DELEGATION_SETTLEMENT_UNPERSISTED" },
+    });
+    expect(record.terminal).toBeUndefined();
+    // The obligation survives as an exact, replayable payload.
+    expect(record.pendingSettlement).toMatchObject({
+      status: "aborted",
+      usageComplete: true,
+      budget: { usage: { input: 100, output: 40, total: 140 } },
+    });
+    expect(record.settlement).toBeUndefined();
+  });
+
+  it("replays a prepared settlement on the next startup without redispatching work", async () => {
+    const ownedRequest = request();
+    const observed = abortedSettlementWithUsage(ownedRequest);
+    const delegate = vi.fn(async (
+      current: OwnedDelegationV2Request,
+      options: DelegateDagFusionNodeOptions,
+    ) => {
+      await options.reconcileUsage(observed);
+      return receipt(current);
+    });
+    const journalDirectory = path.join(temporaryRoot, "replay-journal");
+    const failing = coordinator(fakeSession({ delegate }), {
+      settleBudget: async () => {
+        throw new Error("budget store is unavailable");
+      },
+    }, journalDirectory);
+    await failing.coordinator.attach(1);
+    await expect(failing.coordinator.delegate({
+      epoch: 1,
+      messageId: "msg-replay-prepare",
+      projectId: "default",
+      request: ownedRequest,
+      limits: { maxTokens: 1_000, maxCostUsd: 2 },
+      budget: budgetFor(ownedRequest),
+    })).rejects.toSatisfy(expectCoordinatorCode("SUPERVISOR_BUSY"));
+
+    // A fresh supervisor over the same durable journal, as after a crash.
+    const settled: Array<[string, string, unknown]> = [];
+    const restarted = coordinator(fakeSession({ delegate: vi.fn() }), {
+      settleBudget: async (projectId, reservationId, input) => {
+        settled.push([projectId, reservationId, input]);
+      },
+    }, journalDirectory);
+
+    expect(await restarted.coordinator.recoverPendingSettlements())
+      .toEqual([failing.journal.list()[0].operationId]);
+    expect(settled).toHaveLength(1);
+    expect(settled[0][0]).toBe("default");
+    expect(settled[0][1]).toBe(budgetFor(ownedRequest).reservationId);
+    expect(settled[0][2]).toMatchObject({
+      status: "aborted",
+      usage: { input: 100, output: 40, total: 140 },
+    });
+    expect(restarted.journal.list()[0].settlement).toMatchObject({
+      status: "aborted",
+      usageComplete: true,
+    });
+    // Replay is accounting only: no provider work was redispatched, and the
+    // ownership quarantine from the crash still stands.
+    expect(restarted.journal.list()[0].state).toBe("quarantined");
+    expect(await restarted.coordinator.recoverPendingSettlements()).toEqual([]);
+    expect(settled).toHaveLength(1);
+  });
+
+  it("quarantines when a delegation receipt arrives after a swallowed settlement failure", async () => {
+    const ownedRequest = request();
+    const observed = abortedSettlementWithUsage(ownedRequest);
+    // A transport that swallows the reconciliation rejection and still returns
+    // a receipt must not be read as proof that usage was settled.
+    const delegate = vi.fn(async (
+      current: OwnedDelegationV2Request,
+      options: DelegateDagFusionNodeOptions,
+    ) => {
+      try {
+        await options.reconcileUsage(observed);
+      } catch {
+        // Deliberately swallowed by the transport under test.
+      }
+      return receipt(current);
+    });
+    const harness = coordinator(fakeSession({ delegate }), {
+      settleBudget: async () => {
+        throw new Error("budget store is unavailable");
+      },
+    });
+    await harness.coordinator.attach(1);
+
+    await expect(harness.coordinator.delegate({
+      epoch: 1,
+      messageId: "msg-swallowed-settlement",
+      projectId: "default",
+      request: ownedRequest,
+      limits: { maxTokens: 1_000, maxCostUsd: 2 },
+      budget: budgetFor(ownedRequest),
+    })).rejects.toSatisfy(expectCoordinatorCode("SUPERVISOR_BUSY"));
+
+    expect(harness.journal.list()[0]).toMatchObject({
+      state: "quarantined",
+      quarantine: { reasonCode: "DELEGATION_SETTLEMENT_UNPERSISTED" },
+    });
+    expect(harness.journal.list()[0].terminal).toBeUndefined();
+  });
+
+  it.each([
+    {
+      label: "the durable budget store rejects it",
+      failJournal: false,
+    },
+    {
+      label: "the ownership journal rejects its receipt",
+      failJournal: true,
+    },
+  ])("quarantines hosted Fusion whose settlement is unpersisted when $label", async ({
+    failJournal,
+  }) => {
+    const hosted = hostedRequest(2);
+    const budget = hostedBudget(hosted);
+    const harness = coordinator(fakeSession({ delegate: vi.fn() }), {
+      runHostedFusion: vi.fn(async (options: {
+        reconcileUsage: (observed: DagFusionDelegationUsageSettlement) => Promise<void>;
+      }) => {
+        await options.reconcileUsage({
+          identity: hosted.identity,
+          reason: "caller-aborted",
+          responseStatus: "cancelled",
+          usage: usage(),
+          progress: { started: true, tokens: 150, toolCalls: 1, durationMs: 25 },
+        });
+        return { text: "unreachable" };
+      }),
+      ...(failJournal ? {} : {
+        settleBudget: async () => {
+          throw new Error("budget store is unavailable");
+        },
+      }),
+      budgetReservation: () => activeBudgetReservation(budget, "default", {
+        maxTokens: 4_000,
+        maxCostUsd: 4,
+        modelCallCount: 4,
+      }),
+    });
+    if (failJournal) {
+      vi.spyOn(harness.journal, "recordSettlement").mockImplementation(() => {
+        throw new Error("journal settlement receipt could not be published");
+      });
+    }
+    await harness.coordinator.attach(1);
+
+    await expect(harness.coordinator.hostedFusion({
+      epoch: 1,
+      messageId: "msg-hosted-unpersisted",
+      projectId: "default",
+      request: hosted,
+      budget,
+    })).rejects.toSatisfy(expectCoordinatorCode("SUPERVISOR_BUSY"));
+
+    const record = harness.journal.list()[0];
+    expect(record).toMatchObject({
+      state: "quarantined",
+      quarantine: { reasonCode: "HOSTED_FUSION_SETTLEMENT_UNPERSISTED" },
+    });
+    expect(record.terminal).toBeUndefined();
+    expect(record.pendingSettlement).toMatchObject({ status: "aborted", usageComplete: true });
+    expect(record.settlement).toBeUndefined();
+  });
+
   it("journals settlement before returning and permanently consumes an ownership identity", async () => {
     const ownedRequest = request();
     const delegate = vi.fn(async (

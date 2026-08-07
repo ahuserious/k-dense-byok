@@ -31,7 +31,9 @@ import type {
 } from "./protocol.ts";
 import {
   WorkflowSupervisorJournal,
+  type WorkflowSupervisorPendingSettlementBudgetV1,
   type WorkflowSupervisorRecordV1,
+  type WorkflowSupervisorStartupRecovery,
 } from "./journal.ts";
 import {
   workflowSupervisorDigest,
@@ -49,13 +51,22 @@ import {
   workflowBudgetReservationId,
   workflowBudgetStore,
   type WorkflowBudgetReservationV1,
+  type WorkflowBudgetSettlementStatus,
 } from "../budget.ts";
+
 import {
   billingCountsTowardBudget,
   billingForProvider,
 } from "../../cost/billing.ts";
 import { reloadWorkflowSupervisorCredentials } from "./credentials.ts";
 import type { WorkflowSupervisorCredentialKey } from "./credential-contract.ts";
+
+const WORKFLOW_BUDGET_SETTLEMENT_STATUSES: readonly WorkflowBudgetSettlementStatus[] = [
+  "completed",
+  "failed",
+  "aborted",
+  "timed-out",
+];
 
 export type WorkflowSupervisorCoordinatorErrorCode =
   | "NOT_ATTACHED"
@@ -107,10 +118,14 @@ export interface WorkflowSupervisorCoordinatorDependencies {
   hostedQuarantines(projectId?: string): ReturnType<typeof hostedFusionQuarantineSnapshot>;
   waitHostedQuarantines(): Promise<void>;
   assertNoHostedQuarantine(projectId?: string): void;
+  /**
+   * Apply one journalled settlement intent. Keyed by reservation id rather than
+   * the live settlement so startup recovery can replay the exact same call.
+   */
   settleBudget(
     projectId: string,
-    descriptor: SupervisedWorkflowBudgetDescriptorV1,
-    settlement: DagFusionDelegationUsageSettlement,
+    reservationId: string,
+    input: WorkflowSupervisorPendingSettlementBudgetV1,
   ): Promise<void>;
   budgetReservation(
     projectId: string,
@@ -160,12 +175,17 @@ const defaultDependencies: WorkflowSupervisorCoordinatorDependencies = {
   hostedQuarantines: hostedFusionQuarantineSnapshot,
   waitHostedQuarantines: waitForHostedFusionQuarantines,
   assertNoHostedQuarantine: assertNoHostedFusionQuarantine,
-  settleBudget: async (projectId, descriptor, settlement) => {
-    await workflowBudgetStore.settle(
-      projectId,
-      descriptor.reservationId,
-      settleWorkflowBudgetInputForDagFusion(descriptor, settlement),
-    );
+  settleBudget: async (projectId, reservationId, input) => {
+    // The journal keeps the status a bounded string so it never owns the budget
+    // store's enum. Re-narrow it here rather than casting: a corrupt or
+    // downgraded record must fail closed, not settle under an unknown status.
+    if (!WORKFLOW_BUDGET_SETTLEMENT_STATUSES.includes(input.status as never)) {
+      throw new Error("Journalled settlement carries an unsupported budget status.");
+    }
+    await workflowBudgetStore.settle(projectId, reservationId, {
+      ...input,
+      status: input.status as WorkflowBudgetSettlementStatus,
+    });
   },
   budgetReservation: (projectId, reservationId) =>
     workflowBudgetStore.list(projectId).find((record) => record.id === reservationId),
@@ -220,12 +240,13 @@ export class WorkflowSupervisorCoordinator {
   private configuring = false;
   private configurationReady = true;
   private attachChain: Promise<void> = Promise.resolve();
+  private readonly startupRecovery: WorkflowSupervisorStartupRecovery;
 
   constructor(options: WorkflowSupervisorCoordinatorOptions) {
     this.journal = options.journal;
     this.instanceId = options.instanceId ?? `supervisor-${crypto.randomUUID()}`;
     this.dependencies = { ...defaultDependencies, ...options.dependencies };
-    this.journal.recoverStartup();
+    this.startupRecovery = this.journal.recoverStartup();
   }
 
   private state(): WorkflowSupervisorState {
@@ -480,12 +501,58 @@ export class WorkflowSupervisorCoordinator {
     // Persist accounting before the IPC result. The backend repeats this same
     // deterministic settlement intent, which the budget store accepts
     // idempotently, so Fastify death cannot strand observed provider usage.
-    await this.dependencies.settleBudget(projectId, budget, settlement);
-    this.journal.recordSettlement(attempt.operationId, {
+    //
+    // The intent is journalled *first*. A failure applying it then leaves an
+    // exact, replayable obligation instead of discarding usage the provider
+    // really reported: `recoverPendingSettlements` finishes it after restart
+    // without redispatching any provider work.
+    this.journal.prepareSettlement(attempt.operationId, {
       settlementId: workflowSupervisorDigest(settlement),
       status: workflowSupervisorSettlementStatus(settlement),
       usageComplete: settlement.usage !== undefined,
+      budget: settleWorkflowBudgetInputForDagFusion(budget, settlement),
     });
+    await this.applyPreparedSettlement(projectId, attempt.operationId);
+  }
+
+  /** Apply an already-journalled settlement intent exactly once. */
+  private async applyPreparedSettlement(projectId: string, operationId: string): Promise<void> {
+    const record = this.journal.snapshot(operationId);
+    const pending = record?.pendingSettlement;
+    if (!record || !pending) {
+      throw new Error("Workflow supervisor settlement was not prepared before it was applied.");
+    }
+    if (record.settlement) return;
+    if (!record.reservationId) {
+      throw new Error("Workflow supervisor settlement has no durable reservation to apply.");
+    }
+    await this.dependencies.settleBudget(projectId, record.reservationId, pending.budget);
+    this.journal.recordSettlement(operationId, {
+      settlementId: pending.settlementId,
+      status: pending.status,
+      usageComplete: pending.usageComplete,
+    });
+  }
+
+  /**
+   * Discharge settlements journalled by a previous supervisor that died before
+   * applying them. Ownership of the provider work stays quarantined either way;
+   * this only makes the accounting whole.
+   */
+  async recoverPendingSettlements(): Promise<string[]> {
+    const recovered: string[] = [];
+    for (const operationId of this.startupRecovery.settlementPending) {
+      const record = this.journal.snapshot(operationId);
+      if (!record?.pendingSettlement || record.settlement) continue;
+      try {
+        await this.applyPreparedSettlement(record.projectId, operationId);
+        recovered.push(operationId);
+      } catch {
+        // The obligation stays journalled and is retried on the next startup.
+        // Nothing here may weaken the quarantine that already blocks admission.
+      }
+    }
+    return recovered;
   }
 
   private validateBudgetOwnership(
@@ -628,6 +695,7 @@ export class WorkflowSupervisorCoordinator {
       }),
     });
     let settlement: DagFusionDelegationUsageSettlement | undefined;
+    let settlementIsDurable = false;
     let session: WorkflowDelegationSession | undefined;
     try {
       const paths = this.dependencies.pathsForProject(input.projectId);
@@ -640,12 +708,14 @@ export class WorkflowSupervisorCoordinator {
         signal: attempt.controller.signal,
         reconcileUsage: async (observed) => {
           settlement = this.normalizeSettlement(identity, settlement, observed);
+          settlementIsDurable = false;
           await this.persistSettlement(
             attempt,
             input.projectId,
             budget,
             settlement,
           );
+          settlementIsDurable = true;
         },
       });
       if (!settlement) {
@@ -655,9 +725,31 @@ export class WorkflowSupervisorCoordinator {
           new Error("Delegation completed without a durable settlement."),
         );
       }
+      // A transport that swallows the reconciliation rejection can still return
+      // a receipt. Observed usage that never reached both the budget store and
+      // the journal is not settled, whatever the receipt says.
+      if (!settlementIsDurable) {
+        return this.retainQuarantine(
+          attempt,
+          "DELEGATION_SETTLEMENT_UNPERSISTED",
+          new Error("Delegation settled usage that was never durably persisted."),
+        );
+      }
       this.markTerminal(attempt, settlement, undefined, { receipt, settlement });
       return { receipt, settlement };
     } catch (error) {
+      // Terminalizing here would consume the operation identity for good. The
+      // journal only demands a settlement receipt for a `completed` outcome, so
+      // a failed or interrupted outcome would otherwise pass straight through
+      // and drop usage the provider really reported. Quarantine instead, and
+      // let an idempotent retry re-persist it.
+      if (settlement && !settlementIsDurable) {
+        return this.retainQuarantine(
+          attempt,
+          "DELEGATION_SETTLEMENT_UNPERSISTED",
+          error,
+        );
+      }
       try {
         const quarantined = session?.host.snapshot().quarantined.some((entry) =>
           sameIdentity(entry, identity)
@@ -728,6 +820,7 @@ export class WorkflowSupervisorCoordinator {
       }),
     });
     let settlement: DagFusionDelegationUsageSettlement | undefined;
+    let settlementIsDurable = false;
     try {
       if (input.request.projectId !== input.projectId) {
         throw new Error("Hosted Fusion project identity changed across IPC.");
@@ -738,12 +831,14 @@ export class WorkflowSupervisorCoordinator {
         signal: attempt.controller.signal,
         reconcileUsage: async (observed) => {
           settlement = this.normalizeSettlement(identity, settlement, observed);
+          settlementIsDurable = false;
           await this.persistSettlement(
             attempt,
             input.projectId,
             budget,
             settlement,
           );
+          settlementIsDurable = true;
         },
       });
       if (!settlement) {
@@ -753,9 +848,25 @@ export class WorkflowSupervisorCoordinator {
           new Error("Hosted Fusion completed without a durable settlement."),
         );
       }
+      // See the delegation path: a returned result is not proof that the
+      // observed usage reached the budget store and the journal.
+      if (!settlementIsDurable) {
+        return this.retainQuarantine(
+          attempt,
+          "HOSTED_FUSION_SETTLEMENT_UNPERSISTED",
+          new Error("Hosted Fusion settled usage that was never durably persisted."),
+        );
+      }
       this.markTerminal(attempt, settlement, undefined, { result, settlement });
       return { result, settlement };
     } catch (error) {
+      if (settlement && !settlementIsDurable) {
+        return this.retainQuarantine(
+          attempt,
+          "HOSTED_FUSION_SETTLEMENT_UNPERSISTED",
+          error,
+        );
+      }
       try {
         if (this.dependencies.hostedQuarantines(input.projectId).length > 0) {
           await this.dependencies.waitHostedQuarantines();

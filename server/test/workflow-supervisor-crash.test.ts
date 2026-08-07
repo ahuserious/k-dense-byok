@@ -237,13 +237,12 @@ describe("workflow supervisor backend-crash ownership", () => {
         hostedQuarantines: () => [],
         waitHostedQuarantines: async () => undefined,
         assertNoHostedQuarantine: () => undefined,
-        settleBudget: async (projectId, descriptor, settlement) => {
+        settleBudget: async (projectId, reservationId, input) => {
+          // The intent is journalled before it is applied, so the replayable
+          // record exists here while the settlement receipt does not yet.
+          expect(journal.list()[0].pendingSettlement).toBeDefined();
           expect(journal.list()[0].settlement).toBeUndefined();
-          await workflowBudgetStore.settle(
-            projectId,
-            descriptor.reservationId,
-            settleWorkflowBudgetInputForDagFusion(descriptor, settlement),
-          );
+          await workflowBudgetStore.settle(projectId, reservationId, input);
           ordering.push("budget-durable");
         },
         reloadCredentials: async () => undefined,

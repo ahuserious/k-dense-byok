@@ -588,7 +588,88 @@ describe("workflow supervisor client", () => {
     await client.close();
   });
 
-  it("destroys only an aborted operation socket while retaining the control lease", async () => {
+  it("cancels an aborted operation out of band and still takes its settlement", async () => {
+    // Dropping the operation socket also cancels, but discards the terminal
+    // settlement the supervisor is about to send, which is what let the backend
+    // settle zero usage against work the supervisor had already admitted.
+    const paths = temporaryPaths();
+    let operationReceived!: () => void;
+    const received = new Promise<void>((resolve) => {
+      operationReceived = resolve;
+    });
+    const cancelledTargets: string[] = [];
+    let respondToOperation!: () => void;
+    const spawnSupervisor = async (runtimePaths: WorkflowSupervisorRuntimePaths) => {
+      const supervisor = await FakeSupervisor.start(runtimePaths, (request, socket) => {
+        if (request.op === "delegate") {
+          respondToOperation = () => {
+            socket.write(encodeWorkflowSupervisorResponseLine(
+              workflowSupervisorErrorResponse(
+                request.messageId,
+                "OPERATION_FAILED",
+                {
+                  ...settlement(identity(delegationRequest())),
+                  reason: "caller-aborted",
+                  responseStatus: "cancelled",
+                },
+              ),
+            ));
+          };
+          operationReceived();
+          return undefined;
+        }
+        if (request.op === "cancel") {
+          cancelledTargets.push(request.targetMessageId);
+          respondToOperation();
+          return {
+            version: 1,
+            messageId: request.messageId,
+            ok: true,
+            op: "cancel",
+            result: { targetMessageId: request.targetMessageId, cancelled: true },
+          } as const;
+        }
+        return success(request, process.pid, 91);
+      });
+      return {
+        pid: process.pid,
+        token: TOKEN,
+        terminate: () => supervisor.stop(),
+      };
+    };
+    const client = await ensureWorkflowSupervisor({
+      paths,
+      dependencies: { randomEpoch: () => 91, spawnSupervisor },
+    });
+    const controller = new AbortController();
+    const reconcileUsage = vi.fn();
+    const pending = client.delegate("default", delegationRequest(), {
+      limits: { maxTokens: 10_000, maxCostUsd: 2 },
+      supervisedBudget: budget("4", identity(delegationRequest())),
+      signal: controller.signal,
+      reconcileUsage,
+    });
+    await received;
+    controller.abort();
+
+    // The caller sees the supervisor's own terminal outcome, not a bare abort,
+    // and the observed usage reaches reconciliation exactly once.
+    await expect(pending).rejects.toMatchObject({
+      name: "WorkflowSupervisorRemoteError",
+      code: "OPERATION_FAILED",
+    });
+    expect(cancelledTargets).toHaveLength(1);
+    expect(reconcileUsage).toHaveBeenCalledTimes(1);
+    expect(reconcileUsage.mock.calls[0][0]).toMatchObject({
+      reason: "caller-aborted",
+      usage: { input: 100, output: 40 },
+    });
+
+    expect(await client.snapshot()).toMatchObject({ attachedEpoch: 91 });
+    await client.close();
+  });
+
+  it("falls back to dropping the operation socket when a cancelled supervisor stays silent", async () => {
     const paths = temporaryPaths();
     let operationReceived!: () => void;
     const received = new Promise<void>((resolve) => {
@@ -605,6 +686,16 @@ describe("workflow supervisor client", () => {
           socket.once("close", operationClosed);
           return undefined;
         }
+        if (request.op === "cancel") {
+          // Accepted, then deliberately never followed by a terminal frame.
+          return {
+            version: 1,
+            messageId: request.messageId,
+            ok: true,
+            op: "cancel",
+            result: { targetMessageId: request.targetMessageId, cancelled: true },
+          } as const;
+        }
         return success(request, process.pid, 91);
       });
       return {
@@ -615,6 +706,7 @@ describe("workflow supervisor client", () => {
     };
     const client = await ensureWorkflowSupervisor({
       paths,
+      cancelSettlementTimeoutMs: 250,
       dependencies: { randomEpoch: () => 91, spawnSupervisor },
     });
     const controller = new AbortController();
@@ -632,8 +724,7 @@ describe("workflow supervisor client", () => {
     } satisfies Partial<WorkflowSupervisorClientError>);
     await closed;
 
-    // The independent attach lease is still valid after the operation socket
-    // is destroyed, so diagnostics remain callable.
+    // The independent attach lease survives the bounded fallback drop.
     expect(await client.snapshot()).toMatchObject({ attachedEpoch: 91 });
     await client.close();
   });

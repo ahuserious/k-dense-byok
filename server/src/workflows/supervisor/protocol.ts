@@ -208,6 +208,17 @@ export interface WorkflowSupervisorQuiesceProjectRequest
   reason: WorkflowSupervisorQuiesceReason;
 }
 
+/**
+ * Cancel one in-flight operation without dropping its transport. Destroying the
+ * operation socket also cancels, but takes the supervisor's terminal settlement
+ * with it, which leaves the backend guessing at usage it never observed.
+ */
+export interface WorkflowSupervisorCancelRequest
+  extends WorkflowSupervisorAttachedRequestBase {
+  op: "cancel";
+  targetMessageId: string;
+}
+
 export interface WorkflowSupervisorSnapshotRequest
   extends WorkflowSupervisorAttachedRequestBase {
   op: "snapshot";
@@ -227,6 +238,7 @@ export type WorkflowSupervisorRequest =
   | WorkflowSupervisorHostedFusionRequest
   | WorkflowSupervisorReloadCredentialsRequest
   | WorkflowSupervisorQuiesceProjectRequest
+  | WorkflowSupervisorCancelRequest
   | WorkflowSupervisorSnapshotRequest
   | WorkflowSupervisorShutdownRequest;
 
@@ -266,6 +278,12 @@ export interface WorkflowSupervisorSnapshot {
   attachedEpoch: number | null;
   quiescingProjectIds: string[];
   attempts: WorkflowSupervisorAttemptSnapshot[];
+}
+
+export interface WorkflowSupervisorCancelResult {
+  targetMessageId: string;
+  /** False when no attempt with that identity was still in flight. */
+  cancelled: boolean;
 }
 
 export interface WorkflowSupervisorQuiesceProjectResult {
@@ -317,6 +335,10 @@ export type WorkflowSupervisorSuccessResponse =
   | (WorkflowSupervisorSuccessBase & {
       op: "quiesce-project";
       result: WorkflowSupervisorQuiesceProjectResult;
+    })
+  | (WorkflowSupervisorSuccessBase & {
+      op: "cancel";
+      result: WorkflowSupervisorCancelResult;
     })
   | (WorkflowSupervisorSuccessBase & {
       op: "snapshot";
@@ -768,6 +790,19 @@ function isWorkflowSupervisorRequest(
         value.keys.every(isWorkflowSupervisorCredentialKey) &&
         new Set(value.keys).size === value.keys.length
       );
+    case "cancel":
+      return (
+        hasExactKeys(value, [
+          "version",
+          "messageId",
+          "token",
+          "op",
+          "epoch",
+          "targetMessageId",
+        ]) &&
+        isAttachedRequestBase(value) &&
+        isWorkflowSupervisorId(value.targetMessageId)
+      );
     case "quiesce-project":
       return (
         hasExactKeys(value, [
@@ -946,6 +981,12 @@ function isSuccessResponse(
         isProjectId(result.projectId) &&
         result.quiescent === true &&
         isNonNegativeInteger(result.cancelledAttempts)
+      );
+    case "cancel":
+      return (
+        hasExactKeys(result, ["targetMessageId", "cancelled"]) &&
+        isWorkflowSupervisorId(result.targetMessageId) &&
+        typeof result.cancelled === "boolean"
       );
     case "snapshot":
       return hasExactKeys(result, ["snapshot"]) && isSnapshot(result.snapshot);
