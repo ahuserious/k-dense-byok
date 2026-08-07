@@ -63,6 +63,7 @@ const DEFAULT_SHUTDOWN_TIMEOUT_MS = 20_000;
 const CHILD_TERMINATE_TIMEOUT_MS = 3_000;
 const CHILD_KILL_TIMEOUT_MS = 3_000;
 const STARTUP_POLL_INTERVAL_MS = 50;
+const CANCEL_SETTLEMENT_TIMEOUT_MS = 30_000;
 const MAX_LAUNCH_LOCK_BYTES = 4 * 1024;
 const LAUNCH_LOCK_VERSION = 1 as const;
 
@@ -126,6 +127,7 @@ export interface EnsureWorkflowSupervisorOptions {
   pingTimeoutMs?: number;
   closeTimeoutMs?: number;
   shutdownTimeoutMs?: number;
+  cancelSettlementTimeoutMs?: number;
   dependencies?: Partial<WorkflowSupervisorClientDependencies>;
 }
 
@@ -134,6 +136,11 @@ interface ExchangeOptions {
   signal?: AbortSignal;
   connectTimeoutMs: number;
   responseTimeoutMs?: number;
+  /** Cancel out of band on abort instead of dropping the operation socket. */
+  cancelOnAbort?: {
+    cancel(): Promise<void>;
+    timeoutMs: number;
+  };
 }
 
 interface ExchangeResult {
@@ -577,7 +584,23 @@ function exchange(
       );
     };
     const onAbort = () => {
-      finishError(clientError("ABORTED", "Workflow supervisor request was aborted."));
+      // Destroying this socket also cancels the attempt, but it discards the
+      // terminal settlement the supervisor is about to send. When the caller
+      // supplies an out-of-band cancel, ask for cancellation there and keep
+      // reading here; only a silent supervisor falls back to the hard drop.
+      if (!options.cancelOnAbort || !connected) {
+        finishError(clientError("ABORTED", "Workflow supervisor request was aborted."));
+        return;
+      }
+      const { cancel, timeoutMs } = options.cancelOnAbort;
+      if (responseTimer) clearTimeout(responseTimer);
+      responseTimer = timerAfter(timeoutMs, () => {
+        finishError(clientError("ABORTED", "Workflow supervisor request was aborted."));
+      });
+      void cancel().catch(() => {
+        // A cancel that cannot be delivered leaves the bounded timer above as
+        // the only guarantee; it still ends in the fail-closed hard drop.
+      });
     };
 
     socket.once("connect", onConnect);
@@ -1280,6 +1303,8 @@ export class WorkflowSupervisorClient {
   readonly pid: number;
   readonly epoch: number;
 
+
+
   private controlSocket: net.Socket | undefined;
   private closing = false;
   private closePromise: Promise<void> | undefined;
@@ -1292,6 +1317,13 @@ export class WorkflowSupervisorClient {
     private readonly connectTimeoutMs: number,
     private readonly closeTimeoutMs: number,
     private readonly shutdownTimeoutMs: number,
+    /**
+     * How long an aborted provider operation keeps its transport open waiting
+     * for the supervisor's terminal settlement before falling back to dropping
+     * the socket. The supervisor's cancellation path already bounds itself;
+     * this only has to outlast one acknowledgement round trip.
+     */
+    private readonly cancelSettlementTimeoutMs: number,
     epoch: number,
   ) {
     this.pid = runtimeState.pid;
@@ -1305,6 +1337,7 @@ export class WorkflowSupervisorClient {
     connectTimeoutMs: number;
     closeTimeoutMs: number;
     shutdownTimeoutMs: number;
+    cancelSettlementTimeoutMs: number;
   }): Promise<WorkflowSupervisorClient> {
     const epoch = input.dependencies.randomEpoch();
     if (!Number.isSafeInteger(epoch) || epoch < 1) {
@@ -1323,6 +1356,7 @@ export class WorkflowSupervisorClient {
       input.connectTimeoutMs,
       input.closeTimeoutMs,
       input.shutdownTimeoutMs,
+      input.cancelSettlementTimeoutMs,
       epoch,
     );
     const messageId = mintMessageId();
@@ -1395,6 +1429,43 @@ export class WorkflowSupervisorClient {
     return response;
   }
 
+  /**
+   * Provider operations keep their transport open across a caller abort so the
+   * supervisor's terminal settlement still arrives. The cancel travels on its
+   * own short-lived connection because the operation socket is one-shot.
+   */
+  private async operationRequest(
+    request: WorkflowSupervisorRequest,
+    signal?: AbortSignal,
+  ): Promise<WorkflowSupervisorResponse> {
+    this.assertAttached();
+    const { response } = await exchange(
+      this.dependencies,
+      this.runtimeState.socketPath,
+      request,
+      {
+        connectTimeoutMs: this.connectTimeoutMs,
+        signal,
+        cancelOnAbort: {
+          timeoutMs: this.cancelSettlementTimeoutMs,
+          cancel: async () => {
+            await exchange(
+              this.dependencies,
+              this.runtimeState.socketPath,
+              {
+                ...this.attachedCommon(mintMessageId()),
+                op: "cancel",
+                targetMessageId: request.messageId,
+              },
+              { connectTimeoutMs: this.connectTimeoutMs },
+            );
+          },
+        },
+      },
+    );
+    return response;
+  }
+
   private attachedCommon(messageId: string) {
     return {
       ...commonRequest(this.runtimeState, messageId),
@@ -1423,7 +1494,7 @@ export class WorkflowSupervisorClient {
     const identity = expectedIdentity(request);
     assertBudgetIdentity(options.supervisedBudget, identity);
     const messageId = mintMessageId();
-    const response = await this.request(
+    const response = await this.operationRequest(
       {
         ...this.attachedCommon(messageId),
         op: "delegate",
@@ -1483,7 +1554,7 @@ export class WorkflowSupervisorClient {
     const stableRequest: SerializedHostedOpenRouterFusionRequest =
       structuredClone(serialized);
     const messageId = mintMessageId();
-    const response = await this.request(
+    const response = await this.operationRequest(
       {
         ...this.attachedCommon(messageId),
         op: "hosted-fusion",
@@ -1648,6 +1719,11 @@ export async function ensureWorkflowSupervisor(
     DEFAULT_CLOSE_TIMEOUT_MS,
     "Workflow supervisor close timeout",
   );
+  const cancelSettlementTimeoutMs = positiveBoundedInteger(
+    options.cancelSettlementTimeoutMs,
+    CANCEL_SETTLEMENT_TIMEOUT_MS,
+    "Workflow supervisor cancel settlement timeout",
+  );
   const shutdownTimeoutMs = positiveBoundedInteger(
     options.shutdownTimeoutMs,
     DEFAULT_SHUTDOWN_TIMEOUT_MS,
@@ -1676,6 +1752,7 @@ export async function ensureWorkflowSupervisor(
           connectTimeoutMs,
           closeTimeoutMs,
           shutdownTimeoutMs,
+          cancelSettlementTimeoutMs,
         });
         try {
           // A supervisor inherited across backend lifetimes is drain-only. Its
@@ -1710,6 +1787,7 @@ export async function ensureWorkflowSupervisor(
         connectTimeoutMs,
         closeTimeoutMs,
         shutdownTimeoutMs,
+        cancelSettlementTimeoutMs,
       });
     } catch (error) {
       return await failFreshRuntimeStartup(freshRuntime.child, paths, error);

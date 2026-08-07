@@ -5,6 +5,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 export const WORKFLOW_SUPERVISOR_JOURNAL_VERSION = 1 as const;
 export const MAX_WORKFLOW_SUPERVISOR_RECORD_BYTES = 16 * 1_024;
@@ -70,6 +71,35 @@ export interface RecordWorkflowSupervisorSettlementInput {
   usageComplete: boolean;
 }
 
+/**
+ * Accounting-only projection of one settlement, sufficient to reapply it to the
+ * durable budget store without redispatching provider work. Token counts and a
+ * normalized cost are not prompts, results, credentials, or error text, so this
+ * stays inside the journal's content-free contract.
+ */
+export interface WorkflowSupervisorPendingSettlementBudgetV1 {
+  status: string;
+  reason?: string;
+  usage?: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+    cost: number;
+  };
+}
+
+export interface PrepareWorkflowSupervisorSettlementInput
+  extends RecordWorkflowSupervisorSettlementInput {
+  budget: WorkflowSupervisorPendingSettlementBudgetV1;
+}
+
+export interface WorkflowSupervisorPendingSettlementV1
+  extends PrepareWorkflowSupervisorSettlementInput {
+  preparedAt: number;
+}
+
 export interface MarkWorkflowSupervisorTerminalInput {
   outcome: WorkflowSupervisorTerminalOutcome;
   code: string;
@@ -103,6 +133,7 @@ export interface WorkflowSupervisorRecordV1 extends PrepareWorkflowSupervisorOpe
   preparedAt: number;
   updatedAt: number;
   running?: WorkflowSupervisorRunningV1;
+  pendingSettlement?: WorkflowSupervisorPendingSettlementV1;
   settlement?: WorkflowSupervisorSettlementV1;
   terminal?: WorkflowSupervisorTerminalV1;
   quarantine?: WorkflowSupervisorQuarantineV1;
@@ -111,6 +142,8 @@ export interface WorkflowSupervisorRecordV1 extends PrepareWorkflowSupervisorOpe
 export interface WorkflowSupervisorStartupRecovery {
   terminalUnstarted: string[];
   quarantined: string[];
+  /** Prepared-but-unapplied settlements the caller must still reapply. */
+  settlementPending: string[];
 }
 
 export interface WorkflowSupervisorJournalOptions {
@@ -125,7 +158,7 @@ const PREPARE_KEYS = [
 ] as const;
 const RECORD_KEYS = [
   "version", ...PREPARE_KEYS, "state", "preparedAt", "updatedAt",
-  "running", "settlement", "terminal", "quarantine",
+  "running", "pendingSettlement", "settlement", "terminal", "quarantine",
 ] as const;
 
 function fail(code: WorkflowSupervisorJournalErrorCode, message: string): never {
@@ -266,6 +299,52 @@ function validateTerminal(
   timestamp(value.terminalAt, "terminal.terminalAt");
 }
 
+function validatePendingSettlementBudget(
+  value: unknown,
+  code: WorkflowSupervisorJournalErrorCode,
+): asserts value is WorkflowSupervisorPendingSettlementBudgetV1 {
+  strictKeys(value, ["status", "reason", "usage"], "Pending settlement budget", code);
+  for (const [label, field] of [["status", value.status], ["reason", value.reason]] as const) {
+    if (label === "reason" && field === undefined) continue;
+    if (typeof field !== "string" || field.length < 1 || field.length > 128) {
+      fail(code, `Pending settlement budget ${label} must be a bounded string.`);
+    }
+  }
+  if (value.usage === undefined) return;
+  strictKeys(
+    value.usage,
+    ["input", "output", "cacheRead", "cacheWrite", "total", "cost"],
+    "Pending settlement usage",
+    code,
+  );
+  for (const label of ["input", "output", "cacheRead", "cacheWrite", "total", "cost"] as const) {
+    const amount = (value.usage as Record<string, unknown>)[label];
+    if (typeof amount !== "number" || !Number.isFinite(amount) || amount < 0) {
+      fail(code, `Pending settlement usage ${label} must be a non-negative finite number.`);
+    }
+  }
+}
+
+function validatePendingSettlement(
+  value: unknown,
+  code: WorkflowSupervisorJournalErrorCode,
+): asserts value is WorkflowSupervisorPendingSettlementV1 {
+  strictKeys(
+    value,
+    ["settlementId", "status", "usageComplete", "budget", "preparedAt"],
+    "Pending settlement",
+    code,
+  );
+  digest(value.settlementId, "settlementId", code);
+  oneOf(value.status, SETTLEMENT_STATUSES, "workflow supervisor settlement status", code);
+  if (typeof value.usageComplete !== "boolean") fail(code, "usageComplete must be boolean.");
+  if (value.status === "completed" && !value.usageComplete) {
+    fail(code, "A completed settlement must include complete usage.");
+  }
+  validatePendingSettlementBudget(value.budget, code);
+  timestamp(value.preparedAt, "pendingSettlement.preparedAt");
+}
+
 function validateQuarantine(
   value: unknown,
   code: WorkflowSupervisorJournalErrorCode,
@@ -292,14 +371,28 @@ function validateStored(value: unknown, expectedOperationId: string): WorkflowSu
   if (value.updatedAt < value.preparedAt) fail("CORRUPT", "updatedAt precedes preparedAt.");
 
   if (value.running !== undefined) validateRunning(value.running, "CORRUPT");
+  if (value.pendingSettlement !== undefined) {
+    validatePendingSettlement(value.pendingSettlement, "CORRUPT");
+  }
   if (value.settlement !== undefined) validateSettlement(value.settlement, "CORRUPT");
   if (value.terminal !== undefined) validateTerminal(value.terminal, "CORRUPT");
   if (value.quarantine !== undefined) validateQuarantine(value.quarantine, "CORRUPT");
   if (value.settlement !== undefined && value.running === undefined) {
     fail("CORRUPT", "Settlement receipt exists without a running operation.");
   }
+  if (value.pendingSettlement !== undefined && value.running === undefined) {
+    fail("CORRUPT", "Pending settlement exists without a running operation.");
+  }
+  if (
+    value.settlement !== undefined &&
+    value.pendingSettlement !== undefined &&
+    value.settlement.settlementId !== value.pendingSettlement.settlementId
+  ) {
+    fail("CORRUPT", "Settlement receipt does not match its prepared settlement.");
+  }
   for (const [label, receiptAt] of [
     ["running.startedAt", value.running?.startedAt],
+    ["pendingSettlement.preparedAt", value.pendingSettlement?.preparedAt],
     ["settlement.settledAt", value.settlement?.settledAt],
     ["terminal.terminalAt", value.terminal?.terminalAt],
     ["quarantine.quarantinedAt", value.quarantine?.quarantinedAt],
@@ -597,6 +690,38 @@ export class WorkflowSupervisorJournal {
     });
   }
 
+  /**
+   * Write-ahead half of a settlement. The intent must be durable before it is
+   * applied to the budget store: a failure between the two would otherwise
+   * discard usage the provider really reported, and the record's terminal
+   * transition would consume the operation identity with nothing to replay.
+   */
+  prepareSettlement(
+    id: string,
+    input: PrepareWorkflowSupervisorSettlementInput,
+  ): WorkflowSupervisorRecordV1 {
+    validatePendingSettlement({ ...input, preparedAt: 0 }, "INVALID_ARGUMENT");
+    const record = this.required(id);
+    if (record.pendingSettlement) {
+      if (
+        sameFields(record.pendingSettlement, input, ["settlementId", "status", "usageComplete"]) &&
+        isDeepStrictEqual(record.pendingSettlement.budget, input.budget)
+      ) {
+        return this.durableReplay(record);
+      }
+      fail("CONFLICT", `${id} already prepared a different settlement.`);
+    }
+    if (record.state === "prepared" || record.state === "terminal" || !record.running) {
+      fail("CONFLICT", `${id} cannot prepare settlement from ${record.state}.`);
+    }
+    const updatedAt = this.currentTime(record.updatedAt);
+    return this.replace({
+      ...record,
+      updatedAt,
+      pendingSettlement: { ...structuredClone(input), preparedAt: updatedAt },
+    });
+  }
+
   recordSettlement(id: string, input: RecordWorkflowSupervisorSettlementInput): WorkflowSupervisorRecordV1 {
     validateSettlement({ ...input, settledAt: 0 }, "INVALID_ARGUMENT");
     const record = this.required(id);
@@ -605,6 +730,12 @@ export class WorkflowSupervisorJournal {
         return this.durableReplay(record);
       }
       fail("CONFLICT", `${id} already has a different settlement.`);
+    }
+    if (
+      record.pendingSettlement &&
+      !sameFields(record.pendingSettlement, input, ["settlementId", "status", "usageComplete"])
+    ) {
+      fail("CONFLICT", `${id} settled differently from its prepared settlement.`);
     }
     if (record.state === "prepared" || record.state === "terminal" || !record.running) {
       fail("CONFLICT", `${id} cannot record settlement from ${record.state}.`);
@@ -680,8 +811,18 @@ export class WorkflowSupervisorJournal {
   }
 
   recoverStartup(): WorkflowSupervisorStartupRecovery {
-    const recovery: WorkflowSupervisorStartupRecovery = { terminalUnstarted: [], quarantined: [] };
+    const recovery: WorkflowSupervisorStartupRecovery = {
+      terminalUnstarted: [],
+      quarantined: [],
+      settlementPending: [],
+    };
     for (const record of this.list()) {
+      // Ownership stays uncertain across supervisor death, so a running record
+      // still quarantines below. Its prepared-but-unapplied accounting is a
+      // separate obligation the caller can still discharge exactly once.
+      if (record.pendingSettlement && !record.settlement) {
+        recovery.settlementPending.push(record.operationId);
+      }
       if (record.state === "prepared") {
         this.markTerminal(record.operationId, {
           outcome: "unstarted",
