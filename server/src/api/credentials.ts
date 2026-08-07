@@ -23,9 +23,19 @@
  * Keys are stored exactly where the app already expects them (repo-root
  * `.env`, plaintext, on the user's own machine) — we are removing friction,
  * not changing the trust model. The server binds to localhost only.
+ *
+ * Cross-process writes are serialized through a `.env.lock` owner-token file
+ * created next to `.env` (same directory, so the O_EXCL create is atomic on
+ * one filesystem), and the pre-mutation snapshot is revalidated by content
+ * hash inside the lock so a concurrent change becomes a retryable conflict
+ * instead of a silent lost update. The lock is advisory: writers that do not
+ * take it (a user's editor, external scripts) are still detected by the hash
+ * and stat re-checks when they write first, but cannot be excluded from the
+ * final rename window itself.
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type { FastifyInstance } from "fastify";
 import { REPO_ROOT } from "../config.ts";
@@ -36,6 +46,13 @@ import type { WorkflowSupervisorCredentialKey } from "../workflows/supervisor/cr
 
 const ENV_PATH = path.join(REPO_ROOT, ".env");
 export const MAX_CREDENTIAL_ENV_BYTES = 1024 * 1024;
+const MAX_CREDENTIAL_LOCK_BYTES = 4_096;
+const CREDENTIAL_LOCK_TIMEOUT_MS = 2_000;
+const CREDENTIAL_LOCK_RETRY_DELAY_MS = 25;
+const CREDENTIAL_LOCK_STALE_MS = 10_000;
+/** Recorded once so lock tokens can distinguish this process from a later
+ * process that recycled the same pid. */
+const PROCESS_STARTED_AT_MS = Date.now() - Math.round(process.uptime() * 1000);
 let credentialEnvPath = ENV_PATH;
 let credentialMutationTail = Promise.resolve();
 
@@ -124,6 +141,24 @@ export function setCredentialEnvPathForTests(file: string | null): void {
   credentialEnvPath = file ?? ENV_PATH;
 }
 
+let credentialAfterSnapshotHook: (() => void | Promise<void>) | null = null;
+let credentialBeforeRenameHook: (() => void) | null = null;
+
+/** Test-only: interpose after the pre-mutation snapshot is read, before the
+ * cross-process lock is taken, so tests can simulate an external writer. */
+export function setCredentialAfterSnapshotHookForTests(
+  hook: (() => void | Promise<void>) | null,
+): void {
+  credentialAfterSnapshotHook = hook;
+}
+
+/** Test-only: interpose in the window between the final snapshot validation
+ * and the rename that replaces `.env` — the cross-process race window that a
+ * concurrent writer can land in. */
+export function setCredentialBeforeRenameHookForTests(hook: (() => void) | null): void {
+  credentialBeforeRenameHook = hook;
+}
+
 function readKey(spec: ManagedKey): string | null {
   for (const name of [spec.envVar, ...(spec.envAliases ?? [])]) {
     const v = process.env[name];
@@ -146,6 +181,8 @@ interface CredentialChange {
 interface CredentialEnvSnapshot {
   contents: string;
   stat: fs.BigIntStats | null;
+  /** sha256 of the exact bytes read; the authoritative change detector. */
+  sha256: string;
 }
 
 /** Serialize exactly the subset understood by env-file.mjs. Its parser has no
@@ -184,6 +221,17 @@ function storageError(message: string): Error {
   const error = new Error(message);
   error.name = "CredentialStorageError";
   return error;
+}
+
+/** A concurrent writer changed the file: retryable, unlike a storage fault. */
+function conflictError(message: string): Error {
+  const error = new Error(message);
+  error.name = "CredentialConflictError";
+  return error;
+}
+
+function sha256Hex(bytes: Buffer): string {
+  return crypto.createHash("sha256").update(bytes).digest("hex");
 }
 
 function credentialEnvSize(stat: fs.BigIntStats): number {
@@ -231,7 +279,7 @@ function readCredentialEnv(): CredentialEnvSnapshot {
     before = fs.lstatSync(credentialEnvPath, { bigint: true });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return { contents: "", stat: null };
+      return { contents: "", stat: null, sha256: sha256Hex(Buffer.alloc(0)) };
     }
     throw error;
   }
@@ -265,7 +313,7 @@ function readCredentialEnv(): CredentialEnvSnapshot {
     ) {
       throw storageError("Credential environment file changed while it was being read.");
     }
-    return { contents: bytes.toString("utf-8"), stat: after };
+    return { contents: bytes.toString("utf-8"), stat: after, sha256: sha256Hex(bytes) };
   } finally {
     fs.closeSync(descriptor);
   }
@@ -301,6 +349,191 @@ function fsyncDirectory(directory: string): void {
     if (process.platform !== "win32") throw error;
   } finally {
     if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+interface CredentialLockOwner {
+  version: 1;
+  /** Random nonce: the actual ownership proof (pids are recycled). */
+  token: string;
+  pid: number;
+  /** Owning process's start time; disambiguates a recycled pid. */
+  startedAt: number;
+  hostname: string;
+  createdAt: number;
+}
+
+type CredentialLockObservation =
+  | { kind: "missing" }
+  | { kind: "unrecognized" }
+  | { kind: "owned"; owner: CredentialLockOwner };
+
+interface AcquiredCredentialEnvLock {
+  lockFile: string;
+  owner: CredentialLockOwner;
+}
+
+/** Create the lock atomically (O_CREAT|O_EXCL in the target's own directory);
+ * null when another writer already holds it. */
+function tryCreateCredentialEnvLock(lockFile: string): CredentialLockOwner | null {
+  const owner: CredentialLockOwner = {
+    version: 1,
+    token: crypto.randomBytes(32).toString("hex"),
+    pid: process.pid,
+    startedAt: PROCESS_STARTED_AT_MS,
+    hostname: os.hostname(),
+    createdAt: Date.now(),
+  };
+  let descriptor: number | undefined;
+  try {
+    descriptor = fs.openSync(
+      lockFile,
+      fs.constants.O_WRONLY |
+        fs.constants.O_CREAT |
+        fs.constants.O_EXCL |
+        noFollowFlag(),
+      0o600,
+    );
+    fs.writeFileSync(descriptor, `${JSON.stringify(owner)}\n`, "utf-8");
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    return owner;
+  } catch (error) {
+    if (descriptor !== undefined) {
+      fs.closeSync(descriptor);
+      fs.rmSync(lockFile, { force: true });
+    }
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return null;
+    throw error;
+  }
+}
+
+function readCredentialEnvLock(lockFile: string): CredentialLockObservation {
+  let descriptor: number;
+  try {
+    descriptor = fs.openSync(lockFile, fs.constants.O_RDONLY | noFollowFlag());
+  } catch (error) {
+    const code = String((error as NodeJS.ErrnoException).code);
+    if (code === "ENOENT") return { kind: "missing" };
+    if (["ELOOP", "EMLINK"].includes(code)) {
+      throw storageError("Credential lock path cannot be a symbolic link.");
+    }
+    throw error;
+  }
+  try {
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile() || stat.size > MAX_CREDENTIAL_LOCK_BYTES) {
+      return { kind: "unrecognized" };
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(fs.readFileSync(descriptor, "utf-8"));
+    } catch {
+      return { kind: "unrecognized" };
+    }
+    const record = parsed as Partial<CredentialLockOwner> | null;
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      record?.version !== 1 ||
+      typeof record.token !== "string" ||
+      !/^[a-f0-9]{64}$/.test(record.token) ||
+      !Number.isSafeInteger(record.pid) ||
+      (record.pid as number) < 1 ||
+      !Number.isSafeInteger(record.startedAt) ||
+      typeof record.hostname !== "string" ||
+      record.hostname.length < 1 ||
+      !Number.isSafeInteger(record.createdAt) ||
+      (record.createdAt as number) < 0
+    ) {
+      return { kind: "unrecognized" };
+    }
+    return { kind: "owned", owner: record as CredentialLockOwner };
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function credentialLockOwnerMayBeAlive(owner: CredentialLockOwner): boolean {
+  // A lock written from another host can never be proven dead from here.
+  if (owner.hostname !== os.hostname()) return true;
+  try {
+    process.kill(owner.pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+/** Take over only a lock whose owner is provably dead AND older than the
+ * stale bound AND unchanged on a confirming re-read. Anything live,
+ * ambiguous, or unrecognized is left alone until the acquisition timeout.
+ * (Two waiters can still race this unlink; the loser's O_EXCL create fails
+ * and it re-enters the wait loop, so exclusion is preserved.) */
+function recoverStaleCredentialEnvLock(
+  lockFile: string,
+  observed: CredentialLockOwner,
+): boolean {
+  if (Date.now() - observed.createdAt <= CREDENTIAL_LOCK_STALE_MS) return false;
+  if (credentialLockOwnerMayBeAlive(observed)) return false;
+  const confirmed = readCredentialEnvLock(lockFile);
+  if (
+    confirmed.kind !== "owned" ||
+    confirmed.owner.token !== observed.token ||
+    confirmed.owner.pid !== observed.pid ||
+    confirmed.owner.startedAt !== observed.startedAt ||
+    Date.now() - confirmed.owner.createdAt <= CREDENTIAL_LOCK_STALE_MS ||
+    credentialLockOwnerMayBeAlive(confirmed.owner)
+  ) {
+    return false;
+  }
+  try {
+    fs.unlinkSync(lockFile);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function acquireCredentialEnvLock(): Promise<AcquiredCredentialEnvLock> {
+  const lockFile = `${credentialEnvPath}.lock`;
+  fs.mkdirSync(path.dirname(lockFile), { recursive: true });
+  const deadline = Date.now() + CREDENTIAL_LOCK_TIMEOUT_MS;
+  for (;;) {
+    const owner = tryCreateCredentialEnvLock(lockFile);
+    if (owner) return { lockFile, owner };
+    const observed = readCredentialEnvLock(lockFile);
+    if (
+      observed.kind === "owned" &&
+      recoverStaleCredentialEnvLock(lockFile, observed.owner)
+    ) {
+      continue;
+    }
+    if (Date.now() >= deadline) {
+      throw storageError(
+        `Timed out waiting for the credential lock at ${lockFile}. ` +
+          "If no other Kady process is saving credentials, delete that file and retry.",
+      );
+    }
+    if (observed.kind !== "missing") {
+      await new Promise((resolve) => setTimeout(resolve, CREDENTIAL_LOCK_RETRY_DELAY_MS));
+    }
+  }
+}
+
+/** Unlink only a lock that still carries our token: a stale-lock takeover
+ * that raced us must not lose ITS lock to our release. */
+function releaseCredentialEnvLock(acquired: AcquiredCredentialEnvLock): void {
+  const observed = readCredentialEnvLock(acquired.lockFile);
+  if (observed.kind !== "owned" || observed.owner.token !== acquired.owner.token) {
+    return;
+  }
+  try {
+    fs.unlinkSync(acquired.lockFile);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 }
 
@@ -390,6 +623,7 @@ function persistCredentialEnv(
     descriptor = undefined;
 
     targetMatchesSnapshot(snapshot);
+    credentialBeforeRenameHook?.();
     fs.renameSync(temporary, credentialEnvPath);
     fsyncDirectory(directory);
   } catch (error) {
@@ -525,11 +759,33 @@ export async function registerCredentialRoutes(
           }
         }
 
-        let snapshot: CredentialEnvSnapshot;
         try {
-          snapshot = readCredentialEnv();
-          persistCredentialEnv(snapshot, renderCredentialEnv(snapshot, changes));
-        } catch {
+          const snapshot = readCredentialEnv();
+          await credentialAfterSnapshotHook?.();
+          const lock = await acquireCredentialEnvLock();
+          try {
+            // Cooperating writers serialize on `.env.lock`; the content hash
+            // is the authoritative change detector for everything else. The
+            // stat-based sameFileVersion re-check in persistCredentialEnv
+            // stays as a fast-fail for writes landing after this point.
+            const revalidated = readCredentialEnv();
+            if (revalidated.sha256 !== snapshot.sha256) {
+              throw conflictError("Credential environment file changed since it was read.");
+            }
+            persistCredentialEnv(revalidated, renderCredentialEnv(revalidated, changes));
+          } finally {
+            releaseCredentialEnvLock(lock);
+          }
+        } catch (error) {
+          if ((error as Error).name === "CredentialConflictError") {
+            reply.code(409);
+            return {
+              detail:
+                "The .env file was changed by another process while saving. Retry the change.",
+              reason: "credential_conflict",
+              saved: false,
+            };
+          }
           reply.code(500);
           return {
             detail: "Credentials could not be saved safely. Check the .env file and retry.",
