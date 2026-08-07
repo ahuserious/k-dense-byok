@@ -197,6 +197,7 @@ describe("dedicated workflow delegation session", () => {
 describe("strict workflow model resolution", () => {
   it.each([
     ["openrouter", "anthropic/claude-sonnet-4", "api-key", "pi"],
+    ["nvidia", "meta/llama-3.3-70b-instruct", "api-key", "pi"],
     ["ollama", "qwen3:32b", "local", "local"],
     ["openai-compatible", "lab/model", "custom", "custom"],
     ["openai-codex", "gpt-5.4", "oauth", "pi"],
@@ -412,6 +413,22 @@ describe("strict workflow model resolution", () => {
     await expect(
       resolveWorkflowModel(
         exact(fixed("openai-codex", "gpt-5.4", "api-key")),
+        context(paths),
+        dependencies({ resolveFixedModel }),
+      ),
+    ).rejects.toMatchObject({ code: "WORKFLOW_MODEL_UNSUPPORTED_AUTH_CLAIM" });
+    expect(resolveFixedModel).not.toHaveBeenCalled();
+  });
+
+  it("still fails closed for an unknown provider after nvidia joined the claim table", async () => {
+    const paths = resolvePaths(PROJECT_ID);
+    const resolveFixedModel = vi.fn(
+      (requested: FixedModel) => piModel(requested.provider, requested.model),
+    );
+
+    await expect(
+      resolveWorkflowModel(
+        exact(fixed("definitely-not-a-provider", "some/model", "api-key")),
         context(paths),
         dependencies({ resolveFixedModel }),
       ),

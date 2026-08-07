@@ -20,11 +20,17 @@ import {
   setCredentialEnvPathForTests,
   setModalCredentialValidatorForTests,
 } from "../src/api/credentials.ts";
-import type { WorkflowSupervisorCredentialKey } from "../src/workflows/supervisor/credential-contract.ts";
+import {
+  WORKFLOW_SUPERVISOR_CREDENTIAL_KEYS,
+  type WorkflowSupervisorCredentialKey,
+} from "../src/workflows/supervisor/credential-contract.ts";
+import { reloadWorkflowSupervisorCredentials } from "../src/workflows/supervisor/credentials.ts";
+import { REPO_ROOT } from "../src/config.ts";
 
 const MANAGED_ENV_NAMES = [
   "OPENROUTER_API_KEY",
   "OR_API_KEY",
+  "NVIDIA_API_KEY",
   "EXA_API_KEY",
   "PERPLEXITY_API_KEY",
   "GEMINI_API_KEY",
@@ -556,6 +562,104 @@ describe("credential route workflow-supervisor reload", () => {
       expect(persisted).toContain("PERPLEXITY_API_KEY=second-perplexity-test-key");
     } finally {
       releaseFirstReload();
+      await app.close();
+    }
+  });
+
+  it("forwards nvidia changes to the supervisor and only ever exposes a masked value", async () => {
+    const rawNvidiaKey = "nvapi-route-nvidia-test-key";
+    const calls: WorkflowSupervisorCredentialKey[][] = [];
+    const app = await credentialApp(async (keys) => {
+      calls.push([...keys]);
+    });
+    try {
+      const putResponse = await app.inject({
+        method: "PUT",
+        url: "/credentials",
+        payload: { nvidiaApiKey: rawNvidiaKey },
+      });
+
+      expect(putResponse.statusCode).toBe(200);
+      expect(calls).toEqual([["nvidia"]]);
+      expect(modelRuntime.setRuntimeApiKey).toHaveBeenCalledWith(
+        "nvidia",
+        rawNvidiaKey,
+      );
+
+      const getResponse = await app.inject({ method: "GET", url: "/credentials" });
+      expect(getResponse.statusCode).toBe(200);
+      expect(getResponse.json().nvidia).toEqual({
+        set: true,
+        masked: "nvap…-key",
+      });
+      expect(getResponse.body).not.toContain(rawNvidiaKey);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("refreshes the nvidia runtime key when the supervisor reloads credentials", async () => {
+    // The reload clears the changed env names and re-reads the repo-root env
+    // files, so the on-disk root .env decides set vs remove. Save and restore
+    // that file (and the ambient env var) byte-for-byte around the test.
+    const rootEnvPath = path.join(REPO_ROOT, ".env");
+    const originalRootEnv = fs.existsSync(rootEnvPath)
+      ? fs.readFileSync(rootEnvPath)
+      : null;
+    try {
+      process.env.NVIDIA_API_KEY = "nvidia-reload-test-key";
+      fs.writeFileSync(
+        rootEnvPath,
+        "NVIDIA_API_KEY=nvidia-reload-test-key\n",
+        { mode: 0o600 },
+      );
+      await reloadWorkflowSupervisorCredentials(["nvidia"]);
+      expect(modelRuntime.setRuntimeApiKey).toHaveBeenCalledWith(
+        "nvidia",
+        "nvidia-reload-test-key",
+      );
+
+      delete process.env.NVIDIA_API_KEY;
+      // An empty tombstone stops a lower-priority env file from resurrecting
+      // the cleared credential, mirroring the persistence route's tombstones.
+      fs.writeFileSync(rootEnvPath, "NVIDIA_API_KEY=\n", { mode: 0o600 });
+      await reloadWorkflowSupervisorCredentials(["nvidia"]);
+      expect(modelRuntime.removeRuntimeApiKey).toHaveBeenCalledWith("nvidia");
+    } finally {
+      if (originalRootEnv === null) fs.rmSync(rootEnvPath, { force: true });
+      else fs.writeFileSync(rootEnvPath, originalRootEnv);
+    }
+  });
+
+  it("keeps every supervisor-forwarded credential id inside the shared contract", async () => {
+    expect(WORKFLOW_SUPERVISOR_CREDENTIAL_KEYS).toContain("openrouter");
+    expect(WORKFLOW_SUPERVISOR_CREDENTIAL_KEYS).toContain("nvidia");
+
+    const forwarded = new Set<WorkflowSupervisorCredentialKey>();
+    const app = await credentialApp(async (keys) => {
+      for (const key of keys) forwarded.add(key);
+    });
+    try {
+      const response = await app.inject({
+        method: "PUT",
+        url: "/credentials",
+        payload: {
+          openrouterApiKey: "openrouter-contract-key",
+          nvidiaApiKey: "nvidia-contract-test-key",
+          exaApiKey: "exa-contract-test-key",
+          perplexityApiKey: "perplexity-contract-key",
+          geminiApiKey: "gemini-contract-test-key",
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(forwarded).toEqual(
+        new Set(["openrouter", "nvidia", "exa", "perplexity", "gemini"]),
+      );
+      for (const forwardedKey of forwarded) {
+        expect(WORKFLOW_SUPERVISOR_CREDENTIAL_KEYS).toContain(forwardedKey);
+      }
+    } finally {
       await app.close();
     }
   });

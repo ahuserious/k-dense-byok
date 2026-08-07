@@ -15,6 +15,7 @@ const CREDENTIAL_ENV_NAMES: Record<
   exa: ["EXA_API_KEY"],
   perplexity: ["PERPLEXITY_API_KEY"],
   gemini: ["GEMINI_API_KEY"],
+  nvidia: ["NVIDIA_API_KEY"],
 };
 
 const ENV_FILES = [
@@ -64,5 +65,11 @@ export async function reloadWorkflowSupervisorCredentials(
     const key = process.env.OPENROUTER_API_KEY?.trim();
     if (key) await getModelRuntime().setRuntimeApiKey("openrouter", key);
     else await getModelRuntime().removeRuntimeApiKey("openrouter");
+  }
+
+  if (keys.includes("nvidia")) {
+    const key = process.env.NVIDIA_API_KEY?.trim();
+    if (key) await getModelRuntime().setRuntimeApiKey("nvidia", key);
+    else await getModelRuntime().removeRuntimeApiKey("nvidia");
   }
 }

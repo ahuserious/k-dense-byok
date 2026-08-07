@@ -74,6 +74,7 @@ const MANAGED_KEYS: ManagedKey[] = [
     id: "nvidia",
     bodyField: "nvidiaApiKey",
     envVar: "NVIDIA_API_KEY",
+    supervisorKey: "nvidia",
     onChange: async (key) => {
       try {
         if (key) await getModelRuntime().setRuntimeApiKey("nvidia", key);

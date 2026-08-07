@@ -83,6 +83,7 @@ function expectedAuthKind(
   provider: string,
 ): FixedRequestedModel["auth"]["kind"] | null {
   if (provider === "openrouter") return "api-key";
+  if (provider === "nvidia") return "api-key";
   if (provider === "ollama") return "local";
   if (provider === "openai-compatible") return "custom";
   if (isSubscriptionProvider(provider)) return "oauth";
@@ -127,6 +128,9 @@ function resolveFixedModelWithKady(requested: FixedRequestedModel): Model<Api> {
   const registry = getModelRegistry();
   if (requested.provider === "openrouter") {
     return resolveModel(`openrouter/${requested.model}`, registry);
+  }
+  if (requested.provider === "nvidia") {
+    return resolveModel(`nvidia/${requested.model}`, registry);
   }
   if (requested.provider === "ollama") {
     return resolveModel(`ollama/${requested.model}`, registry);

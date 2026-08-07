@@ -3,6 +3,7 @@ export const WORKFLOW_SUPERVISOR_CREDENTIAL_KEYS = [
   "exa",
   "perplexity",
   "gemini",
+  "nvidia",
 ] as const;
 
 export type WorkflowSupervisorCredentialKey =
