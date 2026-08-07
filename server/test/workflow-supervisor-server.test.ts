@@ -219,6 +219,77 @@ async function exchange(
   }
 }
 
+async function restartServer(
+  options: Partial<Parameters<typeof createWorkflowSupervisorSocketServer>[0]>,
+): Promise<void> {
+  await server.close();
+  coordinator = new FakeCoordinator();
+  server = createWorkflowSupervisorSocketServer({
+    socketPath,
+    token: TOKEN,
+    coordinator,
+    frameTimeoutMs: 2_000,
+    ...options,
+  });
+  await server.listen();
+}
+
+interface WorkloadSaturation {
+  sockets: net.Socket[];
+  delegateStartCount: () => number;
+}
+
+/**
+ * Fills every workload slot of a maximumConnections: 8 server (4 slots after
+ * the reserved lifecycle pool): one attach lease plus three in-flight
+ * delegates, mirroring how the cancel test builds its connections.
+ */
+async function saturateWorkloadCapacity(epoch: number): Promise<WorkloadSaturation> {
+  let started = 0;
+  coordinator.delegateStarted = () => {
+    started += 1;
+  };
+  const sockets: net.Socket[] = [];
+  const control = await connect();
+  const attached = readResponse(control);
+  control.write(encodeWorkflowSupervisorRequestLine({
+    ...common(`msg-saturate-attach-${epoch}`),
+    op: "attach",
+    epoch,
+  }));
+  expect((await attached).ok).toBe(true);
+  sockets.push(control);
+  for (let index = 0; index < 3; index += 1) {
+    const socket = await connect();
+    socket.write(encodeWorkflowSupervisorRequestLine({
+      ...common(`msg-saturate-delegate-${epoch}-${index}`),
+      op: "delegate",
+      epoch,
+      projectId: "default",
+      request: delegationRequest(),
+      limits: { maxTokens: 1_000, maxCostUsd: 1 },
+      budget: delegationBudget(),
+    }));
+    sockets.push(socket);
+  }
+  await waitUntil(() => started === 3);
+  return { sockets, delegateStartCount: () => started };
+}
+
+/** Resolves once the socket closes; asserts it never received a byte. */
+function expectDestroyedSilently(socket: net.Socket): Promise<void> {
+  let receivedBytes = false;
+  socket.on("data", () => {
+    receivedBytes = true;
+  });
+  return new Promise((resolve) => {
+    socket.once("close", () => {
+      expect(receivedBytes).toBe(false);
+      resolve();
+    });
+  });
+}
+
 async function waitUntil(predicate: () => boolean): Promise<void> {
   const deadline = Date.now() + 2_000;
   while (!predicate()) {
@@ -519,6 +590,254 @@ describe("workflow supervisor socket server", () => {
         .toEqual(expect.objectContaining({ ok: true, op: "ping" }));
     },
   );
+
+  it("admits lifecycle cancel over a reserved lane while workload saturation stays capped", async () => {
+    await server.close();
+    coordinator = new FakeCoordinator();
+    server = createWorkflowSupervisorSocketServer({
+      socketPath,
+      token: TOKEN,
+      coordinator,
+      maximumConnections: 8,
+      frameTimeoutMs: 2_000,
+    });
+    await server.listen();
+
+    let startedDelegates = 0;
+    coordinator.delegateStarted = () => {
+      startedDelegates += 1;
+    };
+
+    const control = await connect();
+    const attached = readResponse(control);
+    control.write(encodeWorkflowSupervisorRequestLine({
+      ...common("msg-reserve-attach"),
+      op: "attach",
+      epoch: 61,
+    }));
+    expect((await attached).ok).toBe(true);
+
+    // Saturate the server's workload admission with in-flight delegates. An
+    // excess workload connection is refused by destruction without a response
+    // frame, so across capacity regimes: started + refused === opened.
+    const delegates: net.Socket[] = [];
+    let closedDelegates = 0;
+    for (let index = 0; index < 7; index += 1) {
+      const socket = await connect();
+      socket.once("close", () => {
+        closedDelegates += 1;
+      });
+      delegates.push(socket);
+      socket.write(encodeWorkflowSupervisorRequestLine({
+        ...common(`msg-reserve-delegate-${index}`),
+        op: "delegate",
+        epoch: 61,
+        projectId: "default",
+        request: delegationRequest(),
+        limits: { maxTokens: 1_000, maxCostUsd: 1 },
+        budget: delegationBudget(),
+      }));
+    }
+    await waitUntil(() => startedDelegates + closedDelegates === 7);
+    expect(startedDelegates).toBeGreaterThanOrEqual(1);
+
+    // Saturation invariant: one more workload connection is destroyed without
+    // ever receiving a response frame.
+    const excess = await connect();
+    const excessOutcome = readResponse(excess);
+    excess.write(encodeWorkflowSupervisorRequestLine({
+      ...common("msg-reserve-excess"),
+      op: "delegate",
+      epoch: 61,
+      projectId: "default",
+      request: delegationRequest(),
+      limits: { maxTokens: 1_000, maxCostUsd: 1 },
+      budget: delegationBudget(),
+    }));
+    await expect(excessOutcome).rejects.toThrow(
+      /closed before a response frame|ECONNRESET|EPIPE/,
+    );
+
+    // The lifecycle lane: a cancel on a fresh independent connection must get
+    // through even though workload connections hold the supervisor at
+    // saturation. Pre-fix this connection is destroyed at accept before
+    // classification, so a saturated supervisor cannot be cancelled at all.
+    const cancelResponse = await exchange({
+      ...common("msg-reserve-cancel"),
+      op: "cancel",
+      epoch: 61,
+      targetMessageId: "msg-reserve-delegate-0",
+    });
+    expect(cancelResponse).toEqual(expect.objectContaining({
+      ok: true,
+      op: "cancel",
+      result: { targetMessageId: "msg-reserve-delegate-0", cancelled: true },
+    }));
+    expect(coordinator.cancelled).toContainEqual({
+      epoch: 61,
+      messageId: "msg-reserve-delegate-0",
+    });
+
+    excess.destroy();
+    for (const socket of delegates) socket.destroy();
+    control.destroy();
+  });
+
+  it("destroys idle provisional connections at the first-frame deadline and reclaims the seat", async () => {
+    await restartServer({ maximumConnections: 8, frameTimeoutMs: 300 });
+    const saturation = await saturateWorkloadCapacity(11);
+
+    // At workload saturation an idle connection is admitted provisionally and
+    // then destroyed, without a response, when its first frame never arrives.
+    const idle = await connect();
+    await expectDestroyedSilently(idle);
+
+    // Its classification seat was reclaimed: a control op still gets through.
+    expect((await exchange({ ...common("msg-idle-ping"), op: "ping" })).ok).toBe(true);
+    for (const socket of saturation.sockets) socket.destroy();
+  });
+
+  it("destroys slow-loris connections at the classification byte cap and reclaims the seat", async () => {
+    await restartServer({ maximumConnections: 8 });
+    const saturation = await saturateWorkloadCapacity(12);
+
+    // Trickle newline-free bytes past the 8 KiB classification byte cap, well
+    // under both the frame limit and the first-frame deadline.
+    const loris = await connect();
+    const lorisDestroyed = expectDestroyedSilently(loris);
+    loris.write(Buffer.alloc(5_000, 0x61));
+    loris.write(Buffer.alloc(5_000, 0x61));
+    await lorisDestroyed;
+
+    expect((await exchange({ ...common("msg-loris-ping"), op: "ping" })).ok).toBe(true);
+    for (const socket of saturation.sockets) socket.destroy();
+  });
+
+  it("destroys malformed first frames at saturation and reclaims the seat", async () => {
+    await restartServer({ maximumConnections: 8 });
+    const saturation = await saturateWorkloadCapacity(13);
+
+    const malformed = await connect();
+    const malformedDestroyed = expectDestroyedSilently(malformed);
+    malformed.write("this is not a supervisor protocol frame\n");
+    await malformedDestroyed;
+
+    expect((await exchange({ ...common("msg-malformed-ping"), op: "ping" })).ok).toBe(true);
+    for (const socket of saturation.sockets) socket.destroy();
+  });
+
+  it("refuses workload frames on the provisional path without consuming the reserved pool", async () => {
+    await restartServer({ maximumConnections: 8 });
+    const saturation = await saturateWorkloadCapacity(14);
+
+    // A delegate disguised through the classification buffer is destroyed at
+    // classification, without a response, and never reaches the coordinator.
+    const disguised = await connect();
+    const disguisedDestroyed = expectDestroyedSilently(disguised);
+    disguised.write(encodeWorkflowSupervisorRequestLine({
+      ...common("msg-disguised-delegate"),
+      op: "delegate",
+      epoch: 14,
+      projectId: "default",
+      request: delegationRequest(),
+      limits: { maxTokens: 1_000, maxCostUsd: 1 },
+      budget: delegationBudget(),
+    }));
+    await disguisedDestroyed;
+    expect(saturation.delegateStartCount()).toBe(3);
+
+    // No reserved slot was consumed: a control op still gets through.
+    expect((await exchange({ ...common("msg-disguised-ping"), op: "ping" })).ok).toBe(true);
+    for (const socket of saturation.sockets) socket.destroy();
+  });
+
+  it("bounds the lifecycle pool itself and readmits control once it drains", async () => {
+    await restartServer({ maximumConnections: 8 });
+    let quiesceCalls = 0;
+    let releaseQuiesce!: () => void;
+    const quiesceGate = new Promise<void>((resolve) => {
+      releaseQuiesce = resolve;
+    });
+    coordinator.quiesceProject = async () => {
+      quiesceCalls += 1;
+      await quiesceGate;
+      return 0;
+    };
+    const saturation = await saturateWorkloadCapacity(15);
+
+    // Fill the reserved pool with in-flight control operations.
+    const quiesces: net.Socket[] = [];
+    const quiesceResponses: Promise<WorkflowSupervisorResponse>[] = [];
+    for (let index = 0; index < 4; index += 1) {
+      const socket = await connect();
+      quiesceResponses.push(readResponse(socket));
+      socket.write(encodeWorkflowSupervisorRequestLine({
+        ...common(`msg-pool-quiesce-${index}`),
+        op: "quiesce-project",
+        epoch: 15,
+        projectId: "default",
+        reason: "caller-request",
+      }));
+      quiesces.push(socket);
+    }
+    await waitUntil(() => quiesceCalls === 4);
+
+    // Park idle connections on every classification seat...
+    const parked: net.Socket[] = [];
+    for (let index = 0; index < 4; index += 1) parked.push(await connect());
+    // ...so a connection beyond reserve + buffer is refused at accept.
+    const overflow = net.createConnection(socketPath);
+    await new Promise<void>((resolve) => {
+      overflow.once("close", () => resolve());
+      overflow.once("error", () => resolve());
+    });
+    expect(overflow.destroyed).toBe(true);
+
+    // A control frame that classifies while the reserved pool is full is
+    // destroyed without a response instead of waiting on a slot.
+    const starved = parked[0]!;
+    const starvedDestroyed = expectDestroyedSilently(starved);
+    starved.write(encodeWorkflowSupervisorRequestLine({
+      ...common("msg-pool-starved-ping"),
+      op: "ping",
+    }));
+    await starvedDestroyed;
+
+    // Once the in-flight control operations complete, control admission works
+    // again over the reclaimed reserved slots.
+    for (const socket of parked.slice(1)) socket.destroy();
+    releaseQuiesce();
+    for (const response of quiesceResponses) {
+      expect((await response).ok).toBe(true);
+    }
+    expect((await exchange({ ...common("msg-pool-recovered-ping"), op: "ping" })).ok).toBe(true);
+    for (const socket of quiesces) socket.destroy();
+    for (const socket of saturation.sockets) socket.destroy();
+  });
+
+  it("reclaims every admission lane so full capacity is admissible again after teardown", async () => {
+    await restartServer({ maximumConnections: 8 });
+    const saturation = await saturateWorkloadCapacity(16);
+
+    // Churn the provisional path with rejected traffic of both kinds.
+    const malformed = await connect();
+    const malformedDestroyed = expectDestroyedSilently(malformed);
+    malformed.write("garbage\n");
+    await malformedDestroyed;
+    const idle = await connect();
+
+    idle.destroy();
+    for (const socket of saturation.sockets) socket.destroy();
+    await waitUntil(() => coordinator.attachedEpoch === null);
+
+    // Every lane drained: a full workload complement is admissible again, and
+    // with the workload pool refilled a control op still rides the reserved
+    // lane.
+    const refilled = await saturateWorkloadCapacity(17);
+    expect(refilled.delegateStartCount()).toBe(3);
+    expect((await exchange({ ...common("msg-reclaimed-ping"), op: "ping" })).ok).toBe(true);
+    for (const socket of refilled.sockets) socket.destroy();
+  });
 
   it("flushes shutdown acceptance and then closes the listener and control lease", async () => {
     const control = await connect();

@@ -21,6 +21,11 @@ const DEFAULT_MAXIMUM_REMEMBERED_CONTROL_IDS = 4_096;
 const DEFAULT_MAXIMUM_CONNECTIONS = 64;
 const DEFAULT_MAXIMUM_BUFFERED_BYTES = 16 * 1024 * 1024;
 const DEFAULT_FRAME_TIMEOUT_MS = 15_000;
+// Lifecycle/control slots reserved out of the connection capacity, and the
+// per-connection byte bound before classification. See the admission contract
+// in accept().
+const LIFECYCLE_RESERVED_CONNECTIONS = 4;
+const CLASSIFICATION_BUFFER_BYTE_CAP = 8 * 1024;
 
 export interface WorkflowSupervisorCoordinatorPort {
   attach(epoch: number): Promise<void>;
@@ -73,6 +78,9 @@ interface ActiveOperation {
   messageId: string;
   pending: boolean;
 }
+
+/** Which admission pool a connection currently occupies; see accept(). */
+type AdmissionLane = "general" | "provisional" | "reserved";
 
 function isProviderOperation(request: WorkflowSupervisorRequest): boolean {
   return request.op === "delegate" || request.op === "hosted-fusion";
@@ -179,9 +187,13 @@ class WorkflowSupervisorSocketServerImpl implements WorkflowSupervisorSocketServ
   private readonly maximumConnections: number;
   private readonly maximumBufferedBytes: number;
   private readonly frameTimeoutMs: number;
+  private readonly reservedLifecycleConnections: number;
   private readonly rememberedOperationIds = new Set<string>();
   private readonly rememberedControlIds = new Set<string>();
   private readonly sockets = new Set<net.Socket>();
+  private generalConnections = 0;
+  private provisionalConnections = 0;
+  private reservedConnections = 0;
   private totalBufferedBytes = 0;
   private readonly server: net.Server;
   private listening = false;
@@ -226,6 +238,12 @@ class WorkflowSupervisorSocketServerImpl implements WorkflowSupervisorSocketServ
     this.maximumRememberedOperationIds = maximumRememberedOperationIds;
     this.maximumRememberedControlIds = maximumRememberedControlIds;
     this.maximumConnections = maximumConnections;
+    // Guarantee at least one workload slot even under tiny configured caps;
+    // with one connection total there is no lifecycle pool at all.
+    this.reservedLifecycleConnections = Math.min(
+      LIFECYCLE_RESERVED_CONNECTIONS,
+      maximumConnections - 1,
+    );
     this.maximumBufferedBytes = maximumBufferedBytes;
     this.frameTimeoutMs = frameTimeoutMs;
     this.closed = new Promise<void>((resolve) => {
@@ -291,7 +309,63 @@ class WorkflowSupervisorSocketServerImpl implements WorkflowSupervisorSocketServ
   }
 
   private accept(socket: net.Socket): void {
-    if (this.sockets.size >= this.maximumConnections) {
+    // ADMISSION CONTRACT
+    //
+    // Durable capacity stays at `maximumConnections` (64 by default) and is
+    // split into two pools:
+    //   - a workload pool of `maximumConnections - reservedLifecycleConnections`
+    //     slots (60 by default), admitted exactly as before with lazy
+    //     classification; and
+    //   - a lifecycle pool of `reservedLifecycleConnections` slots (4 by
+    //     default) that only classified lifecycle/control frames may occupy,
+    //     so workload saturation can never deny cancellation, inspection, or
+    //     shutdown — and the pool's own bound means control traffic cannot
+    //     exhaust the supervisor either.
+    //
+    // Lifecycle/control operations are exactly the non-provider operations —
+    // ping, attach, cancel, snapshot, quiesce-project, shutdown, and
+    // reload-credentials — mirroring the replay-window split in
+    // handleRequest():
+    //   - cancel, snapshot, shutdown, and quiesce-project are the operations
+    //     a saturated supervisor must still honor to stay controllable;
+    //   - ping is the liveness probe for exactly that saturated state;
+    //   - attach rides the lifecycle pool because every epoch-gated control
+    //     operation requires a live attach lease, and the coordinator admits
+    //     at most one attached epoch, so a lease holds at most one reserved
+    //     slot;
+    //   - reload-credentials is host control-plane maintenance: one small,
+    //     single-flight, epoch-gated frame whose starvation would block
+    //     credential rotation precisely when a wedged supervisor needs it.
+    //   Provider work (delegate, hosted-fusion) claims only workload capacity.
+    //
+    // When the workload pool is full, a connection may be admitted
+    // provisionally into a classification buffer (one seat per lifecycle
+    // slot) bounded three ways: in count (the buffer size), in time (the
+    // existing first-frame deadline, whose expiry here destroys instead of
+    // answering), and in bytes buffered before classification (the
+    // classification byte cap) — the slow-loris defense. A provisional
+    // connection earns processing only by presenting a complete first frame
+    // that classifies as lifecycle/control while a reserved slot is free;
+    // every other outcome (deadline, byte cap, malformed frame, workload
+    // frame, lifecycle pool full) destroys it without a response, exactly
+    // like an at-capacity workload connection at accept. The one exception is
+    // the aggregate buffered-byte limit, which keeps answering
+    // SUPERVISOR_BUSY on every lane as it always has. Authentication is not
+    // bypassed: classification reads only the operation name, the token check
+    // still runs first in handleRequest(), and a bounded-lane connection is
+    // destroyed once its single response flushes, so an invalid-token control
+    // frame cannot hold a reserved slot afterwards.
+    let lane: AdmissionLane;
+    if (
+      this.generalConnections <
+        this.maximumConnections - this.reservedLifecycleConnections
+    ) {
+      lane = "general";
+      this.generalConnections += 1;
+    } else if (this.provisionalConnections < this.reservedLifecycleConnections) {
+      lane = "provisional";
+      this.provisionalConnections += 1;
+    } else {
       socket.destroy();
       return;
     }
@@ -349,11 +423,19 @@ class WorkflowSupervisorSocketServerImpl implements WorkflowSupervisorSocketServ
       if (responded || connectionClosed || socket.destroyed) return false;
       const encoded = encodeWorkflowSupervisorResponseLine(response);
       responded = true;
-      const flushed = () => {
-        afterFlush?.();
-      };
-      if (keepOpen) socket.write(encoded, flushed);
-      else socket.end(encoded, flushed);
+      if (keepOpen) {
+        socket.write(encoded, () => {
+          afterFlush?.();
+        });
+      } else {
+        socket.end(encoded, () => {
+          afterFlush?.();
+          // A bounded-lane connection must not linger half-open holding its
+          // slot after its single response; general connections keep the
+          // half-close semantics they always had.
+          if (lane !== "general") socket.destroy();
+        });
+      }
       return true;
     };
 
@@ -369,6 +451,12 @@ class WorkflowSupervisorSocketServerImpl implements WorkflowSupervisorSocketServ
       receivedFrame = true;
       chunks = [];
       releaseBufferedBytes();
+      if (lane === "provisional") {
+        // An unclassified connection admitted past the workload pool has no
+        // claim to a response; reclaim its buffer seat at the deadline.
+        socket.destroy();
+        return;
+      }
       sendError(null, "INVALID_MESSAGE");
     }, this.frameTimeoutMs);
     frameTimer.unref();
@@ -377,6 +465,9 @@ class WorkflowSupervisorSocketServerImpl implements WorkflowSupervisorSocketServ
       connectionClosed = true;
       clearTimeout(frameTimer);
       this.sockets.delete(socket);
+      if (lane === "general") this.generalConnections -= 1;
+      else if (lane === "provisional") this.provisionalConnections -= 1;
+      else this.reservedConnections -= 1;
       releaseBufferedBytes();
       cancelActiveOperation();
       detach();
@@ -586,6 +677,10 @@ class WorkflowSupervisorSocketServerImpl implements WorkflowSupervisorSocketServ
         receivedFrame = true;
         clearTimeout(frameTimer);
         releaseBufferedBytes();
+        if (lane === "provisional") {
+          socket.destroy();
+          return;
+        }
         sendError(null, "INVALID_MESSAGE");
         return;
       }
@@ -601,6 +696,15 @@ class WorkflowSupervisorSocketServerImpl implements WorkflowSupervisorSocketServ
       this.totalBufferedBytes += chunk.byteLength;
       accountedBufferedBytes += chunk.byteLength;
       receivedBytes += chunk.byteLength;
+      if (lane === "provisional" && receivedBytes > CLASSIFICATION_BUFFER_BYTE_CAP) {
+        // Slow-loris bound: a provisional connection may not buffer more than
+        // one small control frame's worth of bytes before classifying.
+        clearTimeout(frameTimer);
+        chunks = [];
+        releaseBufferedBytes();
+        socket.destroy();
+        return;
+      }
       if (receivedBytes > MAX_WORKFLOW_SUPERVISOR_FRAME_BYTES) {
         receivedFrame = true;
         clearTimeout(frameTimer);
@@ -621,6 +725,10 @@ class WorkflowSupervisorSocketServerImpl implements WorkflowSupervisorSocketServ
       try {
         request = parseWorkflowSupervisorRequestLine(frame);
       } catch (error) {
+        if (lane === "provisional") {
+          socket.destroy();
+          return;
+        }
         sendError(
           null,
           error instanceof WorkflowSupervisorProtocolError
@@ -628,6 +736,22 @@ class WorkflowSupervisorSocketServerImpl implements WorkflowSupervisorSocketServ
             : "INVALID_MESSAGE",
         );
         return;
+      }
+      if (lane === "provisional") {
+        // Classification point: only lifecycle/control frames may promote out
+        // of the buffer, and only while a reserved slot is free. Workload
+        // frames are refused exactly as an at-capacity workload connection is
+        // refused at accept: destroyed without a response.
+        if (
+          isProviderOperation(request) ||
+          this.reservedConnections >= this.reservedLifecycleConnections
+        ) {
+          socket.destroy();
+          return;
+        }
+        this.provisionalConnections -= 1;
+        this.reservedConnections += 1;
+        lane = "reserved";
       }
       void handleRequest(request);
     });
