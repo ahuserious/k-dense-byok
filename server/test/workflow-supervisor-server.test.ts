@@ -329,6 +329,64 @@ describe("workflow supervisor socket server", () => {
     control.destroy();
   });
 
+  it("cancels an in-flight operation from an independent connection while its transport stays open", async () => {
+    const control = await connect();
+    const attached = readResponse(control);
+    control.write(encodeWorkflowSupervisorRequestLine({
+      ...common("msg-cancel-control"),
+      op: "attach",
+      epoch: 29,
+    }));
+    await attached;
+
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    coordinator.delegateStarted = markStarted;
+    const operation = await connect();
+    const operationResponse = readResponse(operation);
+    operation.write(encodeWorkflowSupervisorRequestLine({
+      ...common("msg-cancel-target"),
+      op: "delegate",
+      epoch: 29,
+      projectId: "default",
+      request: delegationRequest(),
+      limits: { maxTokens: 1_000, maxCostUsd: 1 },
+      budget: delegationBudget(),
+    }));
+    await started;
+
+    // The cancel travels over its own short-lived second connection, not the
+    // delegating one, so the operation transport survives to deliver the
+    // supervisor's terminal frame instead of being destroyed to cancel.
+    const cancelResponse = await exchange({
+      ...common("msg-cancel-request"),
+      op: "cancel",
+      epoch: 29,
+      targetMessageId: "msg-cancel-target",
+    });
+    expect(cancelResponse).toEqual(expect.objectContaining({
+      ok: true,
+      op: "cancel",
+      result: { targetMessageId: "msg-cancel-target", cancelled: true },
+    }));
+    expect(coordinator.cancelled).toEqual([
+      { epoch: 29, messageId: "msg-cancel-target" },
+    ]);
+
+    // The delegating connection was never destroyed: it still receives the
+    // outcome of its own cancelled operation as a response frame.
+    expect(operation.destroyed).toBe(false);
+    expect(await operationResponse).toEqual(expect.objectContaining({
+      messageId: "msg-cancel-target",
+      ok: false,
+      error: expect.objectContaining({ code: "OPERATION_FAILED" }),
+    }));
+    operation.destroy();
+    control.destroy();
+  });
+
   it("fails provider work closed at replay capacity while preserving control and shutdown", async () => {
     await server.close();
     coordinator = new FakeCoordinator();
