@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
-import { SUBAGENT_DELEGATION_V2_PROTOCOL_VERSION } from "pi-subagents/delegation";
 import type {
   ModelRequest,
   WorkflowNode,
@@ -61,7 +60,7 @@ import type {
   DagFusionDelegationReceipt,
   DagFusionDelegationUsageSettlement,
   DelegateDagFusionNodeOptions,
-  OwnedDelegationV2Request,
+  OwnedDelegationRequest,
 } from "../../pi-packages/dag-fusion-drive/index.ts";
 import type {
   SupervisedWorkflowBudgetDescriptorV1,
@@ -83,7 +82,7 @@ export interface KadySupervisedDelegateOptions extends DelegateDagFusionNodeOpti
 
 export interface KadyDelegationHostPort {
   delegate(
-    request: OwnedDelegationV2Request,
+    request: OwnedDelegationRequest,
     options: KadySupervisedDelegateOptions,
   ): Promise<DagFusionDelegationReceipt>;
 }
@@ -1536,8 +1535,7 @@ export function createKadyWorkflowNodeExecutor(
           `Paid or subscription-backed slot ${slot.id} has no positive pre-delegation cost envelope.`,
         );
       }
-      const request: OwnedDelegationV2Request = {
-        version: SUBAGENT_DELEGATION_V2_PROTOCOL_VERSION,
+      const request: OwnedDelegationRequest = {
         requestId: stableId("dagcall", context.runId, context.executionId, slot.id),
         ownerRunId: context.runId,
         nodeId: `${context.executionId}:${slot.id}`,

@@ -3,7 +3,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { OwnedDelegationV2Request } from "../pi-packages/dag-fusion-drive/index.ts";
+import type { OwnedDelegationRequest } from "../pi-packages/dag-fusion-drive/index.ts";
 import { workflowBudgetReservationId } from "../src/workflows/budget.ts";
 import type { SupervisedWorkflowBudgetDescriptorV1 } from "../src/workflows/supervised-budget.ts";
 import {
@@ -127,9 +127,8 @@ function common(messageId: string, token = TOKEN) {
   } as const;
 }
 
-function delegationRequest(): OwnedDelegationV2Request {
+function delegationRequest(): OwnedDelegationRequest {
   return {
-    version: 2,
     requestId: "dagcall_server_test",
     ownerRunId: "wrun_server_test",
     nodeId: "research-node",

@@ -14,7 +14,7 @@ import type {
   DagFusionDelegationReceipt,
   DagFusionDelegationUsageLimits,
   DagFusionDelegationUsageSettlement,
-  OwnedDelegationV2Request,
+  OwnedDelegationRequest,
 } from "../../../pi-packages/dag-fusion-drive/index.ts";
 import {
   assertNoHostedFusionQuarantine,
@@ -638,7 +638,7 @@ export class WorkflowSupervisorCoordinator {
     epoch: number;
     messageId: string;
     projectId: string;
-    request: OwnedDelegationV2Request;
+    request: OwnedDelegationRequest;
     limits: DagFusionDelegationUsageLimits;
     budget: SupervisedWorkflowBudgetDescriptorV1;
   }): Promise<WorkflowSupervisorDelegateResult> {

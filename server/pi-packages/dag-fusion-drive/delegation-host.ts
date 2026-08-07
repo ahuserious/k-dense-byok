@@ -4,15 +4,14 @@ import {
   SUBAGENT_DELEGATION_RESPONSE_EVENT,
   SUBAGENT_DELEGATION_STARTED_EVENT,
   SUBAGENT_DELEGATION_UPDATE_EVENT,
-  SUBAGENT_DELEGATION_V2_PROTOCOL_VERSION,
-  type SubagentDelegationV2Cancel,
-  type SubagentDelegationV2Request,
-  type SubagentDelegationV2Response,
-  type SubagentDelegationV2Started,
-  type SubagentDelegationV2TerminalResponse,
-  type SubagentDelegationV2Thinking,
-  type SubagentDelegationV2Update,
-  type SubagentDelegationV2Usage,
+  type SubagentDelegationCancel,
+  type SubagentDelegationRequest,
+  type SubagentDelegationResponse,
+  type SubagentDelegationStarted,
+  type SubagentDelegationTerminalResponse,
+  type SubagentDelegationThinking,
+  type SubagentDelegationUpdate,
+  type SubagentDelegationUsage,
 } from "pi-subagents/delegation";
 
 /** Minimal shared surface implemented by Pi's `pi.events` bus. */
@@ -27,12 +26,12 @@ export interface DagFusionDelegationIdentity {
   nodeId: string;
 }
 
-export type OwnedDelegationV2Request = SubagentDelegationV2Request & {
+export type OwnedDelegationRequest = SubagentDelegationRequest & {
   model: string;
-  thinking: SubagentDelegationV2Thinking;
+  thinking: SubagentDelegationThinking;
   timeoutMs: number;
-  turnBudget: NonNullable<SubagentDelegationV2Request["turnBudget"]>;
-  toolBudget: NonNullable<SubagentDelegationV2Request["toolBudget"]> & {
+  turnBudget: NonNullable<SubagentDelegationRequest["turnBudget"]>;
+  toolBudget: NonNullable<SubagentDelegationRequest["toolBudget"]> & {
     block: "*";
   };
 };
@@ -62,8 +61,8 @@ export type DagFusionDelegationSettlementReason =
 export interface DagFusionDelegationUsageSettlement {
   identity: DagFusionDelegationIdentity;
   reason: DagFusionDelegationSettlementReason;
-  responseStatus?: SubagentDelegationV2Response["status"];
-  usage?: SubagentDelegationV2Usage;
+  responseStatus?: SubagentDelegationResponse["status"];
+  usage?: SubagentDelegationUsage;
   progress: DagFusionDelegationProgress;
 }
 
@@ -77,8 +76,8 @@ export interface DelegateDagFusionNodeOptions {
     settlement: DagFusionDelegationUsageSettlement,
   ): void | Promise<void>;
   signal?: AbortSignal;
-  onStarted?(event: SubagentDelegationV2Started): void;
-  onUpdate?(event: SubagentDelegationV2Update): void;
+  onStarted?(event: SubagentDelegationStarted): void;
+  onUpdate?(event: SubagentDelegationUpdate): void;
 }
 
 export interface DagFusionDelegationReceipt {
@@ -86,7 +85,7 @@ export interface DagFusionDelegationReceipt {
   requested: {
     agent: string;
     model: string;
-    thinking: SubagentDelegationV2Thinking;
+    thinking: SubagentDelegationThinking;
   };
   resolved?: {
     agent: string;
@@ -94,8 +93,8 @@ export interface DagFusionDelegationReceipt {
     thinking: string;
     launchContractDigest?: string;
   };
-  response: SubagentDelegationV2Response;
-  usage?: SubagentDelegationV2Usage & { totalTokens: number };
+  response: SubagentDelegationResponse;
+  usage?: SubagentDelegationUsage & { totalTokens: number };
   progress: DagFusionDelegationProgress;
 }
 
@@ -165,7 +164,7 @@ interface PendingDelegationQuarantine {
 interface PendingDelegation {
   key: string;
   nodeKey: string;
-  request: OwnedDelegationV2Request;
+  request: OwnedDelegationRequest;
   expectedModel: string;
   options: DelegateDagFusionNodeOptions;
   progress: DagFusionDelegationProgress;
@@ -191,9 +190,9 @@ const THINKING_LEVELS = [
   "high",
   "xhigh",
   "max",
-] as const satisfies readonly SubagentDelegationV2Thinking[];
+] as const satisfies readonly SubagentDelegationThinking[];
 
-const TERMINAL_STATUSES = new Set<SubagentDelegationV2Response["status"]>([
+const TERMINAL_STATUSES = new Set<SubagentDelegationResponse["status"]>([
   "completed",
   "failed",
   "timed_out",
@@ -234,7 +233,7 @@ function logicalNodeKey(identity: DagFusionDelegationIdentity): string {
 
 function requestIdentity(
   request: Pick<
-    SubagentDelegationV2Request,
+    SubagentDelegationRequest,
     "requestId" | "ownerRunId" | "nodeId"
   >,
 ): DagFusionDelegationIdentity {
@@ -294,7 +293,7 @@ function jsonBytes(value: unknown): number | undefined {
 /** Mirrors pi-subagents 0.40's public V2 launch projection. */
 export function expectedDelegatedModel(
   model: string,
-  thinking: SubagentDelegationV2Thinking,
+  thinking: SubagentDelegationThinking,
 ): string {
   const suffix = THINKING_LEVELS.find((level) => model.endsWith(`:${level}`));
   const baseModel = suffix ? model.slice(0, -(suffix.length + 1)) : model;
@@ -302,19 +301,13 @@ export function expectedDelegatedModel(
 }
 
 function validateRequest(
-  request: OwnedDelegationV2Request,
+  request: OwnedDelegationRequest,
   limits: DagFusionDelegationUsageLimits,
   maxRequestTimeoutMs: number,
 ): void {
   if (!request || typeof request !== "object" || Array.isArray(request)) {
     throw new DagFusionDelegationError(
       "Delegation request must be an object.",
-      "DAG_FUSION_INVALID_REQUEST",
-    );
-  }
-  if (request.version !== SUBAGENT_DELEGATION_V2_PROTOCOL_VERSION) {
-    throw new DagFusionDelegationError(
-      "dag-fusion-drive accepts only Pi Delegation V2 requests.",
       "DAG_FUSION_INVALID_REQUEST",
     );
   }
@@ -435,7 +428,6 @@ function eventIdentity(data: unknown): DagFusionDelegationIdentity | undefined {
   if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
   const value = data as Record<string, unknown>;
   if (
-    value.version !== SUBAGENT_DELEGATION_V2_PROTOCOL_VERSION ||
     !validId(value.requestId) ||
     !validId(value.ownerRunId) ||
     !validId(value.nodeId)
@@ -454,8 +446,8 @@ function cloneProgress(progress: DagFusionDelegationProgress): DagFusionDelegati
 }
 
 function usageWithTotal(
-  usage: SubagentDelegationV2Usage,
-): SubagentDelegationV2Usage & { totalTokens: number } {
+  usage: SubagentDelegationUsage,
+): SubagentDelegationUsage & { totalTokens: number } {
   return { ...usage, totalTokens: usage.input + usage.output };
 }
 
@@ -560,7 +552,7 @@ export class DagFusionDelegationHost {
   }
 
   async delegate(
-    request: OwnedDelegationV2Request,
+    request: OwnedDelegationRequest,
     options: DelegateDagFusionNodeOptions,
   ): Promise<DagFusionDelegationReceipt> {
     if (this.#disposed) {
@@ -595,7 +587,7 @@ export class DagFusionDelegationHost {
       );
     }
 
-    let ownedRequest: OwnedDelegationV2Request;
+    let ownedRequest: OwnedDelegationRequest;
     try {
       ownedRequest = structuredClone(request);
     } catch (error) {
@@ -807,7 +799,7 @@ export class DagFusionDelegationHost {
     }
     pending.progress.started = true;
     try {
-      pending.options.onStarted?.(structuredClone(data) as SubagentDelegationV2Started);
+      pending.options.onStarted?.(structuredClone(data) as SubagentDelegationStarted);
     } catch (error) {
       void this.#settleLocal(
         pending,
@@ -834,7 +826,7 @@ export class DagFusionDelegationHost {
       void this.#failProtocol(pending, "Delegation update arrived before its started event.");
       return;
     }
-    const update = data as SubagentDelegationV2Update;
+    const update = data as SubagentDelegationUpdate;
     if (update.model !== undefined && update.model !== pending.expectedModel) {
       void this.#failProtocol(
         pending,
@@ -931,7 +923,7 @@ export class DagFusionDelegationHost {
       }
       return;
     }
-    const response = data as SubagentDelegationV2Response;
+    const response = data as SubagentDelegationResponse;
     if (!TERMINAL_STATUSES.has(response.status)) {
       const error = new DagFusionDelegationError(
         "Delegation returned an unknown terminal status.",
@@ -947,7 +939,7 @@ export class DagFusionDelegationHost {
       return;
     }
 
-    let reconciliableUsage: SubagentDelegationV2Usage | undefined;
+    let reconciliableUsage: SubagentDelegationUsage | undefined;
     if (response.status !== "invalid_request" && response.usage) {
       try {
         this.#validateUsageShapeAndProgress(pending, response.usage);
@@ -1075,11 +1067,10 @@ export class DagFusionDelegationHost {
 
   #validateResponse(
     pending: PendingDelegation,
-    response: SubagentDelegationV2Response,
+    response: SubagentDelegationResponse,
   ): DagFusionDelegationReceipt {
     if (response.status === "invalid_request") {
       const allowedFields = new Set([
-        "version",
         "requestId",
         "ownerRunId",
         "nodeId",
@@ -1112,10 +1103,9 @@ export class DagFusionDelegationHost {
         progress: cloneProgress(pending.progress),
       };
     }
-    const terminal: SubagentDelegationV2TerminalResponse = response;
+    const terminal: SubagentDelegationTerminalResponse = response;
     const completed = terminal.status === "completed";
     const allowedFields = new Set([
-      "version",
       "requestId",
       "ownerRunId",
       "nodeId",
@@ -1304,7 +1294,7 @@ export class DagFusionDelegationHost {
 
   #validateUsage(
     pending: PendingDelegation,
-    usage: SubagentDelegationV2Usage,
+    usage: SubagentDelegationUsage,
   ): void {
     this.#validateUsageShapeAndProgress(pending, usage);
     const totalTokens = usage.input + usage.output;
@@ -1340,7 +1330,7 @@ export class DagFusionDelegationHost {
 
   #validateUsageShapeAndProgress(
     pending: PendingDelegation,
-    usage: SubagentDelegationV2Usage,
+    usage: SubagentDelegationUsage,
   ): void {
     const tokenFields = [
       usage.input,
@@ -1400,8 +1390,8 @@ export class DagFusionDelegationHost {
     error: DagFusionDelegationError,
     emitCancel: boolean,
     terminal?: {
-      responseStatus: SubagentDelegationV2Response["status"];
-      usage?: SubagentDelegationV2Usage;
+      responseStatus: SubagentDelegationResponse["status"];
+      usage?: SubagentDelegationUsage;
     },
   ): Promise<void> {
     if (pending.quarantine) {
@@ -1480,8 +1470,7 @@ export class DagFusionDelegationHost {
 
     pending.cancellation = { reason, error };
     this.#stopDeadline(pending);
-    const cancel: SubagentDelegationV2Cancel = {
-      version: SUBAGENT_DELEGATION_V2_PROTOCOL_VERSION,
+    const cancel: SubagentDelegationCancel = {
       ...requestIdentity(pending.request),
     };
     try {

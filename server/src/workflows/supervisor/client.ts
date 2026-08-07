@@ -8,7 +8,7 @@ import type {
   DagFusionDelegationIdentity,
   DagFusionDelegationReceipt,
   DagFusionDelegationUsageSettlement,
-  OwnedDelegationV2Request,
+  OwnedDelegationRequest,
 } from "../../../pi-packages/dag-fusion-drive/index.ts";
 import {
   prepareWorkflowDelegationProject,
@@ -1241,7 +1241,7 @@ function sameIdentity(
     left.nodeId === right.nodeId;
 }
 
-function expectedIdentity(request: OwnedDelegationV2Request): DagFusionDelegationIdentity {
+function expectedIdentity(request: OwnedDelegationRequest): DagFusionDelegationIdentity {
   return {
     requestId: request.requestId,
     ownerRunId: request.ownerRunId,
@@ -1475,7 +1475,7 @@ export class WorkflowSupervisorClient {
 
   async delegate(
     projectId: string,
-    request: OwnedDelegationV2Request,
+    request: OwnedDelegationRequest,
     options: KadySupervisedDelegateOptions,
   ): Promise<DagFusionDelegationReceipt> {
     const canonicalPaths = resolvePaths(projectId);

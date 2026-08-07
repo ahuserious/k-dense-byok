@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type {
   DagFusionDelegationReceipt,
   DagFusionDelegationUsageSettlement,
-  OwnedDelegationV2Request,
+  OwnedDelegationRequest,
 } from "../pi-packages/dag-fusion-drive/index.ts";
 import {
   MAX_WORKFLOW_SUPERVISOR_FRAME_BYTES,
@@ -47,9 +47,8 @@ function budget() {
   });
 }
 
-function delegationRequest(): OwnedDelegationV2Request {
+function delegationRequest(): OwnedDelegationRequest {
   return {
-    version: 2,
     requestId: "dagcall_run-1_node-1_agent",
     ownerRunId: "wrun_0123456789abcdef",
     nodeId: "node-1:agent",
@@ -192,7 +191,6 @@ function receipt(): DagFusionDelegationReceipt {
       launchContractDigest: "a".repeat(64),
     },
     response: {
-      version: 2,
       requestId: request.requestId,
       ownerRunId: request.ownerRunId,
       nodeId: request.nodeId,
@@ -435,6 +433,22 @@ describe("workflow supervisor IPC protocol", () => {
     (mismatched.request as Record<string, unknown>).projectId = "different-project";
     expectProtocolCode(
       () => parseWorkflowSupervisorRequestLine(JSON.stringify(mismatched)),
+      "INVALID_MESSAGE",
+    );
+  });
+
+  it("rejects legacy version'd V2 delegation requests and requests missing result", () => {
+    const legacy = structuredClone(requests()[2]!) as unknown as Record<string, unknown>;
+    (legacy.request as Record<string, unknown>).version = 2;
+    expectProtocolCode(
+      () => parseWorkflowSupervisorRequestLine(JSON.stringify(legacy)),
+      "INVALID_MESSAGE",
+    );
+
+    const missingResult = structuredClone(requests()[2]!) as unknown as Record<string, unknown>;
+    delete (missingResult.request as Record<string, unknown>).result;
+    expectProtocolCode(
+      () => parseWorkflowSupervisorRequestLine(JSON.stringify(missingResult)),
       "INVALID_MESSAGE",
     );
   });

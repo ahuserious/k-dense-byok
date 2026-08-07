@@ -16,9 +16,8 @@ import {
   SUBAGENT_DELEGATION_RESPONSE_EVENT,
   SUBAGENT_DELEGATION_STARTED_EVENT,
   SUBAGENT_DELEGATION_UPDATE_EVENT,
-  SUBAGENT_DELEGATION_V2_PROTOCOL_VERSION,
-  type SubagentDelegationV2Request,
-  type SubagentDelegationV2TerminalResponse,
+  type SubagentDelegationRequest,
+  type SubagentDelegationTerminalResponse,
 } from "pi-subagents/delegation";
 import {
   createDagFusionDelegationHost,
@@ -26,7 +25,7 @@ import {
   expectedDelegatedModel,
   type DagFusionDelegationHost,
   type DagFusionDelegationIdentity,
-  type OwnedDelegationV2Request,
+  type OwnedDelegationRequest,
 } from "../pi-packages/dag-fusion-drive/index.ts";
 import {
   createDagFusionWorkflowSessionBridge,
@@ -38,10 +37,9 @@ const require_ = createRequire(import.meta.url);
 const hosts: DagFusionDelegationHost[] = [];
 
 function request(
-  overrides: Partial<OwnedDelegationV2Request> = {},
-): OwnedDelegationV2Request {
+  overrides: Partial<OwnedDelegationRequest> = {},
+): OwnedDelegationRequest {
   return {
-    version: SUBAGENT_DELEGATION_V2_PROTOCOL_VERSION,
     requestId: "attempt-1",
     ownerRunId: "workflow-1",
     nodeId: "research-1",
@@ -60,7 +58,7 @@ function request(
 }
 
 function identity(
-  ownedRequest: OwnedDelegationV2Request,
+  ownedRequest: OwnedDelegationRequest,
 ): DagFusionDelegationIdentity {
   return {
     requestId: ownedRequest.requestId,
@@ -70,11 +68,10 @@ function identity(
 }
 
 function completedResponse(
-  ownedRequest: OwnedDelegationV2Request,
-  overrides: Partial<SubagentDelegationV2TerminalResponse> = {},
-): SubagentDelegationV2TerminalResponse {
+  ownedRequest: OwnedDelegationRequest,
+  overrides: Partial<SubagentDelegationTerminalResponse> = {},
+): SubagentDelegationTerminalResponse {
   return {
-    version: SUBAGENT_DELEGATION_V2_PROTOCOL_VERSION,
     ...identity(ownedRequest),
     status: "completed",
     runId: `child-${ownedRequest.requestId}`,
@@ -98,11 +95,10 @@ function completedResponse(
 }
 
 function cancelledResponse(
-  ownedRequest: OwnedDelegationV2Request,
-  overrides: Partial<SubagentDelegationV2TerminalResponse> = {},
-): SubagentDelegationV2TerminalResponse {
+  ownedRequest: OwnedDelegationRequest,
+  overrides: Partial<SubagentDelegationTerminalResponse> = {},
+): SubagentDelegationTerminalResponse {
   return {
-    version: SUBAGENT_DELEGATION_V2_PROTOCOL_VERSION,
     ...identity(ownedRequest),
     status: "cancelled",
     ...overrides,
@@ -153,9 +149,9 @@ describe("pi-subagents compatibility", () => {
   });
 
   it("exposes the Delegation V2 owned-leaf contract", () => {
-    const ownedRequest: SubagentDelegationV2Request = request();
+    const ownedRequest: SubagentDelegationRequest = request();
 
-    expect(ownedRequest.version).toBe(2);
+    expect("version" in ownedRequest).toBe(false);
     expect(SUBAGENT_DELEGATION_REQUEST_EVENT).toBe(
       "prompt-template:subagent:request",
     );
@@ -200,7 +196,6 @@ describe("pi-subagents compatibility", () => {
       // typed terminal proves the actual pi-subagents V2 listener parsed and
       // correlated the full ownership tuple without launching paid work.
       expect(receipt.response).toMatchObject({
-        version: 2,
         ...identity(ownedRequest),
         status: "unavailable_context",
       });
@@ -227,11 +222,9 @@ describe("pi-subagents compatibility", () => {
     events.on(SUBAGENT_DELEGATION_REQUEST_EVENT, (data) => {
       wireRequest = data;
       events.emit(SUBAGENT_DELEGATION_STARTED_EVENT, {
-        version: 2,
         ...identity(ownedRequest),
       });
       events.emit(SUBAGENT_DELEGATION_UPDATE_EVENT, {
-        version: 2,
         ...identity(ownedRequest),
         model: expectedDelegatedModel(ownedRequest.model, ownedRequest.thinking),
         tokens: 10,
@@ -309,7 +302,7 @@ describe("pi-subagents compatibility", () => {
     acknowledgeCancellation();
     await rejection;
     expect(cancels).toEqual([
-      { version: 2, ...identity(ownedRequest) },
+      { ...identity(ownedRequest) },
     ]);
     expect(reconciled).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -426,11 +419,9 @@ describe("pi-subagents compatibility", () => {
     const ownedRequest = request();
     events.on(SUBAGENT_DELEGATION_REQUEST_EVENT, () => {
       events.emit(SUBAGENT_DELEGATION_STARTED_EVENT, {
-        version: 2,
         ...identity(ownedRequest),
       });
       events.emit(SUBAGENT_DELEGATION_UPDATE_EVENT, {
-        version: 2,
         ...identity(ownedRequest),
         tokens: 20,
       });
@@ -534,7 +525,7 @@ describe("pi-subagents compatibility", () => {
       }),
       "DAG_FUSION_TIMEOUT",
     );
-    expect(cancels).toEqual([{ version: 2, ...identity(ownedRequest) }]);
+    expect(cancels).toEqual([{ ...identity(ownedRequest) }]);
     expect(reconciled).toHaveBeenCalledWith(
       expect.objectContaining({
         reason: "host-timeout",
@@ -670,7 +661,7 @@ describe("pi-subagents compatibility", () => {
 
     await host.dispose();
     await rejection;
-    expect(cancels).toEqual([{ version: 2, ...identity(ownedRequest) }]);
+    expect(cancels).toEqual([{ ...identity(ownedRequest) }]);
     expect(host.snapshot()).toEqual({
       disposed: true,
       saturated: false,

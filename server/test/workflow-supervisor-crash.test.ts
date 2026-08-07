@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   DagFusionDelegationUsageSettlement,
   DelegateDagFusionNodeOptions,
-  OwnedDelegationV2Request,
+  OwnedDelegationRequest,
 } from "../pi-packages/dag-fusion-drive/index.ts";
 import type { WorkflowDelegationSession } from "../src/agent/workflow-delegation-session.ts";
 import { PROJECTS_ROOT } from "../src/config.ts";
@@ -55,9 +55,8 @@ afterEach(async () => {
   fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
 });
 
-function delegationRequest(): OwnedDelegationV2Request {
+function delegationRequest(): OwnedDelegationRequest {
   return {
-    version: 2,
     requestId: "dagcall_supervisor_crash",
     ownerRunId: "wrun_supervisor_crash",
     nodeId: "research:agent",
@@ -75,7 +74,7 @@ function delegationRequest(): OwnedDelegationV2Request {
 }
 
 function cancelledSettlement(
-  request: OwnedDelegationV2Request,
+  request: OwnedDelegationRequest,
 ): DagFusionDelegationUsageSettlement {
   return {
     identity: {
@@ -189,7 +188,7 @@ describe("workflow supervisor backend-crash ownership", () => {
       session: {} as WorkflowDelegationSession["session"],
       host: {
         delegate: async (
-          current: OwnedDelegationV2Request,
+          current: OwnedDelegationRequest,
           options: DelegateDagFusionNodeOptions,
         ) => {
           started.resolve();

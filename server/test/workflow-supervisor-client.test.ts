@@ -7,7 +7,7 @@ import type {
   DagFusionDelegationIdentity,
   DagFusionDelegationReceipt,
   DagFusionDelegationUsageSettlement,
-  OwnedDelegationV2Request,
+  OwnedDelegationRequest,
 } from "../pi-packages/dag-fusion-drive/index.ts";
 import { resolvePaths } from "../src/projects.ts";
 import type { HostedOpenRouterFusionRequest } from "../src/workflows/hosted-fusion.ts";
@@ -161,7 +161,7 @@ class FakeSupervisor {
   }
 }
 
-function identity(request: OwnedDelegationV2Request): DagFusionDelegationIdentity {
+function identity(request: OwnedDelegationRequest): DagFusionDelegationIdentity {
   return {
     requestId: request.requestId,
     ownerRunId: request.ownerRunId,
@@ -222,9 +222,8 @@ function settlement(
   };
 }
 
-function delegationRequest(projectId = "default"): OwnedDelegationV2Request {
+function delegationRequest(projectId = "default"): OwnedDelegationRequest {
   return {
-    version: 2,
     requestId: "dagcall_run-1_node-1_agent",
     ownerRunId: "wrun_0123456789abcdef",
     nodeId: "node-1:agent",
@@ -251,7 +250,7 @@ function delegationRequest(projectId = "default"): OwnedDelegationV2Request {
   };
 }
 
-function receipt(request: OwnedDelegationV2Request): DagFusionDelegationReceipt {
+function receipt(request: OwnedDelegationRequest): DagFusionDelegationReceipt {
   return {
     identity: identity(request),
     requested: {
@@ -266,7 +265,6 @@ function receipt(request: OwnedDelegationV2Request): DagFusionDelegationReceipt 
       launchContractDigest: "b".repeat(64),
     },
     response: {
-      version: 2,
       requestId: request.requestId,
       ownerRunId: request.ownerRunId,
       nodeId: request.nodeId,

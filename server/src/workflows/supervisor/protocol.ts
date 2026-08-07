@@ -3,7 +3,7 @@ import type {
   DagFusionDelegationReceipt,
   DagFusionDelegationUsageLimits,
   DagFusionDelegationUsageSettlement,
-  OwnedDelegationV2Request,
+  OwnedDelegationRequest,
 } from "../../../pi-packages/dag-fusion-drive/index.ts";
 import type {
   HostedOpenRouterFusionRequest,
@@ -176,7 +176,7 @@ export interface WorkflowSupervisorDelegateRequest
   extends WorkflowSupervisorAttachedRequestBase {
   op: "delegate";
   projectId: string;
-  request: OwnedDelegationV2Request;
+  request: OwnedDelegationRequest;
   limits: DagFusionDelegationUsageLimits;
   budget: SupervisedWorkflowBudgetDescriptorV1;
 }
@@ -635,13 +635,12 @@ function isDelegationResultRequest(value: unknown): boolean {
 
 function isOwnedDelegationRequest(
   value: unknown,
-): value is OwnedDelegationV2Request {
+): value is OwnedDelegationRequest {
   if (!isRecord(value)) return false;
   if (
     !hasExactKeys(
       value,
       [
-        "version",
         "requestId",
         "ownerRunId",
         "nodeId",
@@ -662,7 +661,6 @@ function isOwnedDelegationRequest(
     return false;
   }
   return (
-    value.version === 2 &&
     isWorkflowSupervisorId(value.requestId) &&
     isWorkflowSupervisorId(value.ownerRunId) &&
     isWorkflowSupervisorId(value.nodeId) &&

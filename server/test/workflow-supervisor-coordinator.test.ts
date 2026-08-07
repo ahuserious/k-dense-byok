@@ -7,7 +7,7 @@ import type {
   DagFusionDelegationReceipt,
   DagFusionDelegationUsageSettlement,
   DelegateDagFusionNodeOptions,
-  OwnedDelegationV2Request,
+  OwnedDelegationRequest,
 } from "../pi-packages/dag-fusion-drive/index.ts";
 import type { WorkflowDelegationSession } from "../src/agent/workflow-delegation-session.ts";
 import { resolvePaths } from "../src/projects.ts";
@@ -31,9 +31,8 @@ afterEach(() => {
   fs.rmSync(temporaryRoot, { recursive: true, force: true });
 });
 
-function request(projectId = "default"): OwnedDelegationV2Request {
+function request(projectId = "default"): OwnedDelegationRequest {
   return {
-    version: 2,
     requestId: "dagcall_run-1_node-1_agent",
     ownerRunId: "wrun_0123456789abcdef",
     nodeId: "node-1:agent",
@@ -52,7 +51,7 @@ function request(projectId = "default"): OwnedDelegationV2Request {
   };
 }
 
-function budgetFor(ownedRequest: OwnedDelegationV2Request, projectId = "default") {
+function budgetFor(ownedRequest: OwnedDelegationRequest, projectId = "default") {
   const separator = ownedRequest.nodeId.lastIndexOf(":");
   const executionId = ownedRequest.nodeId.slice(0, separator);
   const slotId = ownedRequest.nodeId.slice(separator + 1);
@@ -158,7 +157,7 @@ function usage() {
 }
 
 function settlement(
-  ownedRequest: OwnedDelegationV2Request,
+  ownedRequest: OwnedDelegationRequest,
   reason: DagFusionDelegationUsageSettlement["reason"] = "terminal-response",
 ): DagFusionDelegationUsageSettlement {
   return {
@@ -180,7 +179,7 @@ function settlement(
   };
 }
 
-function receipt(ownedRequest: OwnedDelegationV2Request): DagFusionDelegationReceipt {
+function receipt(ownedRequest: OwnedDelegationRequest): DagFusionDelegationReceipt {
   return {
     identity: {
       requestId: ownedRequest.requestId,
@@ -199,7 +198,6 @@ function receipt(ownedRequest: OwnedDelegationV2Request): DagFusionDelegationRec
       launchContractDigest: "a".repeat(64),
     },
     response: {
-      version: 2,
       requestId: ownedRequest.requestId,
       ownerRunId: ownedRequest.ownerRunId,
       nodeId: ownedRequest.nodeId,
@@ -237,7 +235,7 @@ function hostSnapshot(
 
 function fakeSession(input: {
   delegate(
-    request: OwnedDelegationV2Request,
+    request: OwnedDelegationRequest,
     options: DelegateDagFusionNodeOptions,
   ): Promise<DagFusionDelegationReceipt>;
   snapshot?: () => DagFusionDelegationHostSnapshot;
@@ -265,7 +263,7 @@ function fakeSession(input: {
  * this is the shape that could silently drop usage.
  */
 function abortedSettlementWithUsage(
-  ownedRequest: OwnedDelegationV2Request,
+  ownedRequest: OwnedDelegationRequest,
 ): DagFusionDelegationUsageSettlement {
   return {
     ...settlement(ownedRequest, "caller-aborted"),
@@ -340,7 +338,7 @@ describe("workflow supervisor coordinator", () => {
     const ownedRequest = request();
     const observed = abortedSettlementWithUsage(ownedRequest);
     const delegate = vi.fn(async (
-      current: OwnedDelegationV2Request,
+      current: OwnedDelegationRequest,
       options: DelegateDagFusionNodeOptions,
     ) => {
       await options.reconcileUsage(observed);
@@ -386,7 +384,7 @@ describe("workflow supervisor coordinator", () => {
     const ownedRequest = request();
     const observed = abortedSettlementWithUsage(ownedRequest);
     const delegate = vi.fn(async (
-      current: OwnedDelegationV2Request,
+      current: OwnedDelegationRequest,
       options: DelegateDagFusionNodeOptions,
     ) => {
       await options.reconcileUsage(observed);
@@ -442,7 +440,7 @@ describe("workflow supervisor coordinator", () => {
     // A transport that swallows the reconciliation rejection and still returns
     // a receipt must not be read as proof that usage was settled.
     const delegate = vi.fn(async (
-      current: OwnedDelegationV2Request,
+      current: OwnedDelegationRequest,
       options: DelegateDagFusionNodeOptions,
     ) => {
       try {
@@ -541,7 +539,7 @@ describe("workflow supervisor coordinator", () => {
   it("journals settlement before returning and permanently consumes an ownership identity", async () => {
     const ownedRequest = request();
     const delegate = vi.fn(async (
-      current: OwnedDelegationV2Request,
+      current: OwnedDelegationRequest,
       options: DelegateDagFusionNodeOptions,
     ) => {
       await options.reconcileUsage(settlement(current));
@@ -662,7 +660,7 @@ describe("workflow supervisor coordinator", () => {
     const started = Promise.withResolvers<void>();
     const ownedRequest = request();
     const delegate = vi.fn(async (
-      current: OwnedDelegationV2Request,
+      current: OwnedDelegationRequest,
       options: DelegateDagFusionNodeOptions,
     ): Promise<DagFusionDelegationReceipt> => {
       started.resolve();
@@ -703,7 +701,7 @@ describe("workflow supervisor coordinator", () => {
     const started = Promise.withResolvers<void>();
     const ownedRequest = request();
     const delegate = vi.fn(async (
-      current: OwnedDelegationV2Request,
+      current: OwnedDelegationRequest,
       options: DelegateDagFusionNodeOptions,
     ): Promise<DagFusionDelegationReceipt> => {
       started.resolve();
@@ -739,7 +737,7 @@ describe("workflow supervisor coordinator", () => {
       nodeId: ownedRequest.nodeId,
     };
     const delegate = vi.fn(async (
-      _current: OwnedDelegationV2Request,
+      _current: OwnedDelegationRequest,
       options: DelegateDagFusionNodeOptions,
     ): Promise<DagFusionDelegationReceipt> => {
       started.resolve();
@@ -788,7 +786,7 @@ describe("workflow supervisor coordinator", () => {
       nodeId: ownedRequest.nodeId,
     };
     const delegate = vi.fn(async (
-      _current: OwnedDelegationV2Request,
+      _current: OwnedDelegationRequest,
       options: DelegateDagFusionNodeOptions,
     ): Promise<DagFusionDelegationReceipt> => {
       started.resolve();

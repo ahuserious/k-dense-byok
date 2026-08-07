@@ -8,7 +8,7 @@ import type {
   DagFusionDelegationReceipt,
   DagFusionDelegationUsageSettlement,
   DelegateDagFusionNodeOptions,
-  OwnedDelegationV2Request,
+  OwnedDelegationRequest,
   TrustedDagFusionCompactionAudit,
 } from "../pi-packages/dag-fusion-drive/index.ts";
 import type { ProjectPaths } from "../src/projects.ts";
@@ -240,7 +240,7 @@ function resolvedReceipt(request: ModelRequest): {
 }
 
 function completedReceipt(
-  request: OwnedDelegationV2Request,
+  request: OwnedDelegationRequest,
   value: unknown,
   status: "completed" | "failed" = "completed",
 ): DagFusionDelegationReceipt {
@@ -272,7 +272,6 @@ function completedReceipt(
       launchContractDigest: "launch-contract",
     },
     response: {
-      version: 2,
       requestId: request.requestId,
       ownerRunId: request.ownerRunId,
       nodeId: request.nodeId,
@@ -298,7 +297,7 @@ function completedReceipt(
 }
 
 type HostCall = {
-  request: OwnedDelegationV2Request;
+  request: OwnedDelegationRequest;
   options: KadySupervisedDelegateOptions;
 };
 
@@ -311,7 +310,7 @@ class FakeHost {
   ) {}
 
   async delegate(
-    request: OwnedDelegationV2Request,
+    request: OwnedDelegationRequest,
     options: DelegateDagFusionNodeOptions,
   ): Promise<DagFusionDelegationReceipt> {
     this.events?.push(`delegate:${request.nodeId.split(":").at(-1)}`);
@@ -500,7 +499,6 @@ describe("production Kady DAG node executor", () => {
     expect(events.filter((event) => event === "reserve:agent")).toHaveLength(1);
     expect(host.calls).toHaveLength(1);
     expect(host.calls[0].request).toMatchObject({
-      version: 2,
       agent: KADY_WORKFLOW_READ_ONLY_AGENT,
       context: "fresh",
       model: "ollama/qwen3:14b",
@@ -1728,7 +1726,7 @@ describe("production Kady DAG node executor", () => {
       releaseChild = resolve;
     });
     const host = {
-      async delegate(request: OwnedDelegationV2Request, options: DelegateDagFusionNodeOptions) {
+      async delegate(request: OwnedDelegationRequest, options: DelegateDagFusionNodeOptions) {
         started();
         await new Promise<void>((resolve) => {
           const onAbort = async () => {
@@ -1850,7 +1848,7 @@ describe("production Kady DAG node executor", () => {
     const document = graph(node);
     const reconcile = vi.fn();
     const host = {
-      async delegate(request: OwnedDelegationV2Request) {
+      async delegate(request: OwnedDelegationRequest) {
         return completedReceipt(request, analysis("recovered settlement"));
       },
     };
@@ -1877,7 +1875,7 @@ describe("production Kady DAG node executor", () => {
     const document = graph(node);
     let delegationCalls = 0;
     const host = {
-      async delegate(request: OwnedDelegationV2Request, options: DelegateDagFusionNodeOptions) {
+      async delegate(request: OwnedDelegationRequest, options: DelegateDagFusionNodeOptions) {
         delegationCalls += 1;
         const receipt = completedReceipt(request, null, "failed");
         await options.reconcileUsage({

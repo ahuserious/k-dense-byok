@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import { SUBAGENT_DELEGATION_V2_PROTOCOL_VERSION } from "pi-subagents/delegation";
 import {
   DAG_FUSION_GRAPH_CONTRACT_VERSION,
   DagFusionDelegationError,
@@ -17,7 +16,7 @@ import {
   type DagFusionNodeV1,
   type DagFusionTrustedHostV1,
   type DelegateDagFusionNodeOptions,
-  type OwnedDelegationV2Request,
+  type OwnedDelegationRequest,
 } from "../pi-packages/dag-fusion-drive/index.ts";
 
 function deferred(): { promise: Promise<void>; resolve(): void } {
@@ -382,7 +381,7 @@ describe("dag-fusion-drive runtime contract", () => {
 
   it("composes agent execution with the owned Delegation V2 client", async () => {
     const delegated = vi.fn(async (
-      request: OwnedDelegationV2Request,
+      request: OwnedDelegationRequest,
       options: DelegateDagFusionNodeOptions,
     ) => {
       expect(request.ownerRunId).toBe("delegated-run");
@@ -401,7 +400,6 @@ describe("dag-fusion-drive runtime contract", () => {
           thinking: request.thinking,
         },
         response: {
-          version: SUBAGENT_DELEGATION_V2_PROTOCOL_VERSION,
           requestId: request.requestId,
           ownerRunId: request.ownerRunId,
           nodeId: request.nodeId,
@@ -412,7 +410,6 @@ describe("dag-fusion-drive runtime contract", () => {
     });
     const prepareAgent = vi.fn((request: DagFusionAgentExecutionRequestV1) => ({
       request: {
-        version: SUBAGENT_DELEGATION_V2_PROTOCOL_VERSION,
         requestId: "delegation-1",
         ownerRunId: request.runId,
         nodeId: request.node.id,
@@ -494,7 +491,6 @@ describe("dag-fusion-drive runtime contract", () => {
       prepareAgent(request) {
         return {
           request: {
-            version: SUBAGENT_DELEGATION_V2_PROTOCOL_VERSION,
             requestId: "adapter-abort-1",
             ownerRunId: request.runId,
             nodeId: request.node.id,
@@ -579,7 +575,6 @@ describe("dag-fusion-drive runtime contract", () => {
       prepareAgent(request) {
         return {
           request: {
-            version: SUBAGENT_DELEGATION_V2_PROTOCOL_VERSION,
             requestId: "adapter-unconfirmed-1",
             ownerRunId: request.runId,
             nodeId: request.node.id,
@@ -620,7 +615,6 @@ describe("dag-fusion-drive runtime contract", () => {
       prepareAgent(request) {
         return {
           request: {
-            version: SUBAGENT_DELEGATION_V2_PROTOCOL_VERSION,
             requestId: "wrong-owner",
             ownerRunId: "another-run",
             nodeId: request.node.id,

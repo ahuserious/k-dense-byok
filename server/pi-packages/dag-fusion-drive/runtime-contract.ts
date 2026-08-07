@@ -5,7 +5,7 @@ import {
   type DagFusionDelegationReceipt,
   type DagFusionDelegationUsageSettlement,
   type DelegateDagFusionNodeOptions,
-  type OwnedDelegationV2Request,
+  type OwnedDelegationRequest,
 } from "./delegation-host.ts";
 
 export const DAG_FUSION_GRAPH_CONTRACT_VERSION = "1.0" as const;
@@ -1408,7 +1408,7 @@ export async function executeDagFusionGraphV1(
 }
 
 export interface DagFusionDelegationPlanV1 {
-  request: OwnedDelegationV2Request;
+  request: OwnedDelegationRequest;
   reconcileUsage(
     settlement: DagFusionDelegationUsageSettlement,
   ): void | Promise<void>;
