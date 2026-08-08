@@ -203,6 +203,27 @@ describe("workspace persistence schema", () => {
     expect(legacy.projects["project-a"].view).toBe("chat");
   });
 
+  it.each(["dag-workflows", "dag-pipelines"])(
+    "maps the legacy %s view to Scientific Pipelines",
+    (legacyView) => {
+      const legacy = validateWorkspaceMetadata({
+        version: WORKSPACE_SCHEMA_VERSION,
+        screen: "workspace",
+        openedProjectIds: ["project-a"],
+        projects: {
+          "project-a": {
+            tabs: [{ id: "tab-1", title: "Legacy" }],
+            activeTabId: "tab-1",
+            view: legacyView,
+            sandbox: { openPaths: [], activePath: null },
+          },
+        },
+      });
+
+      expect(legacy.projects["project-a"].view).toBe("scientific-pipelines");
+    },
+  );
+
   it("sanitizes Compute state without breaking v1 snapshots that predate it", () => {
     const legacy = validateWorkspaceMetadata({
       version: WORKSPACE_SCHEMA_VERSION,

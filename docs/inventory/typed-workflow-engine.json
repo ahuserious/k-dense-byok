@@ -33,18 +33,12 @@
   ],
   "surfaceModules": [
     "web/src/components/dag-workflows-panel.tsx",
-    "web/src/components/dag-builder.tsx",
-    "web/src/components/dag-builder-canvas.tsx",
-    "web/src/components/dag-builder-inspector.tsx",
     "web/src/components/dag-workflow-console.tsx",
     "web/src/lib/dag-workflow-builder.ts",
     "web/src/lib/dag-workflows.ts",
     "server/src/api/dag-workflows.ts"
   ],
-  "brokenAgentPanel": [
-    "web/src/components/helper-agent-chat.tsx",
-    "web/src/components/dag-builder.tsx"
-  ],
+  "removedBuilderSurface": "The typed visual editor and broken builder-agent panel were intentionally removed; typed list, full raw inspection, create, safeguarded Run, console, and runtime remain.",
   "files": [
     "server/src/workflows/index.ts",
     "server/src/workflows/schema.ts",
@@ -75,13 +69,9 @@
     "server/src/workflows/supervisor/runtime.ts",
     "server/src/workflows/supervisor/server.ts",
     "web/src/components/dag-workflows-panel.tsx",
-    "web/src/components/dag-builder.tsx",
-    "web/src/components/dag-builder-canvas.tsx",
-    "web/src/components/dag-builder-inspector.tsx",
     "web/src/components/dag-workflow-console.tsx",
     "web/src/lib/dag-workflow-builder.ts",
     "web/src/lib/dag-workflows.ts",
-    "server/src/api/dag-workflows.ts",
-    "web/src/components/helper-agent-chat.tsx"
+    "server/src/api/dag-workflows.ts"
   ]
 }

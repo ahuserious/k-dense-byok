@@ -55,15 +55,14 @@ function SurfaceHarness() {
   return (
     <>
       <button type="button" onClick={() => setActiveView("chat")}>Chat</button>
-      <button type="button" onClick={() => setActiveView("dag-builder")}>DAG Builder</button>
+      <button type="button" onClick={() => setActiveView("dag-builder")}>Builder</button>
       <button type="button" onClick={() => setActiveView("console")}>Console</button>
       <PersistentWorkspaceSurfaces
         activeView={activeView}
         mountedViews={mountedViews}
         surfaces={{
           workflows: <div>Workflows</div>,
-          "dag-workflows": <div>DAG Workflows</div>,
-          "dag-pipelines": <div>DAG Pipelines</div>,
+          "scientific-pipelines": <div>Scientific Pipelines</div>,
           "dag-builder": <StatefulBuilderSurface />,
           console: <StatefulConsoleSurface />,
           raindrop: <div>Raindrop</div>,
@@ -80,7 +79,7 @@ describe("PersistentWorkspaceSurfaces", () => {
     expect(screen.queryByTestId("builder-instance")).not.toBeInTheDocument();
     expect(screen.queryByTestId("console-instance")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "DAG Builder" }));
+    fireEvent.click(screen.getByRole("button", { name: "Builder" }));
     const builderInstance = screen.getByTestId("builder-instance").textContent;
     fireEvent.change(screen.getByLabelText("Draft name"), {
       target: { value: "Unsaved fusion draft" },
@@ -100,7 +99,7 @@ describe("PersistentWorkspaceSurfaces", () => {
       .toHaveValue("Unsaved fusion draft");
 
     fireEvent.click(screen.getByRole("button", { name: "Chat" }));
-    fireEvent.click(screen.getByRole("button", { name: "DAG Builder" }));
+    fireEvent.click(screen.getByRole("button", { name: "Builder" }));
     expect(screen.getByTestId("builder-instance")).toHaveTextContent(
       builderInstance ?? "",
     );
