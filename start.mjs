@@ -138,6 +138,23 @@ function checkPython() {
   else log(`  ${sym.warn} python3 not found — some scientific file previews won't work.`);
 }
 
+/** Resolve the bun runtime (PATH first, then the default ~/.bun install).
+ *  Bun runs the vendored workflow engine; it is optional — without it the
+ *  engine is skipped and the /pipelines API degrades to 503. */
+function findBun() {
+  if (has("bun")) return "bun";
+  const bunHome = path.join(os.homedir(), ".bun", "bin", isWin ? "bun.exe" : "bun");
+  return fs.existsSync(bunHome) ? bunHome : null;
+}
+
+function checkBun() {
+  if (findBun()) log(`  bun ${sym.ok} (runs the workflow engine)`);
+  else {
+    log(`  ${sym.warn} bun not found — the workflow engine (Scientific DAG Workflow Designer)`);
+    log("    won't start. Install bun from https://bun.sh to enable it; everything else works.");
+  }
+}
+
 // ---- Step 2: environment ---------------------------------------------------
 
 function setupEnv() {
@@ -438,6 +455,120 @@ function startService(label, dir, npmArgs, options = {}) {
   return child;
 }
 
+// ---- Workflow engine (vendored bun workspace, optional) ----------------------
+
+const ARCHON_ENGINE_DIR = path.join(repoRoot, "server", "vendor", "archon-engine");
+const ARCHON_PORT = Number(process.env.KADY_ARCHON_PORT || 3091);
+
+/**
+ * Start the vendored workflow engine (Scientific DAG Workflow Designer) as an
+ * owned child, following the same children.push / group-kill /
+ * waitForOwnedTree discipline as the other services. Everything here is
+ * NON-FATAL: without bun (or if the engine fails), the /pipelines API answers
+ * 503 and the rest of Kady runs normally.
+ *
+ * Returns true when a child was spawned (callers may health-poll it).
+ */
+async function startWorkflowEngine() {
+  if (!fs.existsSync(path.join(ARCHON_ENGINE_DIR, "package.json"))) {
+    log(`  ${sym.warn} Workflow engine sources missing (server/vendor/archon-engine) — skipping it.`);
+    return false;
+  }
+  const bun = findBun();
+  if (!bun) {
+    log(`  ${sym.warn} bun not found — skipping the workflow engine (install it from https://bun.sh).`);
+    return false;
+  }
+
+  // Port preflight. A healthy responder is reused (matches how the /pipelines
+  // proxy would reach it anyway); a stale repo-owned leftover is stopped; a
+  // foreign process means we skip rather than fight over the port.
+  const pids = listenersOn(ARCHON_PORT);
+  if (pids.length > 0) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${ARCHON_PORT}/api/health`, {
+        signal: AbortSignal.timeout(2000),
+      });
+      if (res.ok) {
+        log(`  ${sym.arrow} Workflow engine already running on port ${ARCHON_PORT} — reusing it.`);
+        return false;
+      }
+    } catch {
+      /* not answering health — fall through to ownership check */
+    }
+    for (const pid of pids) {
+      if (ownedByThisRepo(pid)) {
+        log(`  Stopping a leftover workflow engine on port ${ARCHON_PORT} (PID ${pid})...`);
+        await killTree(pid);
+      } else {
+        log(`  ${sym.warn} Port ${ARCHON_PORT} is in use by ${processName(pid)} (PID ${pid}) and not answering`);
+        log("    the engine health check — skipping the workflow engine (set KADY_ARCHON_PORT to move it).");
+        return false;
+      }
+    }
+  }
+
+  // One-time install/build, keyed on the artifacts themselves (node_modules
+  // and the built web dist are git-ignored inside the vendor dir).
+  if (!fs.existsSync(path.join(ARCHON_ENGINE_DIR, "node_modules"))) {
+    log("  Installing workflow engine packages (first run)...");
+    if (run(bun, ["install"], { cwd: ARCHON_ENGINE_DIR }) !== 0) {
+      log(`  ${sym.warn} Workflow engine install failed — skipping it (everything else keeps running).`);
+      return false;
+    }
+  }
+  if (!fs.existsSync(path.join(ARCHON_ENGINE_DIR, "packages", "web", "dist", "index.html"))) {
+    log("  Building the workflow engine UI (first run)...");
+    if (run(bun, ["run", "build:web"], { cwd: ARCHON_ENGINE_DIR }) !== 0) {
+      log(`  ${sym.warn} Workflow engine UI build failed — skipping it (everything else keeps running).`);
+      return false;
+    }
+  }
+
+  log(`  ${sym.arrow} Workflow engine (Scientific DAG Workflow Designer) on port ${ARCHON_PORT}`);
+  const engineEnv = {
+    ...process.env,
+    PORT: String(ARCHON_PORT),
+    HOST: "127.0.0.1",
+    DEFAULT_AI_ASSISTANT: process.env.DEFAULT_AI_ASSISTANT || "pi",
+    ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING: "1",
+  };
+  // The engine warns/behaves differently when it thinks it runs nested inside
+  // a Claude Code session; the launcher is not one.
+  delete engineEnv.CLAUDECODE;
+  const engineArgs = ["--filter", "@archon/server", "start"];
+  const child = isWin
+    ? // One command string through cmd.exe so taskkill /T reaps the tree
+      // (same rationale as the npm spawn above). Quote bun: the fallback
+      // path lives under the user's home dir, which may contain spaces.
+      spawn([`"${bun}"`, ...engineArgs].join(" "), {
+        cwd: ARCHON_ENGINE_DIR,
+        stdio: "inherit",
+        shell: true,
+        env: engineEnv,
+      })
+    : // Own process group: `bun --filter` re-spawns the actual server as a
+      // grandchild in the same group, so only a group-wide signal (stopAll)
+      // reliably reaps the whole engine tree.
+      spawn(bun, engineArgs, {
+        cwd: ARCHON_ENGINE_DIR,
+        stdio: "inherit",
+        detached: true,
+        env: engineEnv,
+      });
+  child.kadyRole = "archon-engine";
+  children.push(child);
+  // Unlike the backend/frontend, an engine death is a degradation, not a
+  // launcher failure: the /pipelines proxy answers 503 while it is down.
+  child.on("exit", () => {
+    if (!shuttingDown) {
+      log(`\n  ${sym.warn} The workflow engine stopped unexpectedly — the DAG Builder will be`);
+      log("    unavailable until Kady is restarted. Everything else keeps running.");
+    }
+  });
+  return true;
+}
+
 async function stopAll(code) {
   if (shuttingDown) {
     log(`\n  ${sym.warn} Second shutdown signal received — forcing unsafe process termination.`);
@@ -554,6 +685,7 @@ checkNode();
 ensureUv();
 checkGit();
 checkPython();
+checkBun();
 // Pi itself needs no separate install: it's an npm dependency of server/
 // and the backend install below keeps all direct Pi packages on the latest
 // mutually compatible release.
@@ -599,6 +731,7 @@ startService(
   [],
   { directFrontend: true, serviceArgs: ["dev", "-p", String(FRONTEND_PORT)] },
 );
+const engineSpawned = await startWorkflowEngine();
 
 process.on("SIGINT", () => stopAll(0));
 process.on("SIGTERM", () => stopAll(0));
@@ -610,6 +743,10 @@ log("");
 log("Waiting for services to come up (the first run can take a minute)...");
 await waitFor(`http://localhost:${BACKEND_PORT}/`, "backend", 120);
 await waitFor(`http://localhost:${FRONTEND_PORT}/`, "app UI", 180);
+// Bounded engine readiness poll; a timeout only warns (the engine is optional).
+if (engineSpawned) {
+  await waitFor(`http://127.0.0.1:${ARCHON_PORT}/api/health`, "workflow engine", 30);
+}
 
 if (!shuttingDown) {
   log("");

@@ -69,6 +69,16 @@ export const OLLAMA_BASE_URL =
   process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
 
 /**
+ * Base URL of the vendored workflow engine (the "Scientific DAG Workflow
+ * Designer", served from server/vendor/archon-engine). start.mjs spawns it as
+ * an owned child on KADY_ARCHON_PORT (default 3091); the /pipelines routes
+ * proxy to it and answer 503 while it is down.
+ */
+export const ARCHON_BASE_URL =
+  process.env.ARCHON_BASE_URL ??
+  `http://127.0.0.1:${process.env.KADY_ARCHON_PORT ?? "3091"}`;
+
+/**
  * Local OpenAI-compatible model server (LM Studio, vLLM, text-generation-webui,
  * …) discovered through the standard `/v1/models` endpoint. Defaults to LM
  * Studio's port so that case needs no configuration; vLLM's default (8000)
