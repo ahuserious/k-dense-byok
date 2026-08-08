@@ -4,13 +4,16 @@ import { guardRepoRoot } from "./repo-root.ts";
 
 const BLOCKED_REMOTE = /(?:github\.com[:/])?K-Dense-AI(?:\/|$)/i;
 
-function remoteUrls(repoRoot: string): string[] {
+/** The invariant is push-side only: the K-Dense-AI upstream stays fetchable
+ * (the re-baseline pins and topology checks depend on it) with its push URL
+ * disabled (\`no_push\`). Only push destinations are banned here. */
+function remotePushUrls(repoRoot: string): string[] {
   const remotes = execFileSync("git", ["remote"], { cwd: repoRoot, encoding: "utf8" })
     .split("\n")
     .map((value) => value.trim())
     .filter(Boolean);
   return remotes.flatMap((remote) =>
-    execFileSync("git", ["remote", "get-url", "--all", remote], {
+    execFileSync("git", ["remote", "get-url", "--push", "--all", remote], {
       cwd: repoRoot,
       encoding: "utf8",
     })
@@ -21,8 +24,8 @@ function remoteUrls(repoRoot: string): string[] {
 }
 
 describe("Phase R remote allowlist", () => {
-  it("rejects remotes that resolve directly to K-Dense-AI", () => {
-    const blocked = remoteUrls(guardRepoRoot()).filter((url) => BLOCKED_REMOTE.test(url));
-    expect(blocked, `Blocked K-Dense-AI remotes:\n${blocked.join("\n")}`).toEqual([]);
+  it("rejects push URLs that resolve to K-Dense-AI", () => {
+    const blocked = remotePushUrls(guardRepoRoot()).filter((url) => BLOCKED_REMOTE.test(url));
+    expect(blocked, `Blocked K-Dense-AI push URLs:\n${blocked.join("\n")}`).toEqual([]);
   });
 });
