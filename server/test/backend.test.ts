@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { PROJECTS_ROOT } from "../src/config.ts";
+import { PROJECTS_ROOT, REPO_ROOT } from "../src/config.ts";
 import {
   createProject,
   deleteProject,
@@ -441,7 +441,20 @@ describe("skills", () => {
 
     const target = ensureProjectExists("default");
     const count = await seedProjectSkills(target, false); // no network
-    expect(count).toBe(2);
+    // The committed catalogue (server/seed/skills) tops up on every seed, so
+    // the count is the 2 sibling skills plus whatever ships committed.
+    const committedCount = fs
+      .readdirSync(path.join(REPO_ROOT, "server", "seed", "skills"), {
+        withFileTypes: true,
+      })
+      .filter(
+        (dirent) =>
+          dirent.isDirectory() &&
+          fs.existsSync(
+            path.join(REPO_ROOT, "server", "seed", "skills", dirent.name, "SKILL.md"),
+          ),
+      ).length;
+    expect(count).toBe(2 + committedCount);
     expect(listProjectSkills(target).map((s) => s.name)).toContain("literature-review");
     expect(listDisabledSkills(target).map((s) => s.name)).toContain("anndata");
   });
