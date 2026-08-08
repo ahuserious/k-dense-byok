@@ -13,10 +13,7 @@ export const WORKSPACE_STORAGE_KEY = "kady:workspace:v1";
 export const WORKSPACE_VIEWS = [
   "chat",
   "workflows",
-  "dag-workflows",
-  // Ported reference surface: the Archon-engine pipeline list. Sits between
-  // the typed-engine list and the builder in the nav.
-  "dag-pipelines",
+  "scientific-pipelines",
   "dag-builder",
   "console",
   "raindrop",
@@ -181,6 +178,9 @@ function boundedNumber(value: unknown, fallback: number, min: number, max: numbe
 }
 
 function sanitizeWorkspaceView(value: unknown): WorkspaceView {
+  if (value === "dag-workflows" || value === "dag-pipelines") {
+    return "scientific-pipelines";
+  }
   return WORKSPACE_VIEWS.includes(value as WorkspaceView)
     ? value as WorkspaceView
     : "chat";

@@ -3,7 +3,6 @@
 import {
   BracesIcon,
   LayersIcon,
-  ListTreeIcon,
   MessageSquareTextIcon,
   NetworkIcon,
   TerminalSquareIcon,
@@ -13,9 +12,6 @@ import {
 import type { WorkspaceView } from "@/lib/workspace-persistence";
 import { cn } from "@/lib/utils";
 
-// Naming: "DAG Workflows" is the native typed engine (list + typed builder);
-// "DAG Pipelines" is the ported Archon-engine list; "DAG Builder" hosts both
-// builders behind an engine toggle (typed default, Pipelines-engine iframe).
 const NAVIGATION_ITEMS: ReadonlyArray<{
   view: WorkspaceView;
   label: string;
@@ -23,9 +19,8 @@ const NAVIGATION_ITEMS: ReadonlyArray<{
 }> = [
   { view: "chat", label: "Chat", icon: MessageSquareTextIcon },
   { view: "workflows", label: "Workflows", icon: WorkflowIcon },
-  { view: "dag-workflows", label: "DAG Workflows", icon: ListTreeIcon },
-  { view: "dag-pipelines", label: "DAG Pipelines", icon: LayersIcon },
-  { view: "dag-builder", label: "DAG Builder", icon: NetworkIcon },
+  { view: "scientific-pipelines", label: "Scientific Pipelines", icon: LayersIcon },
+  { view: "dag-builder", label: "Builder", icon: NetworkIcon },
   { view: "console", label: "Console", icon: TerminalSquareIcon },
   { view: "raindrop", label: "Raindrop", icon: BracesIcon },
 ];

@@ -11,12 +11,7 @@ import { DagWorkflowConsole } from "@/components/dag-workflow-console";
 import { DagWorkflowsPanel } from "@/components/dag-workflows-panel";
 import { ChatRail } from "@/components/chat-rail";
 import { ConsolePanel } from "@/components/console/console-panel";
-import { DagBuilder } from "@/components/dag-builder";
-import {
-  DagBuilderSurface,
-  type DagBuilderEngine,
-} from "@/components/dag-builder-surface";
-import { PipelinesPanel } from "@/components/pipelines-panel";
+import { DagBuilderSurface } from "@/components/dag-builder-surface";
 import { RaindropPanel } from "@/components/raindrop-panel";
 import { RaindropSurface } from "@/components/raindrop-surface";
 import { WorkspaceNavigation } from "@/components/workspace-navigation";
@@ -37,7 +32,6 @@ import { APP_VERSION, isVersioned, useUpdateCheck } from "@/lib/version";
 import { useSkills } from "@/lib/use-skills";
 import { flattenFiles, useSandbox } from "@/lib/use-sandbox";
 import { ProjectScopeProvider } from "@/lib/projects";
-import type { VersionedDagWorkflowDefinition } from "@/lib/dag-workflows";
 import {
   hasProjectActivity,
   sameProjectActivity,
@@ -346,15 +340,10 @@ function WorkspacePage({
     mountedViews: mountedWorkspaceViews,
     setActiveView: setView,
   } = usePersistentWorkspaceView(initialState?.view ?? "chat");
-  const [selectedDagDefinition, setSelectedDagDefinition] =
-    useState<VersionedDagWorkflowDefinition | null>(null);
-  // Which builder the "DAG Builder" view shows: the native typed builder
-  // (default, unchanged behavior) or the ported Pipelines-engine iframe.
-  const [builderEngine, setBuilderEngine] = useState<DagBuilderEngine>("typed");
-  // Archon pipeline the iframe builder should deep-link open (?edit=), set by
-  // the DAG Pipelines list's Edit affordance.
-  const [archonEditWorkflow, setArchonEditWorkflow] = useState<string | null>(null);
-  // The DAG Builder chat rail (collapsible far-right pipeline-compose chat).
+  // Vendored pipeline the visual builder should deep-link open (?edit=), set by
+  // the Scientific Pipelines list's Edit affordance.
+  const [pipelineEditWorkflow, setPipelineEditWorkflow] = useState<string | null>(null);
+  // The Builder chat rail (collapsible far-right pipeline-compose chat).
   const [railOpen, setRailOpen] = useState(false);
   const [tabWorkspaceStates, setTabWorkspaceStates] = useState<
     Record<string, ChatWorkspaceState>
@@ -730,27 +719,15 @@ function WorkspacePage({
     [activeTabId, setView],
   );
 
-  const handleOpenDagDefinition = useCallback(
-    (definition: VersionedDagWorkflowDefinition) => {
-      setSelectedDagDefinition(definition);
-      // A typed definition always opens in the native typed builder, even if
-      // the DAG Builder view was last showing the Pipelines-engine iframe.
-      setBuilderEngine("typed");
-      setView("dag-builder");
-    },
-    [setView],
-  );
-
   // ------------------------------------------------------------------
-  // DAG Pipelines (Archon engine) — ported reference surface handlers.
+  // Scientific Pipelines — vendored-engine list handlers.
   // ------------------------------------------------------------------
 
-  // "Edit" on a pipeline row: open the DAG Builder view with the Pipelines
-  // engine selected and the pipeline deep-linked (?edit=) into the iframe.
+  // "Edit" on a pipeline row opens the Builder with the pipeline deep-linked
+  // (?edit=) into the vendored visual builder iframe.
   const handleEditPipeline = useCallback(
     (name: string) => {
-      setArchonEditWorkflow(name);
-      setBuilderEngine("archon");
+      setPipelineEditWorkflow(name);
       setView("dag-builder");
     },
     [setView],
@@ -769,7 +746,7 @@ function WorkspacePage({
       const id = makeTabId();
       pendingPipelineRun.current = {
         tabId: id,
-        prompt: `Run the Archon pipeline named "${name}" and report its results.`,
+        prompt: `Run the scientific pipeline named "${name}" and report its results.`,
       };
       setTabs((prev) =>
         prev.length >= MAX_CHAT_TABS
@@ -1271,32 +1248,18 @@ function WorkspacePage({
                 budgetBlocked={projectCost.budget.state === "exceeded"}
               />
             ),
-            "dag-workflows": (
+            "scientific-pipelines": (
               <DagWorkflowsPanel
                 projectId={projectId}
-                onOpenDefinition={handleOpenDagDefinition}
-              />
-            ),
-            "dag-pipelines": (
-              <PipelinesPanel
+                activeSessionId={activeSessionId}
+                budgetBlocked={budgetBlocked}
                 onRunPipeline={handleRunPipeline}
                 onEditPipeline={handleEditPipeline}
               />
             ),
             "dag-builder": (
               <DagBuilderSurface
-                engine={builderEngine}
-                onEngineChange={setBuilderEngine}
-                archonWorkflowName={archonEditWorkflow ?? undefined}
-                typedBuilder={
-                  <DagBuilder
-                    projectId={projectId}
-                    selectedDefinition={selectedDagDefinition}
-                    activeSessionId={activeSessionId}
-                    budgetBlocked={budgetBlocked}
-                    onDefinitionChanged={setSelectedDagDefinition}
-                  />
-                }
+                workflowName={pipelineEditWorkflow ?? undefined}
               />
             ),
             console: (
@@ -1323,7 +1286,7 @@ function WorkspacePage({
           }}
         />
 
-        {/* Collapsible chat rail — scoped to the DAG Builder view. Mounted on
+        {/* Collapsible chat rail — scoped to the Builder view. Mounted on
             first builder visit and kept mounted (hidden when away) so the rail's
             chat session/stream survives leaving and returning to the view. */}
         {mountedWorkspaceViews.has("dag-builder") && (
