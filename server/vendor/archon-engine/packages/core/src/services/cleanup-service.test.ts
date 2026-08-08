@@ -114,26 +114,66 @@ import {
   SESSION_RETENTION_DAYS,
 } from './cleanup-service';
 
+/** Clear call history, queued one-shot implementations, and restore stable defaults. */
+function resetSharedMocks(): void {
+  mockExecFileAsync.mockReset();
+  mockHasUncommittedChanges.mockReset();
+  mockWorktreeExists.mockReset();
+  mockGetDefaultBranch.mockReset();
+  mockIsBranchMerged.mockReset();
+  mockIsPatchEquivalent.mockReset();
+  mockGetLastCommitDate.mockReset();
+  mockDestroy.mockReset();
+  mockGetPrState.mockReset();
+  mockListAllActiveWithCodebase.mockReset();
+  mockUpdateStatus.mockReset();
+  mockGetConversationsUsingEnv.mockReset();
+  mockGetById.mockReset();
+  mockListByCodebase.mockReset();
+  mockListByCodebaseWithAge.mockReset();
+  mockCountActiveByCodebase.mockReset();
+  mockGetConversationByPlatformId.mockReset();
+  mockUpdateConversation.mockReset();
+  mockGetActiveSession.mockReset();
+  mockDeactivateSession.mockReset();
+  mockDeleteOldSessions.mockReset();
+  mockGetCodebase.mockReset();
+  mockLoadRepoConfig.mockReset();
+
+  mockExecFileAsync.mockResolvedValue({ stdout: '', stderr: '' });
+  mockHasUncommittedChanges.mockResolvedValue(false);
+  mockWorktreeExists.mockResolvedValue(false);
+  mockGetDefaultBranch.mockResolvedValue('main');
+  mockIsBranchMerged.mockResolvedValue(false);
+  mockIsPatchEquivalent.mockResolvedValue(false);
+  mockGetLastCommitDate.mockResolvedValue(null);
+  mockDestroy.mockResolvedValue({
+    worktreeRemoved: true,
+    branchDeleted: true,
+    remoteBranchDeleted: true,
+    directoryClean: true,
+    warnings: [],
+  });
+  mockGetPrState.mockResolvedValue('NONE');
+  mockListAllActiveWithCodebase.mockResolvedValue([]);
+  mockUpdateStatus.mockResolvedValue(undefined);
+  mockGetConversationsUsingEnv.mockResolvedValue([]);
+  mockGetById.mockResolvedValue(null);
+  mockListByCodebase.mockResolvedValue([]);
+  mockListByCodebaseWithAge.mockResolvedValue([]);
+  mockCountActiveByCodebase.mockResolvedValue(0);
+  mockGetConversationByPlatformId.mockResolvedValue(null);
+  mockUpdateConversation.mockResolvedValue(undefined);
+  mockGetActiveSession.mockResolvedValue(null);
+  mockDeactivateSession.mockResolvedValue(undefined);
+  mockDeleteOldSessions.mockResolvedValue(0);
+  mockGetCodebase.mockResolvedValue(null);
+  mockLoadRepoConfig.mockResolvedValue({});
+}
+
 describe('cleanup-service', () => {
   beforeEach(() => {
-    mockExecFileAsync.mockClear();
-    mockHasUncommittedChanges.mockClear();
-    mockWorktreeExists.mockClear();
-    mockGetDefaultBranch.mockClear();
-    mockIsBranchMerged.mockClear();
-    mockGetLastCommitDate.mockClear();
-    mockDestroy.mockClear();
-    mockUpdateStatus.mockClear();
-    mockGetById.mockClear();
-    mockGetCodebase.mockClear();
-    mockLoadRepoConfig.mockClear();
-    // Reset defaults
-    mockHasUncommittedChanges.mockResolvedValue(false);
-    mockWorktreeExists.mockResolvedValue(false);
-    mockGetDefaultBranch.mockResolvedValue('main');
-    mockIsBranchMerged.mockResolvedValue(false);
-    mockGetLastCommitDate.mockResolvedValue(null);
-    mockLoadRepoConfig.mockResolvedValue({});
+    resetSharedMocks();
   });
 
   describe('removeEnvironment', () => {
@@ -454,27 +494,7 @@ describe('cleanup-service', () => {
 
 describe('runScheduledCleanup', () => {
   beforeEach(() => {
-    mockExecFileAsync.mockClear();
-    mockHasUncommittedChanges.mockClear();
-    mockWorktreeExists.mockClear();
-    mockGetDefaultBranch.mockClear();
-    mockIsBranchMerged.mockClear();
-    mockGetLastCommitDate.mockClear();
-    mockDestroy.mockClear();
-    mockListAllActiveWithCodebase.mockClear();
-    mockUpdateStatus.mockClear();
-    mockGetConversationsUsingEnv.mockClear();
-    mockGetById.mockClear();
-    mockGetCodebase.mockClear();
-    mockDeleteOldSessions.mockClear();
-    mockLoadRepoConfig.mockClear();
-    // Reset defaults
-    mockHasUncommittedChanges.mockResolvedValue(false);
-    mockWorktreeExists.mockResolvedValue(false);
-    mockGetDefaultBranch.mockResolvedValue('main');
-    mockIsBranchMerged.mockResolvedValue(false);
-    mockGetLastCommitDate.mockResolvedValue(null);
-    mockLoadRepoConfig.mockResolvedValue({});
+    resetSharedMocks();
   });
 
   test('returns empty report when no environments exist', async () => {
@@ -679,23 +699,6 @@ describe('runScheduledCleanup', () => {
         metadata: {},
       },
     ]);
-    mockWorktreeExists.mockResolvedValue(true);
-    mockHasUncommittedChanges.mockResolvedValueOnce(false);
-    mockIsBranchMerged.mockResolvedValueOnce(false);
-    mockGetConversationsUsingEnv.mockResolvedValueOnce([]);
-    mockGetById.mockResolvedValueOnce({
-      id: 'env-legacy-telegram',
-      codebase_id: 'codebase-1',
-      working_path: '/workspace/repo/worktrees/telegram-thread-abc',
-      branch_name: 'telegram-thread-abc',
-      status: 'active',
-    });
-    mockGetCodebase.mockResolvedValueOnce({
-      id: 'codebase-1',
-      name: 'test-repo',
-      default_cwd: '/workspace/repo',
-    });
-
     const report = await runScheduledCleanup();
 
     expect(report.removed).toHaveLength(0);
@@ -817,8 +820,7 @@ describe('SESSION_RETENTION_DAYS', () => {
 describe('scheduler lifecycle', () => {
   beforeEach(() => {
     stopCleanupScheduler(); // Ensure clean state
-    mockListAllActiveWithCodebase.mockClear();
-    mockListAllActiveWithCodebase.mockResolvedValue([]); // Prevent actual cleanup during tests
+    resetSharedMocks(); // Prevent actual cleanup during tests
   });
 
   afterAll(() => {
@@ -852,15 +854,7 @@ describe('scheduler lifecycle', () => {
 
 describe('getWorktreeStatusBreakdown', () => {
   beforeEach(() => {
-    mockExecFileAsync.mockClear();
-    mockGetDefaultBranch.mockClear();
-    mockIsBranchMerged.mockClear();
-    mockListByCodebaseWithAge.mockClear();
-    mockLoadRepoConfig.mockClear();
-    // Reset defaults
-    mockGetDefaultBranch.mockResolvedValue('main');
-    mockIsBranchMerged.mockResolvedValue(false);
-    mockLoadRepoConfig.mockResolvedValue({});
+    resetSharedMocks();
   });
 
   test('returns correct breakdown with mixed environments', async () => {
@@ -927,28 +921,7 @@ describe('getWorktreeStatusBreakdown', () => {
 
 describe('cleanupMergedWorktrees', () => {
   beforeEach(() => {
-    mockExecFileAsync.mockClear();
-    mockDestroy.mockClear();
-    mockGetConversationsUsingEnv.mockClear();
-    mockGetById.mockClear();
-    mockListByCodebase.mockClear();
-    mockGetDefaultBranch.mockClear();
-    mockIsBranchMerged.mockClear();
-    mockHasUncommittedChanges.mockClear();
-    mockWorktreeExists.mockClear();
-    mockGetCodebase.mockClear();
-    mockUpdateStatus.mockClear();
-    mockLoadRepoConfig.mockClear();
-    // Reset defaults
-    mockGetDefaultBranch.mockResolvedValue('main');
-    mockIsBranchMerged.mockResolvedValue(false);
-    mockLoadRepoConfig.mockResolvedValue({});
-    mockIsPatchEquivalent.mockReset();
-    mockIsPatchEquivalent.mockResolvedValue(false);
-    mockGetPrState.mockReset();
-    mockGetPrState.mockResolvedValue('NONE');
-    mockHasUncommittedChanges.mockResolvedValue(false);
-    mockWorktreeExists.mockResolvedValue(false);
+    resetSharedMocks();
   });
 
   test('removes merged branches without uncommitted changes', async () => {
@@ -1200,19 +1173,8 @@ describe('cleanupMergedWorktrees', () => {
 
 describe('resolveBaseBranch via runScheduledCleanup (issue #1419)', () => {
   beforeEach(() => {
-    mockListAllActiveWithCodebase.mockClear();
-    mockWorktreeExists.mockClear();
-    mockGetDefaultBranch.mockClear();
-    mockIsBranchMerged.mockClear();
-    mockHasUncommittedChanges.mockClear();
-    mockLoadRepoConfig.mockClear();
-    mockDeleteOldSessions.mockClear();
-    // Defaults
+    resetSharedMocks();
     mockWorktreeExists.mockResolvedValue(true);
-    mockHasUncommittedChanges.mockResolvedValue(false);
-    mockIsBranchMerged.mockResolvedValue(false);
-    mockLoadRepoConfig.mockResolvedValue({});
-    mockGetDefaultBranch.mockResolvedValue('main');
   });
 
   test('uses worktree.baseBranch from config and skips git detection for master-branch repo', async () => {
@@ -1336,20 +1298,7 @@ describe('resolveBaseBranch via runScheduledCleanup (issue #1419)', () => {
 
 describe('onConversationClosed', () => {
   beforeEach(() => {
-    mockExecFileAsync.mockClear();
-    mockDestroy.mockClear();
-    mockUpdateStatus.mockClear();
-    mockGetById.mockClear();
-    mockGetCodebase.mockClear();
-    mockGetConversationsUsingEnv.mockClear();
-    mockGetConversationByPlatformId.mockClear();
-    mockGetActiveSession.mockClear();
-    mockUpdateConversation.mockClear();
-    mockWorktreeExists.mockClear();
-    mockHasUncommittedChanges.mockClear();
-    // Reset defaults
-    mockWorktreeExists.mockResolvedValue(false);
-    mockHasUncommittedChanges.mockResolvedValue(false);
+    resetSharedMocks();
   });
 
   test('deactivates session with conversation-closed reason', async () => {
@@ -1499,18 +1448,7 @@ describe('onConversationClosed', () => {
 
 describe('cleanupStaleWorktrees', () => {
   beforeEach(() => {
-    mockExecFileAsync.mockClear();
-    mockDestroy.mockClear();
-    mockGetConversationsUsingEnv.mockClear();
-    mockGetById.mockClear();
-    mockListByCodebaseWithAge.mockClear();
-    mockHasUncommittedChanges.mockClear();
-    mockWorktreeExists.mockClear();
-    mockGetCodebase.mockClear();
-    mockUpdateStatus.mockClear();
-    // Reset defaults
-    mockHasUncommittedChanges.mockResolvedValue(false);
-    mockWorktreeExists.mockResolvedValue(false);
+    resetSharedMocks();
   });
 
   test('removes stale worktrees without uncommitted changes', async () => {
