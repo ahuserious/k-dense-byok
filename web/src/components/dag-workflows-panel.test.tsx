@@ -194,6 +194,105 @@ describe("DagWorkflowsPanel", () => {
     );
   });
 
+  it("reuses an ambiguous admission request id until the run intent changes", async () => {
+    const graph = createDefaultWorkflowGraph("retry-review", "Retry review");
+    const selected: dagApi.VersionedDagWorkflowDefinition = {
+      etag: '"4"',
+      definition: {
+        storageVersion: 1,
+        id: "retry-review",
+        revision: 4,
+        createdAt: 1,
+        updatedAt: 2,
+        graphSha256: "retry-sha",
+        graph,
+      },
+    };
+    vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([
+      {
+        id: "retry-review",
+        revision: 4,
+        createdAt: 1,
+        updatedAt: 2,
+        graphSha256: "retry-sha",
+        schemaVersion: graph.schemaVersion,
+        name: graph.name,
+        description: graph.description ?? null,
+        nodeCount: graph.nodes.length,
+        edgeCount: graph.edges.length,
+      },
+    ]);
+    vi.spyOn(dagApi, "readDagWorkflowDefinition").mockResolvedValue(selected);
+    const createRun = vi.spyOn(dagApi, "createDagWorkflowRun")
+      .mockRejectedValueOnce(
+        new dagApi.DagWorkflowApiError(503, "Response lost after admission.", "UNAVAILABLE"),
+      )
+      .mockRejectedValueOnce(new TypeError("Transport connection reset."))
+      .mockResolvedValueOnce({
+        manifest: {
+          storageVersion: 1,
+          id: "wrun_reconciled",
+          projectId: "project-a",
+          workflowId: "retry-review",
+          workflowRevision: 4,
+          graphSha256: "retry-sha",
+          requestId: "22222222-2222-4222-8222-222222222222",
+          requestSha256: "request-sha",
+          sessionId: "session-active",
+          createdAt: 10,
+          requestedBy: "user",
+          input: { goal: "Changed goal" },
+          effectiveLimits: {},
+          graph,
+        },
+        state: {
+          runId: "wrun_reconciled",
+          status: "queued",
+          lastSeq: 1,
+          executions: {},
+          recoverable: true,
+          diagnostics: [],
+        },
+      });
+    const randomUuid = vi.spyOn(crypto, "randomUUID")
+      .mockReturnValueOnce("11111111-1111-4111-8111-111111111111")
+      .mockReturnValueOnce("22222222-2222-4222-8222-222222222222");
+
+    renderPanel({ activeSessionId: "session-active" });
+
+    await userEvent.click(await screen.findByRole("button", {
+      name: "Open Retry review details",
+    }));
+    const goal = screen.getByLabelText("Typed workflow run goal");
+    const runButton = screen.getByRole("button", { name: "Run typed workflow" });
+    await userEvent.type(goal, "Original goal");
+
+    await userEvent.click(runButton);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Retrying this unchanged run will reuse the same request id.",
+    );
+    await userEvent.click(runButton);
+    await waitFor(() => expect(createRun).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(runButton).toBeEnabled());
+
+    expect(createRun.mock.calls.slice(0, 2).map((call) => call[2].requestId)).toEqual([
+      "11111111-1111-4111-8111-111111111111",
+      "11111111-1111-4111-8111-111111111111",
+    ]);
+
+    await userEvent.clear(goal);
+    await userEvent.type(goal, "Changed goal");
+    await userEvent.click(runButton);
+    expect(await screen.findByRole("status")).toHaveTextContent("Created run wrun_reconciled");
+
+    expect(createRun.mock.calls.map((call) => call[2].requestId)).toEqual([
+      "11111111-1111-4111-8111-111111111111",
+      "11111111-1111-4111-8111-111111111111",
+      "22222222-2222-4222-8222-222222222222",
+    ]);
+    expect(randomUuid).toHaveBeenCalledTimes(2);
+  });
+
   it("blocks typed workflow admission when the project budget is exhausted", async () => {
     const graph = createDefaultWorkflowGraph("budgeted-review", "Budgeted review");
     const selected: dagApi.VersionedDagWorkflowDefinition = {

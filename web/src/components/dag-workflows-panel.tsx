@@ -8,7 +8,7 @@ import {
   PlayIcon,
   PlusIcon,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { PipelinesPanel } from "@/components/pipelines-panel";
 import {
@@ -43,6 +43,14 @@ function runErrorMessage(error: unknown): string {
     return `Run conflict: ${error.detail} Reopen the latest saved revision before running.`;
   }
   return errorMessage(error);
+}
+
+function isAmbiguousRunFailure(error: unknown): boolean {
+  if (error instanceof DagWorkflowApiError) return error.status >= 500;
+  // Fetch transport failures are TypeError, aborted/time-limited fetches are
+  // DOMException/Error variants, and an unknown thrown value cannot prove
+  // that server admission did not happen. Only local validation is definite.
+  return !(error instanceof RangeError);
 }
 
 function summaryFromDefinition(
@@ -122,17 +130,34 @@ function DefinitionDetails({
   const [launching, setLaunching] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [runNotice, setRunNotice] = useState<string | null>(null);
+  const pendingRunRequest = useRef<{ intentKey: string; requestId: string } | null>(null);
   const rawDefinition = JSON.stringify(definition, null, 2);
+  const runIntentKey = JSON.stringify([
+    definition.id,
+    definition.revision,
+    activeSessionId,
+    runGoal.trim(),
+  ]);
+
+  useEffect(() => {
+    pendingRunRequest.current = null;
+    setRunError(null);
+    setRunNotice(null);
+  }, [runIntentKey]);
 
   const launchRun = async () => {
     if (launching || budgetBlocked) return;
+    const goal = runGoal.trim();
+    const request = pendingRunRequest.current?.intentKey === runIntentKey
+      ? pendingRunRequest.current
+      : { intentKey: runIntentKey, requestId: crypto.randomUUID() };
+    pendingRunRequest.current = request;
     setLaunching(true);
     setRunError(null);
     setRunNotice(null);
     try {
-      const goal = runGoal.trim();
       const run = await createDagWorkflowRun(projectId, definition.id, {
-        requestId: crypto.randomUUID(),
+        requestId: request.requestId,
         expectedWorkflowRevision: definition.revision,
         ...(activeSessionId ? { sessionId: activeSessionId } : {}),
         ...(goal ? { input: { goal } } : {}),
@@ -140,8 +165,26 @@ function DefinitionDetails({
       setRunNotice(
         `Created run ${run.manifest.id} with status ${run.state.status}. Open Console for runner progress.`,
       );
+      if (
+        pendingRunRequest.current?.intentKey === request.intentKey &&
+        pendingRunRequest.current.requestId === request.requestId
+      ) {
+        pendingRunRequest.current = null;
+      }
     } catch (caught) {
-      setRunError(runErrorMessage(caught));
+      const ambiguous = isAmbiguousRunFailure(caught);
+      if (
+        !ambiguous &&
+        pendingRunRequest.current?.intentKey === request.intentKey &&
+        pendingRunRequest.current.requestId === request.requestId
+      ) {
+        pendingRunRequest.current = null;
+      }
+      setRunError(
+        ambiguous
+          ? `${runErrorMessage(caught)} Retrying this unchanged run will reuse the same request id.`
+          : runErrorMessage(caught),
+      );
     } finally {
       setLaunching(false);
     }
