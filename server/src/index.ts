@@ -29,6 +29,7 @@ import { registerModalRoutes } from "./api/modal.ts";
 import { registerModelProviderRoutes } from "./api/model-providers.ts";
 import { registerDagWorkflowRoutes } from "./api/dag-workflows.ts";
 import { registerPipelineRoutes } from "./api/pipelines.ts";
+import { registerConsoleRoutes } from "./api/console.ts";
 import { disposeAllWorkflowDelegationSessions } from "./agent/workflow-delegation-session.ts";
 import type { WorkflowRunController } from "./workflows/controller.ts";
 import { reconcileStaleWorkflowBudgetReservations } from "./workflows/budget.ts";
@@ -194,6 +195,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
     controller: workflowController ?? undefined,
   });
   await registerPipelineRoutes(app);
+  await registerConsoleRoutes(app);
 
   // Production attaches to and drains any inherited detached owner before
   // buildApp runs. Budget reconciliation can therefore charge only reservations

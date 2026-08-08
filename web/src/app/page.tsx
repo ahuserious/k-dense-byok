@@ -10,6 +10,7 @@ import { WorkflowsPanel } from "@/components/workflows-panel";
 import { DagWorkflowConsole } from "@/components/dag-workflow-console";
 import { DagWorkflowsPanel } from "@/components/dag-workflows-panel";
 import { ChatRail } from "@/components/chat-rail";
+import { ConsolePanel } from "@/components/console/console-panel";
 import { DagBuilder } from "@/components/dag-builder";
 import {
   DagBuilderSurface,
@@ -1298,9 +1299,13 @@ function WorkspacePage({
               />
             ),
             console: (
-              <DagWorkflowConsole
-                projectId={projectId}
-                active={isActive && view === "console"}
+              <ConsolePanel
+                dagConsole={
+                  <DagWorkflowConsole
+                    projectId={projectId}
+                    active={isActive && view === "console"}
+                  />
+                }
               />
             ),
             raindrop: (
