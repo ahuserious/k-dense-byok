@@ -119,23 +119,24 @@ afterAll(async () => {
 
 describe("DAG workflow API", () => {
   it("previews a legacy YAML translation without scanning or saving project files", async () => {
+    const payload = {
+      workflowId: "legacy-preview",
+      reasoning: "low",
+      source: [
+        "name: Legacy preview",
+        "provider: pi",
+        "interactive: false",
+        "nodes:",
+        "  - id: start",
+        "    prompt: Inspect the explicit run context.",
+        "    model: ollama/local-test",
+      ].join("\n"),
+    };
     const preview = await app.inject({
       method: "POST",
       url: "/dag-workflow-imports/legacy-pipeline/preview",
       headers: headers(),
-      payload: {
-        workflowId: "legacy-preview",
-        reasoning: "low",
-        source: [
-          "name: Legacy preview",
-          "provider: pi",
-          "interactive: false",
-          "nodes:",
-          "  - id: start",
-          "    prompt: Inspect the explicit run context.",
-          "    model: ollama/local-test",
-        ].join("\n"),
-      },
+      payload,
     });
     expect(preview.statusCode).toBe(200);
     expect(preview.headers["cache-control"]).toBe("no-store");
@@ -148,6 +149,17 @@ describe("DAG workflow API", () => {
       blockers: [],
       legacyRuns: { mode: "archive-only", resumable: false },
     });
+
+    const deprecatedPreview = await app.inject({
+      method: "POST",
+      // deprecated-compat: existing migration scripts retain this URL temporarily.
+      url: "/dag-workflow-imports/legacy-archon/preview",
+      headers: headers(),
+      payload,
+    });
+    expect(deprecatedPreview.statusCode).toBe(200);
+    expect(deprecatedPreview.headers["cache-control"]).toBe("no-store");
+    expect(deprecatedPreview.json()).toEqual(preview.json());
 
     const list = await app.inject({
       method: "GET",

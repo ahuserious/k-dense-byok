@@ -87,6 +87,21 @@
       "path": "server/vendor/pipeline-engine/packages/adapters/src/chat/slack/adapter.test.ts",
       "identifiers": ["/archon", "/archon-workflow"],
       "comment": "deprecated-compat: coverage for previous Slack slash-command aliases"
+    },
+    {
+      "path": "server/src/api/dag-workflows.ts",
+      "identifiers": ["legacy-archon"],
+      "comment": "deprecated-compat: previous legacy-workflow preview route"
+    },
+    {
+      "path": "server/test/dag-workflows-api.test.ts",
+      "identifiers": ["legacy-archon"],
+      "comment": "deprecated-compat: coverage for previous legacy-workflow preview route"
+    },
+    {
+      "path": "docs/dag-workflows-legacy-migration.md",
+      "identifiers": [".archon/workflows"],
+      "comment": "deprecated-compat: documented legacy on-disk workflow location"
     }
   ]
 }

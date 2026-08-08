@@ -174,6 +174,11 @@ function getLog(): ReturnType<typeof createLogger> {
   return cachedLog;
 }
 
+let legacyForgeMentionWarningLogged = false;
+export function resetLegacyForgeMentionWarningForTests(): void {
+  legacyForgeMentionWarningLogged = false;
+}
+
 /**
  * Parse YAML using Bun's native YAML parser
  */
@@ -414,12 +419,46 @@ function applyEnvOverrides(
     config.botName = envBotName;
   }
 
-  const githubMention = process.env.GITHUB_BOT_MENTION?.trim();
-  if (githubMention) config.forgeMentions.github = githubMention;
-  const gitlabMention = process.env.GITLAB_BOT_MENTION?.trim();
-  if (gitlabMention) config.forgeMentions.gitlab = gitlabMention;
-  const giteaMention = process.env.GITEA_BOT_MENTION?.trim();
-  if (giteaMention) config.forgeMentions.gitea = giteaMention;
+  const mentionEnvironmentVariables = {
+    github: 'GITHUB_BOT_MENTION',
+    gitlab: 'GITLAB_BOT_MENTION',
+    gitea: 'GITEA_BOT_MENTION',
+  } as const;
+  const legacyMention = envBotName?.trim() || globalConfig?.botName?.trim();
+  const legacyMentionSource = envBotName?.trim() ? 'BOT_DISPLAY_NAME' : 'botName';
+  const servicesUsingLegacyMention: Array<keyof typeof mentionEnvironmentVariables> = [];
+
+  const forgeServices = ['github', 'gitlab', 'gitea'] as const;
+  for (const service of forgeServices) {
+    const environmentVariable = mentionEnvironmentVariables[service];
+    const serviceMention = process.env[environmentVariable]?.trim();
+    const configuredMention = globalConfig?.forgeMentions?.[service]?.trim();
+    if (serviceMention) {
+      config.forgeMentions[service] = serviceMention;
+    } else if (configuredMention) {
+      config.forgeMentions[service] = configuredMention;
+    } else if (legacyMention) {
+      // deprecated-compat: preserve the pre-sweep display-name mention fallback.
+      config.forgeMentions[service] = legacyMention;
+      servicesUsingLegacyMention.push(service);
+    } else if (service === 'github') {
+      config.forgeMentions.github = process.env.GITHUB_APP_SLUG?.trim() || 'pipeline';
+    }
+  }
+
+  if (servicesUsingLegacyMention.length > 0 && !legacyForgeMentionWarningLogged) {
+    legacyForgeMentionWarningLogged = true;
+    getLog().warn(
+      {
+        legacySource: legacyMentionSource,
+        services: servicesUsingLegacyMention,
+        replacements: servicesUsingLegacyMention.map(
+          service => mentionEnvironmentVariables[service]
+        ),
+      },
+      'config.legacy_display_name_forge_mentions_deprecated'
+    );
+  }
 
   // DEFAULT_AI_ASSISTANT is a fallback default: only applies when no config file
   // has explicitly set the assistant. An explicit save via the Web UI (or a repo

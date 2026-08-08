@@ -32,6 +32,7 @@ import {
   loadRepoConfig,
   loadConfig,
   clearConfigCache,
+  resetLegacyForgeMentionWarningForTests,
   toSafeConfig,
   updateGlobalConfig,
 } from './config-loader';
@@ -48,6 +49,7 @@ describe('config-loader', () => {
     'GITHUB_BOT_MENTION',
     'GITLAB_BOT_MENTION',
     'GITEA_BOT_MENTION',
+    'GITHUB_APP_SLUG',
     'WORKSPACE_PATH',
     'WORKTREE_BASE',
     'ARCHON_HOME',
@@ -55,8 +57,10 @@ describe('config-loader', () => {
 
   beforeEach(() => {
     clearConfigCache();
+    resetLegacyForgeMentionWarningForTests();
     mockFsReadFile.mockReset();
     mockFsWriteFile.mockReset();
+    mockLogger.warn.mockClear();
 
     // Save original env vars
     envVars.forEach(key => {
@@ -290,6 +294,98 @@ recommendedWorkflows: "pipeline-plan"
       });
       expect(config.streaming.telegram).toBe('stream');
       expect(config.concurrency.maxConversations).toBe(10);
+      expect(mockLogger.warn).not.toHaveBeenCalledWith(
+        expect.anything(),
+        'config.legacy_display_name_forge_mentions_deprecated'
+      );
+    });
+
+    test('upgrade: BOT_DISPLAY_NAME remains the deprecated forge mention fallback', async () => {
+      mockFsReadFile.mockResolvedValue('');
+      process.env.BOT_DISPLAY_NAME = 'legacy-bot';
+
+      const config = await loadConfig();
+
+      expect(config.botName).toBe('legacy-bot');
+      expect(config.forgeMentions).toEqual({
+        github: 'legacy-bot',
+        gitlab: 'legacy-bot',
+        gitea: 'legacy-bot',
+      });
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        {
+          legacySource: 'BOT_DISPLAY_NAME',
+          services: ['github', 'gitlab', 'gitea'],
+          replacements: ['GITHUB_BOT_MENTION', 'GITLAB_BOT_MENTION', 'GITEA_BOT_MENTION'],
+        },
+        'config.legacy_display_name_forge_mentions_deprecated'
+      );
+      await loadConfig();
+      expect(mockLogger.warn).toHaveBeenCalledTimes(1);
+    });
+
+    test('upgrade: service mention variables beat the legacy display-name fallback', async () => {
+      mockFsReadFile.mockResolvedValue('');
+      process.env.BOT_DISPLAY_NAME = 'legacy-bot';
+      process.env.GITHUB_BOT_MENTION = 'github-service-bot';
+
+      const config = await loadConfig();
+
+      expect(config.forgeMentions).toEqual({
+        github: 'github-service-bot',
+        gitlab: 'legacy-bot',
+        gitea: 'legacy-bot',
+      });
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ services: ['gitlab', 'gitea'] }),
+        'config.legacy_display_name_forge_mentions_deprecated'
+      );
+    });
+
+    test('upgrade: a service mention variable overrides only its forge', async () => {
+      mockFsReadFile.mockResolvedValue('');
+      process.env.GITLAB_BOT_MENTION = 'gitlab-service-bot';
+
+      const config = await loadConfig();
+
+      expect(config.forgeMentions).toEqual({
+        github: 'pipeline',
+        gitlab: 'gitlab-service-bot',
+        gitea: 'pipeline',
+      });
+      expect(mockLogger.warn).not.toHaveBeenCalledWith(
+        expect.anything(),
+        'config.legacy_display_name_forge_mentions_deprecated'
+      );
+    });
+
+    test('upgrade: GitHub App slug is the default GitHub mention when configured', async () => {
+      mockFsReadFile.mockResolvedValue('');
+      process.env.GITHUB_APP_SLUG = 'custom-app-slug';
+
+      const config = await loadConfig();
+
+      expect(config.forgeMentions).toEqual({
+        github: 'custom-app-slug',
+        gitlab: 'pipeline',
+        gitea: 'pipeline',
+      });
+    });
+
+    test('upgrade: an explicitly configured botName retains its legacy mention behavior', async () => {
+      mockFsReadFile.mockResolvedValue('botName: configured-legacy-bot\n');
+
+      const config = await loadConfig();
+
+      expect(config.forgeMentions).toEqual({
+        github: 'configured-legacy-bot',
+        gitlab: 'configured-legacy-bot',
+        gitea: 'configured-legacy-bot',
+      });
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ legacySource: 'botName' }),
+        'config.legacy_display_name_forge_mentions_deprecated'
+      );
     });
 
     test('startup config keeps display name separate from forge mention handles', async () => {

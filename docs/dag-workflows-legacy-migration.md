@@ -11,8 +11,8 @@ or control semantics.
 The former integration had three distinct state owners:
 
 - Project workflow definitions were YAML files under
-  `sandbox/.pipeline-engine/workflows/`. Committed starter YAML was copied there without
-  overwriting a same-named user file.
+  `sandbox/.archon/workflows/`, the legacy on-disk location retained for compatibility.
+  Committed starter YAML was copied there without overwriting a same-named user file.
 - Authoritative node execution and resume state belonged to the separate Pipeline engine
   sidecar database.
 - Kady appended a lossy Console row under
@@ -64,7 +64,7 @@ jq -Rs \
   --arg workflowId imported-research \
   --arg reasoning high \
   '{source: ., workflowId: $workflowId, reasoning: $reasoning}' \
-  projects/default/sandbox/.pipeline-engine/workflows/my-workflow.yaml \
+  projects/default/sandbox/.archon/workflows/my-workflow.yaml \
 | curl --fail-with-body \
     -H 'Content-Type: application/json' \
     -H 'X-Project-Id: default' \

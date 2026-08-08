@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { currentProjectId } from "../scope.ts";
 import {
   WorkflowBudgetError,
@@ -156,6 +156,14 @@ export interface RegisterDagWorkflowRoutesOptions {
   controller?: WorkflowRunController;
 }
 
+interface LegacyWorkflowPreviewRoute {
+  Body: {
+    source?: unknown;
+    workflowId?: unknown;
+    reasoning?: unknown;
+  } | null;
+}
+
 export async function registerDagWorkflowRoutes(
   app: FastifyInstance,
   options: RegisterDagWorkflowRoutesOptions = {},
@@ -166,13 +174,10 @@ export async function registerDagWorkflowRoutes(
    * claims that a legacy sidecar run can resume in Kady. The caller must review
    * the returned typed graph and save it through the normal revisioned PUT.
    */
-  app.post<{
-    Body: {
-      source?: unknown;
-      workflowId?: unknown;
-      reasoning?: unknown;
-    } | null;
-  }>("/dag-workflow-imports/legacy-pipeline/preview", async (request, reply) => {
+  const previewLegacyWorkflow = async (
+    request: FastifyRequest<LegacyWorkflowPreviewRoute>,
+    reply: FastifyReply,
+  ) => {
     try {
       const body = isRecord(request.body) ? request.body : {};
       if (typeof body.source !== "string") {
@@ -218,7 +223,26 @@ export async function registerDagWorkflowRoutes(
       reply.code(error.code === "LEGACY_SOURCE_TOO_LARGE" ? 413 : 400);
       return { detail: error.message, code: error.code };
     }
-  });
+  };
+
+  app.post<LegacyWorkflowPreviewRoute>(
+    "/dag-workflow-imports/legacy-pipeline/preview",
+    previewLegacyWorkflow,
+  );
+  // deprecated-compat: retain the former migration URL for existing scripts.
+  app.post<LegacyWorkflowPreviewRoute>(
+    "/dag-workflow-imports/legacy-archon/preview",
+    async (request, reply) => {
+      request.log.warn(
+        {
+          deprecatedPath: request.url,
+          replacementPath: "/dag-workflow-imports/legacy-pipeline/preview",
+        },
+        "dag_workflows.legacy_preview_path_deprecated",
+      );
+      return previewLegacyWorkflow(request, reply);
+    },
+  );
 
   app.get("/dag-workflows", async (_request, reply) => {
     try {
