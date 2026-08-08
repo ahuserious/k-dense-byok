@@ -14,6 +14,8 @@ The typed visual graph editor and its `DAG Builder agent` panel are intentionall
 
 No other list capability is intentionally dropped. The vendored list retains health, refresh, empty/offline handling, Edit, Run, and Open builder. The typed list retains loading/error/empty handling, revision/schema/graph metadata, definition read/open, validation, template selection, creation, save-then-open, and safeguarded Run admission through the existing typed runtime.
 
+Vendored Run now submits directly to the structured `/pipelines/:name/run` route. Its progress is no longer displayed in a newly-created Kady chat because that chat has no structured bridge to the vendored engine's conversation stream; retaining the natural-language chat dispatch would make engine selection ambiguous. The consolidated list instead shows the returned dispatch receipt and status inline in its vendored section. The current vendored response reports an acceptance status but no workflow `runId`, so the UI labels the client-generated conversation/dispatch id honestly rather than presenting it as an engine run id.
+
 The two backing stores deliberately remain separate engines:
 
 - Vendored pipelines continue to use the vendored engine's health, list, run, edit, and builder routes.

@@ -8,6 +8,7 @@ import * as pipelinesApi from "@/lib/pipelines";
 import { createDefaultWorkflowGraph } from "@/lib/dag-workflow-builder";
 
 beforeEach(() => {
+  window.sessionStorage.clear();
   vi.spyOn(pipelinesApi, "pipelineHealth").mockResolvedValue(true);
   vi.spyOn(pipelinesApi, "listPipelines").mockResolvedValue([]);
 });
@@ -22,7 +23,7 @@ function renderPanel({
 }: {
   activeSessionId?: string | null;
   budgetBlocked?: boolean;
-  onRunPipeline?: (name: string) => void;
+  onRunPipeline?: (name: string) => Promise<unknown>;
   onEditPipeline?: (name: string) => void;
 } = {}) {
   return render(
@@ -101,6 +102,49 @@ describe("DagWorkflowsPanel", () => {
       expect(screen.getByRole("button", { name: "Download raw definition" }))
         .toBeInTheDocument();
     });
+  });
+
+  it("routes the selected vendored pipeline directly without invoking typed admission or Builder", async () => {
+    vi.mocked(pipelinesApi.listPipelines).mockResolvedValue([
+      { name: "microscopy-qc", description: "Inspect microscopy acquisition quality" },
+    ]);
+    vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
+    const createTypedRun = vi.spyOn(dagApi, "createDagWorkflowRun");
+    const onEditPipeline = vi.fn();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ accepted: true, status: "started" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    renderPanel({
+      onEditPipeline,
+      onRunPipeline: async (name) => ({
+        receiptId: "vendored-receipt-1",
+        response: await pipelinesApi.runPipeline(
+          name,
+          "vendored-receipt-1",
+          `Run vendored pipeline ${name}.`,
+        ),
+      }),
+    });
+
+    await userEvent.click(await screen.findByRole("button", { name: "Run" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("http://localhost:8000/pipelines/microscopy-qc/run");
+    expect(init).toMatchObject({ method: "POST" });
+    expect(JSON.parse(String(init?.body))).toEqual({
+      conversationId: "vendored-receipt-1",
+      message: "Run vendored pipeline microscopy-qc.",
+    });
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Dispatch vendored-receipt-1 · started",
+    );
+    expect(createTypedRun).not.toHaveBeenCalled();
+    expect(onEditPipeline).not.toHaveBeenCalled();
   });
 
   it("runs the selected saved revision once with session, bounded goal, and revision safeguards", async () => {
@@ -194,7 +238,7 @@ describe("DagWorkflowsPanel", () => {
     );
   });
 
-  it("reuses an ambiguous admission request id until the run intent changes", async () => {
+  it("reuses an ambiguous admission request id after remount until the run intent changes", async () => {
     const graph = createDefaultWorkflowGraph("retry-review", "Retry review");
     const selected: dagApi.VersionedDagWorkflowDefinition = {
       etag: '"4"',
@@ -258,7 +302,7 @@ describe("DagWorkflowsPanel", () => {
       .mockReturnValueOnce("11111111-1111-4111-8111-111111111111")
       .mockReturnValueOnce("22222222-2222-4222-8222-222222222222");
 
-    renderPanel({ activeSessionId: "session-active" });
+    const firstMount = renderPanel({ activeSessionId: "session-active" });
 
     await userEvent.click(await screen.findByRole("button", {
       name: "Open Retry review details",
@@ -271,18 +315,33 @@ describe("DagWorkflowsPanel", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Retrying this unchanged run will reuse the same request id.",
     );
-    await userEvent.click(runButton);
+    expect(
+      window.sessionStorage.getItem("kady:typed-workflow-run-requests:v1:project-a"),
+    ).toContain("11111111-1111-4111-8111-111111111111");
+    expect(
+      window.sessionStorage.getItem("kady:typed-workflow-run-requests:v1:project-b"),
+    ).toBeNull();
+
+    firstMount.unmount();
+    renderPanel({ activeSessionId: "session-active" });
+    await userEvent.click(await screen.findByRole("button", {
+      name: "Open Retry review details",
+    }));
+    const restoredGoal = screen.getByLabelText("Typed workflow run goal");
+    await waitFor(() => expect(restoredGoal).toHaveValue("Original goal"));
+    const restoredRunButton = screen.getByRole("button", { name: "Run typed workflow" });
+    await userEvent.click(restoredRunButton);
     await waitFor(() => expect(createRun).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(runButton).toBeEnabled());
+    await waitFor(() => expect(restoredRunButton).toBeEnabled());
 
     expect(createRun.mock.calls.slice(0, 2).map((call) => call[2].requestId)).toEqual([
       "11111111-1111-4111-8111-111111111111",
       "11111111-1111-4111-8111-111111111111",
     ]);
 
-    await userEvent.clear(goal);
-    await userEvent.type(goal, "Changed goal");
-    await userEvent.click(runButton);
+    await userEvent.clear(restoredGoal);
+    await userEvent.type(restoredGoal, "Changed goal");
+    await userEvent.click(restoredRunButton);
     expect(await screen.findByRole("status")).toHaveTextContent("Created run wrun_reconciled");
 
     expect(createRun.mock.calls.map((call) => call[2].requestId)).toEqual([
@@ -291,6 +350,9 @@ describe("DagWorkflowsPanel", () => {
       "22222222-2222-4222-8222-222222222222",
     ]);
     expect(randomUuid).toHaveBeenCalledTimes(2);
+    expect(
+      window.sessionStorage.getItem("kady:typed-workflow-run-requests:v1:project-a"),
+    ).toBeNull();
   });
 
   it("blocks typed workflow admission when the project budget is exhausted", async () => {

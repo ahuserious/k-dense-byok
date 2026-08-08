@@ -44,6 +44,7 @@ import {
   type ModalComputeScope,
 } from "@/lib/modal-jobs";
 import { isJunkFilePath } from "@/lib/utils";
+import { runPipeline } from "@/lib/pipelines";
 import {
   PanelLeftIcon,
   PanelRightIcon,
@@ -733,44 +734,18 @@ function WorkspacePage({
     [setView],
   );
 
-  // Run a pipeline in a brand-new chat tab. We can't send into the new tab
-  // synchronously: its <ChatTab> must first mount and register its imperative
-  // handle. So we mint the tab id outside any setState updater (strict-mode
-  // safe, mirroring newTab), append + activate the tab, and park the prompt;
-  // the flush effect below dispatches it once the handle registers. sendQuick
-  // uses the tab's default model, so no model plumbing is needed here.
-  const pendingPipelineRun = useRef<{ tabId: string; prompt: string } | null>(null);
   const handleRunPipeline = useCallback(
-    (name: string) => {
-      if (tabsRef.current.length >= MAX_CHAT_TABS) return;
-      const id = makeTabId();
-      pendingPipelineRun.current = {
-        tabId: id,
-        prompt: `Run the scientific pipeline named "${name}" and report its results.`,
-      };
-      setTabs((prev) =>
-        prev.length >= MAX_CHAT_TABS
-          ? prev
-          : [...prev, { id, title: `Run: ${name}` }],
+    async (name: string) => {
+      const receiptId = `kady-${makeTabId()}`;
+      const response = await runPipeline(
+        name,
+        receiptId,
+        `Run vendored pipeline ${name}.`,
       );
-      setActiveTabId(id);
-      setView("chat");
+      return { receiptId, response };
     },
-    [setView],
+    [],
   );
-
-  // Flush a parked pipeline run once its chat tab has mounted and registered
-  // its handle. Depending on `tabs` makes this run right after the new
-  // <ChatTab> commits; we guard on the handle being present and retry on the
-  // next tabs change if it isn't yet.
-  useEffect(() => {
-    const pending = pendingPipelineRun.current;
-    if (!pending) return;
-    const handle = tabHandles.current.get(pending.tabId);
-    if (!handle) return;
-    pendingPipelineRun.current = null;
-    void handle.sendQuick(pending.prompt);
-  }, [tabs]);
 
   const handleFileSelect = useCallback((path: string) => {
     sandboxSelectFile(path);

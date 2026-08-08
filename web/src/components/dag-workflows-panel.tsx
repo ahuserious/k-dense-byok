@@ -53,6 +53,91 @@ function isAmbiguousRunFailure(error: unknown): boolean {
   return !(error instanceof RangeError);
 }
 
+interface StoredRunRequest {
+  workflowId: string;
+  revision: number;
+  sessionId: string | null;
+  goal: string;
+  requestId: string;
+  savedAt: number;
+}
+
+type StoredRunRequests = Record<string, StoredRunRequest>;
+
+const RUN_REQUEST_STORAGE_PREFIX = "kady:typed-workflow-run-requests:v1:";
+
+function isStoredRunRequest(value: unknown): value is StoredRunRequest {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const request = value as Record<string, unknown>;
+  return (
+    typeof request.workflowId === "string" &&
+    typeof request.revision === "number" &&
+    (request.sessionId === null || typeof request.sessionId === "string") &&
+    typeof request.goal === "string" &&
+    typeof request.requestId === "string" &&
+    typeof request.savedAt === "number"
+  );
+}
+
+function runRequestStorageKey(projectId: string): string {
+  return `${RUN_REQUEST_STORAGE_PREFIX}${encodeURIComponent(projectId)}`;
+}
+
+function readStoredRunRequests(projectId: string): StoredRunRequests {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.sessionStorage.getItem(runRequestStorageKey(projectId));
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, StoredRunRequest] =>
+        isStoredRunRequest(entry[1]),
+      ),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function writeStoredRunRequests(projectId: string, requests: StoredRunRequests): void {
+  if (typeof window === "undefined") return;
+  try {
+    const storageKey = runRequestStorageKey(projectId);
+    if (Object.keys(requests).length === 0) {
+      window.sessionStorage.removeItem(storageKey);
+    } else {
+      window.sessionStorage.setItem(storageKey, JSON.stringify(requests));
+    }
+  } catch {
+    // A denied/full sessionStorage must not block workflow admission. The
+    // component ref still protects retries for the current mount.
+  }
+}
+
+function storeRunRequest(
+  projectId: string,
+  intentKey: string,
+  request: StoredRunRequest,
+): void {
+  writeStoredRunRequests(projectId, {
+    ...readStoredRunRequests(projectId),
+    [intentKey]: request,
+  });
+}
+
+function removeStoredRunRequest(
+  projectId: string,
+  intentKey: string,
+  expectedRequestId?: string,
+): void {
+  const requests = readStoredRunRequests(projectId);
+  if (!(intentKey in requests)) return;
+  if (expectedRequestId && requests[intentKey]?.requestId !== expectedRequestId) return;
+  delete requests[intentKey];
+  writeStoredRunRequests(projectId, requests);
+}
+
 function summaryFromDefinition(
   value: VersionedDagWorkflowDefinition,
 ): DagWorkflowDefinitionSummary {
@@ -69,6 +154,30 @@ function summaryFromDefinition(
     nodeCount: definition.graph.nodes.length,
     edgeCount: definition.graph.edges.length,
   };
+}
+
+interface VendoredRunReceipt {
+  receiptId: string | null;
+  runId: string | null;
+  status: string;
+}
+
+function vendoredRunReceipt(value: unknown): VendoredRunReceipt {
+  const outer = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const response = outer.response && typeof outer.response === "object" && !Array.isArray(outer.response)
+    ? outer.response as Record<string, unknown>
+    : outer;
+  const nestedRun = response.run && typeof response.run === "object" && !Array.isArray(response.run)
+    ? response.run as Record<string, unknown>
+    : {};
+  const runId = [nestedRun.id, nestedRun.runId, response.runId, response.run_id]
+    .find((candidate): candidate is string => typeof candidate === "string") ?? null;
+  const receiptId = typeof outer.receiptId === "string" ? outer.receiptId : runId;
+  const status = [nestedRun.status, response.status, response.state]
+    .find((candidate): candidate is string => typeof candidate === "string") ?? "accepted";
+  return { receiptId, runId, status };
 }
 
 function WorkflowDefinitionRow({
@@ -131,6 +240,8 @@ function DefinitionDetails({
   const [runError, setRunError] = useState<string | null>(null);
   const [runNotice, setRunNotice] = useState<string | null>(null);
   const pendingRunRequest = useRef<{ intentKey: string; requestId: string } | null>(null);
+  const previousRunIntentKey = useRef<string | null>(null);
+  const restoredRunIntent = useRef(false);
   const rawDefinition = JSON.stringify(definition, null, 2);
   const runIntentKey = JSON.stringify([
     definition.id,
@@ -140,18 +251,63 @@ function DefinitionDetails({
   ]);
 
   useEffect(() => {
-    pendingRunRequest.current = null;
+    if (!restoredRunIntent.current) {
+      restoredRunIntent.current = true;
+      // Typed run summaries do not expose requestId, so an absent list result
+      // cannot prove that an ambiguously acknowledged admission was rejected.
+      // Restore the most recently saved exact intent and retain it until an
+      // observed intent edit or a confirmed API outcome reconciles it.
+      const restorable = Object.entries(readStoredRunRequests(projectId))
+        .filter(
+          ([, request]) =>
+            request.workflowId === definition.id &&
+            request.revision === definition.revision &&
+            request.sessionId === activeSessionId,
+        )
+        .sort((left, right) => right[1].savedAt - left[1].savedAt)[0];
+      if (restorable) {
+        const [storedIntentKey, request] = restorable;
+        previousRunIntentKey.current = storedIntentKey;
+        pendingRunRequest.current = {
+          intentKey: storedIntentKey,
+          requestId: request.requestId,
+        };
+        setRunGoal(request.goal);
+        return;
+      }
+    }
+
+    const previousIntentKey = previousRunIntentKey.current;
+    if (previousIntentKey && previousIntentKey !== runIntentKey) {
+      removeStoredRunRequest(projectId, previousIntentKey);
+    }
+    previousRunIntentKey.current = runIntentKey;
+    const storedRequest = readStoredRunRequests(projectId)[runIntentKey];
+    pendingRunRequest.current = storedRequest
+      ? { intentKey: runIntentKey, requestId: storedRequest.requestId }
+      : null;
     setRunError(null);
     setRunNotice(null);
-  }, [runIntentKey]);
+  }, [activeSessionId, definition.id, definition.revision, projectId, runIntentKey]);
 
   const launchRun = async () => {
     if (launching || budgetBlocked) return;
     const goal = runGoal.trim();
+    const storedRequest = readStoredRunRequests(projectId)[runIntentKey];
     const request = pendingRunRequest.current?.intentKey === runIntentKey
       ? pendingRunRequest.current
-      : { intentKey: runIntentKey, requestId: crypto.randomUUID() };
+      : storedRequest
+        ? { intentKey: runIntentKey, requestId: storedRequest.requestId }
+        : { intentKey: runIntentKey, requestId: crypto.randomUUID() };
     pendingRunRequest.current = request;
+    storeRunRequest(projectId, runIntentKey, {
+      workflowId: definition.id,
+      revision: definition.revision,
+      sessionId: activeSessionId,
+      goal,
+      requestId: request.requestId,
+      savedAt: Date.now(),
+    });
     setLaunching(true);
     setRunError(null);
     setRunNotice(null);
@@ -171,6 +327,7 @@ function DefinitionDetails({
       ) {
         pendingRunRequest.current = null;
       }
+      removeStoredRunRequest(projectId, request.intentKey, request.requestId);
     } catch (caught) {
       const ambiguous = isAmbiguousRunFailure(caught);
       if (
@@ -179,6 +336,7 @@ function DefinitionDetails({
         pendingRunRequest.current.requestId === request.requestId
       ) {
         pendingRunRequest.current = null;
+        removeStoredRunRequest(projectId, request.intentKey, request.requestId);
       }
       setRunError(
         ambiguous
@@ -305,7 +463,7 @@ export function DagWorkflowsPanel({
   projectId: string;
   activeSessionId: string | null;
   budgetBlocked: boolean;
-  onRunPipeline: (name: string) => void;
+  onRunPipeline: (name: string) => Promise<unknown>;
   onEditPipeline: (name: string) => void;
 }) {
   const [definitions, setDefinitions] = useState<DagWorkflowDefinitionSummary[] | null>(null);
@@ -318,6 +476,8 @@ export function DagWorkflowsPanel({
   const [newWorkflowName, setNewWorkflowName] = useState("");
   const [newWorkflowDescription, setNewWorkflowDescription] = useState("");
   const [creating, setCreating] = useState(false);
+  const [vendoredRunReceipts, setVendoredRunReceipts] = useState<Record<string, VendoredRunReceipt & { error?: string }>>({});
+  const launchingVendoredRuns = useRef(new Set<string>());
   const selectedTemplate = findDagWorkflowTemplate(newWorkflowTemplateId);
 
   useEffect(() => {
@@ -395,6 +555,31 @@ export function DagWorkflowsPanel({
     }
   };
 
+  const runVendoredPipeline = async (name: string) => {
+    if (launchingVendoredRuns.current.has(name)) return;
+    launchingVendoredRuns.current.add(name);
+    setVendoredRunReceipts((current) => ({
+      ...current,
+      [name]: { receiptId: null, runId: null, status: "submitting" },
+    }));
+    try {
+      const receipt = vendoredRunReceipt(await onRunPipeline(name));
+      setVendoredRunReceipts((current) => ({ ...current, [name]: receipt }));
+    } catch (caught) {
+      setVendoredRunReceipts((current) => ({
+        ...current,
+        [name]: {
+          receiptId: null,
+          runId: null,
+          status: "failed",
+          error: caught instanceof Error ? caught.message : "Unable to start vendored pipeline.",
+        },
+      }));
+    } finally {
+      launchingVendoredRuns.current.delete(name);
+    }
+  };
+
   return (
     <section className="flex h-full min-h-0 flex-col" aria-labelledby="scientific-pipelines-title">
       <header className="shrink-0 border-b px-5 py-4">
@@ -412,9 +597,27 @@ export function DagWorkflowsPanel({
       <div className="min-h-0 flex-1 space-y-6 overflow-y-auto p-5">
         <section className="overflow-hidden rounded-lg border bg-background" aria-label="Vendored-engine pipelines">
           <PipelinesPanel
-            onRunPipeline={onRunPipeline}
+            onRunPipeline={(name) => void runVendoredPipeline(name)}
             onEditPipeline={onEditPipeline}
           />
+          {Object.keys(vendoredRunReceipts).length > 0 ? (
+            <ul className="border-t" aria-label="Vendored pipeline run receipts">
+              {Object.entries(vendoredRunReceipts).map(([name, receipt]) => (
+                <li key={name} className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 text-xs">
+                  <span className="font-medium">{name}</span>
+                  <span role="status" className={receipt.error ? "text-destructive" : "text-muted-foreground"}>
+                    {receipt.error
+                      ? `Run failed: ${receipt.error}`
+                      : receipt.runId
+                        ? `Run ${receipt.runId} · ${receipt.status}`
+                        : receipt.receiptId
+                          ? `Dispatch ${receipt.receiptId} · ${receipt.status}`
+                          : receipt.status}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
         </section>
 
         <section className="overflow-hidden rounded-lg border bg-background" aria-labelledby="typed-workflows-title">
