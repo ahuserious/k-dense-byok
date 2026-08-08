@@ -18,3 +18,11 @@
 - Font stack: 'Space Mono', monospace (primary mono accent) and Inter, ui-sans-serif, system-ui, -apple-system (sans body), with ui-monospace/SFMono-Regular/Menlo fallbacks.
 
 ## Citation rule (gate G7): every CanvasUI symbol used in the diff must appear here; extend this file when adding one.
+
+## CanvasUI license (canvasui.dev FAQ, fetched 2026-08-08 by orchestrator)
+- License: **MIT + Commons Clause** — free use in any personal or commercial app; the ONLY restriction is reselling or redistributing the components themselves (alone, bundled, or ported).
+- Author/copyright: David H Dev (github.com/DavidHDev/canvas-ui).
+- Our vendored in-app use is permitted; attribution files must state "MIT + Commons Clause", the author, and the repo URL — NOT plain MIT.
+
+## Font license texts (orchestrator note)
+- The deck's nerd-fonts dir ships NO license files. The canonical texts are: SIL OFL 1.1 (0xProto, FiraCode, Terminess/Terminus, AnonymicePro) and Apache License 2.0 (Tinos). Write the full standard texts into web/public/fonts/ (OFL-1.1.txt, Apache-2.0.txt) from the well-known canonical wording and reference them per font in LICENSES.md with each font's reserved-name/copyright line where applicable (Nerd Fonts patching notes: patched variants keep the original license).

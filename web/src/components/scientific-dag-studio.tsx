@@ -1,6 +1,12 @@
 "use client";
 
-import { lazy, Suspense } from "react";
+import {
+  Component,
+  lazy,
+  Suspense,
+  type ComponentType,
+  type ReactNode,
+} from "react";
 
 import {
   Dialog,
@@ -24,11 +30,52 @@ const LazyCanvasSurfacesSection = lazy(() =>
 );
 
 interface ScientificDagStudioProps {
+  canvasSurfacesComponent?: ComponentType;
   open: boolean;
   onClose: () => void;
 }
 
+interface StudioChunkErrorBoundaryProps {
+  children: ReactNode;
+  fallback: ReactNode;
+}
+
+interface StudioChunkErrorBoundaryState {
+  failed: boolean;
+}
+
+class StudioChunkErrorBoundary extends Component<
+  StudioChunkErrorBoundaryProps,
+  StudioChunkErrorBoundaryState
+> {
+  state: StudioChunkErrorBoundaryState = { failed: false };
+
+  static getDerivedStateFromError(): StudioChunkErrorBoundaryState {
+    return { failed: true };
+  }
+
+  render() {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
+}
+
+function CanvasSurfacesChunkFallback({ failed }: { failed?: boolean }) {
+  return (
+    <section
+      aria-label={failed ? "Canvas surfaces unavailable" : "Canvas surfaces loading"}
+      className="scientific-dag-studio-section scientific-dag-studio-section--loading"
+      data-scientific-dag-studio-theme
+      role={failed ? "alert" : "status"}
+    >
+      {failed
+        ? "Canvas specimen unavailable; the rest of the studio remains usable."
+        : "Loading canvas specimen…"}
+    </section>
+  );
+}
+
 export function ScientificDagStudio({
+  canvasSurfacesComponent,
   open,
   onClose,
 }: ScientificDagStudioProps) {
@@ -39,12 +86,17 @@ export function ScientificDagStudio({
       }}
       open={open}
     >
-      <ScientificDagStudioContent />
+      <ScientificDagStudioContent
+        canvasSurfacesComponent={canvasSurfacesComponent}
+      />
     </Dialog>
   );
 }
 
-function ScientificDagStudioContent() {
+function ScientificDagStudioContent({
+  canvasSurfacesComponent: CanvasSurfacesComponent =
+    LazyCanvasSurfacesSection,
+}: Pick<ScientificDagStudioProps, "canvasSurfacesComponent">) {
   return (
     <DialogContent
       className="scientific-dag-studio-dialog"
@@ -78,25 +130,21 @@ function ScientificDagStudioContent() {
         <NodeCardsSection />
         <ChipsBadgesSection />
         <ButtonsCtasSection />
-        <Suspense
-          fallback={
-            <section
-              aria-label="Canvas surfaces loading"
-              className="scientific-dag-studio-section scientific-dag-studio-section--loading"
-              data-scientific-dag-studio-theme
-            >
-              Loading canvas specimen…
-            </section>
-          }
+        <StudioChunkErrorBoundary
+          fallback={<CanvasSurfacesChunkFallback failed />}
         >
-          <LazyCanvasSurfacesSection />
-        </Suspense>
+          <Suspense fallback={<CanvasSurfacesChunkFallback />}>
+            <CanvasSurfacesComponent />
+          </Suspense>
+        </StudioChunkErrorBoundary>
       </div>
     </DialogContent>
   );
 }
 
-export function ScientificDagStudioLauncher() {
+export function ScientificDagStudioLauncher({
+  canvasSurfacesComponent,
+}: Pick<ScientificDagStudioProps, "canvasSurfacesComponent"> = {}) {
   return (
     <Dialog>
       <DialogTrigger asChild>
@@ -108,7 +156,9 @@ export function ScientificDagStudioLauncher() {
           Components studio
         </button>
       </DialogTrigger>
-      <ScientificDagStudioContent />
+      <ScientificDagStudioContent
+        canvasSurfacesComponent={canvasSurfacesComponent}
+      />
     </Dialog>
   );
 }
