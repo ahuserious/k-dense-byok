@@ -92,7 +92,9 @@ export interface CostEntry {
   entryId: string;
   ts: number;
   sessionId: string;
-  role: "agent" | "subagent" | "compute";
+  /** "workflow" rows come from the /pipelines cost bridge (out-of-process DAG
+   *  engine spend). Summaries fold them into the default (agent) bucket. */
+  role: "agent" | "subagent" | "compute" | "workflow";
   model: string;
   promptTokens: number;
   completionTokens: number;
@@ -145,7 +147,7 @@ export function recordRun(args: {
   model: string;
   before: CostSnapshot;
   after: CostSnapshot;
-  role?: "agent" | "subagent" | "compute";
+  role?: "agent" | "subagent" | "compute" | "workflow";
   projectId?: string;
   jobId?: string;
   estimated?: boolean;
