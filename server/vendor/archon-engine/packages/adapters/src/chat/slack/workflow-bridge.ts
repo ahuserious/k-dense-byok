@@ -120,7 +120,7 @@ export class SlackWorkflowBridge {
     if (!conversationId) return;
 
     // Skip if this conversation isn't one we have a Slack trigger for. This is
-    // how we filter Slack conversations from web/Telegram/etc. — the adapter
+    // how we filter Slack conversations from web and other adapters — the adapter
     // populates `triggeringMessages` on inbound mention/DM/slash.
     const trigger = this.adapter.getTriggeringMessage(conversationId);
     if (!trigger) return;

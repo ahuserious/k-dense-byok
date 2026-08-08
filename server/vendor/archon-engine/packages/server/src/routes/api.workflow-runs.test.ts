@@ -1138,7 +1138,7 @@ describe('POST /api/workflows/runs/:runId/resume', () => {
   });
 
   test('returns 400 when parent conversation is non-web', async () => {
-    // Slack/Telegram/GitHub-sourced runs cannot route through the web
+    // Slack/Discord/GitHub-sourced runs cannot route through the web
     // adapter — the dispatcher is wired to webAdapter + lockManager.
     mockGetWorkflowRun.mockResolvedValueOnce({
       ...MOCK_FAILED_RUN,
@@ -1587,10 +1587,10 @@ describe('approve/reject auto-resume', () => {
   });
 
   test('approve: skips dispatch when parent conversation is on a non-web platform', async () => {
-    // A Slack/Telegram/GitHub-sourced run being approved via the dashboard
+    // A Slack/Discord/GitHub-sourced run being approved via the dashboard
     // must not route through dispatchToOrchestrator — that helper is wired
     // to the web adapter + lock manager, so dispatching a Slack thread_ts
-    // or Telegram chat_id would misroute through the wrong adapter.
+    // or Discord chat_id would misroute through the wrong adapter.
     mockGetWorkflowRun.mockResolvedValueOnce({
       ...MOCK_PAUSED_RUN,
       parent_conversation_id: 'slack-parent-conv-uuid',

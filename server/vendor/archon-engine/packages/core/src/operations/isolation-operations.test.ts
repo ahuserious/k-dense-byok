@@ -52,6 +52,7 @@ function makeActiveEnv(overrides: Record<string, unknown> = {}) {
     codebase_id: 'cb-1',
     codebase_repository_url: 'https://github.com/owner/repo',
     codebase_default_cwd: '/repo',
+    created_by_platform: null,
     ...overrides,
   };
 }
@@ -63,6 +64,7 @@ function makeEnvWithAge(overrides: Record<string, unknown> = {}) {
     branch_name: 'feat',
     workflow_id: 'wf-1',
     days_since_activity: 1,
+    created_by_platform: null,
     ...overrides,
   };
 }
@@ -107,6 +109,25 @@ describe('listEnvironments', () => {
     expect(mockUpdateStatus).toHaveBeenCalledWith('env-ghost', 'destroyed');
     expect(result.ghostsReconciled).toBe(1);
     expect(result.totalEnvironments).toBe(0); // re-fetch returned empty
+  });
+
+  test('leaves a legacy Telegram environment untouched when its worktree is missing', async () => {
+    const legacyTelegramEnvironment = makeEnvWithAge({
+      id: 'env-legacy-telegram-ghost',
+      working_path: '/worktrees/telegram-ghost',
+      created_by_platform: 'telegram',
+    });
+    mockListAllActiveWithCodebase.mockResolvedValueOnce([makeActiveEnv()]);
+    mockListByCodebaseWithAge.mockResolvedValueOnce([legacyTelegramEnvironment]);
+    mockWorktreeExists.mockResolvedValueOnce(false);
+
+    const result = await listEnvironments();
+
+    expect(mockUpdateStatus).not.toHaveBeenCalled();
+    expect(mockListByCodebaseWithAge).toHaveBeenCalledTimes(1);
+    expect(result.ghostsReconciled).toBe(0);
+    expect(result.totalEnvironments).toBe(1);
+    expect(result.codebases[0]?.environments).toEqual([legacyTelegramEnvironment]);
   });
 
   test('does not re-fetch when no ghosts found', async () => {

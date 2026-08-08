@@ -67,7 +67,7 @@ const SAMPLE_RUNS: Run[] = [
     ...baseRun,
     id: 'e5b3c742-cancelled',
     workflow: 'assist',
-    origin: 'telegram',
+    origin: 'discord',
     status: 'cancelled',
     startedAt: new Date(Date.now() - 47 * 1000).toISOString(),
     finishedAt: new Date().toISOString(),
@@ -170,7 +170,6 @@ export function PreviewPage(): ReactElement {
             <OriginBadge origin="web" />
             <OriginBadge origin="cli" />
             <OriginBadge origin="slack" />
-            <OriginBadge origin="telegram" />
             <OriginBadge origin="discord" />
             <OriginBadge origin="github" />
             <OriginBadge origin="unknown" />

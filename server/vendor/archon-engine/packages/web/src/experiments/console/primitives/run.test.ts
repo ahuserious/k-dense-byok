@@ -1,4 +1,6 @@
 import { describe, test, expect } from 'bun:test';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { OriginBadge } from '../components/OriginBadge';
 import { toRun, normalizeOrigin } from './run';
 
 type Raw = Parameters<typeof toRun>[0];
@@ -17,6 +19,7 @@ describe('normalizeOrigin', () => {
     expect(normalizeOrigin('cli')).toBe('cli');
     expect(normalizeOrigin('slack')).toBe('slack');
     expect(normalizeOrigin('telegram')).toBe('telegram');
+    expect(normalizeOrigin('matrix')).toBe('unknown');
     expect(normalizeOrigin('discord')).toBe('discord');
     expect(normalizeOrigin('github')).toBe('github');
   });
@@ -51,6 +54,22 @@ describe('toRun — provenance', () => {
       raw({ id: 'r1', workflow_name: 'plan', status: 'running', platform_type: 'web' })
     );
     expect(r.origin).toBe('web');
+  });
+
+  test('persisted Telegram history retains its display-only provenance label', () => {
+    const persistedRun = toRun(
+      raw({
+        id: 'legacy-telegram-run',
+        workflow_name: 'plan',
+        status: 'completed',
+        platform_type: 'telegram',
+      })
+    );
+
+    expect(persistedRun.origin).toBe('telegram');
+    expect(renderToStaticMarkup(OriginBadge({ origin: persistedRun.origin }))).toContain(
+      'Origin: Telegram'
+    );
   });
 
   test('detail-sourced row still populates conversationPlatformId (unchanged behavior)', () => {

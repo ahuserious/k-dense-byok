@@ -68,7 +68,7 @@ export interface CommandResult {
 
 /**
  * Generic platform adapter interface
- * Allows supporting multiple platforms (Telegram, Slack, GitHub, etc.)
+ * Allows supporting multiple platforms (Slack, GitHub, Discord, etc.)
  */
 export interface MessageMetadata {
   category?:
@@ -104,7 +104,7 @@ export interface IPlatformAdapter {
   getStreamingMode(): 'stream' | 'batch';
 
   /**
-   * Get the platform type identifier (e.g., 'telegram', 'github', 'slack')
+   * Get the platform type identifier (e.g., 'discord', 'github', 'slack')
    */
   getPlatformType(): string;
 
@@ -121,7 +121,7 @@ export interface IPlatformAdapter {
   /**
    * Optional: Send a structured event (MessageChunk) to the platform.
    * Only implemented by adapters that can display rich structured data (e.g., Web UI).
-   * Other adapters (Telegram, Slack) continue using sendMessage() for formatted text.
+   * Other adapters such as Slack continue using sendMessage() for formatted text.
    */
   sendStructuredEvent?(conversationId: string, event: MessageChunk): Promise<void>;
 

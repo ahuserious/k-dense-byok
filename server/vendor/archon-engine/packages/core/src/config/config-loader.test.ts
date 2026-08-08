@@ -40,7 +40,6 @@ describe('config-loader', () => {
   const originalEnv: Record<string, string | undefined> = {};
   const envVars = [
     'DEFAULT_AI_ASSISTANT',
-    'TELEGRAM_STREAMING_MODE',
     'DISCORD_STREAMING_MODE',
     'SLACK_STREAMING_MODE',
     'MAX_CONCURRENT_CONVERSATIONS',
@@ -90,14 +89,14 @@ describe('config-loader', () => {
       mockFsReadFile.mockResolvedValue(`
 defaultAssistant: codex
 streaming:
-  telegram: batch
+  discord: stream
 concurrency:
   maxConversations: 5
 `);
 
       const config = await loadGlobalConfig();
       expect(config.defaultAssistant).toBe('codex');
-      expect(config.streaming?.telegram).toBe('batch');
+      expect(config.streaming?.discord).toBe('stream');
       expect(config.concurrency?.maxConversations).toBe(5);
     });
 
@@ -278,7 +277,7 @@ recommendedWorkflows: "archon-plan"
       // explicitly rather than asserting an exhaustive shape.
       expect(config.assistants.claude).toEqual({});
       expect(config.assistants.codex).toEqual({});
-      expect(config.streaming.telegram).toBe('stream');
+      expect(config.streaming.discord).toBe('batch');
       expect(config.concurrency.maxConversations).toBe(10);
     });
 
@@ -286,23 +285,23 @@ recommendedWorkflows: "archon-plan"
       mockFsReadFile.mockResolvedValue(`
 defaultAssistant: claude
 streaming:
-  telegram: stream
+  discord: batch
 `);
 
       process.env.DEFAULT_AI_ASSISTANT = 'codex';
-      process.env.TELEGRAM_STREAMING_MODE = 'batch';
+      process.env.DISCORD_STREAMING_MODE = 'stream';
 
       const config = await loadConfig();
 
       // Config file explicitly set 'claude' — env var must NOT override it
       expect(config.assistant).toBe('claude');
       // Streaming env var still overrides (no config-file guard needed there)
-      expect(config.streaming.telegram).toBe('batch');
+      expect(config.streaming.discord).toBe('stream');
     });
 
     test('env var DEFAULT_AI_ASSISTANT applies when no config file sets the assistant', async () => {
       // Global config exists but does not set defaultAssistant
-      mockFsReadFile.mockResolvedValue('streaming:\n  telegram: stream\n');
+      mockFsReadFile.mockResolvedValue('streaming:\n  discord: batch\n');
       process.env.DEFAULT_AI_ASSISTANT = 'codex';
 
       const config = await loadConfig();

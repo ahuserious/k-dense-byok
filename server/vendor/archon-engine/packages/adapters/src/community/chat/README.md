@@ -1,6 +1,6 @@
 # Community Chat Adapters
 
-Chat adapters connect Archon to messaging platforms (Slack, Telegram, Discord, etc.) via polling or WebSocket.
+Chat adapters connect Archon to messaging platforms such as Slack and Discord via WebSocket.
 
 ## Interface
 

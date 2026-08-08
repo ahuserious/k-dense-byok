@@ -3311,8 +3311,6 @@ export interface components {
       };
       streaming: {
         /** @enum {string} */
-        telegram: 'stream' | 'batch';
-        /** @enum {string} */
         discord: 'stream' | 'batch';
         /** @enum {string} */
         slack: 'stream' | 'batch';

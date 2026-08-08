@@ -30,9 +30,10 @@ mock.module('../db/codebases', () => ({
   createCodebase: mock(() => Promise.resolve({ id: 'new-codebase-id' })),
 }));
 
+const mockUpdateIsolationStatus = mock(() => Promise.resolve());
 mock.module('../db/isolation-environments', () => ({
   createIsolationStore: mock(() => ({
-    updateStatus: mock(() => Promise.resolve()),
+    updateStatus: mockUpdateIsolationStatus,
   })),
 }));
 
@@ -204,6 +205,7 @@ describe('validateAndResolveIsolation', () => {
   beforeEach(() => {
     platform = new MockPlatformAdapter();
     mockUpdateConversation.mockClear();
+    mockUpdateIsolationStatus.mockClear();
     mockResolve.mockClear();
   });
 
@@ -242,5 +244,23 @@ describe('validateAndResolveIsolation', () => {
       'Cleaned up 3 merged worktree(s) to make room.'
     );
     expect(result.status).toBe('new');
+  });
+
+  test('link failure does not destroy a reused legacy Telegram environment', async () => {
+    const conversation = makeConversation();
+    const codebase = makeCodebase();
+
+    mockResolve.mockResolvedValueOnce({
+      status: 'resolved',
+      env: makeEnvRow({ created_by_platform: 'telegram' }),
+      cwd: '/worktrees/issue-42',
+      method: { type: 'existing' },
+    });
+    mockUpdateConversation.mockRejectedValueOnce(new Error('link failed'));
+
+    await expect(
+      validateAndResolveIsolation(conversation, codebase, platform, 'conv-1')
+    ).rejects.toThrow('link failed');
+    expect(mockUpdateIsolationStatus).not.toHaveBeenCalled();
   });
 });

@@ -375,6 +375,84 @@ describe('IsolationResolver', () => {
     expect(updatedStatus).toBe('destroyed');
   });
 
+  test('checkExisting blocks repair of a stale legacy Telegram record', async () => {
+    const env = makeEnvRow({ created_by_platform: 'telegram' });
+    worktreeExistsSpy.mockResolvedValue(false);
+
+    let updateCalled = false;
+    const resolver = createResolver({
+      store: makeMockStore({
+        getById: async () => env,
+        updateStatus: async () => {
+          updateCalled = true;
+        },
+      }),
+    });
+
+    const result = await resolver.resolve({
+      existingEnvId: 'env-1',
+      codebase: defaultCodebase,
+      platformType: 'web',
+    });
+
+    expect(result.status).toBe('blocked');
+    expect(updateCalled).toBe(false);
+  });
+
+  test('retries leave a protected legacy Telegram workflow row byte-identical', async () => {
+    const protectedEnvironment = makeEnvRow({
+      id: 'env-legacy-telegram',
+      workflow_type: 'issue',
+      workflow_id: '42',
+      working_path: '/worktrees/legacy-telegram-missing',
+      branch_name: 'legacy-telegram-branch',
+      created_by_platform: 'telegram',
+      created_by_user_id: 'legacy-user',
+      metadata: { provenance: 'telegram-import', nested: { version: 1 } },
+    });
+    const bytesBeforeRetry = JSON.stringify(protectedEnvironment);
+    worktreeExistsSpy.mockResolvedValue(false);
+
+    let statusUpdateCount = 0;
+    let storeCreateCount = 0;
+    let providerCreateCount = 0;
+    const resolver = createResolver({
+      store: makeMockStore({
+        findActiveByWorkflow: async (_cid, wt, wid) =>
+          wt === 'issue' && wid === '42' ? protectedEnvironment : null,
+        updateStatus: async () => {
+          statusUpdateCount++;
+        },
+        create: async () => {
+          storeCreateCount++;
+          throw new Error('protected row must not be upserted');
+        },
+      }),
+      provider: {
+        ...makeMockProvider(),
+        create: async request => {
+          providerCreateCount++;
+          return makeMockProvider().create(request);
+        },
+      },
+    });
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await resolver.resolve({
+        existingEnvId: null,
+        codebase: defaultCodebase,
+        hints: { workflowType: 'issue', workflowId: '42' },
+        platformType: 'web',
+      });
+      expect(result.status).toBe('blocked');
+    }
+
+    expect(statusUpdateCount).toBe(0);
+    expect(storeCreateCount).toBe(0);
+    expect(providerCreateCount).toBe(0);
+    expect(JSON.stringify(protectedEnvironment)).toBe(bytesBeforeRetry);
+  });
+
   test('findReusable marks stale DB record as destroyed when worktree gone', async () => {
     const env = makeEnvRow({ workflow_type: 'issue', workflow_id: '42' });
     // worktreeExists returns false — worktree is gone

@@ -1542,7 +1542,7 @@ describe('workflow dispatch routing — interactive flag', () => {
   });
 
   test('chat resume: resumes a paused run on chat platform when one exists', async () => {
-    // Regression for #1741: chat platforms (slack/telegram/discord/github) used
+    // Regression for #1741: chat platforms (slack/discord/discord/github) used
     // to skip the resume lookup entirely and always start a fresh run, losing
     // the prior worktree and re-asking approval questions indefinitely. The
     // resume lookup must now run for ALL platforms; if a prior run is paused
@@ -1563,7 +1563,7 @@ describe('workflow dispatch routing — interactive flag', () => {
 
     const platform = {
       ...makePlatform(),
-      getPlatformType: mock(() => 'telegram' as const),
+      getPlatformType: mock(() => 'discord' as const),
     };
     await handleMessage(platform, 'conv-1', '/workflow run test-workflow');
 
@@ -1581,7 +1581,7 @@ describe('workflow dispatch routing — interactive flag', () => {
   });
 
   test('scopes resume query to (workflow, conversation, codebase)', async () => {
-    // Persistent chat conversation IDs (Telegram chat_id, Slack thread) can
+    // Persistent chat conversation IDs (Discord chat_id, Slack thread) can
     // accumulate runs from multiple projects. The resume lookup must include
     // codebase_id so a fresh invocation for project A never resumes a stale
     // run from project B.

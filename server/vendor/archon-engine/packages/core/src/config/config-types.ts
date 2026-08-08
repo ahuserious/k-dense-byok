@@ -98,7 +98,6 @@ export interface GlobalConfig {
    * Platform streaming preferences (can be overridden per conversation)
    */
   streaming?: {
-    telegram?: 'stream' | 'batch';
     discord?: 'stream' | 'batch';
     slack?: 'stream' | 'batch';
   };
@@ -297,7 +296,6 @@ export interface MergedConfig {
    */
   tiers?: RawTiersConfig;
   streaming: {
-    telegram: 'stream' | 'batch';
     discord: 'stream' | 'batch';
     slack: 'stream' | 'batch';
   };
@@ -350,7 +348,6 @@ export interface SafeConfig {
   assistant: string;
   assistants: ProviderDefaultsMap;
   streaming: {
-    telegram: 'stream' | 'batch';
     discord: 'stream' | 'batch';
     slack: 'stream' | 'batch';
   };

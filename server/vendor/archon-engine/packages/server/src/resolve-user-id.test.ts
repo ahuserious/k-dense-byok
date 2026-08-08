@@ -2,7 +2,7 @@
  * Tests for resolveUserId — the server-level helper that wraps
  * userDb.findOrCreateUserByPlatformIdentity with a never-throws guarantee.
  *
- * The never-throws contract is load-bearing for Slack/Telegram/Discord
+ * The never-throws contract is load-bearing for Slack and Discord
  * message handling: if resolveUserId ever rethrows, the entire conversation
  * silently stops being processed. Regressions here are catastrophic.
  */
@@ -59,9 +59,9 @@ describe('resolveUserId', () => {
     expect(findOrCreate).toHaveBeenCalledWith('slack', 'U123', 'Alice');
   });
 
-  test('coerces numeric platform ids to string (telegram)', async () => {
-    await resolveUserId('telegram', 7654321, 'Bob');
-    expect(findOrCreate).toHaveBeenCalledWith('telegram', '7654321', 'Bob');
+  test('coerces numeric platform ids to string', async () => {
+    await resolveUserId('discord', 7654321, 'Bob');
+    expect(findOrCreate).toHaveBeenCalledWith('discord', '7654321', 'Bob');
   });
 
   test('returns undefined for undefined platform user id WITHOUT calling DB', async () => {
@@ -91,14 +91,14 @@ describe('resolveUserId', () => {
 
   test('logs failure as static server.user_resolve_failed event (not platform-templated)', async () => {
     findOrCreate.mockRejectedValueOnce(new Error('connection refused'));
-    await resolveUserId('telegram', 999, undefined);
+    await resolveUserId('discord', 999, undefined);
 
     const failedCall = warnCalls.find(c => c.evt === 'server.user_resolve_failed');
     expect(failedCall).toBeDefined();
-    expect(failedCall?.obj).toHaveProperty('platform', 'telegram');
+    expect(failedCall?.obj).toHaveProperty('platform', 'discord');
     expect(failedCall?.obj).toHaveProperty('platformUserId', '999');
     // Confirm we did NOT use a per-platform event name (would collide with the
     // GitHub adapter's own `github.user_resolve_failed` event).
-    expect(warnCalls.find(c => c.evt === 'telegram.user_resolve_failed')).toBeUndefined();
+    expect(warnCalls.find(c => c.evt === 'discord.user_resolve_failed')).toBeUndefined();
   });
 });

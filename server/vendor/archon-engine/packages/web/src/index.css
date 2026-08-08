@@ -90,8 +90,8 @@
   --color-node-bash: var(--node-bash);
   --color-node-loop: var(--node-loop);
   --color-node-approval: var(--node-approval);
-  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, monospace;
 
   /* shadcn theme mappings */
   --color-foreground: var(--foreground);
@@ -328,5 +328,5 @@ body {
 /* Monospace chrome (Raindrop aesthetic). The builder uses the `font-sans` utility
  * everywhere, which resolves to this var. */
 @theme inline {
-  --font-sans: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --font-sans: ui-monospace, 'SF Mono', Menlo, monospace;
 }

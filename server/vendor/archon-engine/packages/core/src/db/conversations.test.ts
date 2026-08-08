@@ -44,7 +44,7 @@ describe('conversations', () => {
 
     const existingConversation: Conversation = {
       id: 'conv-123',
-      platform_type: 'telegram',
+      platform_type: 'discord',
       platform_conversation_id: 'chat-456',
       ai_assistant_type: 'claude',
       codebase_id: null,
@@ -58,13 +58,13 @@ describe('conversations', () => {
     test('returns existing conversation when found', async () => {
       mockQuery.mockResolvedValueOnce(createQueryResult([existingConversation]));
 
-      const result = await getOrCreateConversation('telegram', 'chat-456');
+      const result = await getOrCreateConversation('discord', 'chat-456');
 
       expect(result).toEqual(existingConversation);
       expect(mockQuery).toHaveBeenCalledTimes(1);
       expect(mockQuery).toHaveBeenCalledWith(
         'SELECT * FROM remote_agent_conversations WHERE platform_type = $1 AND platform_conversation_id = $2',
-        ['telegram', 'chat-456']
+        ['discord', 'chat-456']
       );
     });
 
@@ -79,14 +79,14 @@ describe('conversations', () => {
       // Second query creates new
       mockQuery.mockResolvedValueOnce(createQueryResult([newConversation]));
 
-      const result = await getOrCreateConversation('telegram', 'chat-789');
+      const result = await getOrCreateConversation('discord', 'chat-789');
 
       expect(result).toEqual(newConversation);
       expect(mockQuery).toHaveBeenCalledTimes(2);
       expect(mockQuery).toHaveBeenNthCalledWith(
         2,
         'INSERT INTO remote_agent_conversations (platform_type, platform_conversation_id, ai_assistant_type, codebase_id, cwd, user_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-        ['telegram', 'chat-789', 'claude', null, null, null]
+        ['discord', 'chat-789', 'claude', null, null, null]
       );
     });
 
@@ -105,7 +105,7 @@ describe('conversations', () => {
       // Third query creates new
       mockQuery.mockResolvedValueOnce(createQueryResult([newConversation]));
 
-      const result = await getOrCreateConversation('telegram', 'chat-789', 'codebase-123');
+      const result = await getOrCreateConversation('discord', 'chat-789', 'codebase-123');
 
       expect(result).toEqual(newConversation);
       expect(mockQuery).toHaveBeenCalledTimes(3);
@@ -117,7 +117,7 @@ describe('conversations', () => {
       expect(mockQuery).toHaveBeenNthCalledWith(
         3,
         'INSERT INTO remote_agent_conversations (platform_type, platform_conversation_id, ai_assistant_type, codebase_id, cwd, user_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-        ['telegram', 'chat-789', 'codex', 'codebase-123', null, null]
+        ['discord', 'chat-789', 'codex', 'codebase-123', null, null]
       );
     });
 
@@ -134,13 +134,13 @@ describe('conversations', () => {
       mockQuery.mockResolvedValueOnce(createQueryResult([]));
       mockQuery.mockResolvedValueOnce(createQueryResult([newConversation]));
 
-      const result = await getOrCreateConversation('telegram', 'chat-789');
+      const result = await getOrCreateConversation('discord', 'chat-789');
 
       expect(result).toEqual(newConversation);
       expect(mockQuery).toHaveBeenNthCalledWith(
         2,
         'INSERT INTO remote_agent_conversations (platform_type, platform_conversation_id, ai_assistant_type, codebase_id, cwd, user_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-        ['telegram', 'chat-789', 'codex', null, null, null]
+        ['discord', 'chat-789', 'codex', null, null, null]
       );
     });
 
@@ -157,13 +157,13 @@ describe('conversations', () => {
       // Third query creates new
       mockQuery.mockResolvedValueOnce(createQueryResult([newConversation]));
 
-      const result = await getOrCreateConversation('telegram', 'chat-789', 'non-existent-codebase');
+      const result = await getOrCreateConversation('discord', 'chat-789', 'non-existent-codebase');
 
       expect(result).toEqual(newConversation);
       expect(mockQuery).toHaveBeenNthCalledWith(
         3,
         'INSERT INTO remote_agent_conversations (platform_type, platform_conversation_id, ai_assistant_type, codebase_id, cwd, user_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-        ['telegram', 'chat-789', 'claude', 'non-existent-codebase', null, null]
+        ['discord', 'chat-789', 'claude', 'non-existent-codebase', null, null]
       );
     });
 
@@ -285,17 +285,17 @@ describe('conversations', () => {
     });
 
     test('works for any platform type without filtering', async () => {
-      const telegramConv: Conversation = {
+      const discordConv: Conversation = {
         ...cliConversation,
         id: 'conv-tg-1',
-        platform_type: 'telegram',
+        platform_type: 'discord',
         platform_conversation_id: 'tg-chat-999',
       };
-      mockQuery.mockResolvedValueOnce(createQueryResult([telegramConv]));
+      mockQuery.mockResolvedValueOnce(createQueryResult([discordConv]));
 
       const result = await findConversationByPlatformId('tg-chat-999');
 
-      expect(result).toEqual(telegramConv);
+      expect(result).toEqual(discordConv);
       // Verify no platform_type in the query
       expect(mockQuery).toHaveBeenCalledWith(
         'SELECT * FROM remote_agent_conversations WHERE platform_conversation_id = $1',

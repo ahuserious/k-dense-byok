@@ -16,7 +16,7 @@ function getLog(): ReturnType<typeof createLogger> {
  * Constructed by the orchestrator from platform type, issue context strings, and isolation hints.
  */
 export interface RouterContext {
-  /** Platform type identifier from the adapter (e.g., 'github', 'slack', 'telegram', 'test') */
+  /** Platform type identifier from the adapter (e.g., 'github', 'slack', 'discord', 'test') */
   platformType?: string;
   /** Whether this is a PR vs issue - currently only relevant for GitHub */
   isPullRequest?: boolean;

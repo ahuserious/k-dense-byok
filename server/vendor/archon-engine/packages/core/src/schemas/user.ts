@@ -9,7 +9,6 @@ import { z } from '@hono/zod-openapi';
 
 export const identityPlatformSchema = z.enum([
   'slack',
-  'telegram',
   'discord',
   'github',
   'gitea',

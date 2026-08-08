@@ -51,6 +51,13 @@ const STALE_THRESHOLD_DAYS = parseInt(process.env.STALE_THRESHOLD_DAYS ?? '14', 
 const CLEANUP_INTERVAL_HOURS = parseInt(process.env.CLEANUP_INTERVAL_HOURS ?? '6', 10);
 const SESSION_RETENTION_DAYS = parseInt(process.env.SESSION_RETENTION_DAYS ?? '30', 10);
 
+/** Persisted upgrade data only; this does not restore the Telegram adapter. */
+function isLegacyTelegramEnvironment(
+  env: Pick<IsolationEnvironmentRow, 'created_by_platform'>
+): boolean {
+  return env.created_by_platform === 'telegram';
+}
+
 // Export configuration for use by other modules
 export { STALE_THRESHOLD_DAYS, SESSION_RETENTION_DAYS };
 
@@ -113,6 +120,10 @@ export async function onConversationClosed(
     return;
   }
 
+  // Conversation-close cleanup is automatic. Legacy Telegram worktrees may
+  // only be removed through the explicit manual/archival primitive.
+  if (isLegacyTelegramEnvironment(env)) return;
+
   // Clear this conversation's reference (best-effort - conversation may be deleted)
   await conversationDb
     .updateConversation(conversation.id, { isolation_env_id: null })
@@ -163,6 +174,8 @@ export async function removeEnvironment(
   envId: string,
   options?: RemoveEnvironmentOptions
 ): Promise<RemoveEnvironmentResult> {
+  // This exported primitive is the intentional manual/archival removal path.
+  // Automatic callers must apply the legacy Telegram exemption before calling.
   const noopResult: RemoveEnvironmentResult = {
     worktreeRemoved: false,
     branchDeleted: false,
@@ -307,6 +320,11 @@ export async function runScheduledCleanup(): Promise<CleanupReport> {
         // Skip if already processing or destroyed
         if (env.status !== 'active') continue;
 
+        // Telegram adapter support was removed, but existing databases may still
+        // contain its persistent worktrees. Preserve those records before any
+        // path or branch cleanup can delete legacy committed work.
+        if (isLegacyTelegramEnvironment(env)) continue;
+
         // Check if path still exists
         const pathExists = await worktreeExists(toWorktreePath(env.working_path));
         if (!pathExists) {
@@ -355,11 +373,6 @@ export async function runScheduledCleanup(): Promise<CleanupReport> {
             report.removed.push(`${env.id} (merged)`);
           }
           continue;
-        }
-
-        // Check staleness (skip Telegram - already filtered in query but double-check)
-        if (env.created_by_platform === 'telegram') {
-          continue; // Never cleanup Telegram (persistent workspace)
         }
 
         // Check if environment is stale
@@ -479,8 +492,12 @@ export async function getWorktreeStatusBreakdown(
   const mainBranch = await resolveBaseBranch(repoPath, mainRepoPath);
 
   for (const env of environments) {
-    // Skip Telegram (never shown as stale)
-    const isTelegram = env.created_by_platform === 'telegram';
+    // Keep legacy Telegram worktrees active even if their branch later merged.
+    if (isLegacyTelegramEnvironment(env)) {
+      breakdown.active++;
+      breakdown.activeEnvs.push({ id: env.id, branchName: env.branch_name });
+      continue;
+    }
 
     // Check if merged (treat as not-merged on unexpected errors)
     let merged = false;
@@ -498,8 +515,7 @@ export async function getWorktreeStatusBreakdown(
       continue;
     }
 
-    // Check if stale (non-Telegram only)
-    const isStale = !isTelegram && env.days_since_activity >= STALE_THRESHOLD_DAYS;
+    const isStale = env.days_since_activity >= STALE_THRESHOLD_DAYS;
     if (isStale) {
       breakdown.stale++;
       breakdown.staleEnvs.push({
@@ -530,8 +546,8 @@ export async function cleanupStaleWorktrees(
   const environments = await isolationEnvDb.listByCodebaseWithAge(codebaseId);
 
   for (const env of environments) {
-    // Skip Telegram
-    if (env.created_by_platform === 'telegram') continue;
+    // This is a persisted-data exemption, not an active platform adapter.
+    if (isLegacyTelegramEnvironment(env)) continue;
 
     // Check if stale
     if (env.days_since_activity < STALE_THRESHOLD_DAYS) continue;
@@ -609,6 +625,10 @@ export async function cleanupMergedWorktrees(
   const prStateCache = new Map<string, PrState>();
 
   for (const env of environments) {
+    // This path also backs capacity cleanup. Exempt persisted Telegram data
+    // before merge/PR checks can lead to automatic local or remote deletion.
+    if (isLegacyTelegramEnvironment(env)) continue;
+
     // Check if safe to remove via union of signals (skip env on unexpected errors)
     let safe = false;
     let openPr = false;

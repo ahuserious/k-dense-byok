@@ -83,5 +83,8 @@ env-level fallback.
 - Health: `GET /api/health` → `{"status":"ok"}`. Builder UI:
   `/legacy/workflows/builder` (serves `packages/web/dist`; build with
   `bun run build:web`).
-- Platform adapters (Telegram/Slack/GitHub/Discord) are env-gated and stay
-  dormant without their credentials ("web-only mode").
+- Platform adapters: Telegram was REMOVED outright in the S2a
+  de-instrumentation (a set TELEGRAM_BOT_TOKEN is ignored, never fatal);
+  remaining adapters (Slack/GitHub/Discord) are env-gated and stay dormant
+  without their credentials ("web-only mode"). Telemetry/update-check/remote
+  egress was removed or gated default-off per docs/adr/S2a-vendor-egress.md.

@@ -49,6 +49,7 @@ async function reconcileGhosts(
     working_path: string;
     branch_name: string | null;
     workflow_id: string;
+    created_by_platform: string | null;
   }[]
 ): Promise<number> {
   let reconciled = 0;
@@ -56,6 +57,10 @@ async function reconcileGhosts(
     try {
       const exists = await worktreeExists(toWorktreePath(env.working_path));
       if (!exists) {
+        // Telegram support is gone, but its persisted environments may still
+        // contain user work. Only an explicit/manual removal may archive them.
+        if (env.created_by_platform === 'telegram') continue;
+
         await isolationDb.updateStatus(env.id, 'destroyed');
         getLog().info({ envId: env.id, path: env.working_path }, 'isolation.ghost_reconciled');
         reconciled++;

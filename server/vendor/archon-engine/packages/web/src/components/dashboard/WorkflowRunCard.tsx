@@ -4,7 +4,6 @@ import {
   Globe,
   Terminal,
   Hash,
-  Send,
   GitBranch,
   ExternalLink,
   MessageSquare,
@@ -39,7 +38,6 @@ const PLATFORM_ICONS: Record<string, React.ReactElement> = {
   web: <Globe className="h-3.5 w-3.5" />,
   cli: <Terminal className="h-3.5 w-3.5" />,
   slack: <Hash className="h-3.5 w-3.5" />,
-  telegram: <Send className="h-3.5 w-3.5" />,
   github: <GitBranch className="h-3.5 w-3.5" />,
 };
 

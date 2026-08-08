@@ -619,7 +619,6 @@ function PlatformConnectionsSection({
   const platforms = [
     { name: 'Web', connected: active.has('Web') },
     { name: 'Slack', connected: active.has('Slack') },
-    { name: 'Telegram', connected: active.has('Telegram') },
     { name: 'Discord', connected: active.has('Discord') },
     { name: 'GitHub', connected: active.has('GitHub') },
     { name: 'Gitea', connected: active.has('Gitea') },

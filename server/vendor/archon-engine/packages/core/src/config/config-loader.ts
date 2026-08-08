@@ -215,7 +215,6 @@ const DEFAULT_CONFIG_CONTENT = `# Archon Global Configuration
 
 # Streaming mode per platform (stream or batch)
 # streaming:
-#   telegram: stream
 #   discord: batch
 #   slack: batch
 
@@ -366,7 +365,6 @@ function getDefaults(): MergedConfig {
     assistant: providers.find(p => p.builtIn)?.id ?? 'claude',
     assistants: registeredAssistants,
     streaming: {
-      telegram: 'stream',
       discord: 'batch',
       slack: 'batch',
     },
@@ -431,11 +429,6 @@ function applyEnvOverrides(
 
   // Streaming overrides
   const streamingModes = ['stream', 'batch'] as const;
-  const telegramMode = process.env.TELEGRAM_STREAMING_MODE;
-  if (telegramMode && streamingModes.includes(telegramMode as 'stream' | 'batch')) {
-    config.streaming.telegram = telegramMode as 'stream' | 'batch';
-  }
-
   const discordMode = process.env.DISCORD_STREAMING_MODE;
   if (discordMode && streamingModes.includes(discordMode as 'stream' | 'batch')) {
     config.streaming.discord = discordMode as 'stream' | 'batch';
@@ -494,7 +487,6 @@ function mergeGlobalConfig(defaults: MergedConfig, global: GlobalConfig): Merged
 
   // Streaming preferences
   if (global.streaming) {
-    if (global.streaming.telegram) result.streaming.telegram = global.streaming.telegram;
     if (global.streaming.discord) result.streaming.discord = global.streaming.discord;
     if (global.streaming.slack) result.streaming.slack = global.streaming.slack;
   }
@@ -762,7 +754,6 @@ export function toSafeConfig(config: MergedConfig): SafeConfig {
     assistant: config.assistant,
     assistants: toSafeAssistantDefaults(config.assistants),
     streaming: {
-      telegram: config.streaming.telegram,
       discord: config.streaming.discord,
       slack: config.streaming.slack,
     },

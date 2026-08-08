@@ -114,26 +114,66 @@ import {
   SESSION_RETENTION_DAYS,
 } from './cleanup-service';
 
+/** Clear call history, queued one-shot implementations, and restore stable defaults. */
+function resetSharedMocks(): void {
+  mockExecFileAsync.mockReset();
+  mockHasUncommittedChanges.mockReset();
+  mockWorktreeExists.mockReset();
+  mockGetDefaultBranch.mockReset();
+  mockIsBranchMerged.mockReset();
+  mockIsPatchEquivalent.mockReset();
+  mockGetLastCommitDate.mockReset();
+  mockDestroy.mockReset();
+  mockGetPrState.mockReset();
+  mockListAllActiveWithCodebase.mockReset();
+  mockUpdateStatus.mockReset();
+  mockGetConversationsUsingEnv.mockReset();
+  mockGetById.mockReset();
+  mockListByCodebase.mockReset();
+  mockListByCodebaseWithAge.mockReset();
+  mockCountActiveByCodebase.mockReset();
+  mockGetConversationByPlatformId.mockReset();
+  mockUpdateConversation.mockReset();
+  mockGetActiveSession.mockReset();
+  mockDeactivateSession.mockReset();
+  mockDeleteOldSessions.mockReset();
+  mockGetCodebase.mockReset();
+  mockLoadRepoConfig.mockReset();
+
+  mockExecFileAsync.mockResolvedValue({ stdout: '', stderr: '' });
+  mockHasUncommittedChanges.mockResolvedValue(false);
+  mockWorktreeExists.mockResolvedValue(false);
+  mockGetDefaultBranch.mockResolvedValue('main');
+  mockIsBranchMerged.mockResolvedValue(false);
+  mockIsPatchEquivalent.mockResolvedValue(false);
+  mockGetLastCommitDate.mockResolvedValue(null);
+  mockDestroy.mockResolvedValue({
+    worktreeRemoved: true,
+    branchDeleted: true,
+    remoteBranchDeleted: true,
+    directoryClean: true,
+    warnings: [],
+  });
+  mockGetPrState.mockResolvedValue('NONE');
+  mockListAllActiveWithCodebase.mockResolvedValue([]);
+  mockUpdateStatus.mockResolvedValue(undefined);
+  mockGetConversationsUsingEnv.mockResolvedValue([]);
+  mockGetById.mockResolvedValue(null);
+  mockListByCodebase.mockResolvedValue([]);
+  mockListByCodebaseWithAge.mockResolvedValue([]);
+  mockCountActiveByCodebase.mockResolvedValue(0);
+  mockGetConversationByPlatformId.mockResolvedValue(null);
+  mockUpdateConversation.mockResolvedValue(undefined);
+  mockGetActiveSession.mockResolvedValue(null);
+  mockDeactivateSession.mockResolvedValue(undefined);
+  mockDeleteOldSessions.mockResolvedValue(0);
+  mockGetCodebase.mockResolvedValue(null);
+  mockLoadRepoConfig.mockResolvedValue({});
+}
+
 describe('cleanup-service', () => {
   beforeEach(() => {
-    mockExecFileAsync.mockClear();
-    mockHasUncommittedChanges.mockClear();
-    mockWorktreeExists.mockClear();
-    mockGetDefaultBranch.mockClear();
-    mockIsBranchMerged.mockClear();
-    mockGetLastCommitDate.mockClear();
-    mockDestroy.mockClear();
-    mockUpdateStatus.mockClear();
-    mockGetById.mockClear();
-    mockGetCodebase.mockClear();
-    mockLoadRepoConfig.mockClear();
-    // Reset defaults
-    mockHasUncommittedChanges.mockResolvedValue(false);
-    mockWorktreeExists.mockResolvedValue(false);
-    mockGetDefaultBranch.mockResolvedValue('main');
-    mockIsBranchMerged.mockResolvedValue(false);
-    mockGetLastCommitDate.mockResolvedValue(null);
-    mockLoadRepoConfig.mockResolvedValue({});
+    resetSharedMocks();
   });
 
   describe('removeEnvironment', () => {
@@ -454,27 +494,7 @@ describe('cleanup-service', () => {
 
 describe('runScheduledCleanup', () => {
   beforeEach(() => {
-    mockExecFileAsync.mockClear();
-    mockHasUncommittedChanges.mockClear();
-    mockWorktreeExists.mockClear();
-    mockGetDefaultBranch.mockClear();
-    mockIsBranchMerged.mockClear();
-    mockGetLastCommitDate.mockClear();
-    mockDestroy.mockClear();
-    mockListAllActiveWithCodebase.mockClear();
-    mockUpdateStatus.mockClear();
-    mockGetConversationsUsingEnv.mockClear();
-    mockGetById.mockClear();
-    mockGetCodebase.mockClear();
-    mockDeleteOldSessions.mockClear();
-    mockLoadRepoConfig.mockClear();
-    // Reset defaults
-    mockHasUncommittedChanges.mockResolvedValue(false);
-    mockWorktreeExists.mockResolvedValue(false);
-    mockGetDefaultBranch.mockResolvedValue('main');
-    mockIsBranchMerged.mockResolvedValue(false);
-    mockGetLastCommitDate.mockResolvedValue(null);
-    mockLoadRepoConfig.mockResolvedValue({});
+    resetSharedMocks();
   });
 
   test('returns empty report when no environments exist', async () => {
@@ -662,15 +682,15 @@ describe('runScheduledCleanup', () => {
     expect(report.removed).toHaveLength(0);
   });
 
-  test('skips telegram environments', async () => {
+  test('preserves a clean committed unmerged legacy Telegram worktree during upgrade cleanup', async () => {
     mockListAllActiveWithCodebase.mockResolvedValueOnce([
       {
-        id: 'env-telegram',
-        working_path: '/workspace/repo/worktrees/thread-abc',
-        branch_name: 'thread-abc',
+        id: 'env-legacy-telegram',
+        working_path: '/workspace/repo/worktrees/telegram-thread-abc',
+        branch_name: 'telegram-thread-abc',
         status: 'active',
         created_by_platform: 'telegram',
-        created_at: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), // 30 days ago
+        created_at: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
         codebase_default_cwd: '/workspace/repo',
         codebase_id: 'codebase-1',
         workflow_type: 'thread',
@@ -679,15 +699,11 @@ describe('runScheduledCleanup', () => {
         metadata: {},
       },
     ]);
-    // Path exists for this env
-    mockWorktreeExists.mockResolvedValueOnce(true);
-    // getDefaultBranch returns 'main' (default from beforeEach)
-    // isBranchMerged returns false (default from beforeEach)
-
     const report = await runScheduledCleanup();
 
-    // Should not be in removed (Telegram is persistent)
     expect(report.removed).toHaveLength(0);
+    expect(mockDestroy).not.toHaveBeenCalled();
+    expect(mockUpdateStatus).not.toHaveBeenCalled();
   });
 
   test('continues processing after error on one environment', async () => {
@@ -804,8 +820,7 @@ describe('SESSION_RETENTION_DAYS', () => {
 describe('scheduler lifecycle', () => {
   beforeEach(() => {
     stopCleanupScheduler(); // Ensure clean state
-    mockListAllActiveWithCodebase.mockClear();
-    mockListAllActiveWithCodebase.mockResolvedValue([]); // Prevent actual cleanup during tests
+    resetSharedMocks(); // Prevent actual cleanup during tests
   });
 
   afterAll(() => {
@@ -839,15 +854,7 @@ describe('scheduler lifecycle', () => {
 
 describe('getWorktreeStatusBreakdown', () => {
   beforeEach(() => {
-    mockExecFileAsync.mockClear();
-    mockGetDefaultBranch.mockClear();
-    mockIsBranchMerged.mockClear();
-    mockListByCodebaseWithAge.mockClear();
-    mockLoadRepoConfig.mockClear();
-    // Reset defaults
-    mockGetDefaultBranch.mockResolvedValue('main');
-    mockIsBranchMerged.mockResolvedValue(false);
-    mockLoadRepoConfig.mockResolvedValue({});
+    resetSharedMocks();
   });
 
   test('returns correct breakdown with mixed environments', async () => {
@@ -878,8 +885,8 @@ describe('getWorktreeStatusBreakdown', () => {
       },
       {
         id: 'env-4',
-        branch_name: 'telegram-branch',
-        created_by_platform: 'telegram',
+        branch_name: 'old-discord-branch',
+        created_by_platform: 'discord',
         days_since_activity: 60,
         working_path: '/path4',
         status: 'active',
@@ -895,28 +902,7 @@ describe('getWorktreeStatusBreakdown', () => {
 
     expect(breakdown.total).toBe(4);
     expect(breakdown.merged).toBe(1);
-    expect(breakdown.stale).toBe(1); // env-2 is stale (30 days), env-4 is Telegram so not counted as stale
-    expect(breakdown.active).toBe(2); // env-3 active, env-4 Telegram (counted as active, not stale)
-  });
-
-  test('excludes telegram from stale count', async () => {
-    mockListByCodebaseWithAge.mockResolvedValueOnce([
-      {
-        id: 'env-telegram',
-        branch_name: 'telegram-branch',
-        created_by_platform: 'telegram',
-        days_since_activity: 100,
-        working_path: '/path',
-        status: 'active',
-      },
-    ]);
-
-    // getDefaultBranch returns 'main' (default from beforeEach)
-    // isBranchMerged returns false (default from beforeEach)
-
-    const breakdown = await getWorktreeStatusBreakdown('codebase-1', '/workspace/repo');
-
-    expect(breakdown.stale).toBe(0);
+    expect(breakdown.stale).toBe(2);
     expect(breakdown.active).toBe(1);
   });
 
@@ -935,28 +921,7 @@ describe('getWorktreeStatusBreakdown', () => {
 
 describe('cleanupMergedWorktrees', () => {
   beforeEach(() => {
-    mockExecFileAsync.mockClear();
-    mockDestroy.mockClear();
-    mockGetConversationsUsingEnv.mockClear();
-    mockGetById.mockClear();
-    mockListByCodebase.mockClear();
-    mockGetDefaultBranch.mockClear();
-    mockIsBranchMerged.mockClear();
-    mockHasUncommittedChanges.mockClear();
-    mockWorktreeExists.mockClear();
-    mockGetCodebase.mockClear();
-    mockUpdateStatus.mockClear();
-    mockLoadRepoConfig.mockClear();
-    // Reset defaults
-    mockGetDefaultBranch.mockResolvedValue('main');
-    mockIsBranchMerged.mockResolvedValue(false);
-    mockLoadRepoConfig.mockResolvedValue({});
-    mockIsPatchEquivalent.mockReset();
-    mockIsPatchEquivalent.mockResolvedValue(false);
-    mockGetPrState.mockReset();
-    mockGetPrState.mockResolvedValue('NONE');
-    mockHasUncommittedChanges.mockResolvedValue(false);
-    mockWorktreeExists.mockResolvedValue(false);
+    resetSharedMocks();
   });
 
   test('removes merged branches without uncommitted changes', async () => {
@@ -994,6 +959,29 @@ describe('cleanupMergedWorktrees', () => {
       '/workspace/repo/worktrees/merged-branch',
       expect.objectContaining({ deleteRemoteBranch: true })
     );
+  });
+
+  test('preserves a legacy Telegram worktree even when its branch is merged', async () => {
+    mockListByCodebase.mockResolvedValueOnce([
+      {
+        id: 'env-legacy-telegram-merged',
+        branch_name: 'telegram-thread-merged',
+        working_path: '/workspace/repo/worktrees/telegram-thread-merged',
+        created_by_platform: 'telegram',
+        status: 'active',
+      },
+    ]);
+    // If consulted, the branch is merged. The persisted-data exemption must
+    // short-circuit before merge classification or any removal decision.
+    mockIsBranchMerged.mockResolvedValue(true);
+
+    const result = await cleanupMergedWorktrees('codebase-1', '/workspace/repo');
+
+    expect(result.removed).toHaveLength(0);
+    expect(result.skipped).toHaveLength(0);
+    expect(mockIsBranchMerged).not.toHaveBeenCalled();
+    expect(mockDestroy).not.toHaveBeenCalled();
+    expect(mockUpdateStatus).not.toHaveBeenCalled();
   });
 
   test('skips merged branches with uncommitted changes', async () => {
@@ -1208,19 +1196,8 @@ describe('cleanupMergedWorktrees', () => {
 
 describe('resolveBaseBranch via runScheduledCleanup (issue #1419)', () => {
   beforeEach(() => {
-    mockListAllActiveWithCodebase.mockClear();
-    mockWorktreeExists.mockClear();
-    mockGetDefaultBranch.mockClear();
-    mockIsBranchMerged.mockClear();
-    mockHasUncommittedChanges.mockClear();
-    mockLoadRepoConfig.mockClear();
-    mockDeleteOldSessions.mockClear();
-    // Defaults
+    resetSharedMocks();
     mockWorktreeExists.mockResolvedValue(true);
-    mockHasUncommittedChanges.mockResolvedValue(false);
-    mockIsBranchMerged.mockResolvedValue(false);
-    mockLoadRepoConfig.mockResolvedValue({});
-    mockGetDefaultBranch.mockResolvedValue('main');
   });
 
   test('uses worktree.baseBranch from config and skips git detection for master-branch repo', async () => {
@@ -1344,20 +1321,7 @@ describe('resolveBaseBranch via runScheduledCleanup (issue #1419)', () => {
 
 describe('onConversationClosed', () => {
   beforeEach(() => {
-    mockExecFileAsync.mockClear();
-    mockDestroy.mockClear();
-    mockUpdateStatus.mockClear();
-    mockGetById.mockClear();
-    mockGetCodebase.mockClear();
-    mockGetConversationsUsingEnv.mockClear();
-    mockGetConversationByPlatformId.mockClear();
-    mockGetActiveSession.mockClear();
-    mockUpdateConversation.mockClear();
-    mockWorktreeExists.mockClear();
-    mockHasUncommittedChanges.mockClear();
-    // Reset defaults
-    mockWorktreeExists.mockResolvedValue(false);
-    mockHasUncommittedChanges.mockResolvedValue(false);
+    resetSharedMocks();
   });
 
   test('deactivates session with conversation-closed reason', async () => {
@@ -1507,18 +1471,7 @@ describe('onConversationClosed', () => {
 
 describe('cleanupStaleWorktrees', () => {
   beforeEach(() => {
-    mockExecFileAsync.mockClear();
-    mockDestroy.mockClear();
-    mockGetConversationsUsingEnv.mockClear();
-    mockGetById.mockClear();
-    mockListByCodebaseWithAge.mockClear();
-    mockHasUncommittedChanges.mockClear();
-    mockWorktreeExists.mockClear();
-    mockGetCodebase.mockClear();
-    mockUpdateStatus.mockClear();
-    // Reset defaults
-    mockHasUncommittedChanges.mockResolvedValue(false);
-    mockWorktreeExists.mockResolvedValue(false);
+    resetSharedMocks();
   });
 
   test('removes stale worktrees without uncommitted changes', async () => {
@@ -1549,24 +1502,6 @@ describe('cleanupStaleWorktrees', () => {
     const result = await cleanupStaleWorktrees('codebase-1', '/workspace/repo');
 
     expect(result.removed).toContain('stale-branch');
-  });
-
-  test('skips telegram worktrees even if old', async () => {
-    mockListByCodebaseWithAge.mockResolvedValueOnce([
-      {
-        id: 'env-telegram',
-        branch_name: 'telegram-branch',
-        working_path: '/workspace/repo/worktrees/telegram-branch',
-        created_by_platform: 'telegram',
-        days_since_activity: 100,
-        status: 'active',
-      },
-    ]);
-
-    const result = await cleanupStaleWorktrees('codebase-1', '/workspace/repo');
-
-    expect(result.removed).toHaveLength(0);
-    expect(result.skipped).toHaveLength(0);
   });
 
   test('skips worktrees that are not stale', async () => {

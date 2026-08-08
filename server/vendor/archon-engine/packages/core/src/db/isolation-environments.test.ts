@@ -217,6 +217,31 @@ describe('isolation-environments', () => {
       const setClause = query.slice(query.indexOf('DO UPDATE SET'));
       expect(setClause).not.toContain('created_by_user_id');
     });
+
+    test('ON CONFLICT preserves a legacy Telegram platform marker', async () => {
+      const protectedEnvironment = {
+        ...sampleEnv,
+        created_by_platform: 'telegram',
+        metadata: { provenance: 'telegram-import' },
+      };
+      mockQuery.mockResolvedValueOnce(createQueryResult([protectedEnvironment]));
+
+      const result = await create({
+        codebase_id: protectedEnvironment.codebase_id,
+        workflow_type: protectedEnvironment.workflow_type,
+        workflow_id: protectedEnvironment.workflow_id,
+        working_path: '/workspace/worktrees/project/repaired-42',
+        branch_name: 'repaired-42',
+        created_by_platform: 'web',
+        metadata: { provenance: 'repair-attempt' },
+      });
+
+      const [query, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+      const setClause = query.slice(query.indexOf('DO UPDATE SET'));
+      expect(params[6]).toBe('web');
+      expect(setClause).not.toContain('created_by_platform');
+      expect(result.created_by_platform).toBe('telegram');
+    });
   });
 
   describe('updateStatus', () => {
@@ -315,15 +340,6 @@ describe('isolation-environments', () => {
 
       const [, params] = mockQuery.mock.calls[0] as [string, number[]];
       expect(params[0]).toBe(7);
-    });
-
-    test('excludes telegram environments in query', async () => {
-      mockQuery.mockResolvedValueOnce(createQueryResult([]));
-
-      await findStaleEnvironments();
-
-      const [query] = mockQuery.mock.calls[0] as [string, unknown[]];
-      expect(query).toContain("created_by_platform != 'telegram'");
     });
 
     test('returns environments with codebase info', async () => {
