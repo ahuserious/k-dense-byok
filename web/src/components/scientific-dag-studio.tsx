@@ -164,7 +164,6 @@ export function ScientificDagStudioLauncher({
 }
 
 export { ButtonsCtasSection } from "./scientific-dag-studio-buttons-ctas";
-export { CanvasSurfacesSection } from "./scientific-dag-studio-canvas-surfaces";
 export { ChipsBadgesSection } from "./scientific-dag-studio-chips-badges";
 export { NodeCardsSection } from "./scientific-dag-studio-node-cards";
 export { PaletteSection } from "./scientific-dag-studio-palette";

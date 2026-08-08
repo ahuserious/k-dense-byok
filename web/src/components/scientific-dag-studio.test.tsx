@@ -9,9 +9,10 @@ vi.mock("./canvasui/Liquid", () => ({
   Liquid: ({ children }: { children: ReactNode }) => children,
 }));
 
-const RejectingCanvasSurfacesSection = lazy(() =>
+const loadRejectingCanvasSurfacesChunk = vi.fn(() =>
   Promise.reject(new Error("simulated outer studio chunk rejection")),
 );
+const RejectingCanvasSurfacesSection = lazy(loadRejectingCanvasSurfacesChunk);
 
 describe("ScientificDagStudio", () => {
   it("traps focus, closes with Escape, and restores launcher focus", async () => {
@@ -74,16 +75,19 @@ describe("ScientificDagStudio", () => {
     expect(dialog).toBeInTheDocument();
   });
 
-  it("keeps the studio usable when its outer canvas chunk rejects", async () => {
+  it("loads the outer canvas chunk only when opened and survives rejection", async () => {
     const user = userEvent.setup();
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
 
     try {
+      expect(loadRejectingCanvasSurfacesChunk).not.toHaveBeenCalled();
+
       render(
         <ScientificDagStudioLauncher
           canvasSurfacesComponent={RejectingCanvasSurfacesSection}
         />,
       );
+      expect(loadRejectingCanvasSurfacesChunk).not.toHaveBeenCalled();
 
       await user.click(
         screen.getByRole("button", { name: "Components studio" }),
@@ -96,6 +100,7 @@ describe("ScientificDagStudio", () => {
       ).toHaveTextContent(
         "Canvas specimen unavailable; the rest of the studio remains usable.",
       );
+      expect(loadRejectingCanvasSurfacesChunk).toHaveBeenCalledOnce();
       expect(
         screen.getByRole("dialog", { name: "Components studio" }),
       ).toBeInTheDocument();
