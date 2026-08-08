@@ -1,0 +1,8 @@
+# Vendored Archon engine — generated/installed artifacts (tracked ignore file;
+# do NOT rely on .git/info/exclude for these).
+node_modules/
+packages/*/node_modules/
+packages/web/dist/
+coverage/
+.web-built
+*.log
