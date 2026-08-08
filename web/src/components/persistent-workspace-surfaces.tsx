@@ -9,6 +9,7 @@ export type PersistentWorkspaceSurfaceView = Exclude<WorkspaceView, "chat">;
 const PERSISTENT_WORKSPACE_SURFACE_VIEWS = [
   "workflows",
   "dag-workflows",
+  "dag-pipelines",
   "dag-builder",
   "console",
   "raindrop",

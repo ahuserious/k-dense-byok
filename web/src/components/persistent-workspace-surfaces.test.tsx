@@ -63,6 +63,7 @@ function SurfaceHarness() {
         surfaces={{
           workflows: <div>Workflows</div>,
           "dag-workflows": <div>DAG Workflows</div>,
+          "dag-pipelines": <div>DAG Pipelines</div>,
           "dag-builder": <StatefulBuilderSurface />,
           console: <StatefulConsoleSurface />,
           raindrop: <div>Raindrop</div>,

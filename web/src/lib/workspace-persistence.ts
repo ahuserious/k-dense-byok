@@ -14,6 +14,9 @@ export const WORKSPACE_VIEWS = [
   "chat",
   "workflows",
   "dag-workflows",
+  // Ported reference surface: the Archon-engine pipeline list. Sits between
+  // the typed-engine list and the builder in the nav.
+  "dag-pipelines",
   "dag-builder",
   "console",
   "raindrop",

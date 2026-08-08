@@ -10,6 +10,11 @@ import { WorkflowsPanel } from "@/components/workflows-panel";
 import { DagWorkflowConsole } from "@/components/dag-workflow-console";
 import { DagWorkflowsPanel } from "@/components/dag-workflows-panel";
 import { DagBuilder } from "@/components/dag-builder";
+import {
+  DagBuilderSurface,
+  type DagBuilderEngine,
+} from "@/components/dag-builder-surface";
+import { PipelinesPanel } from "@/components/pipelines-panel";
 import { RaindropPanel } from "@/components/raindrop-panel";
 import { WorkspaceNavigation } from "@/components/workspace-navigation";
 import {
@@ -340,6 +345,12 @@ function WorkspacePage({
   } = usePersistentWorkspaceView(initialState?.view ?? "chat");
   const [selectedDagDefinition, setSelectedDagDefinition] =
     useState<VersionedDagWorkflowDefinition | null>(null);
+  // Which builder the "DAG Builder" view shows: the native typed builder
+  // (default, unchanged behavior) or the ported Pipelines-engine iframe.
+  const [builderEngine, setBuilderEngine] = useState<DagBuilderEngine>("typed");
+  // Archon pipeline the iframe builder should deep-link open (?edit=), set by
+  // the DAG Pipelines list's Edit affordance.
+  const [archonEditWorkflow, setArchonEditWorkflow] = useState<string | null>(null);
   const [tabWorkspaceStates, setTabWorkspaceStates] = useState<
     Record<string, ChatWorkspaceState>
   >(() =>
@@ -717,10 +728,67 @@ function WorkspacePage({
   const handleOpenDagDefinition = useCallback(
     (definition: VersionedDagWorkflowDefinition) => {
       setSelectedDagDefinition(definition);
+      // A typed definition always opens in the native typed builder, even if
+      // the DAG Builder view was last showing the Pipelines-engine iframe.
+      setBuilderEngine("typed");
       setView("dag-builder");
     },
     [setView],
   );
+
+  // ------------------------------------------------------------------
+  // DAG Pipelines (Archon engine) — ported reference surface handlers.
+  // ------------------------------------------------------------------
+
+  // "Edit" on a pipeline row: open the DAG Builder view with the Pipelines
+  // engine selected and the pipeline deep-linked (?edit=) into the iframe.
+  const handleEditPipeline = useCallback(
+    (name: string) => {
+      setArchonEditWorkflow(name);
+      setBuilderEngine("archon");
+      setView("dag-builder");
+    },
+    [setView],
+  );
+
+  // Run a pipeline in a brand-new chat tab. We can't send into the new tab
+  // synchronously: its <ChatTab> must first mount and register its imperative
+  // handle. So we mint the tab id outside any setState updater (strict-mode
+  // safe, mirroring newTab), append + activate the tab, and park the prompt;
+  // the flush effect below dispatches it once the handle registers. sendQuick
+  // uses the tab's default model, so no model plumbing is needed here.
+  const pendingPipelineRun = useRef<{ tabId: string; prompt: string } | null>(null);
+  const handleRunPipeline = useCallback(
+    (name: string) => {
+      if (tabsRef.current.length >= MAX_CHAT_TABS) return;
+      const id = makeTabId();
+      pendingPipelineRun.current = {
+        tabId: id,
+        prompt: `Run the Archon pipeline named "${name}" and report its results.`,
+      };
+      setTabs((prev) =>
+        prev.length >= MAX_CHAT_TABS
+          ? prev
+          : [...prev, { id, title: `Run: ${name}` }],
+      );
+      setActiveTabId(id);
+      setView("chat");
+    },
+    [setView],
+  );
+
+  // Flush a parked pipeline run once its chat tab has mounted and registered
+  // its handle. Depending on `tabs` makes this run right after the new
+  // <ChatTab> commits; we guard on the handle being present and retry on the
+  // next tabs change if it isn't yet.
+  useEffect(() => {
+    const pending = pendingPipelineRun.current;
+    if (!pending) return;
+    const handle = tabHandles.current.get(pending.tabId);
+    if (!handle) return;
+    pendingPipelineRun.current = null;
+    void handle.sendQuick(pending.prompt);
+  }, [tabs]);
 
   const handleFileSelect = useCallback((path: string) => {
     sandboxSelectFile(path);
@@ -1204,13 +1272,26 @@ function WorkspacePage({
                 onOpenDefinition={handleOpenDagDefinition}
               />
             ),
+            "dag-pipelines": (
+              <PipelinesPanel
+                onRunPipeline={handleRunPipeline}
+                onEditPipeline={handleEditPipeline}
+              />
+            ),
             "dag-builder": (
-              <DagBuilder
-                projectId={projectId}
-                selectedDefinition={selectedDagDefinition}
-                activeSessionId={activeSessionId}
-                budgetBlocked={budgetBlocked}
-                onDefinitionChanged={setSelectedDagDefinition}
+              <DagBuilderSurface
+                engine={builderEngine}
+                onEngineChange={setBuilderEngine}
+                archonWorkflowName={archonEditWorkflow ?? undefined}
+                typedBuilder={
+                  <DagBuilder
+                    projectId={projectId}
+                    selectedDefinition={selectedDagDefinition}
+                    activeSessionId={activeSessionId}
+                    budgetBlocked={budgetBlocked}
+                    onDefinitionChanged={setSelectedDagDefinition}
+                  />
+                }
               />
             ),
             console: (

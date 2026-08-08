@@ -2,6 +2,7 @@
 
 import {
   BracesIcon,
+  LayersIcon,
   ListTreeIcon,
   MessageSquareTextIcon,
   NetworkIcon,
@@ -12,6 +13,9 @@ import {
 import type { WorkspaceView } from "@/lib/workspace-persistence";
 import { cn } from "@/lib/utils";
 
+// Naming: "DAG Workflows" is the native typed engine (list + typed builder);
+// "DAG Pipelines" is the ported Archon-engine list; "DAG Builder" hosts both
+// builders behind an engine toggle (typed default, Pipelines-engine iframe).
 const NAVIGATION_ITEMS: ReadonlyArray<{
   view: WorkspaceView;
   label: string;
@@ -20,6 +24,7 @@ const NAVIGATION_ITEMS: ReadonlyArray<{
   { view: "chat", label: "Chat", icon: MessageSquareTextIcon },
   { view: "workflows", label: "Workflows", icon: WorkflowIcon },
   { view: "dag-workflows", label: "DAG Workflows", icon: ListTreeIcon },
+  { view: "dag-pipelines", label: "DAG Pipelines", icon: LayersIcon },
   { view: "dag-builder", label: "DAG Builder", icon: NetworkIcon },
   { view: "console", label: "Console", icon: TerminalSquareIcon },
   { view: "raindrop", label: "Raindrop", icon: BracesIcon },
@@ -35,7 +40,7 @@ export function WorkspaceNavigation({
   return (
     <nav
       aria-label="Project workspace"
-      className="flex shrink-0 items-center gap-1 overflow-x-auto border-b bg-muted/20 px-3 py-1.5"
+      className="flex shrink-0 items-center gap-1 overflow-x-auto border-b bg-muted/20 px-3 py-1.5 font-mono"
     >
       {NAVIGATION_ITEMS.map((item) => {
         const Icon = item.icon;
