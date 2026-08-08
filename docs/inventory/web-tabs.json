@@ -1,0 +1,39 @@
+{
+  "inventory": "seven-web-tabs",
+  "source": "web/src/components/workspace-navigation.tsx",
+  "items": [
+    { "tab": "Chat", "view": "chat", "mounts": ["web/src/components/chat-tab.tsx"] },
+    { "tab": "Workflows", "view": "workflows", "mounts": ["web/src/components/workflows-panel.tsx", "web/src/data/workflows.json"] },
+    { "tab": "DAG Workflows", "view": "dag-workflows", "mounts": ["web/src/components/dag-workflows-panel.tsx"] },
+    { "tab": "DAG Pipelines", "view": "dag-pipelines", "mounts": ["web/src/components/pipelines-panel.tsx"] },
+    { "tab": "DAG Builder", "view": "dag-builder", "mounts": ["web/src/components/dag-builder-surface.tsx", "web/src/components/dag-builder.tsx", "web/src/components/dag-builder-canvas.tsx", "web/src/components/dag-builder-inspector.tsx", "web/src/components/pipeline-builder-panel.tsx", "web/src/components/helper-agent-chat.tsx"] },
+    { "tab": "Console", "view": "console", "mounts": ["web/src/components/console/console-panel.tsx", "web/src/components/dag-workflow-console.tsx", "web/src/components/console/kady-console.tsx"] },
+    { "tab": "Raindrop", "view": "raindrop", "mounts": ["web/src/components/raindrop-surface.tsx", "web/src/components/raindrop-panel.tsx", "web/src/components/raindrop-workshop-panel.tsx"] }
+  ],
+  "files": [
+    "web/src/app/page.tsx",
+    "web/src/components/workspace-navigation.tsx",
+    "web/src/components/persistent-workspace-surfaces.tsx",
+    "web/src/components/chat-tab.tsx",
+    "web/src/components/workflows-panel.tsx",
+    "web/src/data/workflows.json",
+    "web/src/components/dag-workflows-panel.tsx",
+    "web/src/components/pipelines-panel.tsx",
+    "web/src/components/dag-builder-surface.tsx",
+    "web/src/components/dag-builder.tsx",
+    "web/src/components/dag-builder-canvas.tsx",
+    "web/src/components/dag-builder-inspector.tsx",
+    "web/src/components/pipeline-builder-panel.tsx",
+    "web/src/components/helper-agent-chat.tsx",
+    "web/src/components/console/console-panel.tsx",
+    "web/src/components/dag-workflow-console.tsx",
+    "web/src/components/console/kady-console.tsx",
+    "web/src/components/raindrop-surface.tsx",
+    "web/src/components/raindrop-panel.tsx",
+    "web/src/components/raindrop-workshop-panel.tsx"
+  ],
+  "notes": {
+    "mountOwner": "web/src/app/page.tsx",
+    "brokenBuilderAgentPanel": "web/src/components/helper-agent-chat.tsx requires a saved context binding; web/src/components/dag-builder.tsx mounts it without context when no definition is selected, leaving the panel parked in Select saved context state"
+  }
+}
