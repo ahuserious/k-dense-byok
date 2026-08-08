@@ -9,6 +9,7 @@ import { SettingsDialog } from "@/components/settings-dialog";
 import { WorkflowsPanel } from "@/components/workflows-panel";
 import { DagWorkflowConsole } from "@/components/dag-workflow-console";
 import { DagWorkflowsPanel } from "@/components/dag-workflows-panel";
+import { ChatRail } from "@/components/chat-rail";
 import { DagBuilder } from "@/components/dag-builder";
 import {
   DagBuilderSurface,
@@ -351,6 +352,8 @@ function WorkspacePage({
   // Archon pipeline the iframe builder should deep-link open (?edit=), set by
   // the DAG Pipelines list's Edit affordance.
   const [archonEditWorkflow, setArchonEditWorkflow] = useState<string | null>(null);
+  // The DAG Builder chat rail (collapsible far-right pipeline-compose chat).
+  const [railOpen, setRailOpen] = useState(false);
   const [tabWorkspaceStates, setTabWorkspaceStates] = useState<
     Record<string, ChatWorkspaceState>
   >(() =>
@@ -1309,6 +1312,29 @@ function WorkspacePage({
             ),
           }}
         />
+
+        {/* Collapsible chat rail — scoped to the DAG Builder view. Mounted on
+            first builder visit and kept mounted (hidden when away) so the rail's
+            chat session/stream survives leaving and returning to the view. */}
+        {mountedWorkspaceViews.has("dag-builder") && (
+          <ChatRail
+            visible={view === "dag-builder"}
+            open={railOpen}
+            onToggle={setRailOpen}
+            projectId={projectId}
+            allFiles={allFiles}
+            sandboxReady={sandbox.tree !== null}
+            uploadFiles={sandbox.uploadFiles}
+            onSandboxRefresh={handleSandboxRefresh}
+            onTurnComplete={handleTurnComplete}
+            allSkills={allSkills}
+            skillsReady={!skillsLoading}
+            budgetState={projectCost.budget.state}
+            budgetTotalUsd={projectCost.budget.totalUsd}
+            budgetLimitUsd={projectCost.budget.limitUsd}
+            onMetaChange={handleMetaChange}
+          />
+        )}
       </div>
 
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />

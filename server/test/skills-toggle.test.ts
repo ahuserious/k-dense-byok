@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { PROJECTS_ROOT } from "../src/config.ts";
+import { PROJECTS_ROOT, REPO_ROOT } from "../src/config.ts";
 import { ensureProjectExists, resolvePaths } from "../src/projects.ts";
 import {
   disableSkill,
@@ -26,6 +26,24 @@ function makeSkill(dir: string, name: string, desc: string): void {
     "utf-8",
   );
 }
+
+// Skills committed in-repo (server/seed/skills) are topped up into every
+// project on seed (see seedProjectSkills), so seed counts and enabled lists
+// include them. Read the set dynamically so committing another skill later
+// doesn't silently break these assertions.
+const committedSkillNames = fs
+  .readdirSync(path.join(REPO_ROOT, "server", "seed", "skills"), {
+    withFileTypes: true,
+  })
+  .filter(
+    (dirent) =>
+      dirent.isDirectory() &&
+      fs.existsSync(
+        path.join(REPO_ROOT, "server", "seed", "skills", dirent.name, "SKILL.md"),
+      ),
+  )
+  .map((dirent) => dirent.name)
+  .sort();
 beforeEach(reset);
 afterAll(() => fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true }));
 
@@ -49,20 +67,25 @@ describe("skills enable/disable", () => {
 
     ensureProjectExists("target");
     const target = resolvePaths("target");
-    expect(await seedProjectSkills(target, false)).toBe(9);
+    expect(await seedProjectSkills(target, false)).toBe(
+      9 + committedSkillNames.length,
+    );
     expect(listDisabledSkills(target).map((s) => s.name).sort()).toEqual([
       "hypogenic",
       "modal",
       "openpiv",
       "scanpy",
     ]);
-    expect(listProjectSkills(target).map((s) => s.name).sort()).toEqual([
-      "diffdock",
-      "liteparse",
-      "molecular-dynamics",
-      "optimize-for-gpu",
-      "rowan",
-    ]);
+    expect(listProjectSkills(target).map((s) => s.name).sort()).toEqual(
+      [
+        "diffdock",
+        "liteparse",
+        "molecular-dynamics",
+        "optimize-for-gpu",
+        "rowan",
+        ...committedSkillNames,
+      ].sort(),
+    );
   });
 
   it("migrates existing package skills once without overriding later user choices", async () => {
@@ -71,12 +94,20 @@ describe("skills enable/disable", () => {
     makeSkill(paths.skillsDir, "scanpy", "single-cell package");
     makeSkill(paths.skillsDir, "literature-review", "review workflow");
 
-    expect(await seedProjectSkills(paths, false)).toBe(2);
+    expect(await seedProjectSkills(paths, false)).toBe(
+      2 + committedSkillNames.length,
+    );
     expect(listDisabledSkills(paths).map((s) => s.name)).toContain("scanpy");
     expect(listProjectSkills(paths).map((s) => s.name)).toContain("literature-review");
+    // The committed catalogue topped up into this EXISTING project too.
+    for (const name of committedSkillNames) {
+      expect(listProjectSkills(paths).map((s) => s.name)).toContain(name);
+    }
 
     expect(enableSkill(paths, "scanpy")).toEqual({ ok: true });
-    expect(await seedProjectSkills(paths, false)).toBe(2);
+    expect(await seedProjectSkills(paths, false)).toBe(
+      2 + committedSkillNames.length,
+    );
     expect(listProjectSkills(paths).map((s) => s.name)).toContain("scanpy");
   });
 

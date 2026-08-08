@@ -16,12 +16,20 @@ import {
   type ResourceDiagnostic,
   type Skill,
 } from "@earendil-works/pi-coding-agent";
-import { KADY_PI_AGENT_DIR, PROJECTS_ROOT } from "../config.ts";
+import { KADY_PI_AGENT_DIR, PROJECTS_ROOT, REPO_ROOT } from "../config.ts";
 import type { ProjectPaths } from "../projects.ts";
 import type { ToggleResult } from "./capability-state.ts";
 import { fetchCatalogue } from "./skills-fetch.ts";
 
 const DEFAULT_DISABLED_MIGRATION = "package-skills-disabled-v1";
+
+/**
+ * Skills committed in-repo (archon + scientific-pipeline-builder — the DAG
+ * Builder chat rail's preloads). Unlike the fetched catalogue they need no
+ * network, and they are topped up on EVERY seed call so existing projects
+ * pick up newly-committed skills too (mirrors the reference tree's c60a013).
+ */
+const COMMITTED_SKILLS_DIR = path.join(REPO_ROOT, "server", "seed", "skills");
 
 /**
  * One place skills are installed: a project sandbox, or the user-level Pi agent
@@ -263,7 +271,16 @@ export async function seedProjectSkills(
   paths: ProjectPaths,
   allowRemote = true,
 ): Promise<number> {
-  if (countInstalledSkills(paths) > 0) {
+  // Committed skills ALWAYS top up, non-clobbering (copySkillDirs skips
+  // anything already enabled/disabled), so an EXISTING project gains newly
+  // committed skills instead of short-circuiting on an already-populated dir.
+  // Record whether the project had skills BEFORE the top-up: a fresh project
+  // must still fall through to the sibling/catalogue seeding below, not be
+  // counted as populated just because the committed skills landed first.
+  const hadSkillsBeforeTopUp = countInstalledSkills(paths) > 0;
+  copySkillDirs(COMMITTED_SKILLS_DIR, paths);
+
+  if (hadSkillsBeforeTopUp) {
     applyDefaultSkillStates(paths);
     return countInstalledSkills(paths);
   }

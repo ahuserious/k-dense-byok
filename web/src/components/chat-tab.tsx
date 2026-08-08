@@ -1183,6 +1183,13 @@ export interface ChatTabHandle {
    * false when the chip isn't in this tab's transcript.
    */
   scrollToToolCall: (toolCallId: string) => boolean;
+  /**
+   * Append a line to the chat input (stacking) WITHOUT sending it. Used by the
+   * DAG Builder compose popover so a user can stack several pipeline stages
+   * and submit them together (one pipeline-build turn), rather than firing
+   * each immediately.
+   */
+  appendToInput: (text: string) => void;
 }
 
 export interface ChatTabProps {
@@ -1217,6 +1224,13 @@ export interface ChatTabProps {
   onViewCompute?: (jobId?: string) => void;
   /** Open a typed result artifact in the center file preview. */
   onOpenFile?: (path: string) => void;
+  /**
+   * Skills this tab should always use (the DAG Builder chat rail passes
+   * archon + scientific-pipeline-builder). When set, the FIRST message this
+   * tab sends is prefixed with a one-time directive naming them, so the agent
+   * reliably reaches for them. Omitted for normal tabs (no behavior change).
+   */
+  preloadSkills?: string[];
 }
 
 export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
@@ -1243,6 +1257,7 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
     onViewInNotebook,
     onViewCompute,
     onOpenFile,
+    preloadSkills,
   },
   ref,
 ) {
@@ -1345,6 +1360,9 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
   const messageQueueLengthRef = useRef(0);
   messageQueueLengthRef.current = messageQueue.length;
   const composerRestoreRef = useRef<((text: string) => void) | null>(null);
+  // Whether this tab's preloadSkills directive has been injected yet — once
+  // per tab lifetime, on the first outgoing message (see handleSend).
+  const primedRef = useRef(false);
   // Set by Stop: without it, cancelling a turn immediately started the next
   // queued message, so "Stop" only ever paused for a fraction of a second.
   const [queuePaused, setQueuePaused] = useState(false);
@@ -1609,9 +1627,17 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
       if (selectedBudgetBlocked) return false;
       const trimmed = text.trim();
       if (!trimmed) return false;
+      // Force-load directive: on the FIRST message of a preload-configured tab
+      // (the DAG Builder chat rail), prepend a one-time directive naming the
+      // skills it should use. Flows into every route below (send/queue/steer).
+      let outgoing = trimmed;
+      if (preloadSkills && preloadSkills.length > 0 && !primedRef.current) {
+        primedRef.current = true;
+        outgoing = `[For this conversation, use these skills whenever relevant: ${preloadSkills.join(", ")}.]\n\n${outgoing}`;
+      }
       const sendNow = () =>
         send(
-          trimmed,
+          outgoing,
           selectedModel.id,
           {
             attachments: attachedFiles,
@@ -1631,15 +1657,15 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
           ? "queue"
           : routeSubmit(isStreaming, intent);
       if (route === "queue") {
-        return enqueue(trimmed, images);
+        return enqueue(outgoing, images);
       }
       if (route === "steer") {
-        const result = await steer(trimmed);
+        const result = await steer(outgoing);
         if (result === "ok") return true;
         if (result === "not_streaming") {
           // The run ended while we typed: keep ordering behind any queue.
           if (steerNotStreamingFallback(messageQueueLengthRef.current) === "queue") {
-            return enqueue(trimmed);
+            return enqueue(outgoing);
           }
           void sendNow();
           return true;
@@ -1671,6 +1697,7 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
       attachedFiles,
       thinkingDisabled,
       thinkingLevel,
+      preloadSkills,
     ],
   );
 
@@ -1700,6 +1727,10 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
         setTimeout(() => el.classList.remove("kady-flash"), 1800);
         return true;
       },
+      // The composer-append bridge registered by <ChatInput> (used for
+      // steer/stop text restoration) has exactly the stacking semantics the
+      // DAG compose popover needs: append on a fresh line, never send.
+      appendToInput: (text: string) => composerRestoreRef.current?.(text),
       sendQuick: async (prompt: string) => {
         if (!selectedModelAvailable) {
           toast.error(
