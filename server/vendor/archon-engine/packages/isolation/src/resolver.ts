@@ -245,7 +245,7 @@ export class IsolationResolver {
     }
 
     if (env) {
-      await this.markDestroyedBestEffort(env.id);
+      await this.markDestroyedBestEffort(env);
     }
 
     return null;
@@ -312,7 +312,7 @@ export class IsolationResolver {
       return { env: existing, warnings };
     }
 
-    await this.markDestroyedBestEffort(existing.id);
+    await this.markDestroyedBestEffort(existing);
     return null;
   }
 
@@ -357,7 +357,7 @@ export class IsolationResolver {
         };
       }
 
-      await this.markDestroyedBestEffort(linkedEnv.id);
+      await this.markDestroyedBestEffort(linkedEnv);
     }
     return null;
   }
@@ -415,13 +415,17 @@ export class IsolationResolver {
    * Best-effort mark a stale environment as destroyed.
    * Logs errors but never throws - stale cleanup should not block resolution.
    */
-  private async markDestroyedBestEffort(envId: string): Promise<void> {
+  private async markDestroyedBestEffort(env: IsolationEnvironmentRow): Promise<void> {
+    // The Telegram adapter no longer exists, but persisted Telegram worktrees
+    // remain user-owned data and may only be archived by an explicit action.
+    if (env.created_by_platform === 'telegram') return;
+
     try {
-      await this.store.updateStatus(envId, 'destroyed');
+      await this.store.updateStatus(env.id, 'destroyed');
     } catch (cleanupError) {
       const err = cleanupError instanceof Error ? cleanupError : new Error(String(cleanupError));
       getLog().error(
-        { err, errorType: err.constructor.name, isolationEnvId: envId },
+        { err, errorType: err.constructor.name, isolationEnvId: env.id },
         'isolation_cleanup_failed'
       );
     }

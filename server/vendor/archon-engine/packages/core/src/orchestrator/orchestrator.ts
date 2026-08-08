@@ -151,13 +151,18 @@ export async function validateAndResolveIsolation(
           { err, conversationId: conversation.id, isolationEnvId: result.env.id },
           'isolation_link_failed'
         );
-        try {
-          await createIsolationStore().updateStatus(result.env.id, 'destroyed');
-        } catch (rollbackError) {
-          getLog().error(
-            { err: toError(rollbackError), isolationEnvId: result.env.id },
-            'isolation_rollback_failed'
-          );
+        // A resolved environment can be a reused legacy row. Persisted
+        // Telegram environments remain user-owned data and are only archived
+        // by an explicit/manual removal action.
+        if (result.env.created_by_platform !== 'telegram') {
+          try {
+            await createIsolationStore().updateStatus(result.env.id, 'destroyed');
+          } catch (rollbackError) {
+            getLog().error(
+              { err: toError(rollbackError), isolationEnvId: result.env.id },
+              'isolation_rollback_failed'
+            );
+          }
         }
         throw err;
       }

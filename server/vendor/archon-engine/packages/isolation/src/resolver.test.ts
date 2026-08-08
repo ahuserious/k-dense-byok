@@ -375,6 +375,30 @@ describe('IsolationResolver', () => {
     expect(updatedStatus).toBe('destroyed');
   });
 
+  test('checkExisting leaves a stale legacy Telegram record active', async () => {
+    const env = makeEnvRow({ created_by_platform: 'telegram' });
+    worktreeExistsSpy.mockResolvedValue(false);
+
+    let updateCalled = false;
+    const resolver = createResolver({
+      store: makeMockStore({
+        getById: async () => env,
+        updateStatus: async () => {
+          updateCalled = true;
+        },
+      }),
+    });
+
+    const result = await resolver.resolve({
+      existingEnvId: 'env-1',
+      codebase: defaultCodebase,
+      platformType: 'web',
+    });
+
+    expect(result.status).toBe('stale_cleaned');
+    expect(updateCalled).toBe(false);
+  });
+
   test('findReusable marks stale DB record as destroyed when worktree gone', async () => {
     const env = makeEnvRow({ workflow_type: 'issue', workflow_id: '42' });
     // worktreeExists returns false — worktree is gone
