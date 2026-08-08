@@ -79,6 +79,15 @@ export const ARCHON_BASE_URL =
   `http://127.0.0.1:${process.env.KADY_ARCHON_PORT ?? "3091"}`;
 
 /**
+ * Base URL of the optional local Raindrop Workshop UI (the OSS agent-trace
+ * debugger, an external sibling checkout — NOT vendored). Only the
+ * /raindrop/health probe reads this; when nothing listens there the Raindrop
+ * view simply keeps its native session-trace panel.
+ */
+export const RAINDROP_BASE_URL =
+  process.env.RAINDROP_BASE_URL ?? "http://localhost:5899";
+
+/**
  * Local OpenAI-compatible model server (LM Studio, vLLM, text-generation-webui,
  * …) discovered through the standard `/v1/models` endpoint. Defaults to LM
  * Studio's port so that case needs no configuration; vLLM's default (8000)

@@ -19,6 +19,7 @@
     "@fastify/multipart": "^9.0.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@quintinshaw/pi-dynamic-workflows": "3.5.0",
+    "@raindrop-ai/pi-agent": "^0.0.7",
     "@types/adm-zip": "^0.5.8",
     "adm-zip": "^0.5.17",
     "archiver": "^8.0.0",

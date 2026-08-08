@@ -34,6 +34,13 @@ import { clearSessionCompute, makeModalTools, MODAL_TOOL_NAMES } from "./modal-t
 import { makeSubagentLedgerExtension, subagentsExtensionPath } from "./subagent-bridge.ts";
 import { makeFusionRequestExtension } from "./fusion-bridge.ts";
 import { WEB_ACCESS_TOOLS, ensureWebAccess } from "./web-access-bridge.ts";
+// Raindrop Workshop observability (the Raindrop view's optional Workshop
+// mode). This Pi extension mirrors agent runs/turns/LLM/tool spans to the
+// LOCAL Workshop daemon ONLY — it ships to the cloud only if
+// RAINDROP_WRITE_KEY is set (we never set it), and disables itself silently
+// when neither RAINDROP_LOCAL_DEBUGGER nor a write key is present. Local-only
+// by default => no egress; with no Workshop running nothing changes.
+import raindropExtension from "@raindrop-ai/pi-agent/extension";
 import {
   seedNotebookPackage,
   seedBuiltinAgentNotebookTools,
@@ -60,6 +67,19 @@ import { BUILTIN_TOOLS } from "./tools.ts";
 // imported directly (tests/scripts) so child Pi processes still share the same
 // Kady-scoped auth store as the in-process runtime.
 process.env.PI_CODING_AGENT_DIR ??= KADY_PI_AGENT_DIR;
+
+/**
+ * Raindrop's extension as a fault-isolated ExtensionFactory: if it throws on load
+ * (e.g. a config read in an odd cwd), we swallow it so a tracing hiccup can never
+ * break session creation. Observability is best-effort by design.
+ */
+const raindropTracingFactory = (pi: Parameters<typeof raindropExtension>[0]): void => {
+  try {
+    raindropExtension(pi);
+  } catch (err) {
+    console.warn("[raindrop] tracing disabled:", (err as Error).message);
+  }
+};
 
 // pi-subagents runs each delegation as a child `pi` CLI process. The binary
 // ships with our pi-coding-agent dependency; make sure spawn("pi") resolves
@@ -596,6 +616,9 @@ async function build(
       // Child Modal jobs are submitted through the localhost bridge under the
       // child run id; reattribute them to this parent session on completion.
       makeSubagentModalExtension(projectId, () => holder.session?.sessionId ?? ""),
+      // Mirror this session's runs/spans to the local Raindrop Workshop when
+      // RAINDROP_LOCAL_DEBUGGER is set (no-op otherwise; never cloud).
+      raindropTracingFactory,
     ],
   });
   await resourceLoader.reload();

@@ -18,6 +18,7 @@ import {
 } from "@/components/dag-builder-surface";
 import { PipelinesPanel } from "@/components/pipelines-panel";
 import { RaindropPanel } from "@/components/raindrop-panel";
+import { RaindropSurface } from "@/components/raindrop-surface";
 import { WorkspaceNavigation } from "@/components/workspace-navigation";
 import {
   PersistentWorkspaceSurfaces,
@@ -1309,10 +1310,14 @@ function WorkspacePage({
               />
             ),
             raindrop: (
-              <RaindropPanel
-                projectId={projectId}
-                active={isActive && view === "raindrop"}
-                openChatSessions={raindropOpenChatSessions}
+              <RaindropSurface
+                nativePanel={
+                  <RaindropPanel
+                    projectId={projectId}
+                    active={isActive && view === "raindrop"}
+                    openChatSessions={raindropOpenChatSessions}
+                  />
+                }
               />
             ),
           }}
