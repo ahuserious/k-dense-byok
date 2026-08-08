@@ -2,10 +2,15 @@ import os from "node:os";
 import path from "node:path";
 import { defineConfig } from "vitest/config";
 
+const liveTestsEnabled = process.env.LIVE_TESTS === "1";
+const liveTestFiles = ["test/**/*.live.test.ts", "test/**/*-live.test.ts"];
+
 export default defineConfig({
   test: {
     environment: "node",
     include: ["test/**/*.test.ts"],
+    exclude: liveTestsEnabled ? [] : liveTestFiles,
+    setupFiles: ["test/stubs/deterministic-env.ts"],
     // Multiple test files reset/repopulate this same shared directory in
     // beforeEach/afterAll; running files concurrently races on it (ENOTEMPTY,
     // files vanishing mid-assertion). Run test files serially to avoid that.
@@ -21,6 +26,9 @@ export default defineConfig({
       KADY_SKILLS_CACHE_DIR:
         process.env.VITEST_SKILLS_CACHE_DIR ??
         path.join(os.tmpdir(), `kady-vitest-skills-cache-${process.pid}`),
+      npm_config_cache:
+        process.env.VITEST_NPM_CACHE ??
+        path.join(os.tmpdir(), `kady-vitest-npm-cache-${process.pid}`),
     },
   },
 });
