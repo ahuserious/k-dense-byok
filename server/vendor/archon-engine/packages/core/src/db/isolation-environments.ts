@@ -66,10 +66,9 @@ export async function listByCodebase(
  */
 export async function create(env: CreateEnvironmentParams): Promise<IsolationEnvironmentRow> {
   const dialect = getDialect();
-  // Note: created_by_user_id is intentionally NOT in the DO UPDATE SET — on
-  // re-creation (upsert) we preserve the original creator's attribution.
-  // The first user to spin up an environment owns it; subsequent reactivations
-  // by different users don't transfer ownership. Mirrors created_by_platform.
+  // Creator provenance is intentionally NOT in the DO UPDATE SET. The first
+  // creator/platform owns the row; retries and repairs may update worktree
+  // details but cannot transfer ownership or erase a legacy platform marker.
   const result = await pool.query<IsolationEnvironmentRow>(
     `INSERT INTO remote_agent_isolation_environments
      (codebase_id, workflow_type, workflow_id, provider, working_path, branch_name, created_by_platform, created_by_user_id, metadata)
@@ -79,7 +78,6 @@ export async function create(env: CreateEnvironmentParams): Promise<IsolationEnv
        working_path = EXCLUDED.working_path,
        branch_name = EXCLUDED.branch_name,
        provider = EXCLUDED.provider,
-       created_by_platform = EXCLUDED.created_by_platform,
        metadata = EXCLUDED.metadata,
        status = 'active',
        created_at = ${dialect.now()}

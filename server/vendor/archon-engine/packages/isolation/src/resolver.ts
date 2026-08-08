@@ -54,6 +54,29 @@ export interface IsolationResolverDeps {
 
 const DEFAULT_STALE_THRESHOLD_DAYS = 14;
 
+function isProtectedLegacyEnvironment(env: IsolationEnvironmentRow): boolean {
+  return env.created_by_platform === 'telegram';
+}
+
+function protectedLegacyEnvironmentBlockedResult(): IsolationResolution {
+  return {
+    status: 'blocked',
+    reason: 'creation_failed',
+    userMessage:
+      'A legacy Telegram workspace record is protected and its worktree is missing. ' +
+      'Automatic repair is disabled to preserve its provenance. ' +
+      'Remove or archive it explicitly before creating a replacement.',
+  };
+}
+
+type ReusableEnvironmentLookup =
+  | {
+      outcome: 'reusable';
+      env: IsolationEnvironmentRow;
+      warnings: string[];
+    }
+  | { outcome: 'protected_legacy' };
+
 /**
  * Resolves which isolation environment to use for a conversation.
  *
@@ -150,6 +173,9 @@ export class IsolationResolver {
       workflowId,
       baseBranch
     );
+    if (reusable?.outcome === 'protected_legacy') {
+      return protectedLegacyEnvironmentBlockedResult();
+    }
     if (reusable) {
       return {
         status: 'resolved',
@@ -245,6 +271,9 @@ export class IsolationResolver {
     }
 
     if (env) {
+      if (isProtectedLegacyEnvironment(env)) {
+        return protectedLegacyEnvironmentBlockedResult();
+      }
       await this.markDestroyedBestEffort(env);
     }
 
@@ -291,7 +320,7 @@ export class IsolationResolver {
     workflowType: IsolationWorkflowType,
     workflowId: string,
     baseBranch?: BranchName
-  ): Promise<{ env: IsolationEnvironmentRow; warnings: string[] } | null> {
+  ): Promise<ReusableEnvironmentLookup | null> {
     const existing = await this.store.findActiveByWorkflow(codebaseId, workflowType, workflowId);
     if (!existing) return null;
 
@@ -309,8 +338,12 @@ export class IsolationResolver {
         workflowType,
         workflowId,
       });
-      return { env: existing, warnings };
+      return { outcome: 'reusable', env: existing, warnings };
     }
+
+    // A missing legacy Telegram worktree is immutable persisted data. Stop
+    // resolution here so a later create/upsert cannot rewrite its provenance.
+    if (isProtectedLegacyEnvironment(existing)) return { outcome: 'protected_legacy' };
 
     await this.markDestroyedBestEffort(existing);
     return null;
@@ -357,7 +390,9 @@ export class IsolationResolver {
         };
       }
 
-      await this.markDestroyedBestEffort(linkedEnv);
+      if (!isProtectedLegacyEnvironment(linkedEnv)) {
+        await this.markDestroyedBestEffort(linkedEnv);
+      }
     }
     return null;
   }
@@ -418,7 +453,7 @@ export class IsolationResolver {
   private async markDestroyedBestEffort(env: IsolationEnvironmentRow): Promise<void> {
     // The Telegram adapter no longer exists, but persisted Telegram worktrees
     // remain user-owned data and may only be archived by an explicit action.
-    if (env.created_by_platform === 'telegram') return;
+    if (isProtectedLegacyEnvironment(env)) return;
 
     try {
       await this.store.updateStatus(env.id, 'destroyed');
