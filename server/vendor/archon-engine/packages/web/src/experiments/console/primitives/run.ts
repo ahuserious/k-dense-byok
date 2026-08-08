@@ -1,6 +1,6 @@
 import type { RunStatus } from '../lib/run-status';
 
-export type RunOrigin = 'web' | 'cli' | 'slack' | 'telegram' | 'discord' | 'github' | 'unknown';
+export type RunOrigin = 'web' | 'cli' | 'slack' | 'discord' | 'github' | 'unknown';
 
 export interface Run {
   id: string;
@@ -76,7 +76,6 @@ export function normalizeOrigin(s: string | null | undefined): RunOrigin {
     case 'web':
     case 'cli':
     case 'slack':
-    case 'telegram':
     case 'discord':
     case 'github':
       return lower;

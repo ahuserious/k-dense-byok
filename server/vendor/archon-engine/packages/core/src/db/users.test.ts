@@ -166,7 +166,7 @@ describe('users', () => {
       mockQuery.mockResolvedValueOnce(createQueryResult([newUser]));
       mockQuery.mockResolvedValueOnce(createQueryResult([], 1));
 
-      const result = await findOrCreateUserByPlatformIdentity('telegram', '7654321', 'Bob');
+      const result = await findOrCreateUserByPlatformIdentity('discord', '7654321', 'Bob');
 
       expect(result).toEqual(newUser);
       expect(mockWithTransaction).toHaveBeenCalledTimes(1);
@@ -178,7 +178,7 @@ describe('users', () => {
       expect(mockQuery).toHaveBeenNthCalledWith(
         3,
         expect.stringContaining('INSERT INTO remote_agent_user_identities'),
-        ['user-new', 'telegram', '7654321', 'Bob']
+        ['user-new', 'discord', '7654321', 'Bob']
       );
     });
 

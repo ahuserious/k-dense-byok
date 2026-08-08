@@ -48,7 +48,6 @@ export const safeConfigSchema = z
     assistant: z.string().min(1),
     assistants: z.record(z.string(), providerDefaultsSchema),
     streaming: z.object({
-      telegram: z.enum(['stream', 'batch']),
       discord: z.enum(['stream', 'batch']),
       slack: z.enum(['stream', 'batch']),
       // github removed — never implemented; hardcoded 'batch' in GitHubAdapter

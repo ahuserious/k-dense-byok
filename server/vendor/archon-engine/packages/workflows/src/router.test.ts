@@ -448,7 +448,7 @@ function broken() {
 
     it('should use workflowType when isPullRequest is not set', () => {
       const context: RouterContext = {
-        platformType: 'telegram',
+        platformType: 'discord',
         workflowType: 'task',
       };
       const result = buildRouterPrompt('do something', testWorkflows, context);

@@ -662,34 +662,6 @@ describe('runScheduledCleanup', () => {
     expect(report.removed).toHaveLength(0);
   });
 
-  test('skips telegram environments', async () => {
-    mockListAllActiveWithCodebase.mockResolvedValueOnce([
-      {
-        id: 'env-telegram',
-        working_path: '/workspace/repo/worktrees/thread-abc',
-        branch_name: 'thread-abc',
-        status: 'active',
-        created_by_platform: 'telegram',
-        created_at: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), // 30 days ago
-        codebase_default_cwd: '/workspace/repo',
-        codebase_id: 'codebase-1',
-        workflow_type: 'thread',
-        workflow_id: 'abc',
-        provider: 'worktree',
-        metadata: {},
-      },
-    ]);
-    // Path exists for this env
-    mockWorktreeExists.mockResolvedValueOnce(true);
-    // getDefaultBranch returns 'main' (default from beforeEach)
-    // isBranchMerged returns false (default from beforeEach)
-
-    const report = await runScheduledCleanup();
-
-    // Should not be in removed (Telegram is persistent)
-    expect(report.removed).toHaveLength(0);
-  });
-
   test('continues processing after error on one environment', async () => {
     mockListAllActiveWithCodebase.mockResolvedValueOnce([
       {
@@ -878,8 +850,8 @@ describe('getWorktreeStatusBreakdown', () => {
       },
       {
         id: 'env-4',
-        branch_name: 'telegram-branch',
-        created_by_platform: 'telegram',
+        branch_name: 'old-discord-branch',
+        created_by_platform: 'discord',
         days_since_activity: 60,
         working_path: '/path4',
         status: 'active',
@@ -895,28 +867,7 @@ describe('getWorktreeStatusBreakdown', () => {
 
     expect(breakdown.total).toBe(4);
     expect(breakdown.merged).toBe(1);
-    expect(breakdown.stale).toBe(1); // env-2 is stale (30 days), env-4 is Telegram so not counted as stale
-    expect(breakdown.active).toBe(2); // env-3 active, env-4 Telegram (counted as active, not stale)
-  });
-
-  test('excludes telegram from stale count', async () => {
-    mockListByCodebaseWithAge.mockResolvedValueOnce([
-      {
-        id: 'env-telegram',
-        branch_name: 'telegram-branch',
-        created_by_platform: 'telegram',
-        days_since_activity: 100,
-        working_path: '/path',
-        status: 'active',
-      },
-    ]);
-
-    // getDefaultBranch returns 'main' (default from beforeEach)
-    // isBranchMerged returns false (default from beforeEach)
-
-    const breakdown = await getWorktreeStatusBreakdown('codebase-1', '/workspace/repo');
-
-    expect(breakdown.stale).toBe(0);
+    expect(breakdown.stale).toBe(2);
     expect(breakdown.active).toBe(1);
   });
 
@@ -1549,24 +1500,6 @@ describe('cleanupStaleWorktrees', () => {
     const result = await cleanupStaleWorktrees('codebase-1', '/workspace/repo');
 
     expect(result.removed).toContain('stale-branch');
-  });
-
-  test('skips telegram worktrees even if old', async () => {
-    mockListByCodebaseWithAge.mockResolvedValueOnce([
-      {
-        id: 'env-telegram',
-        branch_name: 'telegram-branch',
-        working_path: '/workspace/repo/worktrees/telegram-branch',
-        created_by_platform: 'telegram',
-        days_since_activity: 100,
-        status: 'active',
-      },
-    ]);
-
-    const result = await cleanupStaleWorktrees('codebase-1', '/workspace/repo');
-
-    expect(result.removed).toHaveLength(0);
-    expect(result.skipped).toHaveLength(0);
   });
 
   test('skips worktrees that are not stale', async () => {

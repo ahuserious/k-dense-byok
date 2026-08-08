@@ -16,7 +16,7 @@ describe('normalizeOrigin', () => {
     expect(normalizeOrigin('web')).toBe('web');
     expect(normalizeOrigin('cli')).toBe('cli');
     expect(normalizeOrigin('slack')).toBe('slack');
-    expect(normalizeOrigin('telegram')).toBe('telegram');
+    expect(normalizeOrigin('matrix')).toBe('unknown');
     expect(normalizeOrigin('discord')).toBe('discord');
     expect(normalizeOrigin('github')).toBe('github');
   });

@@ -8225,10 +8225,10 @@ describe('parseMcpFailureServerNames', () => {
   it('extracts entries (name + segment) from a well-formed message', async () => {
     const { parseMcpFailureServerNames } = await import('./dag-executor');
     const entries = parseMcpFailureServerNames(
-      'MCP server connection failed: telegram (disconnected), github (timeout)'
+      'MCP server connection failed: discord (disconnected), github (timeout)'
     );
     expect(entries).toEqual([
-      { name: 'telegram', segment: 'telegram (disconnected)' },
+      { name: 'discord', segment: 'discord (disconnected)' },
       { name: 'github', segment: 'github (timeout)' },
     ]);
   });
@@ -8395,7 +8395,7 @@ describe('executeDagWorkflow -- MCP failure filtering', () => {
   it('forwards only workflow-configured failures and preserves status detail', async () => {
     await writeFile(join(testDir, 'mcp.json'), JSON.stringify({ 'workflow-server': {} }));
     const platform = await runWithSystemChunk(
-      'MCP server connection failed: workflow-server (timeout), telegram (disconnected)',
+      'MCP server connection failed: workflow-server (timeout), discord (disconnected)',
       'mcp.json'
     );
 
@@ -8406,7 +8406,7 @@ describe('executeDagWorkflow -- MCP failure filtering', () => {
   it('suppresses MCP message entirely when all failures are user plugins', async () => {
     await writeFile(join(testDir, 'mcp.json'), JSON.stringify({ 'workflow-server': {} }));
     const platform = await runWithSystemChunk(
-      'MCP server connection failed: telegram (disconnected), notion (timeout)',
+      'MCP server connection failed: discord (disconnected), notion (timeout)',
       'mcp.json'
     );
 
@@ -8415,7 +8415,7 @@ describe('executeDagWorkflow -- MCP failure filtering', () => {
 
   it('suppresses everything when node has no mcp: config (all failures are plugin noise)', async () => {
     const platform = await runWithSystemChunk(
-      'MCP server connection failed: telegram (disconnected)'
+      'MCP server connection failed: discord (disconnected)'
     );
 
     expect(mcpMessages(platform)).toEqual([]);

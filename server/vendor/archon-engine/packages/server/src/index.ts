@@ -1,6 +1,6 @@
 /**
  * Remote Coding Agent - Main Entry Point
- * Multi-platform AI coding assistant (Telegram, Discord, Slack, GitHub, Gitea)
+ * Multi-platform AI coding assistant (Discord, Slack, GitHub, Gitea)
  */
 
 // Strip CWD .env keys FIRST — before any application imports read process.env.
@@ -61,7 +61,6 @@ getVendorCatalog();
 import { OpenAPIHono, z } from '@hono/zod-openapi';
 import { validationErrorHook } from './routes/openapi-defaults';
 import {
-  TelegramAdapter,
   GitHubAdapter,
   DiscordAdapter,
   SlackAdapter,
@@ -91,8 +90,6 @@ import {
   loadAppPrivateKey,
   registerGitHubAppAuthProvider,
   isPerUserGitHubEnabled,
-  isPerUserProviderKeysEnabled,
-  getDatabaseType,
   assertEncryptionKeyAtBoot,
   assertProviderKeysKeyAtBoot,
   getDecryptedAccessToken,
@@ -106,11 +103,12 @@ import {
   createLogger,
   logArchonPaths,
   validateAppDefaultsPaths,
-  shutdownTelemetry,
-  captureArchonStarted,
-  captureArchonActive,
 } from '@archon/paths';
-import { selectGitHubAuthMode, parseGitCredentialPath } from './github-auth-bootstrap';
+import {
+  selectGitHubAuthMode,
+  parseGitCredentialPath,
+  shouldProbeGhAuth,
+} from './github-auth-bootstrap';
 import {
   getAuth,
   closeAuth,
@@ -128,8 +126,8 @@ function getLog(): ReturnType<typeof createLogger> {
 }
 
 /**
- * Resolve a platform-native user identifier (Slack U-id, Telegram chat id,
- * Discord snowflake) to an Archon user UUID via auto-create-on-first-sight.
+ * Resolve a platform-native user identifier (Slack U-id or Discord snowflake)
+ * to an Archon user UUID via auto-create-on-first-sight.
  *
  * Contract: NEVER THROWS. On any failure, warn-log and return undefined so
  * message handling proceeds (writes user_id = NULL on the conversation/run
@@ -213,43 +211,12 @@ export interface ServerOptions {
   webDistPath?: string;
   /** Override the port. Range: 1–65535. */
   port?: number;
-  /** Run in standalone web-only mode (no Telegram/Slack/GitHub/Discord adapters). */
+  /** Run in standalone web-only mode (no Slack/GitHub/Discord adapters). */
   skipPlatformAdapters?: boolean;
 }
 
 export async function startServer(opts: ServerOptions = {}): Promise<void> {
   getLog().info('server_starting');
-  // Anonymous once-per-boot startup event (self-gates on opt-out). Flushed by
-  // the shutdownTelemetry() call in the SIGINT/SIGTERM shutdown handler.
-  // Deployment shape is categorical only — booleans/enums derived from which
-  // integrations are configured, never the config values themselves. The
-  // adapter gates mirror the env checks the adapter-init section below uses
-  // (loadArchonEnv() ran at module load, so process.env is final here).
-  const deploymentShape = {
-    dbKind: getDatabaseType(),
-    webAuthEnabled: isWebAuthEnabled(),
-    multiUser: isPerUserProviderKeysEnabled(),
-    githubAuthMode: selectGitHubAuthMode(process.env).kind,
-    adapterSlack: Boolean(process.env.SLACK_BOT_TOKEN && process.env.SLACK_APP_TOKEN),
-    adapterTelegram: Boolean(process.env.TELEGRAM_BOT_TOKEN),
-    adapterDiscord: Boolean(process.env.DISCORD_BOT_TOKEN),
-    adapterGitea: Boolean(
-      process.env.GITEA_URL && process.env.GITEA_TOKEN && process.env.GITEA_WEBHOOK_SECRET
-    ),
-    adapterGitlab: Boolean(process.env.GITLAB_TOKEN && process.env.GITLAB_WEBHOOK_SECRET),
-  };
-  captureArchonStarted({ surface: 'server', ...deploymentShape });
-
-  // Daily heartbeat so long-running servers stay visible in active-install
-  // metrics (a boot-only event undercounts server installs after day one).
-  // unref() so the timer never keeps the process alive on shutdown.
-  // captureArchonActive is synchronous fire-and-forget (errors swallowed
-  // internally) — if it ever becomes async, this callback must not return
-  // its promise unhandled.
-  const TELEMETRY_HEARTBEAT_INTERVAL_MS = 24 * 60 * 60 * 1000;
-  setInterval(() => {
-    captureArchonActive({ surface: 'server', ...deploymentShape });
-  }, TELEMETRY_HEARTBEAT_INTERVAL_MS).unref();
 
   // Phase 2: validate the encryption key the moment per-user provider keys are
   // enabled, regardless of GitHub App configuration. TOKEN_ENCRYPTION_KEY alone
@@ -379,9 +346,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     dashboardPoller.start(transport, 1_500);
   }
 
-  // Mutable — pushed to as each adapter starts, read by the /api/health endpoint.
-  // Must be a live reference because Telegram starts after the HTTP listener begins
-  // accepting requests, so a snapshot taken at registration time would miss it.
+  // Mutable — pushed to as each configured adapter starts and read by /api/health.
   const activePlatforms: string[] = ['Web'];
 
   // Platform adapters (skipped in CLI serve mode or when not configured)
@@ -395,7 +360,6 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
   if (!opts.skipPlatformAdapters) {
     // Check that at least one platform is configured
-    const hasTelegram = Boolean(process.env.TELEGRAM_BOT_TOKEN);
     const hasDiscord = Boolean(process.env.DISCORD_BOT_TOKEN);
     // GitHub adapter: dual-mode (App vs PAT). Fail fast if both are configured —
     // silently preferring one would create 3am debugging sessions for an operator
@@ -411,7 +375,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     );
     const hasGitLab = Boolean(process.env.GITLAB_TOKEN && process.env.GITLAB_WEBHOOK_SECRET);
 
-    if (!hasTelegram && !hasDiscord && !hasGitHub && !hasGitea && !hasGitLab) {
+    if (!hasDiscord && !hasGitHub && !hasGitea && !hasGitLab) {
       getLog().warn('no_platform_adapters_configured');
     }
 
@@ -946,43 +910,6 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   });
   getLog().info({ port: server.port, hostname }, 'server_listening');
 
-  // Initialize Telegram adapter (conditional, skipped in CLI serve mode)
-  let telegram: TelegramAdapter | null = null;
-  if (!opts.skipPlatformAdapters && process.env.TELEGRAM_BOT_TOKEN) {
-    const streamingMode = (process.env.TELEGRAM_STREAMING_MODE ?? 'stream') as 'stream' | 'batch';
-    telegram = new TelegramAdapter(process.env.TELEGRAM_BOT_TOKEN, streamingMode);
-    const telegramAdapter = telegram; // Capture for use in callback
-
-    // Register message handler (auth is handled internally by adapter)
-    telegramAdapter.onMessage(
-      async ({ conversationId, message, userId: telegramUserId, displayName }) => {
-        // Resolve Telegram user id (numeric) → Archon user UUID.
-        const userId = await resolveUserId('telegram', telegramUserId, displayName);
-
-        // Fire-and-forget: handler returns immediately, processing happens async
-        lockManager
-          .acquireLock(conversationId, async () => {
-            await handleMessage(telegramAdapter, conversationId, message, {
-              isolationHints: { workflowType: 'thread', workflowId: conversationId },
-              userId,
-            });
-          })
-          .catch(createMessageErrorHandler('Telegram', telegramAdapter, conversationId));
-      }
-    );
-
-    try {
-      await telegramAdapter.start();
-      activePlatforms.push('Telegram');
-    } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-      getLog().error({ err: error, errorType: error.constructor.name }, 'telegram.start_failed');
-      telegram = null; // Don't include in active platforms or shutdown
-    }
-  } else if (!opts.skipPlatformAdapters) {
-    getLog().info('telegram_adapter_skipped');
-  }
-
   // Graceful shutdown
   const shutdown = (): void => {
     getLog().info('server_shutting_down');
@@ -998,7 +925,6 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       .then(async () => {
         // Stop adapters (these should not throw, but be defensive)
         try {
-          telegram?.stop();
           discord?.stop();
           // Detach Slack workflow bridge BEFORE stopping the adapter so a
           // pending debounced chat.update can't fire against a closed socket.
@@ -1012,9 +938,6 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         } catch (error) {
           getLog().error({ err: error }, 'adapter_stop_error');
         }
-
-        // Flush queued telemetry events before pool closes the process.
-        await shutdownTelemetry();
 
         // Release the dedicated Better Auth pool (no-op when web auth is off).
         await closeAuth();
@@ -1045,10 +968,11 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
   getLog().info({ activePlatforms, port }, 'server_ready');
 
-  // Non-blocking: warn at startup if gh CLI auth is unavailable
-  checkGhAuth().catch((err: unknown) => {
-    getLog().debug({ err }, 'gh_auth.check_unexpected_error');
-  });
+  if (shouldProbeGhAuth(process.env)) {
+    checkGhAuth().catch((err: unknown) => {
+      getLog().debug({ err }, 'gh_auth.check_unexpected_error');
+    });
+  }
 }
 
 /**

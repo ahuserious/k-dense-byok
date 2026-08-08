@@ -1,5 +1,5 @@
 import { Link } from 'react-router';
-import { Globe, Terminal, Hash, Send, GitBranch, Trash2 } from 'lucide-react';
+import { Globe, Terminal, Hash, GitBranch, Trash2 } from 'lucide-react';
 import type { DashboardRunResponse } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { formatDuration, formatStarted } from '@/lib/format';
@@ -20,7 +20,6 @@ const PLATFORM_ICONS: Record<string, React.ReactElement> = {
   web: <Globe className="h-3 w-3" />,
   cli: <Terminal className="h-3 w-3" />,
   slack: <Hash className="h-3 w-3" />,
-  telegram: <Send className="h-3 w-3" />,
   github: <GitBranch className="h-3 w-3" />,
 };
 

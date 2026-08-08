@@ -16,6 +16,15 @@ export type GitHubAuthModeDecision =
   | { kind: 'conflict'; message: string };
 
 /**
+ * The gh CLI probe may contact GitHub even when no forge action was requested.
+ * Keep it disabled for standalone/vendor boots unless the operator explicitly
+ * opts in for diagnostics.
+ */
+export function shouldProbeGhAuth(env: NodeJS.ProcessEnv): boolean {
+  return env.ARCHON_ENABLE_GH_AUTH_PROBE === '1';
+}
+
+/**
  * Decide GitHub auth mode from env, refusing both modes set simultaneously.
  *
  * "Refuse" is intentional — silently preferring one over the other creates

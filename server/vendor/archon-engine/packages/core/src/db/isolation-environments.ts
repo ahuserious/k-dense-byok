@@ -187,8 +187,7 @@ export async function getConversationsUsingEnv(envId: string): Promise<string[]>
 }
 
 /**
- * Find stale environments (no activity for specified days)
- * Excludes Telegram (persistent workspaces never auto-cleanup)
+ * Find stale environments (no activity for specified days).
  */
 export async function findStaleEnvironments(
   staleDays = 14
@@ -203,7 +202,6 @@ export async function findStaleEnvironments(
      FROM remote_agent_isolation_environments e
      JOIN remote_agent_codebases c ON e.codebase_id = c.id
      WHERE e.status = 'active'
-       AND e.created_by_platform != 'telegram'
        AND NOT EXISTS (
          SELECT 1 FROM remote_agent_conversations conv
          WHERE conv.isolation_env_id = e.id

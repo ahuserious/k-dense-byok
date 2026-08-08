@@ -317,15 +317,6 @@ describe('isolation-environments', () => {
       expect(params[0]).toBe(7);
     });
 
-    test('excludes telegram environments in query', async () => {
-      mockQuery.mockResolvedValueOnce(createQueryResult([]));
-
-      await findStaleEnvironments();
-
-      const [query] = mockQuery.mock.calls[0] as [string, unknown[]];
-      expect(query).toContain("created_by_platform != 'telegram'");
-    });
-
     test('returns environments with codebase info', async () => {
       const mockEnv = {
         ...sampleEnv,

@@ -2109,7 +2109,7 @@ export function registerApiRoutes(
    *
    * **Cross-adapter guard**: only web-sourced parents qualify.
    * `dispatchToOrchestrator` is wired to the web adapter + its lock manager,
-   * so a Slack / Telegram / GitHub / Discord run being approved from the
+   * so a Slack / GitHub / Discord run being approved from the
    * dashboard must not route through it — the Slack thread would never see
    * the resumed output. Non-web parents skip auto-resume and the originating
    * platform's own re-run flow applies.

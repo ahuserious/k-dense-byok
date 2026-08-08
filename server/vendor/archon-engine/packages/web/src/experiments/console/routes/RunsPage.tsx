@@ -117,7 +117,7 @@ function buildDemoRuns(scope: Scope, projectName: string | null): Run[] {
       ...base,
       id: 'demo-completed-1',
       workflow: 'assist',
-      origin: 'telegram',
+      origin: 'discord',
       status: 'completed',
       startedAt: iso(8 * 60 + 14),
       finishedAt: iso(0),

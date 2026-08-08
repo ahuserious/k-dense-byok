@@ -17,9 +17,6 @@
  *   teal     oklch(0.755 0.165 168)  #06CE94
  */
 
-/* Geist & Geist Mono — loaded only when a console route mounts. */
-@import url('https://fonts.googleapis.com/css2?family=Geist:wght@300..700&family=Geist+Mono:wght@400..600&display=swap');
-
 .console-root {
   /* Surfaces — cool charcoal (hue 265) */
   --surface: oklch(0.175 0.007 265);
@@ -99,9 +96,8 @@
   --input: var(--border);
   --ring: var(--brand-magenta);
 
-  /* Typography — Geist, with the SS01/CV11 alternates the brand uses. */
+  /* Typography uses only local system fonts. */
   font-family:
-    'Geist',
     ui-sans-serif,
     system-ui,
     -apple-system,
@@ -113,14 +109,13 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Override Tailwind's compiled font-mono so console-internal monospace
-   becomes Geist Mono. Higher specificity than the bare .font-mono utility. */
+/* Override Tailwind's compiled font-mono with the local system stack. */
 .console-root .font-mono,
 .console-root code,
 .console-root pre,
 .console-root kbd,
 .console-root samp {
-  font-family: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
   font-feature-settings: 'ss01', 'ss02';
 }
 

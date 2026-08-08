@@ -569,7 +569,7 @@ async function dispatchOrchestratorWorkflow(
   // Dispatch workflow.
   // Resume detection runs for ALL platforms: check if a prior run for this workflow
   // is in a resumable state (paused/failed-by-approval) in this conversation+codebase
-  // before dispatching fresh. This ensures chat platforms (slack, telegram, discord,
+  // before dispatching fresh. This ensures chat platforms (slack, discord,
   // github) resume after approval gates just like web does.
   const resumableRun = await workflowDb.findResumableRunByParentConversation(
     workflow.name,
@@ -1481,7 +1481,7 @@ export async function handleMessage(
 // ─── Streaming Mode ─────────────────────────────────────────────────────────
 
 /**
- * Stream mode: send text chunks immediately for real-time UX (web, Telegram stream).
+ * Stream mode: send text chunks immediately for real-time UX (web and supported chat adapters).
  * If an orchestrator command is detected, retract streamed text and dispatch.
  */
 async function handleStreamMode(

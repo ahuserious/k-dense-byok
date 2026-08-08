@@ -405,7 +405,7 @@ export async function findResumableRun(
  * Find a resumable (failed/paused) run for a workflow scoped to (parent conversation, codebase).
  * Used by the orchestrator (all platforms) to detect approved runs that need foreground resume
  * on the prior run's worktree. Codebase scope prevents cross-project resume on persistent
- * chat conversation IDs (Telegram chat_id, Slack thread, etc.).
+ * chat conversation IDs (for example a Slack thread).
  */
 export async function findResumableRunByParentConversation(
   workflowName: string,

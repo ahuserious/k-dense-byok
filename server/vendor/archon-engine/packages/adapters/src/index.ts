@@ -1,5 +1,4 @@
 // Chat adapters
-export { TelegramAdapter } from './chat/telegram';
 export { SlackAdapter, SlackWorkflowBridge } from './chat/slack';
 
 // Forge adapters

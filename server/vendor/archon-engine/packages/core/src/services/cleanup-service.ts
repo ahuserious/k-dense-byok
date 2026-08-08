@@ -357,11 +357,6 @@ export async function runScheduledCleanup(): Promise<CleanupReport> {
           continue;
         }
 
-        // Check staleness (skip Telegram - already filtered in query but double-check)
-        if (env.created_by_platform === 'telegram') {
-          continue; // Never cleanup Telegram (persistent workspace)
-        }
-
         // Check if environment is stale
         const isStale = await isEnvironmentStale(env, STALE_THRESHOLD_DAYS);
         if (isStale) {
@@ -479,9 +474,6 @@ export async function getWorktreeStatusBreakdown(
   const mainBranch = await resolveBaseBranch(repoPath, mainRepoPath);
 
   for (const env of environments) {
-    // Skip Telegram (never shown as stale)
-    const isTelegram = env.created_by_platform === 'telegram';
-
     // Check if merged (treat as not-merged on unexpected errors)
     let merged = false;
     try {
@@ -498,8 +490,8 @@ export async function getWorktreeStatusBreakdown(
       continue;
     }
 
-    // Check if stale (non-Telegram only)
-    const isStale = !isTelegram && env.days_since_activity >= STALE_THRESHOLD_DAYS;
+    // Check if stale
+    const isStale = env.days_since_activity >= STALE_THRESHOLD_DAYS;
     if (isStale) {
       breakdown.stale++;
       breakdown.staleEnvs.push({
@@ -530,9 +522,6 @@ export async function cleanupStaleWorktrees(
   const environments = await isolationEnvDb.listByCodebaseWithAge(codebaseId);
 
   for (const env of environments) {
-    // Skip Telegram
-    if (env.created_by_platform === 'telegram') continue;
-
     // Check if stale
     if (env.days_since_activity < STALE_THRESHOLD_DAYS) continue;
 

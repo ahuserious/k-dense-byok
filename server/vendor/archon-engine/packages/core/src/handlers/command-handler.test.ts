@@ -490,7 +490,7 @@ describe('CommandHandler', () => {
   describe('handleCommand', () => {
     const baseConversation: Conversation = {
       id: 'conv-123',
-      platform_type: 'telegram',
+      platform_type: 'discord',
       platform_conversation_id: 'chat-456',
       ai_assistant_type: 'claude',
       codebase_id: null,
@@ -515,7 +515,7 @@ describe('CommandHandler', () => {
       test('should show platform and assistant info', async () => {
         const result = await handleCommand(baseConversation, '/status');
         expect(result.success).toBe(true);
-        expect(result.message).toContain('telegram');
+        expect(result.message).toContain('discord');
         expect(result.message).toContain('claude');
       });
 
@@ -1792,7 +1792,7 @@ describe('CommandHandler', () => {
 
         // Status should still succeed, just without workflow info
         expect(result.success).toBe(true);
-        expect(result.message).toContain('telegram'); // Basic info still present
+        expect(result.message).toContain('discord'); // Basic info still present
         expect(result.message).not.toContain('Active Workflow');
       });
 
@@ -1826,7 +1826,7 @@ describe('CommandHandler', () => {
     describe('/workflow approve — interactive_loop branch', () => {
       const baseConversation: Conversation = {
         id: 'conv-approve',
-        platform_type: 'telegram',
+        platform_type: 'discord',
         platform_conversation_id: 'chat-approve',
         ai_assistant_type: 'claude',
         codebase_id: null,
@@ -1948,7 +1948,7 @@ describe('CommandHandler', () => {
     describe('/workflow approve — standard approval node with captureResponse', () => {
       const baseConversation: Conversation = {
         id: 'conv-approve',
-        platform_type: 'telegram',
+        platform_type: 'discord',
         platform_conversation_id: 'chat-approve',
         ai_assistant_type: 'claude',
         codebase_id: null,
@@ -2028,7 +2028,7 @@ describe('CommandHandler', () => {
     describe('/workflow reject — on_reject branch', () => {
       const baseConversation: Conversation = {
         id: 'conv-approve',
-        platform_type: 'telegram',
+        platform_type: 'discord',
         platform_conversation_id: 'chat-approve',
         ai_assistant_type: 'claude',
         codebase_id: null,

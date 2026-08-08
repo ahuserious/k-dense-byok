@@ -110,8 +110,8 @@ function dagNodeTelemetryType(node: DagNode): WorkflowNodeType {
 
 /**
  * Usage totals for the terminal telemetry event. Fields are omitted (not sent
- * as zero) when nothing was reported, so absence in PostHog means "providers
- * reported no usage", never "zero spend".
+ * as zero) when nothing was reported, so absence means "providers reported no
+ * usage", never "zero spend".
  */
 function buildRunUsageProps(totals: {
   costUsd: number;
@@ -162,7 +162,7 @@ function getLog(): ReturnType<typeof createLogger> {
 const MCP_FAILURE_PREFIX = 'MCP server connection failed: ';
 
 /** A failed MCP server entry parsed from the SDK message. `segment` is the
- *  original substring (e.g. `"telegram (disconnected)"`) so callers can
+ *  original substring (e.g. `"research-tools (disconnected)"`) so callers can
  *  reconstruct a filtered message without losing the status detail. */
 export interface McpFailureEntry {
   name: string;
@@ -1125,7 +1125,7 @@ async function executeNodeInternal(
         // Providers yield system chunks for user-actionable issues (missing env
         // vars, Haiku+MCP, structured output failures, etc.). MCP-failure
         // chunks need filtering: user-level plugin MCPs inherited from
-        // `~/.claude/` (e.g. `telegram`) routinely fail to connect inside the
+        // `~/.claude/` (e.g. `research-tools`) routinely fail to connect inside the
         // headless subprocess and aren't actionable for the workflow author.
         // Other warnings (⚠️) are always actionable and surface verbatim.
         if (msg.content.startsWith(MCP_FAILURE_PREFIX)) {

@@ -99,7 +99,7 @@ CREATE INDEX IF NOT EXISTS idx_user_identities_user_id
   ON remote_agent_user_identities(user_id);
 
 COMMENT ON TABLE remote_agent_user_identities IS
-  'Maps platform-native user IDs (Slack U-ids, Telegram chat ids, GitHub logins, Discord snowflakes) to Archon user UUIDs.';
+  'Maps platform-native user IDs (Slack U-ids, GitHub logins, Discord snowflakes) to Archon user UUIDs.';
 
 -- ============================================================================
 -- Table 2: Conversations
