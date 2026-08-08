@@ -1,23 +1,24 @@
 import type { ReactElement } from 'react';
-import { Globe, Terminal, Hash, MessageCircle, GitBranch } from 'lucide-react';
+import { Globe, Terminal, Hash, Send, MessageCircle, GitBranch } from 'lucide-react';
 import type { RunOrigin } from '../primitives/run';
 
 const ORIGIN_LABEL: Record<RunOrigin, string> = {
   web: 'Web',
   cli: 'CLI',
   slack: 'Slack',
+  telegram: 'Telegram',
   discord: 'Discord',
   github: 'GitHub',
   unknown: '—',
 };
 
-// One icon per platform so the source is recognisable at a glance. Extends the
-// Keep one icon per supported origin and render no icon for `unknown` rather
-// than showing a misleading default.
+// Keep one icon per known origin so historical provenance remains recognisable.
+// Telegram is display-only; `unknown` intentionally has no misleading fallback.
 const ORIGIN_ICON: Record<RunOrigin, ReactElement | null> = {
   web: <Globe className="h-3 w-3" />,
   cli: <Terminal className="h-3 w-3" />,
   slack: <Hash className="h-3 w-3" />,
+  telegram: <Send className="h-3 w-3" />,
   discord: <MessageCircle className="h-3 w-3" />,
   github: <GitBranch className="h-3 w-3" />,
   unknown: null,

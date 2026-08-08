@@ -307,6 +307,11 @@ export async function runScheduledCleanup(): Promise<CleanupReport> {
         // Skip if already processing or destroyed
         if (env.status !== 'active') continue;
 
+        // Telegram adapter support was removed, but existing databases may still
+        // contain its persistent worktrees. Preserve those records before any
+        // path or branch cleanup can delete legacy committed work.
+        if (env.created_by_platform === 'telegram') continue;
+
         // Check if path still exists
         const pathExists = await worktreeExists(toWorktreePath(env.working_path));
         if (!pathExists) {
@@ -474,6 +479,10 @@ export async function getWorktreeStatusBreakdown(
   const mainBranch = await resolveBaseBranch(repoPath, mainRepoPath);
 
   for (const env of environments) {
+    // Legacy Telegram worktrees remain persistent upgrade data even though the
+    // platform adapter no longer exists.
+    const isLegacyTelegram = env.created_by_platform === 'telegram';
+
     // Check if merged (treat as not-merged on unexpected errors)
     let merged = false;
     try {
@@ -490,8 +499,8 @@ export async function getWorktreeStatusBreakdown(
       continue;
     }
 
-    // Check if stale
-    const isStale = env.days_since_activity >= STALE_THRESHOLD_DAYS;
+    // Keep legacy Telegram worktrees in the active bucket, never stale.
+    const isStale = !isLegacyTelegram && env.days_since_activity >= STALE_THRESHOLD_DAYS;
     if (isStale) {
       breakdown.stale++;
       breakdown.staleEnvs.push({
@@ -522,6 +531,9 @@ export async function cleanupStaleWorktrees(
   const environments = await isolationEnvDb.listByCodebaseWithAge(codebaseId);
 
   for (const env of environments) {
+    // This is a persisted-data exemption, not an active platform adapter.
+    if (env.created_by_platform === 'telegram') continue;
+
     // Check if stale
     if (env.days_since_activity < STALE_THRESHOLD_DAYS) continue;
 

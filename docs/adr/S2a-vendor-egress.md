@@ -39,12 +39,30 @@ Counts: **17 found; 6 removed; 7 gated off by default; 4 retained for explicit u
 
 `server/test/guards/vendor-egress.test.ts` scans the complete vendored tree for
 analytics SDK names, known analytics ingest hosts, the removed upstream release
-endpoint, and remote font/CDN hosts. Its allowlist is path/rule/pattern-specific
-and includes a reason for every exception.
+endpoint, and remote font/CDN hosts. It also scans first-party source for direct
+`fetch` and `WebSocket` use, Node HTTP(S) imports and request/get calls,
+network-SDK client construction, and curl/wget subprocess commands.
 
-The only current exception is the generated `bun.lock`, which still records the
-removed analytics dependency until the orchestrator performs its required Bun
-install/lockfile gate. Runtime source and package manifests are not allowlisted.
+`server/test/guards/vendor-egress.manifest.json` is the machine-readable
+companion to this ADR. Coverage is keyed by exact relative path and capability,
+with an expected occurrence count so adding another call in an already reviewed
+file still fails the guard. Every entry records its disposition, ADR reference,
+and reason. Marker exceptions use the same path-specific manifest; none are
+currently required after the orchestrator refreshed the vendor lockfile.
+
+The current call-site inventory contains **18 occurrences across 14
+path/capability entries**:
+
+| Disposition | Path/capability entries | Occurrences | Scope |
+|---|---:|---:|---|
+| Required local | 6 | 6 | Relative/same-origin builder and console API calls. |
+| Gated off by default | 6 | 9 | Slack, Discord, GitHub, Gitea, and GitLab clients behind explicit operator configuration. |
+| Retained explicit | 2 | 3 | OpenAI OAuth and GitHub device-flow calls initiated by Connect/provider use. |
+
+There are no reviewed exceptions for raw WebSockets, Node HTTP(S) clients, or
+network subprocess commands. Mutation-style fixture tests prove an unknown
+fetch, WebSocket, SDK client, or curl command is rejected without committing an
+actual violation to the vendor tree.
 
 ## Reviewed non-egress URL literals
 

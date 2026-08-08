@@ -662,6 +662,47 @@ describe('runScheduledCleanup', () => {
     expect(report.removed).toHaveLength(0);
   });
 
+  test('preserves a clean committed unmerged legacy Telegram worktree during upgrade cleanup', async () => {
+    mockListAllActiveWithCodebase.mockResolvedValueOnce([
+      {
+        id: 'env-legacy-telegram',
+        working_path: '/workspace/repo/worktrees/telegram-thread-abc',
+        branch_name: 'telegram-thread-abc',
+        status: 'active',
+        created_by_platform: 'telegram',
+        created_at: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+        codebase_default_cwd: '/workspace/repo',
+        codebase_id: 'codebase-1',
+        workflow_type: 'thread',
+        workflow_id: 'abc',
+        provider: 'worktree',
+        metadata: {},
+      },
+    ]);
+    mockWorktreeExists.mockResolvedValue(true);
+    mockHasUncommittedChanges.mockResolvedValueOnce(false);
+    mockIsBranchMerged.mockResolvedValueOnce(false);
+    mockGetConversationsUsingEnv.mockResolvedValueOnce([]);
+    mockGetById.mockResolvedValueOnce({
+      id: 'env-legacy-telegram',
+      codebase_id: 'codebase-1',
+      working_path: '/workspace/repo/worktrees/telegram-thread-abc',
+      branch_name: 'telegram-thread-abc',
+      status: 'active',
+    });
+    mockGetCodebase.mockResolvedValueOnce({
+      id: 'codebase-1',
+      name: 'test-repo',
+      default_cwd: '/workspace/repo',
+    });
+
+    const report = await runScheduledCleanup();
+
+    expect(report.removed).toHaveLength(0);
+    expect(mockDestroy).not.toHaveBeenCalled();
+    expect(mockUpdateStatus).not.toHaveBeenCalled();
+  });
+
   test('continues processing after error on one environment', async () => {
     mockListAllActiveWithCodebase.mockResolvedValueOnce([
       {

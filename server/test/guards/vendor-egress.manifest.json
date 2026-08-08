@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "networkCallSites": [
+    {
+      "relativePath": "packages/adapters/src/chat/slack/adapter.ts",
+      "capability": "network-sdk",
+      "expectedOccurrences": 1,
+      "disposition": "gated-off",
+      "adrReference": "| 8 |",
+      "reason": "Slack Socket Mode is constructed only when both operator-supplied Slack tokens enable the adapter."
+    },
+    {
+      "relativePath": "packages/adapters/src/community/chat/discord/adapter.ts",
+      "capability": "network-sdk",
+      "expectedOccurrences": 1,
+      "disposition": "gated-off",
+      "adrReference": "| 9 |",
+      "reason": "The Discord client is constructed only when an operator supplies DISCORD_BOT_TOKEN."
+    },
+    {
+      "relativePath": "packages/adapters/src/community/forge/gitea/adapter.ts",
+      "capability": "fetch",
+      "expectedOccurrences": 2,
+      "disposition": "gated-off",
+      "adrReference": "| 11 |",
+      "reason": "Gitea REST calls require an explicitly configured URL, token, and webhook secret."
+    },
+    {
+      "relativePath": "packages/adapters/src/community/forge/gitlab/adapter.ts",
+      "capability": "fetch",
+      "expectedOccurrences": 1,
+      "disposition": "gated-off",
+      "adrReference": "| 12 |",
+      "reason": "GitLab REST calls require an explicitly configured token and webhook secret."
+    },
+    {
+      "relativePath": "packages/adapters/src/forge/github/adapter.ts",
+      "capability": "network-sdk",
+      "expectedOccurrences": 2,
+      "disposition": "gated-off",
+      "adrReference": "| 10 |",
+      "reason": "GitHub REST clients are available only behind complete operator-supplied PAT or App configuration."
+    },
+    {
+      "relativePath": "packages/core/src/credentials/openai-oauth.ts",
+      "capability": "fetch",
+      "expectedOccurrences": 1,
+      "disposition": "retained-explicit",
+      "adrReference": "| 14 |",
+      "reason": "The OpenAI token endpoint is called only during a user-initiated Connect or token-refresh flow."
+    },
+    {
+      "relativePath": "packages/core/src/github-auth/auth.ts",
+      "capability": "network-sdk",
+      "expectedOccurrences": 2,
+      "disposition": "gated-off",
+      "adrReference": "| 10 |",
+      "reason": "GitHub App clients exist only when the operator has supplied a complete App configuration; requests are action-driven."
+    },
+    {
+      "relativePath": "packages/core/src/github-auth/device-flow.ts",
+      "capability": "fetch",
+      "expectedOccurrences": 2,
+      "disposition": "retained-explicit",
+      "adrReference": "| 15 |",
+      "reason": "GitHub device-code, token, and profile requests occur only after the user selects Connect."
+    },
+    {
+      "relativePath": "packages/web/src/components/workflows/ArtifactViewerModal.tsx",
+      "capability": "fetch",
+      "expectedOccurrences": 1,
+      "disposition": "required-local",
+      "adrReference": "The required local surfaces",
+      "reason": "Fetches an artifact from the same-origin local product API after the user opens its viewer."
+    },
+    {
+      "relativePath": "packages/web/src/experiments/console/lib/http.ts",
+      "capability": "fetch",
+      "expectedOccurrences": 1,
+      "disposition": "required-local",
+      "adrReference": "The required local surfaces",
+      "reason": "Shared console HTTP helper calls relative same-origin local product API paths."
+    },
+    {
+      "relativePath": "packages/web/src/experiments/console/skills/conversations.ts",
+      "capability": "fetch",
+      "expectedOccurrences": 1,
+      "disposition": "required-local",
+      "adrReference": "The required local surfaces",
+      "reason": "Uploads conversation files to a relative same-origin local product API path."
+    },
+    {
+      "relativePath": "packages/web/src/experiments/console/skills/runs.ts",
+      "capability": "fetch",
+      "expectedOccurrences": 1,
+      "disposition": "required-local",
+      "adrReference": "The required local surfaces",
+      "reason": "Fetches run artifacts from a relative same-origin local product API path."
+    },
+    {
+      "relativePath": "packages/web/src/experiments/console/skills/startRun.ts",
+      "capability": "fetch",
+      "expectedOccurrences": 1,
+      "disposition": "required-local",
+      "adrReference": "The required local surfaces",
+      "reason": "Starts a run through a relative same-origin local product API path."
+    },
+    {
+      "relativePath": "packages/web/src/lib/api.ts",
+      "capability": "fetch",
+      "expectedOccurrences": 1,
+      "disposition": "required-local",
+      "adrReference": "The required local surfaces",
+      "reason": "Central browser API helper is restricted to same-origin local product routes supplied by the UI."
+    }
+  ],
+  "markerAllowlist": []
+}
