@@ -74,6 +74,14 @@
       "reason": "Fetches an artifact from the same-origin local product API after the user opens its viewer."
     },
     {
+      "relativePath": "packages/web/src/experiments/console/lib/sse.ts",
+      "capability": "eventsource",
+      "expectedOccurrences": 3,
+      "disposition": "required-local",
+      "adrReference": "The required local surfaces",
+      "reason": "Subscribes to relative local-product dashboard and conversation SSE routes; the configured base is the same local API origin."
+    },
+    {
       "relativePath": "packages/web/src/experiments/console/lib/http.ts",
       "capability": "fetch",
       "expectedOccurrences": 1,
@@ -112,6 +120,22 @@
       "disposition": "required-local",
       "adrReference": "The required local surfaces",
       "reason": "Central browser API helper is restricted to same-origin local product routes supplied by the UI."
+    },
+    {
+      "relativePath": "packages/web/src/hooks/useDashboardSSE.ts",
+      "capability": "eventsource",
+      "expectedOccurrences": 1,
+      "disposition": "required-local",
+      "adrReference": "The required local surfaces",
+      "reason": "Subscribes to the relative same-origin local dashboard event stream."
+    },
+    {
+      "relativePath": "packages/web/src/hooks/useSSE.ts",
+      "capability": "eventsource",
+      "expectedOccurrences": 1,
+      "disposition": "required-local",
+      "adrReference": "The required local surfaces",
+      "reason": "Subscribes to the selected conversation on the local product SSE API."
     }
   ],
   "markerAllowlist": []

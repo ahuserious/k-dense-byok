@@ -19,6 +19,8 @@ interface MarkerAllowlistEntry {
 type NetworkCapability =
   | "fetch"
   | "websocket"
+  | "eventsource"
+  | "eventsource-import"
   | "node-http-import"
   | "node-http-call"
   | "network-sdk"
@@ -79,6 +81,12 @@ const NETWORK_RULES: readonly NetworkRule[] = [
   // Do not classify SDK methods such as discord.js channel.fetch().
   { capability: "fetch", pattern: /(^|[^.\w])(?:(?:globalThis|window)\.)?fetch\s*\(/gm },
   { capability: "websocket", pattern: /\bnew\s+WebSocket\s*\(/g },
+  { capability: "eventsource", pattern: /\bnew\s+EventSource\s*\(/g },
+  {
+    capability: "eventsource-import",
+    pattern:
+      /(?:from\s*["'](?:eventsource|event-source-polyfill)["']|require\s*\(\s*["'](?:eventsource|event-source-polyfill)["']\s*\)|import\s*\(\s*["'](?:eventsource|event-source-polyfill)["']\s*\))/g,
+  },
   {
     capability: "node-http-import",
     pattern: /(?:from\s*["'](?:node:)?https?["']|require\s*\(\s*["'](?:node:)?https?["']\s*\))/g,
@@ -299,6 +307,7 @@ describe("vendored engine egress guard", () => {
   it.each([
     ["fetch", `export const leak = () => fetch("https://example.invalid/ping");`],
     ["websocket", `export const socket = new WebSocket("wss://example.invalid/events");`],
+    ["eventsource", `export const stream = new EventSource("https://example.invalid/events");`],
     ["network-sdk", `export const client = new Octokit({ auth: "secret" });`],
     ["network-subprocess", `exec("curl https://example.invalid/ping");`],
   ] as const)("rejects an unknown %s call site", (capability, source) => {

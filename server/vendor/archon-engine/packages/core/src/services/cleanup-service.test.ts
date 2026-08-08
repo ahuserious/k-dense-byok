@@ -961,6 +961,29 @@ describe('cleanupMergedWorktrees', () => {
     );
   });
 
+  test('preserves a legacy Telegram worktree even when its branch is merged', async () => {
+    mockListByCodebase.mockResolvedValueOnce([
+      {
+        id: 'env-legacy-telegram-merged',
+        branch_name: 'telegram-thread-merged',
+        working_path: '/workspace/repo/worktrees/telegram-thread-merged',
+        created_by_platform: 'telegram',
+        status: 'active',
+      },
+    ]);
+    // If consulted, the branch is merged. The persisted-data exemption must
+    // short-circuit before merge classification or any removal decision.
+    mockIsBranchMerged.mockResolvedValue(true);
+
+    const result = await cleanupMergedWorktrees('codebase-1', '/workspace/repo');
+
+    expect(result.removed).toHaveLength(0);
+    expect(result.skipped).toHaveLength(0);
+    expect(mockIsBranchMerged).not.toHaveBeenCalled();
+    expect(mockDestroy).not.toHaveBeenCalled();
+    expect(mockUpdateStatus).not.toHaveBeenCalled();
+  });
+
   test('skips merged branches with uncommitted changes', async () => {
     mockListByCodebase.mockResolvedValueOnce([
       {
