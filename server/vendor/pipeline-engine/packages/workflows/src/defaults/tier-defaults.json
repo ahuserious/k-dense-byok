@@ -2,7 +2,7 @@
   "claude": {
     "small": { "model": "haiku" },
     "medium": { "model": "sonnet" },
-    "large": { "model": "claude-opus-4-8[1m]", "effort": "max" }
+    "large": { "model": "claude-opus-4-8", "effort": "max" }
   },
   "codex": {
     "small": { "model": "gpt-5.5", "effort": "minimal" },

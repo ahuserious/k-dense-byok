@@ -465,6 +465,40 @@ describe('SlackAdapter', () => {
       };
     }
 
+    test('canonical and deprecated command generations use the same handlers', async () => {
+      mockCommand.mockClear();
+      mockLogger.warn.mockClear();
+      const adapter = new SlackAdapter('xoxb-fake', 'xapp-fake');
+      adapter.onMessage(async () => {});
+      await adapter.start();
+
+      const invokeHelp = async (commandName: string): Promise<string> => {
+        const args = makeSlashArgs({ text: '' });
+        await findCommandHandler(commandName)(args);
+        expect(args.ack).toHaveBeenCalledTimes(1);
+        const response = args.respond.mock.calls[0]?.[0] as { text: string } | undefined;
+        if (!response) throw new Error(`no help response for ${commandName}`);
+        return response.text;
+      };
+
+      const canonicalGeneralHelp = await invokeHelp('/pipeline');
+      const canonicalWorkflowHelp = await invokeHelp('/pipeline-workflow');
+      // deprecated-compat: aliases remain wired during the Slack command migration window.
+      const legacyGeneralHelp = await invokeHelp('/archon');
+      const legacyWorkflowHelp = await invokeHelp('/archon-workflow');
+
+      expect(legacyGeneralHelp).toBe(canonicalGeneralHelp);
+      expect(legacyWorkflowHelp).toBe(canonicalWorkflowHelp);
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        { command: '/archon', replacement: '/pipeline' },
+        'slack.slash_command_deprecated'
+      );
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        { command: '/archon-workflow', replacement: '/pipeline-workflow' },
+        'slack.slash_command_deprecated'
+      );
+    });
+
     test('unauthorized user is silently rejected — no respond, no seed post', async () => {
       mockPostMessage.mockClear();
       mockCommand.mockClear();

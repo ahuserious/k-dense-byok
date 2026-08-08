@@ -76,7 +76,7 @@ export class GitLabAdapter implements IPlatformAdapter {
     this.token = token;
     this.webhookSecret = webhookSecret;
     this.lockManager = lockManager;
-    this.botMention = botMention ?? 'Pipeline Engine';
+    this.botMention = botMention ?? 'pipeline';
 
     this.allowedUsers = parseAllowedUsers(process.env.GITLAB_ALLOWED_USERS);
     if (this.allowedUsers.length > 0) {

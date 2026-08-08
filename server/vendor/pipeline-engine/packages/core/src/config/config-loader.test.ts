@@ -44,6 +44,10 @@ describe('config-loader', () => {
     'DISCORD_STREAMING_MODE',
     'SLACK_STREAMING_MODE',
     'MAX_CONCURRENT_CONVERSATIONS',
+    'BOT_DISPLAY_NAME',
+    'GITHUB_BOT_MENTION',
+    'GITLAB_BOT_MENTION',
+    'GITEA_BOT_MENTION',
     'WORKSPACE_PATH',
     'WORKTREE_BASE',
     'ARCHON_HOME',
@@ -278,8 +282,34 @@ recommendedWorkflows: "pipeline-plan"
       // explicitly rather than asserting an exhaustive shape.
       expect(config.assistants.claude).toEqual({});
       expect(config.assistants.codex).toEqual({});
+      expect(config.botName).toBe('Pipeline Engine');
+      expect(config.forgeMentions).toEqual({
+        github: 'pipeline',
+        gitlab: 'pipeline',
+        gitea: 'pipeline',
+      });
       expect(config.streaming.telegram).toBe('stream');
       expect(config.concurrency.maxConversations).toBe(10);
+    });
+
+    test('startup config keeps display name separate from forge mention handles', async () => {
+      mockFsReadFile.mockResolvedValue(`
+botName: Research Display
+forgeMentions:
+  github: research-github
+  gitlab: research-gitlab
+`);
+      process.env.BOT_DISPLAY_NAME = 'Environment Display';
+      process.env.GITEA_BOT_MENTION = 'research-gitea';
+
+      const config = await loadConfig();
+
+      expect(config.botName).toBe('Environment Display');
+      expect(config.forgeMentions).toEqual({
+        github: 'research-github',
+        gitlab: 'research-gitlab',
+        gitea: 'research-gitea',
+      });
     });
 
     test('env var DEFAULT_AI_ASSISTANT is a fallback — config file assistant wins', async () => {
@@ -904,8 +934,12 @@ tiers:
       const safe = toSafeConfig(config);
       // Configured tier round-trips.
       expect(safe.tiers?.large).toEqual({ provider: 'codex', model: 'gpt-5.5' });
-      // tierDefaults = built-in presets for the default provider (claude → opus@large).
-      expect(safe.tierDefaults?.large).toEqual({ provider: 'claude', model: 'opus' });
+      // tierDefaults = the vendored presets for the default provider (claude → customized large).
+      expect(safe.tierDefaults?.large).toEqual({
+        provider: 'claude',
+        model: 'claude-opus-4-8',
+        effort: 'max',
+      });
       expect(safe.tierDefaults?.small).toEqual({ provider: 'claude', model: 'haiku' });
     });
   });

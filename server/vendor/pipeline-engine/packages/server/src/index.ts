@@ -445,8 +445,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       // Register on the module-level singleton consumed by createWorkflowDeps()
       // so bash/script subprocess env injection picks up the provider.
       registerGitHubAppAuthProvider(githubAppAuthProvider);
-      const botMention =
-        process.env.GITHUB_BOT_MENTION || process.env.BOT_DISPLAY_NAME || config.botName;
+      const botMention = config.forgeMentions.github;
       const auth: GitHubAuth = { kind: 'app', provider: githubAppAuthProvider };
       // Per-user comment attribution: when enabled, let the adapter author PR/
       // issue comments under the originating user's GitHub identity. Resolver
@@ -468,8 +467,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       if (!patToken || !webhookSecret) {
         throw new Error('GitHub PAT mode misconfigured: GITHUB_TOKEN and WEBHOOK_SECRET required');
       }
-      const botMention =
-        process.env.GITHUB_BOT_MENTION || process.env.BOT_DISPLAY_NAME || config.botName;
+      const botMention = config.forgeMentions.github;
       const auth: GitHubAuth = { kind: 'pat', token: patToken };
       github = new GitHubAdapter(auth, webhookSecret, lockManager, botMention);
       await github.start();
@@ -481,8 +479,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
     // Initialize Gitea adapter (conditional)
     if (process.env.GITEA_URL && process.env.GITEA_TOKEN && process.env.GITEA_WEBHOOK_SECRET) {
-      const giteaBotMention =
-        process.env.GITEA_BOT_MENTION || process.env.BOT_DISPLAY_NAME || config.botName;
+      const giteaBotMention = config.forgeMentions.gitea;
       gitea = new GiteaAdapter(
         process.env.GITEA_URL,
         process.env.GITEA_TOKEN,
@@ -498,8 +495,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
     // Initialize GitLab adapter (conditional)
     if (process.env.GITLAB_TOKEN && process.env.GITLAB_WEBHOOK_SECRET) {
-      const gitlabBotMention =
-        process.env.GITLAB_BOT_MENTION || process.env.BOT_DISPLAY_NAME || config.botName;
+      const gitlabBotMention = config.forgeMentions.gitlab;
       gitlab = new GitLabAdapter(
         process.env.GITLAB_TOKEN,
         process.env.GITLAB_WEBHOOK_SECRET,

@@ -73,6 +73,27 @@ export function runTokenBan(options) {
     pathPattern: globRegex(String(rule.path)),
     identifiers: (rule.identifiers ?? []).map((value) => String(value).toLowerCase()),
   }));
+  const deprecatedCompatibilityRules = (
+    config.deprecatedCompatibilityIdentifiers ?? []
+  ).map((rule) => {
+    const rulePath = String(rule.path ?? "");
+    const comment = String(rule.comment ?? "");
+    if (!rulePath || /[*?]/.test(rulePath)) {
+      throw new Error(
+        "deprecatedCompatibilityIdentifiers entries must use an exact path",
+      );
+    }
+    if (!comment.startsWith("deprecated-compat:")) {
+      throw new Error(
+        "deprecatedCompatibilityIdentifiers entries require a deprecated-compat: comment",
+      );
+    }
+    return {
+      pathPattern: globRegex(rulePath),
+      identifiers: (rule.identifiers ?? []).map((value) => String(value).toLowerCase()),
+    };
+  });
+  const pathScopedRules = [...vendorInternalRules, ...deprecatedCompatibilityRules];
   const selfPaths = new Set([
     path.relative(options.root, options.config).replaceAll(path.sep, "/"),
     "scripts/token-ban.mjs",
@@ -94,7 +115,7 @@ export function runTokenBan(options) {
       const line = lines[lineIndex];
       if (!tokenPattern.test(line)) continue;
       const lowerLine = line.toLowerCase();
-      const pathScopedIdentifiers = vendorInternalRules
+      const pathScopedIdentifiers = pathScopedRules
         .filter((rule) => rule.pathPattern.test(relativePath))
         .flatMap((rule) => rule.identifiers);
       const remainingLine = [...allowedIdentifiers, ...pathScopedIdentifiers]

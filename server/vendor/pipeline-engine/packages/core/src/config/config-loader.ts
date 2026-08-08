@@ -193,6 +193,12 @@ const DEFAULT_CONFIG_CONTENT = `# Pipeline Engine Global Configuration
 # Bot display name (shown in messages)
 # botName: Pipeline Engine
 
+# Forge account handles used for exact @mention matching (without the @)
+# forgeMentions:
+#   github: pipeline
+#   gitlab: pipeline
+#   gitea: pipeline
+
 # Default AI assistant (must match a registered provider, e.g. claude, codex)
 # defaultAssistant: claude
 
@@ -363,6 +369,11 @@ function getDefaults(): MergedConfig {
 
   return {
     botName: 'Pipeline Engine',
+    forgeMentions: {
+      github: 'pipeline',
+      gitlab: 'pipeline',
+      gitea: 'pipeline',
+    },
     assistant: providers.find(p => p.builtIn)?.id ?? 'claude',
     assistants: registeredAssistants,
     streaming: {
@@ -402,6 +413,13 @@ function applyEnvOverrides(
   if (envBotName) {
     config.botName = envBotName;
   }
+
+  const githubMention = process.env.GITHUB_BOT_MENTION?.trim();
+  if (githubMention) config.forgeMentions.github = githubMention;
+  const gitlabMention = process.env.GITLAB_BOT_MENTION?.trim();
+  if (gitlabMention) config.forgeMentions.gitlab = gitlabMention;
+  const giteaMention = process.env.GITEA_BOT_MENTION?.trim();
+  if (giteaMention) config.forgeMentions.gitea = giteaMention;
 
   // DEFAULT_AI_ASSISTANT is a fallback default: only applies when no config file
   // has explicitly set the assistant. An explicit save via the Web UI (or a repo
@@ -473,6 +491,15 @@ function mergeGlobalConfig(defaults: MergedConfig, global: GlobalConfig): Merged
   // Bot name preference
   if (global.botName) {
     result.botName = global.botName;
+  }
+
+  if (global.forgeMentions) {
+    const githubMention = global.forgeMentions.github?.trim();
+    if (githubMention) result.forgeMentions.github = githubMention;
+    const gitlabMention = global.forgeMentions.gitlab?.trim();
+    if (gitlabMention) result.forgeMentions.gitlab = gitlabMention;
+    const giteaMention = global.forgeMentions.gitea?.trim();
+    if (giteaMention) result.forgeMentions.gitea = giteaMention;
   }
 
   // Assistant preference — validate against registry
@@ -627,6 +654,7 @@ export function logConfig(config: MergedConfig): void {
   getLog().info(
     {
       assistant: config.assistant,
+      forgeMentions: config.forgeMentions,
       streaming: config.streaming,
     },
     'config_loaded'
@@ -654,6 +682,12 @@ export async function updateGlobalConfig(
     const merged: GlobalConfig = { ...current };
 
     if (updates.botName !== undefined) merged.botName = updates.botName;
+    if (updates.forgeMentions) {
+      merged.forgeMentions = {
+        ...current.forgeMentions,
+        ...updates.forgeMentions,
+      };
+    }
     if (updates.defaultAssistant !== undefined) merged.defaultAssistant = updates.defaultAssistant;
 
     if (updates.assistants) {

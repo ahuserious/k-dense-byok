@@ -12,10 +12,11 @@ import { mockAllWorkflowModules } from '../test/workflow-mock-factories';
 // the X-Pipeline-User header, threaded into the DB query as a userId filter).
 // ---------------------------------------------------------------------------
 
+const mockWarn = mock(() => undefined);
 const noopLogger = () => ({
   fatal: mock(() => undefined),
   error: mock(() => undefined),
-  warn: mock(() => undefined),
+  warn: mockWarn,
   info: mock(() => undefined),
   debug: mock(() => undefined),
   trace: mock(() => undefined),
@@ -144,7 +145,20 @@ mock.module('@archon/core/utils/commands', () => ({
   findMarkdownFilesRecursive: mock(async () => []),
 }));
 
-import { registerApiRoutes } from './api';
+import { registerApiRoutes, resetLegacyWebIdentityHeaderWarningForTests } from './api';
+
+const originalWebAuthHeader = process.env.ARCHON_WEB_AUTH_HEADER;
+
+beforeEach(() => {
+  delete process.env.ARCHON_WEB_AUTH_HEADER;
+  resetLegacyWebIdentityHeaderWarningForTests();
+  mockWarn.mockClear();
+});
+
+afterEach(() => {
+  if (originalWebAuthHeader === undefined) delete process.env.ARCHON_WEB_AUTH_HEADER;
+  else process.env.ARCHON_WEB_AUTH_HEADER = originalWebAuthHeader;
+});
 
 function makeApp(): OpenAPIHono {
   const app = new OpenAPIHono({ defaultHook: validationErrorHook });
@@ -158,7 +172,13 @@ function makeApp(): OpenAPIHono {
       await fn();
       return { status: 'started' };
     }),
-    getStats: mock(() => ({ active: 0, queued: 0 })),
+    getStats: mock(() => ({
+      active: 0,
+      queuedTotal: 0,
+      queuedByConversation: [],
+      maxConcurrent: 10,
+      activeConversationIds: [],
+    })),
   } as unknown as ConversationLockManager;
   registerApiRoutes(app, mockWebAdapter, mockLockManager);
   return app;
@@ -250,6 +270,58 @@ describe('server-side /api/* gate', () => {
       headers: { 'X-Pipeline-User': 'alice' },
     });
     expect(res.status).toBe(200);
+    expect(mockWarn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'web_auth.legacy_identity_header_deprecated'
+    );
+  });
+
+  test('gate on + legacy identity header → protected route passes with a warning', async () => {
+    apiGateEnabled = true;
+    const res = await makeApp().request('/api/conversations', {
+      // deprecated-compat: supported only for the reverse-proxy migration window.
+      headers: { 'X-Archon-User': 'legacy-alice' },
+    });
+    expect(res.status).toBe(200);
+    expect(mockFindOrCreateUser).toHaveBeenCalledWith(
+      'web',
+      'legacy-alice',
+      'legacy-alice'
+    );
+    expect(mockWarn).toHaveBeenCalledWith(
+      {
+        legacyHeader: 'X-Archon-User',
+        replacementHeader: 'X-Pipeline-User',
+      },
+      'web_auth.legacy_identity_header_deprecated'
+    );
+  });
+
+  test('matching canonical and legacy identity headers resolve one identity', async () => {
+    apiGateEnabled = true;
+    const res = await makeApp().request('/api/conversations', {
+      headers: {
+        'X-Pipeline-User': 'same-user',
+        // deprecated-compat: supported only for the reverse-proxy migration window.
+        'X-Archon-User': 'same-user',
+      },
+    });
+    expect(res.status).toBe(200);
+    expect(mockFindOrCreateUser).toHaveBeenCalledTimes(1);
+    expect(mockFindOrCreateUser).toHaveBeenCalledWith('web', 'same-user', 'same-user');
+  });
+
+  test('conflicting canonical and legacy identity headers fail closed', async () => {
+    const res = await makeApp().request('/api/conversations', {
+      headers: {
+        'X-Pipeline-User': 'canonical-user',
+        // deprecated-compat: supported only for the reverse-proxy migration window.
+        'X-Archon-User': 'different-user',
+      },
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'Conflicting web identity headers' });
+    expect(mockFindOrCreateUser).not.toHaveBeenCalled();
   });
 
   // Fail-closed: a session lookup that throws (e.g. DB outage) with NO trusted
@@ -296,6 +368,21 @@ describe('?mine filter — non-enforcing', () => {
     expect(res.status).toBe(200);
     expect(mockFindOrCreateUser).toHaveBeenCalledWith('web', 'alice', 'alice');
     expect(mockListWorkflowRuns.mock.calls[0]?.[0]?.userId).toBe('user-from-alice');
+  });
+
+  test('runs: ?mine=true with legacy identity header → preserves attribution', async () => {
+    const app = makeApp();
+    const res = await app.request('/api/workflows/runs?mine=true', {
+      // deprecated-compat: supported only for the reverse-proxy migration window.
+      headers: { 'X-Archon-User': 'legacy-owner' },
+    });
+    expect(res.status).toBe(200);
+    expect(mockFindOrCreateUser).toHaveBeenCalledWith(
+      'web',
+      'legacy-owner',
+      'legacy-owner'
+    );
+    expect(mockListWorkflowRuns.mock.calls[0]?.[0]?.userId).toBe('user-from-legacy-owner');
   });
 
   test('runs: ?mine=true with a Better Auth session → session wins over header', async () => {

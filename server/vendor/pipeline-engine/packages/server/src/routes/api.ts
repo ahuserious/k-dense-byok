@@ -94,6 +94,15 @@ function getLog(): ReturnType<typeof createLogger> {
   if (!cachedLog) cachedLog = createLogger('api');
   return cachedLog;
 }
+
+const CANONICAL_WEB_IDENTITY_HEADER = 'X-Pipeline-User';
+// deprecated-compat: remove after the reverse-proxy header migration window.
+const LEGACY_WEB_IDENTITY_HEADER = 'X-Archon-User';
+let legacyWebIdentityHeaderWarningLogged = false;
+
+export function resetLegacyWebIdentityHeaderWarningForTests(): void {
+  legacyWebIdentityHeaderWarningLogged = false;
+}
 import * as conversationDb from '@archon/core/db/conversations';
 import * as codebaseDb from '@archon/core/db/codebases';
 import * as envVarDb from '@archon/core/db/env-vars';
@@ -1344,6 +1353,56 @@ export function registerApiRoutes(
   // Override with WEB_UI_ORIGIN env var to restrict if exposing publicly.
   app.use('/api/*', cors({ origin: process.env.WEB_UI_ORIGIN || '*' }));
 
+  type ProxyIdentityHeader =
+    | { status: 'missing' }
+    | { status: 'conflict' }
+    | { status: 'present'; value: string; legacyHeaderUsed: boolean };
+
+  function readProxyIdentityHeader(c: Context): ProxyIdentityHeader {
+    const configuredHeaderName = process.env.ARCHON_WEB_AUTH_HEADER?.trim();
+    if (configuredHeaderName) {
+      const value = c.req.header(configuredHeaderName)?.trim();
+      return value
+        ? { status: 'present', value, legacyHeaderUsed: false }
+        : { status: 'missing' };
+    }
+
+    const canonicalValue = c.req.header(CANONICAL_WEB_IDENTITY_HEADER)?.trim();
+    const legacyValue = c.req.header(LEGACY_WEB_IDENTITY_HEADER)?.trim();
+    if (canonicalValue && legacyValue && canonicalValue !== legacyValue) {
+      return { status: 'conflict' };
+    }
+    if (canonicalValue) {
+      return { status: 'present', value: canonicalValue, legacyHeaderUsed: Boolean(legacyValue) };
+    }
+    if (legacyValue) {
+      return { status: 'present', value: legacyValue, legacyHeaderUsed: true };
+    }
+    return { status: 'missing' };
+  }
+
+  function warnIfLegacyIdentityHeaderUsed(header: ProxyIdentityHeader): void {
+    if (header.status !== 'present' || !header.legacyHeaderUsed) return;
+    if (legacyWebIdentityHeaderWarningLogged) return;
+    legacyWebIdentityHeaderWarningLogged = true;
+    getLog().warn(
+      {
+        legacyHeader: LEGACY_WEB_IDENTITY_HEADER,
+        replacementHeader: CANONICAL_WEB_IDENTITY_HEADER,
+      },
+      'web_auth.legacy_identity_header_deprecated'
+    );
+  }
+
+  // Reject ambiguous proxy identities even when the optional API gate is off:
+  // attribution must never silently pick one of two conflicting callers.
+  app.use('/api/*', async (c, next) => {
+    if (readProxyIdentityHeader(c).status === 'conflict') {
+      return apiError(c, 400, 'Conflicting web identity headers');
+    }
+    return next();
+  });
+
   // Server-side access gate: when web auth is enabled (and not opted out via
   // ARCHON_WEB_AUTH_REQUIRED=false), every /api/* request must resolve to an
   // identity or get 401 — this is what makes Better Auth the real access
@@ -1414,11 +1473,15 @@ export function registerApiRoutes(
     }
 
     // 2. Trusted reverse-proxy header.
-    const headerName = process.env.ARCHON_WEB_AUTH_HEADER || 'X-Pipeline-User';
-    const headerVal = c.req.header(headerName)?.trim();
-    if (!headerVal) return undefined;
+    const identityHeader = readProxyIdentityHeader(c);
+    if (identityHeader.status !== 'present') return undefined;
+    warnIfLegacyIdentityHeaderUsed(identityHeader);
     try {
-      const user = await userDb.findOrCreateUserByPlatformIdentity('web', headerVal, headerVal);
+      const user = await userDb.findOrCreateUserByPlatformIdentity(
+        'web',
+        identityHeader.value,
+        identityHeader.value
+      );
       return { userId: user.id, role: user.role };
     } catch (err) {
       // Best-effort attribution: the header WAS present, but identity resolution
@@ -1474,11 +1537,18 @@ export function registerApiRoutes(
     }
 
     // 2. Trusted reverse-proxy header.
-    const headerName = process.env.ARCHON_WEB_AUTH_HEADER || 'X-Pipeline-User';
-    const headerVal = c.req.header(headerName)?.trim();
-    if (!headerVal) return { error: apiError(c, 401, failMessage) };
+    const identityHeader = readProxyIdentityHeader(c);
+    if (identityHeader.status === 'conflict') {
+      return { error: apiError(c, 400, 'Conflicting web identity headers') };
+    }
+    if (identityHeader.status === 'missing') return { error: apiError(c, 401, failMessage) };
+    warnIfLegacyIdentityHeaderUsed(identityHeader);
     try {
-      const user = await userDb.findOrCreateUserByPlatformIdentity('web', headerVal, headerVal);
+      const user = await userDb.findOrCreateUserByPlatformIdentity(
+        'web',
+        identityHeader.value,
+        identityHeader.value
+      );
       return { userId: user.id, role: user.role };
     } catch (err) {
       getLog().error({ err: err as Error, headerPresent: true }, 'web.user_resolve_failed');

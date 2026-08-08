@@ -66,5 +66,27 @@
         "archon.console"
       ]
     }
+  ],
+  "deprecatedCompatibilityIdentifiers": [
+    {
+      "path": "server/vendor/pipeline-engine/packages/server/src/routes/api.ts",
+      "identifiers": ["X-Archon-User"],
+      "comment": "deprecated-compat: previous default proxy identity header"
+    },
+    {
+      "path": "server/vendor/pipeline-engine/packages/server/src/routes/api.auth.test.ts",
+      "identifiers": ["X-Archon-User"],
+      "comment": "deprecated-compat: coverage for previous default proxy identity header"
+    },
+    {
+      "path": "server/vendor/pipeline-engine/packages/adapters/src/chat/slack/adapter.ts",
+      "identifiers": ["/archon", "/archon-workflow"],
+      "comment": "deprecated-compat: previous Slack slash-command aliases"
+    },
+    {
+      "path": "server/vendor/pipeline-engine/packages/adapters/src/chat/slack/adapter.test.ts",
+      "identifiers": ["/archon", "/archon-workflow"],
+      "comment": "deprecated-compat: coverage for previous Slack slash-command aliases"
+    }
   ]
 }

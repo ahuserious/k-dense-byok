@@ -458,14 +458,28 @@ export class SlackAdapter implements IPlatformAdapter {
       }
     });
 
-    this.app.command('/pipeline', async ({ command, ack, respond, client }) => {
-      await ack();
-      await this.handleSlashCommand(command, respond, client, 'pipeline');
-    });
-    this.app.command('/pipeline-workflow', async ({ command, ack, respond, client }) => {
-      await ack();
-      await this.handleSlashCommand(command, respond, client, 'pipeline-workflow');
-    });
+    const registerSlashCommand = (
+      commandName: string,
+      kind: 'pipeline' | 'pipeline-workflow',
+      replacement?: string
+    ): void => {
+      this.app.command(commandName, async ({ command, ack, respond, client }) => {
+        await ack();
+        if (replacement) {
+          getLog().warn(
+            { command: commandName, replacement },
+            'slack.slash_command_deprecated'
+          );
+        }
+        await this.handleSlashCommand(command, respond, client, kind);
+      });
+    };
+
+    registerSlashCommand('/pipeline', 'pipeline');
+    registerSlashCommand('/pipeline-workflow', 'pipeline-workflow');
+    // deprecated-compat: remove these aliases after deployed Slack apps migrate.
+    registerSlashCommand('/archon', 'pipeline', '/pipeline');
+    registerSlashCommand('/archon-workflow', 'pipeline-workflow', '/pipeline-workflow');
 
     await this.app.start();
     getLog().info('slack.bot_started');

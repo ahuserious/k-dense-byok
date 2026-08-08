@@ -71,6 +71,16 @@ export interface GlobalConfig {
   botName?: string;
 
   /**
+   * Service-specific account handles used for exact @mention matching.
+   * These are intentionally separate from the human-readable botName.
+   */
+  forgeMentions?: {
+    github?: string;
+    gitlab?: string;
+    gitea?: string;
+  };
+
+  /**
    * Default AI assistant when no codebase-specific preference
    * @default 'claude'
    */
@@ -284,6 +294,11 @@ export interface RepoConfig {
  */
 export interface MergedConfig {
   botName: string;
+  forgeMentions: {
+    github: string;
+    gitlab: string;
+    gitea: string;
+  };
   assistant: string;
   assistants: AssistantDefaults;
   /**
