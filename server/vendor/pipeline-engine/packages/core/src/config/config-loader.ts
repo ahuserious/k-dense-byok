@@ -28,15 +28,17 @@ export async function writeConfigFile(
 ): Promise<void> {
   await writeFile(path, content, { encoding: 'utf-8', ...options });
 }
-import type {
-  GlobalConfig,
-  RepoConfig,
-  MergedConfig,
-  SafeConfig,
-  AssistantDefaults,
-  AssistantDefaultsConfig,
-  RawAliasesConfig,
-  RawTiersConfig,
+import {
+  DEFAULT_FORGE_MENTION,
+  LEGACY_DEFAULT_FORGE_MENTION,
+  type GlobalConfig,
+  type RepoConfig,
+  type MergedConfig,
+  type SafeConfig,
+  type AssistantDefaults,
+  type AssistantDefaultsConfig,
+  type RawAliasesConfig,
+  type RawTiersConfig,
 } from './config-types';
 import { createLogger } from '@archon/paths';
 import {
@@ -375,9 +377,14 @@ function getDefaults(): MergedConfig {
   return {
     botName: 'Pipeline Engine',
     forgeMentions: {
-      github: 'pipeline',
-      gitlab: 'pipeline',
-      gitea: 'pipeline',
+      github: DEFAULT_FORGE_MENTION,
+      gitlab: DEFAULT_FORGE_MENTION,
+      gitea: DEFAULT_FORGE_MENTION,
+    },
+    forgeLegacyMentions: {
+      github: LEGACY_DEFAULT_FORGE_MENTION,
+      gitlab: LEGACY_DEFAULT_FORGE_MENTION,
+      gitea: LEGACY_DEFAULT_FORGE_MENTION,
     },
     assistant: providers.find(p => p.builtIn)?.id ?? 'claude',
     assistants: registeredAssistants,
@@ -435,14 +442,21 @@ function applyEnvOverrides(
     const configuredMention = globalConfig?.forgeMentions?.[service]?.trim();
     if (serviceMention) {
       config.forgeMentions[service] = serviceMention;
+      config.forgeLegacyMentions[service] = undefined;
     } else if (configuredMention) {
       config.forgeMentions[service] = configuredMention;
+      config.forgeLegacyMentions[service] = undefined;
     } else if (legacyMention) {
       // deprecated-compat: preserve the pre-sweep display-name mention fallback.
       config.forgeMentions[service] = legacyMention;
+      config.forgeLegacyMentions[service] = undefined;
       servicesUsingLegacyMention.push(service);
     } else if (service === 'github') {
-      config.forgeMentions.github = process.env.GITHUB_APP_SLUG?.trim() || 'pipeline';
+      const githubAppSlug = process.env.GITHUB_APP_SLUG?.trim();
+      if (githubAppSlug) {
+        config.forgeMentions.github = githubAppSlug;
+        config.forgeLegacyMentions.github = undefined;
+      }
     }
   }
 

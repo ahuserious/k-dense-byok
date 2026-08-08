@@ -118,6 +118,7 @@ mock.module('@archon/git', () => ({
 }));
 
 import { GitHubAdapter } from './adapter';
+import { DEFAULT_FORGE_MENTION, LEGACY_DEFAULT_FORGE_MENTION } from '@archon/core';
 import { ConversationLockManager } from '@archon/core';
 
 // Create a mock lock manager that immediately executes handlers
@@ -1194,7 +1195,9 @@ describe('GitHubAdapter', () => {
       };
     }
 
-    function createAppModeAdapter(opts: { slug?: string } = {}): {
+    function createAppModeAdapter(
+      opts: { slug?: string; legacyBotMention?: string } = {}
+    ): {
       adapter: GitHubAdapter;
       provider: ReturnType<typeof makeMockProvider>;
     } {
@@ -1204,7 +1207,8 @@ describe('GitHubAdapter', () => {
         { kind: 'app', provider: provider.provider as any },
         'fake-webhook-secret',
         mockLockManager,
-        'pipeline'
+        DEFAULT_FORGE_MENTION,
+        { legacyBotMention: opts.legacyBotMention }
       );
       // @ts-expect-error - mock signature verification
       adapter.verifySignature = mock(() => true);
@@ -1373,6 +1377,60 @@ describe('GitHubAdapter', () => {
       // Filter triggered: no user creation, no codebase lookup downstream.
       expect(mockFindOrCreateUserByPlatformIdentity).not.toHaveBeenCalled();
       expect(mockFindCodebaseByRepoUrl).not.toHaveBeenCalled();
+    });
+
+    test('baseline identity migration matches both mentions and self-filters both bot suffixes', async () => {
+      mockLogger.warn.mockClear();
+      const { adapter } = createAppModeAdapter({
+        slug: DEFAULT_FORGE_MENTION,
+        legacyBotMention: LEGACY_DEFAULT_FORGE_MENTION,
+      });
+      const hasMention = (
+        adapter as unknown as { hasMention: (text: string) => boolean }
+      ).hasMention;
+
+      expect(hasMention.call(adapter, `@${DEFAULT_FORGE_MENTION} help`)).toBe(true);
+      expect(hasMention.call(adapter, `@${LEGACY_DEFAULT_FORGE_MENTION} help`)).toBe(true);
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        {
+          matchedIdentity: LEGACY_DEFAULT_FORGE_MENTION,
+          canonicalIdentity: DEFAULT_FORGE_MENTION,
+          surface: 'mention',
+        },
+        'github.legacy_bot_identity_deprecated'
+      );
+
+      for (const author of [
+        `${DEFAULT_FORGE_MENTION}[bot]`,
+        `${LEGACY_DEFAULT_FORGE_MENTION}[bot]`,
+      ]) {
+        mockFindOrCreateUserByPlatformIdentity.mockClear();
+        mockFindCodebaseByRepoUrl.mockClear();
+        const payload = JSON.stringify({
+          action: 'created',
+          issue: {
+            number: 1,
+            title: 't',
+            body: '',
+            user: { login: 'someone' },
+            labels: [],
+            state: 'open',
+          },
+          comment: { body: `@${DEFAULT_FORGE_MENTION} ping`, user: { login: author } },
+          repository: {
+            owner: { login: 'o' },
+            name: 'r',
+            full_name: 'o/r',
+            html_url: 'https://github.com/o/r',
+            default_branch: 'main',
+          },
+          sender: { login: author },
+        });
+        await adapter.handleWebhook(payload, 'mock-signature');
+        expect(mockFindOrCreateUserByPlatformIdentity).not.toHaveBeenCalled();
+        expect(mockFindCodebaseByRepoUrl).not.toHaveBeenCalled();
+      }
+      expect(mockLogger.warn).toHaveBeenCalledTimes(1);
     });
 
     test('clone path resolves installation token (not env GITHUB_TOKEN)', async () => {

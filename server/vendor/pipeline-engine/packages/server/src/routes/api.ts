@@ -2258,6 +2258,14 @@ export function registerApiRoutes(
     }
   }
 
+  function workflowRecoveryGuidance(runId: string): string {
+    const encodedRunId = encodeURIComponent(runId);
+    return (
+      `Use the shipped \`POST /api/workflows/runs/${encodedRunId}/resume\` endpoint ` +
+      `or open \`/legacy/workflows/runs/${encodedRunId}\` in the Console.`
+    );
+  }
+
   // ---------------------------------------------------------------------------
   // API transform helpers (Date → ISO string for wire shape)
   // ---------------------------------------------------------------------------
@@ -3191,7 +3199,7 @@ export function registerApiRoutes(
         return apiError(
           c,
           400,
-          `This run was created outside the web UI. Use \`pipeline-engine workflow resume ${runId}\` from the CLI to resume it.`
+          `This run was created outside the web UI. ${workflowRecoveryGuidance(runId)}`
         );
       }
       const parentConv = await conversationDb.getConversationById(run.parent_conversation_id);
@@ -3199,7 +3207,7 @@ export function registerApiRoutes(
         return apiError(
           c,
           400,
-          `Cannot resume from web UI: the run's parent conversation is not a web conversation. Use \`pipeline-engine workflow resume ${runId}\` from the CLI.`
+          `Cannot resume from web UI: the run's parent conversation is not a web conversation. ${workflowRecoveryGuidance(runId)}`
         );
       }
       const resumeMessage = `/workflow run ${run.workflow_name} ${run.user_message ?? ''}`.trim();
@@ -3306,7 +3314,7 @@ export function registerApiRoutes(
         success: true,
         message: autoResumed
           ? `Workflow approved: ${run.workflow_name}. Resuming workflow.`
-          : `Workflow approved: ${run.workflow_name}. Run \`pipeline-engine workflow resume ${runId}\` from the CLI to continue, or send a new message in the originating conversation.`,
+          : `Workflow approved: ${run.workflow_name}. ${workflowRecoveryGuidance(runId)} You can also send a new message in the originating conversation.`,
       });
     } catch (error) {
       getLog().error({ err: error, runId }, 'api.workflow_run_approve_failed');
@@ -3363,7 +3371,7 @@ export function registerApiRoutes(
           success: true,
           message: autoResumed
             ? `Workflow rejected: ${run.workflow_name}. Running on-reject prompt.`
-            : `Workflow rejected: ${run.workflow_name}. On-reject prompt will run when the run resumes — run \`pipeline-engine workflow resume ${runId}\` from the CLI to trigger it.`,
+            : `Workflow rejected: ${run.workflow_name}. On-reject prompt will run when the run resumes. ${workflowRecoveryGuidance(runId)}`,
         });
       }
 

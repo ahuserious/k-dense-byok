@@ -454,7 +454,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         ? async (userId: string): Promise<string | undefined> =>
             (await getDecryptedAccessToken(userId)) ?? undefined
         : undefined;
-      github = new GitHubAdapter(auth, webhookSecret, lockManager, botMention, { getUserToken });
+      github = new GitHubAdapter(auth, webhookSecret, lockManager, botMention, {
+        getUserToken,
+        legacyBotMention: config.forgeLegacyMentions.github,
+      });
       await github.start();
       activePlatforms.push('GitHub (App)');
       getLog().info(
@@ -469,7 +472,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
       }
       const botMention = config.forgeMentions.github;
       const auth: GitHubAuth = { kind: 'pat', token: patToken };
-      github = new GitHubAdapter(auth, webhookSecret, lockManager, botMention);
+      github = new GitHubAdapter(auth, webhookSecret, lockManager, botMention, {
+        legacyBotMention: config.forgeLegacyMentions.github,
+      });
       await github.start();
       activePlatforms.push('GitHub');
       getLog().info('github.adapter_mode_pat');
@@ -485,7 +490,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         process.env.GITEA_TOKEN,
         process.env.GITEA_WEBHOOK_SECRET,
         lockManager,
-        giteaBotMention
+        giteaBotMention,
+        { legacyBotMention: config.forgeLegacyMentions.gitea }
       );
       await gitea.start();
       activePlatforms.push('Gitea');
@@ -501,7 +507,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
         process.env.GITLAB_WEBHOOK_SECRET,
         lockManager,
         process.env.GITLAB_URL || undefined,
-        gitlabBotMention
+        gitlabBotMention,
+        config.forgeLegacyMentions.gitlab
       );
       await gitlab.start();
       activePlatforms.push('GitLab');

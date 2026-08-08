@@ -15,6 +15,10 @@ import {
   toError,
   onConversationClosed,
   ConversationLockManager,
+  botIdentities,
+  findBotAuthorIdentity,
+  findMentionIdentity,
+  stripMentionIdentities,
 } from '@archon/core';
 import {
   ensureProjectStructure,
@@ -56,6 +60,9 @@ export class GitLabAdapter implements IPlatformAdapter {
   private readonly webhookSecret: string;
   private readonly allowedUsers: string[];
   private readonly botMention: string;
+  private readonly legacyBotMention?: string;
+  private readonly acceptedBotMentions: string[];
+  private legacyBotIdentityWarningLogged = false;
   private readonly lockManager: ConversationLockManager;
 
   constructor(
@@ -63,7 +70,8 @@ export class GitLabAdapter implements IPlatformAdapter {
     webhookSecret: string,
     lockManager: ConversationLockManager,
     gitlabUrl?: string,
-    botMention?: string
+    botMention?: string,
+    legacyBotMention?: string
   ) {
     if (!token) {
       throw new Error('GitLabAdapter requires a non-empty token');
@@ -77,6 +85,8 @@ export class GitLabAdapter implements IPlatformAdapter {
     this.webhookSecret = webhookSecret;
     this.lockManager = lockManager;
     this.botMention = botMention ?? 'pipeline';
+    this.legacyBotMention = legacyBotMention;
+    this.acceptedBotMentions = botIdentities(this.botMention, this.legacyBotMention);
 
     this.allowedUsers = parseAllowedUsers(process.env.GITLAB_ALLOWED_USERS);
     if (this.allowedUsers.length > 0) {
@@ -272,14 +282,26 @@ export class GitLabAdapter implements IPlatformAdapter {
   // ---------------------------------------------------------------------------
 
   private hasMention(text: string): boolean {
-    const pattern = new RegExp(`@${this.botMention}(?:[\\s,:;]|$)`, 'i');
-    return pattern.test(text);
+    const matchedIdentity = findMentionIdentity(text, this.acceptedBotMentions);
+    this.warnIfLegacyBotIdentityMatched(matchedIdentity, 'mention');
+    return matchedIdentity !== undefined;
   }
 
   private stripMention(text: string): string {
-    // `+` consumes all trailing separators (e.g. "@pipeline, " not just "@pipeline")
-    const pattern = new RegExp(`@${this.botMention}(?:[\\s,:;]+|$)`, 'gi');
-    return text.replace(pattern, '').trim();
+    return stripMentionIdentities(text, this.acceptedBotMentions);
+  }
+
+  private warnIfLegacyBotIdentityMatched(
+    matchedIdentity: string | undefined,
+    surface: 'mention' | 'author'
+  ): void {
+    if (!matchedIdentity || !this.legacyBotMention || this.legacyBotIdentityWarningLogged) return;
+    if (matchedIdentity.toLowerCase() !== this.legacyBotMention.toLowerCase()) return;
+    this.legacyBotIdentityWarningLogged = true;
+    getLog().warn(
+      { matchedIdentity, canonicalIdentity: this.botMention, surface },
+      'gitlab.legacy_bot_identity_deprecated'
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -678,7 +700,12 @@ Use 'glab mr view ${String(mr.iid)}' for full details and 'glab mr diff ${String
       getLog().debug({ commentAuthor: event.user?.username }, 'gitlab.ignoring_marked_comment');
       return;
     }
-    if (event.user?.username?.toLowerCase() === this.botMention.toLowerCase()) {
+    const matchedBotAuthor = findBotAuthorIdentity(
+      event.user?.username,
+      this.acceptedBotMentions
+    );
+    if (matchedBotAuthor) {
+      this.warnIfLegacyBotIdentityMatched(matchedBotAuthor, 'author');
       getLog().debug({ commentAuthor: event.user.username }, 'gitlab.ignoring_own_comment');
       return;
     }

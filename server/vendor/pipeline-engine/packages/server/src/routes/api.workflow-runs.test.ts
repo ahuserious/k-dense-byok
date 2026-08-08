@@ -1075,6 +1075,15 @@ describe('GET /api/workflows/runs/by-worker/:platformId', () => {
   });
 });
 
+function expectShippedRecoveryGuidance(message: string, runId: string): void {
+  expect(message).toContain(`POST /api/workflows/runs/${runId}/resume`);
+  expect(message).toContain(`/legacy/workflows/runs/${runId}`);
+  const retiredCliNames = ['pipeline-engine', ['arc', 'hon'].join('')];
+  for (const cliName of retiredCliNames) {
+    expect(message.toLowerCase()).not.toContain(`${cliName} `);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Tests: POST /api/workflows/runs/:runId/resume
 // ---------------------------------------------------------------------------
@@ -1106,9 +1115,7 @@ describe('POST /api/workflows/runs/:runId/resume', () => {
     expect(body.error).toContain('Cannot resume');
   });
 
-  test('returns 400 with CLI hint when run has no parent_conversation_id', async () => {
-    // CLI-created runs cannot be resumed from the web dashboard — the API
-    // surfaces the equivalent CLI command rather than silently doing nothing.
+  test('returns 400 with shipped recovery surfaces when run has no parent_conversation_id', async () => {
     mockGetWorkflowRun.mockResolvedValueOnce({
       ...MOCK_FAILED_RUN,
       parent_conversation_id: null,
@@ -1119,7 +1126,7 @@ describe('POST /api/workflows/runs/:runId/resume', () => {
     });
     expect(response.status).toBe(400);
     const body = (await response.json()) as { error: string };
-    expect(body.error).toContain('pipeline-engine workflow resume run-uuid-4');
+    expectShippedRecoveryGuidance(body.error, 'run-uuid-4');
     expect(mockHandleMessage).not.toHaveBeenCalled();
   });
 
@@ -1155,7 +1162,7 @@ describe('POST /api/workflows/runs/:runId/resume', () => {
     });
     expect(response.status).toBe(400);
     const body = (await response.json()) as { error: string };
-    expect(body.error).toContain('pipeline-engine workflow resume run-uuid-4');
+    expectShippedRecoveryGuidance(body.error, 'run-uuid-4');
     expect(mockHandleMessage).not.toHaveBeenCalled();
   });
 
@@ -1561,7 +1568,7 @@ describe('approve/reject auto-resume', () => {
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as { message: string };
-    expect(body.message).toContain('pipeline-engine workflow resume run-paused-1');
+    expectShippedRecoveryGuidance(body.message, 'run-paused-1');
     expect(mockHandleMessage).not.toHaveBeenCalled();
     expect(mockGetConversationById).not.toHaveBeenCalled();
   });
@@ -1582,7 +1589,7 @@ describe('approve/reject auto-resume', () => {
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as { message: string };
-    expect(body.message).toContain('pipeline-engine workflow resume run-paused-1');
+    expectShippedRecoveryGuidance(body.message, 'run-paused-1');
     expect(mockHandleMessage).not.toHaveBeenCalled();
   });
 
@@ -1610,8 +1617,7 @@ describe('approve/reject auto-resume', () => {
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as { message: string };
-    // Surfaces the exact CLI command so the web-UI user has a concrete next step.
-    expect(body.message).toContain('pipeline-engine workflow resume run-paused-1');
+    expectShippedRecoveryGuidance(body.message, 'run-paused-1');
     expect(mockHandleMessage).not.toHaveBeenCalled();
   });
 
@@ -1658,7 +1664,7 @@ describe('approve/reject auto-resume', () => {
     expect(dispatchedMessage).toBe('/workflow run deploy Review PR');
   });
 
-  test('reject: surfaces CLI resume hint when on_reject configured but parent is non-web', async () => {
+  test('reject: surfaces shipped recovery paths when on_reject parent is non-web', async () => {
     mockGetWorkflowRun.mockResolvedValueOnce({
       ...MOCK_PAUSED_RUN,
       id: 'run-reject-non-web',
@@ -1689,7 +1695,7 @@ describe('approve/reject auto-resume', () => {
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as { message: string };
-    expect(body.message).toContain('pipeline-engine workflow resume run-reject-non-web');
+    expectShippedRecoveryGuidance(body.message, 'run-reject-non-web');
     expect(mockHandleMessage).not.toHaveBeenCalled();
   });
 

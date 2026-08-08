@@ -63,6 +63,10 @@ export type AssistantDefaults = ProviderDefaultsMap & {
   codex: CodexProviderDefaults;
 };
 
+export const DEFAULT_FORGE_MENTION = 'pipeline';
+// deprecated-compat: accepted for matching only during the default-identity migration window.
+export const LEGACY_DEFAULT_FORGE_MENTION = 'archon';
+
 export interface GlobalConfig {
   /**
    * Bot display name (shown in messages)
@@ -298,6 +302,12 @@ export interface MergedConfig {
     github: string;
     gitlab: string;
     gitea: string;
+  };
+  /** Legacy aliases accepted for matching only; canonical output uses forgeMentions. */
+  forgeLegacyMentions: {
+    github?: string;
+    gitlab?: string;
+    gitea?: string;
   };
   assistant: string;
   assistants: AssistantDefaults;

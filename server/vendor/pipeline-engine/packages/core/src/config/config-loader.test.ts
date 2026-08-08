@@ -36,6 +36,12 @@ import {
   toSafeConfig,
   updateGlobalConfig,
 } from './config-loader';
+import { LEGACY_DEFAULT_FORGE_MENTION } from './config-types';
+import {
+  botIdentities,
+  findBotAuthorIdentity,
+  findMentionIdentity,
+} from './forge-identity';
 
 describe('config-loader', () => {
   const originalEnv: Record<string, string | undefined> = {};
@@ -292,6 +298,23 @@ recommendedWorkflows: "pipeline-plan"
         gitlab: 'pipeline',
         gitea: 'pipeline',
       });
+      expect(config.forgeLegacyMentions).toEqual({
+        github: LEGACY_DEFAULT_FORGE_MENTION,
+        gitlab: LEGACY_DEFAULT_FORGE_MENTION,
+        gitea: LEGACY_DEFAULT_FORGE_MENTION,
+      });
+      const baselineIdentities = botIdentities(
+        config.forgeMentions.github,
+        config.forgeLegacyMentions.github
+      );
+      expect(findMentionIdentity('@pipeline', baselineIdentities)).toBe('pipeline');
+      expect(findMentionIdentity(`@${LEGACY_DEFAULT_FORGE_MENTION}`, baselineIdentities)).toBe(
+        LEGACY_DEFAULT_FORGE_MENTION
+      );
+      expect(findBotAuthorIdentity('pipeline[bot]', baselineIdentities)).toBe('pipeline');
+      expect(
+        findBotAuthorIdentity(`${LEGACY_DEFAULT_FORGE_MENTION}[bot]`, baselineIdentities)
+      ).toBe(LEGACY_DEFAULT_FORGE_MENTION);
       expect(config.streaming.telegram).toBe('stream');
       expect(config.concurrency.maxConversations).toBe(10);
       expect(mockLogger.warn).not.toHaveBeenCalledWith(

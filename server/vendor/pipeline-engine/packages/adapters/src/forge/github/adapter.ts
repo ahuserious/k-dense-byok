@@ -18,6 +18,10 @@ import {
   ConversationLockManager,
   AppNotInstalledError,
   installCredentialHelper,
+  botIdentities,
+  findBotAuthorIdentity,
+  findMentionIdentity,
+  stripMentionIdentities,
 } from '@archon/core';
 import {
   ensureProjectStructure,
@@ -65,6 +69,9 @@ export class GitHubAdapter implements IPlatformAdapter {
   private webhookSecret: string;
   private allowedUsers: string[];
   private botMention: string;
+  private readonly legacyBotMention?: string;
+  private readonly acceptedBotMentions: string[];
+  private legacyBotIdentityWarningLogged = false;
   private lockManager: ConversationLockManager;
   private readonly retryDelayFn: (attempt: number) => number;
   /**
@@ -91,6 +98,7 @@ export class GitHubAdapter implements IPlatformAdapter {
     options?: {
       retryDelayMs?: (attempt: number) => number;
       getUserToken?: (userId: string) => Promise<string | undefined>;
+      legacyBotMention?: string;
     }
   ) {
     this.auth = auth;
@@ -98,6 +106,8 @@ export class GitHubAdapter implements IPlatformAdapter {
     this.webhookSecret = webhookSecret;
     this.lockManager = lockManager;
     this.botMention = botMention ?? 'pipeline';
+    this.legacyBotMention = options?.legacyBotMention;
+    this.acceptedBotMentions = botIdentities(this.botMention, this.legacyBotMention);
     this.getUserToken = options?.getUserToken;
 
     // Parse GitHub user whitelist (optional - empty = open access)
@@ -548,16 +558,29 @@ export class GitHubAdapter implements IPlatformAdapter {
    * Check if text contains @mention for the configured bot
    */
   private hasMention(text: string): boolean {
-    const pattern = new RegExp(`@${this.botMention}[\\s,:;]`, 'i');
-    return pattern.test(text) || text.trim().toLowerCase() === `@${this.botMention.toLowerCase()}`;
+    const matchedIdentity = findMentionIdentity(text, this.acceptedBotMentions);
+    this.warnIfLegacyBotIdentityMatched(matchedIdentity, 'mention');
+    return matchedIdentity !== undefined;
   }
 
   /**
    * Strip @mention from text for the configured bot
    */
   private stripMention(text: string): string {
-    const pattern = new RegExp(`@${this.botMention}[\\s,:;]+`, 'gi');
-    return text.replace(pattern, '').trim();
+    return stripMentionIdentities(text, this.acceptedBotMentions);
+  }
+
+  private warnIfLegacyBotIdentityMatched(
+    matchedIdentity: string | undefined,
+    surface: 'mention' | 'author'
+  ): void {
+    if (!matchedIdentity || !this.legacyBotMention || this.legacyBotIdentityWarningLogged) return;
+    if (matchedIdentity.toLowerCase() !== this.legacyBotMention.toLowerCase()) return;
+    this.legacyBotIdentityWarningLogged = true;
+    getLog().warn(
+      { matchedIdentity, canonicalIdentity: this.botMention, surface },
+      'github.legacy_bot_identity_deprecated'
+    );
   }
 
   /**
@@ -979,7 +1002,12 @@ ${userComment}`;
     // filter narrow — comments posted under a user's own GitHub login from a
     // user-to-server token would otherwise be misfiltered.
     const commentAuthor = event.comment?.user?.login;
-    if (commentAuthor?.toLowerCase() === this.botLogin.toLowerCase()) {
+    const matchedBotAuthor = findBotAuthorIdentity(
+      commentAuthor,
+      botIdentities(this.botLogin, this.legacyBotMention)
+    );
+    if (matchedBotAuthor) {
+      this.warnIfLegacyBotIdentityMatched(matchedBotAuthor, 'author');
       getLog().debug({ commentAuthor }, 'github.ignoring_own_comment');
       return;
     }

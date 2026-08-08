@@ -96,11 +96,20 @@ export { cloneRepository, registerRepository, type RegisterResult } from './hand
 // Config
 // =============================================================================
 export {
+  DEFAULT_FORGE_MENTION,
+  LEGACY_DEFAULT_FORGE_MENTION,
   type GlobalConfig,
   type RepoConfig,
   type MergedConfig,
   type SafeConfig,
 } from './config/config-types';
+
+export {
+  botIdentities,
+  findBotAuthorIdentity,
+  findMentionIdentity,
+  stripMentionIdentities,
+} from './config/forge-identity';
 
 export {
   readConfigFile,
