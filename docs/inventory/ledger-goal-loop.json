@@ -1,0 +1,19 @@
+{
+  "inventory": "ledger-role-and-goal-loop-parking",
+  "ledger": {
+    "implementation": "server/src/cost/ledger.ts",
+    "workflowRole": "CostEntry.role accepts workflow; server/src/api/pipelines.ts writes that role while reconciling out-of-process engine runs"
+  },
+  "goalLoop": {
+    "implementation": "server/src/agent/goal-loop.ts",
+    "metadataStore": "server/src/agent/runs-index.ts",
+    "parking": "start and resume persist pending state; there is deliberately no execution engine"
+  },
+  "files": [
+    "server/src/cost/ledger.ts",
+    "server/src/cost/billing.ts",
+    "server/src/api/pipelines.ts",
+    "server/src/agent/goal-loop.ts",
+    "server/src/agent/runs-index.ts"
+  ]
+}

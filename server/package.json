@@ -9,6 +9,7 @@
     "prep": "tsx src/prep.ts",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
+    "test:swept": "node ../scripts/orphan-sweep.mjs -- vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {

@@ -64,6 +64,7 @@ benchmarking/
 TODO.md
 .agents/
 .claude/
+.r1-worktrees/
 skills-lock.json
 AGENTS.md
 CLAUDE.md

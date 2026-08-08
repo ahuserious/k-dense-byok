@@ -1,0 +1,16 @@
+{
+  "inventory": "unwired-chat-turn-to-runs-index-adapter",
+  "chatTurnRoute": "server/src/api/sessions.ts",
+  "costSink": "server/src/cost/ledger.ts",
+  "runsIndex": "server/src/agent/runs-index.ts",
+  "consoleRoute": "server/src/api/console.ts",
+  "finding": "The chat run route records cost with recordRun but neither imports nor calls runs-index startRun/finishRun. Only the pipelines reconcile route currently backfills a workflow row. The adapter is absent and reserved to S8.",
+  "files": [
+    "server/src/api/sessions.ts",
+    "server/src/cost/ledger.ts",
+    "server/src/agent/runs-index.ts",
+    "server/src/api/console.ts",
+    "web/src/lib/console.ts",
+    "web/src/lib/console-types.ts"
+  ]
+}

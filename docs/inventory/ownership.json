@@ -1,0 +1,127 @@
+{
+  "lanes": {
+    "S1": [
+      "web/src/app/page.tsx",
+      "web/src/components/workspace-navigation.tsx",
+      "web/src/components/persistent-workspace-surfaces.tsx",
+      "web/src/components/dag-builder-surface.tsx",
+      "web/src/components/dag-builder.tsx",
+      "web/src/components/dag-builder-canvas.tsx",
+      "web/src/components/dag-builder-inspector.tsx",
+      "web/src/components/dag-workflows-panel.tsx",
+      "web/src/components/dag-workflow-console.tsx",
+      "web/src/components/helper-agent-chat.tsx",
+      "web/src/components/console/console-panel.tsx",
+      "web/src/components/raindrop-surface.tsx",
+      "web/src/components/raindrop-panel.tsx",
+      "web/src/components/raindrop-workshop-panel.tsx",
+      "web/src/lib/workspace-persistence.ts",
+      "web/src/lib/dag-workflow-builder.ts",
+      "web/src/lib/dag-workflows.ts"
+    ],
+    "S2": [
+      "start.mjs",
+      "server/src/agent/archon/**",
+      "web/src/components/pipelines-panel.tsx",
+      "web/src/components/pipeline-builder-panel.tsx",
+      "web/src/components/archon-iframe-panel.tsx",
+      "web/src/lib/archon-config.ts",
+      "web/src/lib/embed-config.ts",
+      "web/src/lib/pipelines.ts",
+      "server/vendor/archon-engine/LICENSE",
+      "server/vendor/archon-engine/NOTICE*",
+      "server/vendor/archon-engine/VENDORED-FROM.md",
+      "server/vendor/archon-engine/packages/workflows/src/store.ts"
+    ],
+    "S3": [
+      "server/vendor/archon-engine/packages/web/src/components/workflows/DagNodeComponent.tsx",
+      "server/vendor/archon-engine/packages/web/src/components/workflows/DagNodeComponent.test.ts",
+      "server/vendor/archon-engine/packages/web/src/components/workflows/DagNodeProgress.tsx",
+      "server/vendor/archon-engine/packages/web/src/components/workflows/NodeInspector.tsx",
+      "server/vendor/archon-engine/packages/web/src/components/workflows/NodePalette.tsx",
+      "server/vendor/archon-engine/packages/web/src/components/workflows/NodeLibrary.tsx",
+      "server/vendor/archon-engine/packages/web/src/components/workflows/QuickAddPicker.tsx",
+      "server/vendor/archon-engine/packages/web/src/components/workflows/CommandPicker.tsx",
+      "server/vendor/archon-engine/packages/web/src/components/workflows/StatusIcon.tsx"
+    ],
+    "S4": [
+      "server/src/api/dag-workflows.ts",
+      "server/src/api/pipelines.ts",
+      "server/src/agent/workflow-model-resolution.ts",
+      "server/src/agent/workflow-delegation-session.ts",
+      "server/src/cost/billing.ts",
+      "server/src/cost/ledger.ts",
+      "server/src/workflows/budget.ts",
+      "server/src/workflows/kady-node-executor.ts",
+      "server/src/workflows/supervised-budget.ts",
+      "server/src/workflows/supervisor/credential-contract.ts",
+      "server/src/workflows/supervisor/credentials.ts"
+    ],
+    "S5": [
+      "server/src/workflows/index.ts",
+      "server/src/workflows/schema.ts",
+      "server/src/workflows/run-state.ts",
+      "server/src/workflows/store.ts",
+      "server/src/workflows/validate.ts",
+      "server/src/workflows/dynamic-workflow-adapter.ts",
+      "server/src/workflows/agent-node-executor.ts",
+      "server/src/workflows/runner.ts",
+      "server/src/workflows/controller.ts",
+      "server/src/workflows/service.ts",
+      "server/src/workflows/legacy-archon-import.ts",
+      "server/src/workflows/evidence-policy.ts",
+      "server/src/workflows/hosted-fusion.ts",
+      "server/src/workflows/lean4-artifacts.ts",
+      "server/src/workflows/lean4-verifier.ts",
+      "server/src/workflows/supervisor/client.ts",
+      "server/src/workflows/supervisor/coordinator.ts",
+      "server/src/workflows/supervisor/entry.ts",
+      "server/src/workflows/supervisor/integrity.ts",
+      "server/src/workflows/supervisor/journal.ts",
+      "server/src/workflows/supervisor/protocol.ts",
+      "server/src/workflows/supervisor/runtime.ts",
+      "server/src/workflows/supervisor/server.ts"
+    ],
+    "S6": [
+      "server/src/workflows/prompt-opt*.ts",
+      "web/src/components/prompt-opt*.tsx",
+      "web/src/lib/prompt-opt*.ts"
+    ],
+    "S7": [
+      "server/src/agent/dag-fusion-bridge.ts",
+      "web/src/components/context-usage-indicator.tsx",
+      "server/src/workflows/context-watcher*.ts",
+      "server/src/workflows/compaction-watcher*.ts",
+      "web/src/components/context-watcher*.tsx",
+      "web/src/components/compaction-watcher*.tsx"
+    ],
+    "S8": [
+      "server/src/api/sessions.ts",
+      "server/src/api/console.ts",
+      "server/src/agent/runs-index.ts",
+      "server/src/agent/goal-loop.ts",
+      "server/src/agent/run-broker.ts",
+      "server/src/agent/chat-turn-runs-adapter*.ts",
+      "web/src/components/chat-tab.tsx",
+      "web/src/components/chat-rail.tsx",
+      "web/src/components/console/kady-console.tsx",
+      "web/src/components/chat-live-graph*.tsx",
+      "web/src/lib/use-agent.ts",
+      "web/src/lib/console.ts",
+      "web/src/lib/console-types.ts"
+    ],
+    "S9": [
+      "web/src/app/globals.css",
+      "web/src/components/theme-provider.tsx",
+      "web/src/components/scientific-dag-studio*.tsx",
+      "web/src/lib/studio-design-tokens*.ts"
+    ],
+    "S10": [
+      "web/src/components/workflows-panel.tsx",
+      "web/src/data/workflows.json",
+      "web/src/lib/dag-workflow-templates.ts",
+      "web/src/components/workflow-library*.tsx",
+      "web/src/lib/workflow-library*.ts"
+    ]
+  }
+}

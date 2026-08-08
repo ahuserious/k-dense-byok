@@ -1,0 +1,32 @@
+{
+  "enabled": false,
+  "token": "archon",
+  "allowedPaths": [
+    "server/vendor/archon-engine/**/LICENSE",
+    "server/vendor/archon-engine/**/NOTICE*",
+    "server/vendor/archon-engine/VENDORED-FROM.md"
+  ],
+  "allowedIdentifiers": [
+    "ARCHON_ENGINE_DIR",
+    "ARCHON_HOME",
+    "KADY_ARCHON_PORT",
+    "ArchonUnavailableError",
+    "archonFetch",
+    "archonHealthy",
+    "legacy-archon",
+    "legacy_archon",
+    "sourceFormat: \"archon-workflow-yaml/v1\"",
+    "LegacyArchonImportError",
+    "previewLegacyArchonWorkflow",
+    "server/vendor/archon-engine/"
+  ],
+  "vendorInternalIdentifiers": [
+    "@archon/",
+    "ARCHON_",
+    ".archon/",
+    "archon.db",
+    "archonPaths",
+    "archonHome",
+    "archonConfig"
+  ]
+}
