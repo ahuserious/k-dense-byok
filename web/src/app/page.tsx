@@ -734,19 +734,6 @@ function WorkspacePage({
     [setView],
   );
 
-  const handleRunPipeline = useCallback(
-    async (name: string) => {
-      const receiptId = `kady-${makeTabId()}`;
-      const response = await runPipeline(
-        name,
-        receiptId,
-        `Run vendored pipeline ${name}.`,
-      );
-      return { receiptId, response };
-    },
-    [],
-  );
-
   const handleFileSelect = useCallback((path: string) => {
     sandboxSelectFile(path);
     setShowNotebook(false);
@@ -846,6 +833,21 @@ function WorkspacePage({
       : directorySpendLimit !== null &&
         directorySpendLimit > 0 &&
         committedUsd >= directorySpendLimit;
+  const handleRunPipeline = useCallback(
+    async (name: string) => {
+      if (budgetBlocked) {
+        throw new Error("Project spend limit reached.");
+      }
+      const receiptId = `kady-${makeTabId()}`;
+      const response = await runPipeline(
+        name,
+        receiptId,
+        `Run vendored pipeline ${name}.`,
+      );
+      return { receiptId, response };
+    },
+    [budgetBlocked],
+  );
   const projectActivity = useMemo(
     () =>
       summarizeProjectActivity(

@@ -16,6 +16,8 @@ No other list capability is intentionally dropped. The vendored list retains hea
 
 Vendored Run now submits directly to the structured `/pipelines/:name/run` route. Its progress is no longer displayed in a newly-created Kady chat because that chat has no structured bridge to the vendored engine's conversation stream; retaining the natural-language chat dispatch would make engine selection ambiguous. The consolidated list instead shows the returned dispatch receipt and status inline in its vendored section. The current vendored response reports an acceptance status but no workflow `runId`, so the UI labels the client-generated conversation/dispatch id honestly rather than presenting it as an engine run id.
 
+S1 applies client-side spend-limit guards in both the page dispatch callback and the consolidated panel, and it renders a vendored response as successful only when the documented body explicitly reports `accepted: true` with a valid status. These are mitigations, not authoritative accounting. S4 owns backend vendored admission, reservation, engine `runId`, and reconciliation in `server/src/api/pipelines.ts`. S2 owns HTTP failure rejection in `web/src/lib/pipelines.ts`; until that client checks `res.ok`, S1's strict body validation catches ordinary error JSON but cannot distinguish a non-2xx response whose body incorrectly imitates the success contract.
+
 The two backing stores deliberately remain separate engines:
 
 - Vendored pipelines continue to use the vendored engine's health, list, run, edit, and builder routes.

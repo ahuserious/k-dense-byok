@@ -169,15 +169,18 @@ function vendoredRunReceipt(value: unknown): VendoredRunReceipt {
   const response = outer.response && typeof outer.response === "object" && !Array.isArray(outer.response)
     ? outer.response as Record<string, unknown>
     : outer;
-  const nestedRun = response.run && typeof response.run === "object" && !Array.isArray(response.run)
-    ? response.run as Record<string, unknown>
-    : {};
-  const runId = [nestedRun.id, nestedRun.runId, response.runId, response.run_id]
+  if (response.accepted !== true) {
+    const detail = [response.error, response.detail, response.message]
+      .find((candidate): candidate is string => typeof candidate === "string" && candidate.length > 0);
+    throw new Error(detail ?? "Vendored pipeline response did not confirm acceptance.");
+  }
+  if (typeof response.status !== "string" || response.status.length === 0) {
+    throw new Error("Vendored pipeline response confirmed acceptance without a valid status.");
+  }
+  const runId = [response.runId, response.run_id]
     .find((candidate): candidate is string => typeof candidate === "string") ?? null;
   const receiptId = typeof outer.receiptId === "string" ? outer.receiptId : runId;
-  const status = [nestedRun.status, response.status, response.state]
-    .find((candidate): candidate is string => typeof candidate === "string") ?? "accepted";
-  return { receiptId, runId, status };
+  return { receiptId, runId, status: response.status };
 }
 
 function WorkflowDefinitionRow({
@@ -556,6 +559,18 @@ export function DagWorkflowsPanel({
   };
 
   const runVendoredPipeline = async (name: string) => {
+    if (budgetBlocked) {
+      setVendoredRunReceipts((current) => ({
+        ...current,
+        [name]: {
+          receiptId: null,
+          runId: null,
+          status: "blocked",
+          error: "Project spend limit reached.",
+        },
+      }));
+      return;
+    }
     if (launchingVendoredRuns.current.has(name)) return;
     launchingVendoredRuns.current.add(name);
     setVendoredRunReceipts((current) => ({
@@ -600,6 +615,11 @@ export function DagWorkflowsPanel({
             onRunPipeline={(name) => void runVendoredPipeline(name)}
             onEditPipeline={onEditPipeline}
           />
+          {budgetBlocked ? (
+            <p role="alert" className="border-t border-destructive/30 bg-destructive/5 px-4 py-2 text-xs text-destructive">
+              Vendored pipeline runs are disabled because the project spend limit is reached.
+            </p>
+          ) : null}
           {Object.keys(vendoredRunReceipts).length > 0 ? (
             <ul className="border-t" aria-label="Vendored pipeline run receipts">
               {Object.entries(vendoredRunReceipts).map(([name, receipt]) => (

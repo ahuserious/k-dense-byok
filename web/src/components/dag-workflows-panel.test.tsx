@@ -147,6 +147,65 @@ describe("DagWorkflowsPanel", () => {
     expect(onEditPipeline).not.toHaveBeenCalled();
   });
 
+  it("blocks vendored pipeline submission when the project budget is exhausted", async () => {
+    vi.mocked(pipelinesApi.listPipelines).mockResolvedValue([
+      { name: "microscopy-qc", description: "Inspect microscopy acquisition quality" },
+    ]);
+    vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
+    const onRunPipeline = vi.fn().mockResolvedValue({
+      receiptId: "must-not-run",
+      response: { accepted: true, status: "started" },
+    });
+
+    renderPanel({ budgetBlocked: true, onRunPipeline });
+
+    expect(await screen.findByText(
+      "Vendored pipeline runs are disabled because the project spend limit is reached.",
+    )).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Run" }));
+
+    expect(onRunPipeline).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(
+      "Run failed: Project spend limit reached.",
+    ));
+  });
+
+  it.each([
+    { httpStatus: 400, body: { error: "Invalid workflow name." }, detail: "Invalid workflow name." },
+    { httpStatus: 502, body: { detail: "Vendored engine unavailable." }, detail: "Vendored engine unavailable." },
+    { httpStatus: 503, body: { message: "Vendored engine starting." }, detail: "Vendored engine starting." },
+    { httpStatus: 200, body: { status: "started" }, detail: "Vendored pipeline response did not confirm acceptance." },
+  ])("renders HTTP $httpStatus non-success or unknown shapes as failures", async ({ httpStatus, body, detail }) => {
+    vi.mocked(pipelinesApi.listPipelines).mockResolvedValue([
+      { name: "microscopy-qc", description: "Inspect microscopy acquisition quality" },
+    ]);
+    vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(body), {
+        status: httpStatus,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    renderPanel({
+      onRunPipeline: async (name) => ({
+        receiptId: "vendored-receipt-failed",
+        response: await pipelinesApi.runPipeline(
+          name,
+          "vendored-receipt-failed",
+          `Run vendored pipeline ${name}.`,
+        ),
+      }),
+    });
+
+    await userEvent.click(await screen.findByRole("button", { name: "Run" }));
+
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(
+      `Run failed: ${detail}`,
+    ));
+    expect(screen.queryByText(/Dispatch vendored-receipt-failed/)).not.toBeInTheDocument();
+  });
+
   it("runs the selected saved revision once with session, bounded goal, and revision safeguards", async () => {
     const graph = createDefaultWorkflowGraph("fusion-review", "Fusion review");
     const selected: dagApi.VersionedDagWorkflowDefinition = {
