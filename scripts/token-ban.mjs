@@ -7,6 +7,10 @@ import { fileURLToPath } from "node:url";
 
 const defaultRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function parseArguments(argv) {
   const options = { root: defaultRoot, config: "config/token-ban.json" };
   for (let index = 0; index < argv.length; index += 1) {
@@ -60,12 +64,15 @@ export function runTokenBan(options) {
   }
 
   const token = String(config.token ?? "archon");
-  const tokenPattern = new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+  const tokenPattern = new RegExp(escapeRegex(token), "i");
   const allowedPathPatterns = (config.allowedPaths ?? []).map(globRegex);
-  const allowedIdentifiers = [
-    ...(config.allowedIdentifiers ?? []),
-    ...(config.vendorInternalIdentifiers ?? []),
-  ].map((value) => String(value).toLowerCase());
+  const allowedIdentifiers = (config.allowedIdentifiers ?? []).map((value) =>
+    String(value).toLowerCase(),
+  );
+  const vendorInternalRules = (config.vendorInternalIdentifiers ?? []).map((rule) => ({
+    pathPattern: globRegex(String(rule.path)),
+    identifiers: (rule.identifiers ?? []).map((value) => String(value).toLowerCase()),
+  }));
   const selfPaths = new Set([
     path.relative(options.root, options.config).replaceAll(path.sep, "/"),
     "scripts/token-ban.mjs",
@@ -87,7 +94,16 @@ export function runTokenBan(options) {
       const line = lines[lineIndex];
       if (!tokenPattern.test(line)) continue;
       const lowerLine = line.toLowerCase();
-      if (allowedIdentifiers.some((identifier) => lowerLine.includes(identifier.toLowerCase()))) continue;
+      const pathScopedIdentifiers = vendorInternalRules
+        .filter((rule) => rule.pathPattern.test(relativePath))
+        .flatMap((rule) => rule.identifiers);
+      const remainingLine = [...allowedIdentifiers, ...pathScopedIdentifiers]
+        .sort((left, right) => right.length - left.length)
+        .reduce(
+          (candidate, identifier) => candidate.replaceAll(identifier, ""),
+          lowerLine,
+        );
+      if (!tokenPattern.test(remainingLine)) continue;
       violations.push({ file: relativePath, line: lineIndex + 1, text: line.trim() });
     }
   }

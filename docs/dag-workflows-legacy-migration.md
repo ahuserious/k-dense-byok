@@ -11,9 +11,9 @@ or control semantics.
 The former integration had three distinct state owners:
 
 - Project workflow definitions were YAML files under
-  `sandbox/.archon/workflows/`. Committed starter YAML was copied there without
+  `sandbox/.pipeline-engine/workflows/`. Committed starter YAML was copied there without
   overwriting a same-named user file.
-- Authoritative node execution and resume state belonged to the separate Archon
+- Authoritative node execution and resume state belonged to the separate Pipeline engine
   sidecar database.
 - Kady appended a lossy Console row under
   `sandbox/.kady/runs/<sessionId>/runs.jsonl` and reconciled reported usage into
@@ -30,13 +30,13 @@ from the old Console row.
 For that reason, legacy runs are **archive-only**. They are not assigned a new
 `wrun_...` id, shown as controllable native Console runs, or inserted into
 Raindrop's autosaved native-run tabs. Keep the old project data if its historical
-rows or the Archon database are still needed. Starting a native run creates new
+rows or the Pipeline engine database are still needed. Starting a native run creates new
 evidence; it is not a resume of an old run.
 
 ## Opt-in YAML preview
 
-`POST /dag-workflow-imports/legacy-archon/preview` accepts one YAML document
-that the user explicitly supplies. The route never scans `.archon`, changes the
+`POST /dag-workflow-imports/legacy-pipeline/preview` accepts one YAML document
+that the user explicitly supplies. The route never scans legacy engine storage, changes the
 source file, saves a definition, or starts a run. It returns:
 
 - a typed schema 1.0 graph when every behavior is portable;
@@ -64,12 +64,12 @@ jq -Rs \
   --arg workflowId imported-research \
   --arg reasoning high \
   '{source: ., workflowId: $workflowId, reasoning: $reasoning}' \
-  projects/default/sandbox/.archon/workflows/my-workflow.yaml \
+  projects/default/sandbox/.pipeline-engine/workflows/my-workflow.yaml \
 | curl --fail-with-body \
     -H 'Content-Type: application/json' \
     -H 'X-Project-Id: default' \
     --data-binary @- \
-    http://localhost:8000/dag-workflow-imports/legacy-archon/preview
+    http://localhost:8000/dag-workflow-imports/legacy-pipeline/preview
 ```
 
 Review the returned graph and warnings before saving the graph through the
@@ -118,8 +118,8 @@ are not copies or claimed byte-for-byte migrations of the legacy seeds.
 
 | Legacy surface | Native boundary |
 |---|---|
-| Archon YAML and embedded visual builder | Explicit YAML preview, then a reviewed save into Kady's native DAG Builder. |
-| Archon sidecar run/resume | No conversion. Native Runner starts a new, fully receipted run. |
+| Pipeline engine YAML and embedded visual builder | Explicit YAML preview, then a reviewed save into Kady's native DAG Builder. |
+| Pipeline engine sidecar run/resume | No conversion. Native Runner starts a new, fully receipted run. |
 | Combined lossy run-index Console | Native Console reads only the authoritative DAG event stream and sends controls to that runner. |
 | External Raindrop Workshop iframe | Native Raindrop autosaves `wrun_...` tabs and uses its separate read-only Pi log analyst. Legacy ids remain archival. |
 

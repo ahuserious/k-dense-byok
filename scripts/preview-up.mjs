@@ -94,7 +94,7 @@ function previewEnvironment(stateRoot, launchRoot, shimDirectory, ports) {
     KADY_PREVIEW: "1",
     KADY_PORT: String(ports.backend),
     KADY_FRONTEND_PORT: String(ports.frontend),
-    KADY_ARCHON_PORT: String(ports.engine),
+    KADY_PIPELINE_ENGINE_PORT: String(ports.engine),
     KADY_PROJECTS_ROOT: path.join(stateRoot, "projects"),
     KADY_PI_AGENT_DIR: piAgentDirectory,
     PI_CODING_AGENT_DIR: piAgentDirectory,
@@ -188,8 +188,20 @@ if (fs.existsSync(stateFile)) {
 const ports = {
   backend: portOption("--backend-port", Number(process.env.KADY_PORT || 18000)),
   frontend: portOption("--frontend-port", Number(process.env.KADY_FRONTEND_PORT || 13000)),
-  engine: portOption("--engine-port", Number(process.env.KADY_ARCHON_PORT || 13091)),
+  engine: portOption(
+    "--engine-port",
+    Number(
+      process.env.KADY_PIPELINE_ENGINE_PORT ||
+        process.env.KADY_ARCHON_PORT ||
+        13091,
+    ),
+  ),
 };
+if (!process.env.KADY_PIPELINE_ENGINE_PORT && process.env.KADY_ARCHON_PORT) {
+  console.warn(
+    "[deprecated] KADY_ARCHON_PORT is deprecated; use KADY_PIPELINE_ENGINE_PORT instead.",
+  );
+}
 if (new Set(Object.values(ports)).size !== 3) fail("Preview ports must be distinct.");
 
 const requestedStateRoot = optionValue("--state-root", "");

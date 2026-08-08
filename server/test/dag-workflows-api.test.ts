@@ -121,7 +121,7 @@ describe("DAG workflow API", () => {
   it("previews a legacy YAML translation without scanning or saving project files", async () => {
     const preview = await app.inject({
       method: "POST",
-      url: "/dag-workflow-imports/legacy-archon/preview",
+      url: "/dag-workflow-imports/legacy-pipeline/preview",
       headers: headers(),
       payload: {
         workflowId: "legacy-preview",
@@ -140,7 +140,7 @@ describe("DAG workflow API", () => {
     expect(preview.statusCode).toBe(200);
     expect(preview.headers["cache-control"]).toBe("no-store");
     expect(preview.json()).toMatchObject({
-      sourceFormat: "archon-workflow-yaml/v1",
+      sourceFormat: "pipeline-workflow-yaml/v1",
       graph: {
         id: "legacy-preview",
         nodes: [{ model: { requested: { reasoning: "low" } } }],

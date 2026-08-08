@@ -3,7 +3,7 @@
 // The DAG Builder "Add to pipeline" popover (lives in the chat rail). It STACKS pipeline
 // stages into the chat input rather than sending each one — pick several workflows /
 // skills / databases / protections, review the stacked list in the chat, then send once.
-// The rail's KADY agent (archon + scientific-pipeline-builder) turns the stack into the
+// The rail's KADY agent (scientific-dag-studio + scientific-pipelines) turns the stack into the
 // pipeline YAML in a single build turn.
 //
 // Ported from the reference tree; rebound to the target's types: Skill comes from

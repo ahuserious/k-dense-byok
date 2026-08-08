@@ -24,7 +24,7 @@ import { fetchCatalogue } from "./skills-fetch.ts";
 const DEFAULT_DISABLED_MIGRATION = "package-skills-disabled-v1";
 
 /**
- * Skills committed in-repo (archon + scientific-pipeline-builder — the DAG
+ * Skills committed in-repo (scientific-dag-studio + scientific-pipelines — the DAG
  * Builder chat rail's preloads). Unlike the fetched catalogue they need no
  * network, and they are topped up on EVERY seed call so existing projects
  * pick up newly-committed skills too (mirrors the reference tree's c60a013).

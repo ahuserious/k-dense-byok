@@ -142,5 +142,5 @@ change.
 ## Do not claim as done
 
 Unchanged and still true: automatic graph-repair rescue is not implemented,
-`dag-fusion-drive` is private with no marketplace release, Archon resume does not
+`dag-fusion-drive` is private with no marketplace release, Pipeline engine resume does not
 exist, and supervisor-or-host death remains the fail-closed quarantine boundary.

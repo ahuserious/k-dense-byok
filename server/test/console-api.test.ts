@@ -30,7 +30,7 @@ describe("console runs feed", () => {
       sessionId: "sess-1",
       loopId: null,
       iteration: 0,
-      task: "proxy an Archon workflow",
+      task: "proxy an Pipeline engine workflow",
       role: "workflow",
       model: "openrouter/test-model",
     });

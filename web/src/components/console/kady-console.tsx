@@ -2,8 +2,8 @@
 //
 // The Console tab's native view. It renders KADY's OWN run + loop feed (GET /console/runs,
 // /console/loops via lib/console.ts) — so agents you fire from the chat / rail / pipelines
-// actually show up here. (The previous Console embedded Archon's /console, which only shows
-// Archon workflow runs, never Kady's — which is why a fired agent was invisible.)
+// actually show up here. (The previous Console embedded Pipeline engine's /console, which only shows
+// Pipeline engine workflow runs, never Kady's — which is why a fired agent was invisible.)
 //
 // Raindrop-styled agent surface: black + monospace, white-overlay rows.
 

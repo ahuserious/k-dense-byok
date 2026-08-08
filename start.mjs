@@ -457,8 +457,14 @@ function startService(label, dir, npmArgs, options = {}) {
 
 // ---- Workflow engine (vendored bun workspace, optional) ----------------------
 
-const ARCHON_ENGINE_DIR = path.join(repoRoot, "server", "vendor", "archon-engine");
-const ARCHON_PORT = Number(process.env.KADY_ARCHON_PORT || 3091);
+const PIPELINE_ENGINE_DIR = path.join(repoRoot, "server", "vendor", "pipeline-engine");
+const legacyPipelineEnginePort = process.env.KADY_ARCHON_PORT;
+if (!process.env.KADY_PIPELINE_ENGINE_PORT && legacyPipelineEnginePort) {
+  log("  [deprecated] KADY_ARCHON_PORT is deprecated; use KADY_PIPELINE_ENGINE_PORT instead.");
+}
+const PIPELINE_ENGINE_PORT = Number(
+  process.env.KADY_PIPELINE_ENGINE_PORT || legacyPipelineEnginePort || 3091,
+);
 
 /**
  * Start the vendored workflow engine (Scientific DAG Workflow Designer) as an
@@ -470,8 +476,8 @@ const ARCHON_PORT = Number(process.env.KADY_ARCHON_PORT || 3091);
  * Returns true when a child was spawned (callers may health-poll it).
  */
 async function startWorkflowEngine() {
-  if (!fs.existsSync(path.join(ARCHON_ENGINE_DIR, "package.json"))) {
-    log(`  ${sym.warn} Workflow engine sources missing (server/vendor/archon-engine) — skipping it.`);
+  if (!fs.existsSync(path.join(PIPELINE_ENGINE_DIR, "package.json"))) {
+    log(`  ${sym.warn} Workflow engine sources missing (server/vendor/pipeline-engine) — skipping it.`);
     return false;
   }
   const bun = findBun();
@@ -483,14 +489,14 @@ async function startWorkflowEngine() {
   // Port preflight. A healthy responder is reused (matches how the /pipelines
   // proxy would reach it anyway); a stale repo-owned leftover is stopped; a
   // foreign process means we skip rather than fight over the port.
-  const pids = listenersOn(ARCHON_PORT);
+  const pids = listenersOn(PIPELINE_ENGINE_PORT);
   if (pids.length > 0) {
     try {
-      const res = await fetch(`http://127.0.0.1:${ARCHON_PORT}/api/health`, {
+      const res = await fetch(`http://127.0.0.1:${PIPELINE_ENGINE_PORT}/api/health`, {
         signal: AbortSignal.timeout(2000),
       });
       if (res.ok) {
-        log(`  ${sym.arrow} Workflow engine already running on port ${ARCHON_PORT} — reusing it.`);
+        log(`  ${sym.arrow} Workflow engine already running on port ${PIPELINE_ENGINE_PORT} — reusing it.`);
         return false;
       }
     } catch {
@@ -498,11 +504,11 @@ async function startWorkflowEngine() {
     }
     for (const pid of pids) {
       if (ownedByThisRepo(pid)) {
-        log(`  Stopping a leftover workflow engine on port ${ARCHON_PORT} (PID ${pid})...`);
+        log(`  Stopping a leftover workflow engine on port ${PIPELINE_ENGINE_PORT} (PID ${pid})...`);
         await killTree(pid);
       } else {
-        log(`  ${sym.warn} Port ${ARCHON_PORT} is in use by ${processName(pid)} (PID ${pid}) and not answering`);
-        log("    the engine health check — skipping the workflow engine (set KADY_ARCHON_PORT to move it).");
+        log(`  ${sym.warn} Port ${PIPELINE_ENGINE_PORT} is in use by ${processName(pid)} (PID ${pid}) and not answering`);
+        log("    the engine health check — skipping the workflow engine (set KADY_PIPELINE_ENGINE_PORT to move it).");
         return false;
       }
     }
@@ -510,25 +516,25 @@ async function startWorkflowEngine() {
 
   // One-time install/build, keyed on the artifacts themselves (node_modules
   // and the built web dist are git-ignored inside the vendor dir).
-  if (!fs.existsSync(path.join(ARCHON_ENGINE_DIR, "node_modules"))) {
+  if (!fs.existsSync(path.join(PIPELINE_ENGINE_DIR, "node_modules"))) {
     log("  Installing workflow engine packages (first run)...");
-    if (run(bun, ["install"], { cwd: ARCHON_ENGINE_DIR }) !== 0) {
+    if (run(bun, ["install"], { cwd: PIPELINE_ENGINE_DIR }) !== 0) {
       log(`  ${sym.warn} Workflow engine install failed — skipping it (everything else keeps running).`);
       return false;
     }
   }
-  if (!fs.existsSync(path.join(ARCHON_ENGINE_DIR, "packages", "web", "dist", "index.html"))) {
+  if (!fs.existsSync(path.join(PIPELINE_ENGINE_DIR, "packages", "web", "dist", "index.html"))) {
     log("  Building the workflow engine UI (first run)...");
-    if (run(bun, ["run", "build:web"], { cwd: ARCHON_ENGINE_DIR }) !== 0) {
+    if (run(bun, ["run", "build:web"], { cwd: PIPELINE_ENGINE_DIR }) !== 0) {
       log(`  ${sym.warn} Workflow engine UI build failed — skipping it (everything else keeps running).`);
       return false;
     }
   }
 
-  log(`  ${sym.arrow} Workflow engine (Scientific DAG Workflow Designer) on port ${ARCHON_PORT}`);
+  log(`  ${sym.arrow} Workflow engine (Scientific DAG Workflow Designer) on port ${PIPELINE_ENGINE_PORT}`);
   const engineEnv = {
     ...process.env,
-    PORT: String(ARCHON_PORT),
+    PORT: String(PIPELINE_ENGINE_PORT),
     HOST: "127.0.0.1",
     DEFAULT_AI_ASSISTANT: process.env.DEFAULT_AI_ASSISTANT || "pi",
     ARCHON_SUPPRESS_NESTED_CLAUDE_WARNING: "1",
@@ -542,7 +548,7 @@ async function startWorkflowEngine() {
       // (same rationale as the npm spawn above). Quote bun: the fallback
       // path lives under the user's home dir, which may contain spaces.
       spawn([`"${bun}"`, ...engineArgs].join(" "), {
-        cwd: ARCHON_ENGINE_DIR,
+        cwd: PIPELINE_ENGINE_DIR,
         stdio: "inherit",
         shell: true,
         env: engineEnv,
@@ -551,12 +557,12 @@ async function startWorkflowEngine() {
       // grandchild in the same group, so only a group-wide signal (stopAll)
       // reliably reaps the whole engine tree.
       spawn(bun, engineArgs, {
-        cwd: ARCHON_ENGINE_DIR,
+        cwd: PIPELINE_ENGINE_DIR,
         stdio: "inherit",
         detached: true,
         env: engineEnv,
       });
-  child.kadyRole = "archon-engine";
+  child.kadyRole = "pipeline-engine";
   children.push(child);
   // Unlike the backend/frontend, an engine death is a degradation, not a
   // launcher failure: the /pipelines proxy answers 503 while it is down.
@@ -745,7 +751,7 @@ await waitFor(`http://localhost:${BACKEND_PORT}/`, "backend", 120);
 await waitFor(`http://localhost:${FRONTEND_PORT}/`, "app UI", 180);
 // Bounded engine readiness poll; a timeout only warns (the engine is optional).
 if (engineSpawned) {
-  await waitFor(`http://127.0.0.1:${ARCHON_PORT}/api/health`, "workflow engine", 30);
+  await waitFor(`http://127.0.0.1:${PIPELINE_ENGINE_PORT}/api/health`, "workflow engine", 30);
 }
 
 if (!shuttingDown) {

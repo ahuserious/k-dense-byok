@@ -9,8 +9,8 @@
     },
     {
       "name": "vendored workflow engine store",
-      "implementation": "server/vendor/archon-engine/packages/workflows/src/store.ts",
-      "client": "server/src/agent/archon/client.ts",
+      "implementation": "server/vendor/pipeline-engine/packages/workflows/src/store.ts",
+      "client": "server/src/agent/pipeline-engine/client.ts",
       "proxy": "server/src/api/pipelines.ts",
       "webClient": "web/src/lib/pipelines.ts",
       "persistence": "owned by the out-of-process vendored engine and accessed only through its REST API"
@@ -19,8 +19,8 @@
   "files": [
     "server/src/workflows/store.ts",
     "server/src/api/dag-workflows.ts",
-    "server/vendor/archon-engine/packages/workflows/src/store.ts",
-    "server/src/agent/archon/client.ts",
+    "server/vendor/pipeline-engine/packages/workflows/src/store.ts",
+    "server/src/agent/pipeline-engine/client.ts",
     "server/src/api/pipelines.ts",
     "web/src/lib/pipelines.ts"
   ]

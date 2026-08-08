@@ -42,7 +42,7 @@ export function RaindropSurface({
 
   // One probe on mount. The Workshop is a manually-started sidecar; if it
   // comes up later, revisiting the view (remount) or reloading picks it up.
-  // No poll here — the embed's own ArchonIframePanel polls once it's chosen.
+  // No poll here — the embed's own EngineIframePanel polls once it's chosen.
   useEffect(() => {
     let cancelled = false;
     void raindropHealth().then((up) => {

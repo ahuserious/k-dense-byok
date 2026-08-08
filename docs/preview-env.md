@@ -24,7 +24,7 @@ launcher's update lookup and forces npm offline.
 The effective environment includes:
 
 - `KADY_PREVIEW=1`;
-- the selected `KADY_PORT`, `KADY_FRONTEND_PORT`, and `KADY_ARCHON_PORT`;
+- the selected `KADY_PORT`, `KADY_FRONTEND_PORT`, and `KADY_PIPELINE_ENGINE_PORT`;
 - temporary `KADY_PROJECTS_ROOT`, `KADY_PI_AGENT_DIR`,
   `PI_CODING_AGENT_DIR`, `KADY_SKILLS_CACHE_DIR`, and workflow-supervisor paths;
 - `KADY_SKILLS_REPO=kady-preview-nonexistent/none` and a blank
@@ -64,7 +64,7 @@ is used only if the owned tree does not quiesce within 90 seconds.
 
 Afterward, `preview-down` runs scoped `pgrep -f` checks for
 `kady-workflow-supervisor`, `tsx/dist/preflight.cjs`, and
-`vendor/archon-engine`. Candidate command/environment records must also contain
+`vendor/pipeline-engine`. Candidate command/environment records must also contain
 one of this preview's unique state paths, so an unrelated Kady checkout is not
 claimed. Teardown fails unless all three scoped counts are zero. The temporary
 state tree is then removed; pass `--keep-state` to retain its logs after the

@@ -1,15 +1,15 @@
 // danbot-byok — web/src/lib/pipelines.ts
 //
-// Client for the Kady `/pipelines` proxy, which forwards to the Archon workflow engine.
-// danbot owns the chat + cost UI; Archon owns workflow execution and the visual builder.
+// Client for the Kady `/pipelines` proxy, which forwards to the pipeline engine.
+// Kady owns the chat + cost UI; the engine owns workflow execution and the visual builder.
 // So this client just lists pipelines, triggers runs, and reports engine health — editing
-// happens in Archon's own builder (which the Pipelines panel links out to).
+// happens in the embedded Scientific DAG Workflow Designer.
 
 import { apiFetch } from "./projects";
 
 export interface PipelineSummary {
   name: string;
-  description: string; // first line of Archon's (often multi-line) description
+  description: string; // first line of the engine's often multi-line description
 }
 
 function jsonPost(body: unknown): RequestInit {
@@ -18,22 +18,43 @@ function jsonPost(body: unknown): RequestInit {
   return { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
 }
 
-/** True when the Archon engine answers — lets the panel degrade gracefully when it's down. */
-export async function pipelineHealth(): Promise<boolean> {
+async function errorDetail(response: Response): Promise<string> {
+  const text = await response.text().catch(() => "");
+  if (!text) return "No error body returned.";
   try {
-    const res = await apiFetch("/pipelines/health");
-    if (!res.ok) return false;
-    const data = (await res.json()) as { healthy?: boolean };
-    return Boolean(data.healthy);
+    const parsed = JSON.parse(text) as unknown;
+    if (parsed && typeof parsed === "object") {
+      const record = parsed as Record<string, unknown>;
+      for (const key of ["error", "detail", "message"]) {
+        if (typeof record[key] === "string" && record[key].length > 0) {
+          return record[key];
+        }
+      }
+    }
+    return typeof parsed === "string" ? parsed : JSON.stringify(parsed);
   } catch {
-    return false;
+    return text;
   }
 }
 
-/** List the workflows Archon knows about (proxied), flattened to {name, description}. */
+async function requireOk(response: Response, operation: string): Promise<void> {
+  if (response.ok) return;
+  const detail = await errorDetail(response);
+  throw new Error(`${operation} failed (${response.status}): ${detail}`);
+}
+
+/** True when the pipeline engine answers. Non-2xx responses remain observable failures. */
+export async function pipelineHealth(): Promise<boolean> {
+  const res = await apiFetch("/pipelines/health");
+  await requireOk(res, "Pipeline health check");
+  const data = (await res.json()) as { healthy?: boolean };
+  return Boolean(data.healthy);
+}
+
+/** List proxied workflows, flattened to {name, description}. */
 export async function listPipelines(): Promise<PipelineSummary[]> {
   const res = await apiFetch("/pipelines");
-  if (!res.ok) return [];
+  await requireOk(res, "Pipeline list");
   const data = (await res.json()) as {
     workflows?: { workflow?: { name?: string; description?: string } }[];
   };
@@ -46,12 +67,12 @@ export async function listPipelines(): Promise<PipelineSummary[]> {
 }
 
 /**
- * Trigger a pipeline run. Archon ties a run to a conversation + a kick-off message.
+ * Trigger a pipeline run. The engine ties a run to a conversation + a kick-off message.
  *
  * `model` is an optional Kady model ref (e.g. "openrouter/anthropic/claude-opus-4.8")
  * sourced from the SAME merged catalogue the chat picker uses, so a pipeline run can
  * use Kady's model list. When provided it's forwarded in the run body; the Kady proxy
- * threads it through to Archon's run options so Archon Pi resolves the chosen model.
+ * threads it through to the engine's run options so Pi resolves the chosen model.
  */
 export async function runPipeline(
   name: string,
@@ -63,5 +84,6 @@ export async function runPipeline(
     `/pipelines/${encodeURIComponent(name)}/run`,
     jsonPost({ conversationId, message, ...(model ? { model } : {}) }),
   );
+  await requireOk(res, "Pipeline run");
   return res.json();
 }

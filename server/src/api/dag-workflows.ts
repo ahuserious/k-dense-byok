@@ -5,12 +5,12 @@ import {
   workflowRunBudgetSummary,
 } from "../workflows/budget.ts";
 import {
-  LegacyArchonImportError,
+  LegacyPipelineImportError,
   MAX_WORKFLOW_EVENT_PAGE_SIZE,
   MAX_WORKFLOW_RUN_LIST_SIZE,
   WorkflowStoreError,
   WorkflowRunControllerError,
-  previewLegacyArchonWorkflow,
+  previewLegacyPipelineWorkflow,
   workflowStore,
   type WorkflowRunController,
   type StoredWorkflowDefinitionV1,
@@ -162,7 +162,7 @@ export async function registerDagWorkflowRoutes(
 ): Promise<void> {
   /**
    * Clean-room, preview-only bridge for the portable subset of the former
-   * Archon YAML format. It never scans `.archon`, writes a definition, or
+   * Pipeline engine YAML format. It never scans legacy engine storage, writes a definition, or
    * claims that a legacy sidecar run can resume in Kady. The caller must review
    * the returned typed graph and save it through the normal revisioned PUT.
    */
@@ -172,17 +172,17 @@ export async function registerDagWorkflowRoutes(
       workflowId?: unknown;
       reasoning?: unknown;
     } | null;
-  }>("/dag-workflow-imports/legacy-archon/preview", async (request, reply) => {
+  }>("/dag-workflow-imports/legacy-pipeline/preview", async (request, reply) => {
     try {
       const body = isRecord(request.body) ? request.body : {};
       if (typeof body.source !== "string") {
-        throw new LegacyArchonImportError(
+        throw new LegacyPipelineImportError(
           "INVALID_IMPORT_REQUEST",
           "source must be a YAML string.",
         );
       }
       if (typeof body.workflowId !== "string") {
-        throw new LegacyArchonImportError(
+        throw new LegacyPipelineImportError(
           "INVALID_IMPORT_REQUEST",
           "workflowId is required.",
         );
@@ -191,12 +191,12 @@ export async function registerDagWorkflowRoutes(
         typeof body.reasoning !== "string" ||
         !IMPORT_REASONING_LEVELS.has(body.reasoning)
       ) {
-        throw new LegacyArchonImportError(
+        throw new LegacyPipelineImportError(
           "INVALID_IMPORT_REQUEST",
           "reasoning must be one of off, minimal, low, medium, high, xhigh, or max.",
         );
       }
-      const preview = previewLegacyArchonWorkflow({
+      const preview = previewLegacyPipelineWorkflow({
         source: body.source,
         workflowId: body.workflowId,
         reasoning: body.reasoning as
@@ -211,7 +211,7 @@ export async function registerDagWorkflowRoutes(
       reply.header("Cache-Control", "no-store");
       return preview;
     } catch (error) {
-      if (!(error instanceof LegacyArchonImportError)) {
+      if (!(error instanceof LegacyPipelineImportError)) {
         reply.code(500);
         return { detail: "Legacy workflow preview failed." };
       }

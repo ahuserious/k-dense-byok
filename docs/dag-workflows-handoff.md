@@ -107,7 +107,7 @@ suites as more than they are:
 - **`dag-fusion-drive` marketplace release** has not happened. The package is
   private; lowering/parity, provenance, artifact review, namespace ownership,
   and explicit publication approval remain gates.
-- **Archon resume** does not exist. Legacy DAG-Pipelines YAML is a preview-only
+- **Pipeline engine resume** does not exist. Legacy DAG-Pipelines YAML is a preview-only
   clean-room import; legacy runs are archive-only and never presented as
   resumable native runs.
 - **Supervisor or host-machine death** remains the fail-closed boundary: a

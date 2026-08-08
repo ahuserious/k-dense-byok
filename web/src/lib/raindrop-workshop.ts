@@ -1,7 +1,7 @@
 // danbot-byok — web/src/lib/raindrop-workshop.ts
 //
 // Client for the Kady `/raindrop/health` proxy. The Raindrop Workshop UI is a
-// DIFFERENT origin (:5899) from Archon (:3091), and a browser fetch straight at
+// DIFFERENT origin (:5899) from Pipeline engine (:3091), and a browser fetch straight at
 // it can't read the response status cross-origin — so health is probed through
 // the Kady backend (same-origin via apiFetch), which does a server-side fetch
 // with no CORS wall. Mirrors pipelineHealth() in lib/pipelines.ts.
