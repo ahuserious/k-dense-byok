@@ -1,0 +1,4 @@
+Scientific DAG Studio publication is blocked pending explicit owner approval.
+
+This marker is enforced by the Phase R repository guard. Do not remove it as
+part of release preparation without separate publication authorization.
