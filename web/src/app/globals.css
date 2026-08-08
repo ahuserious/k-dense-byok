@@ -285,26 +285,18 @@
     outline-offset: 3px;
   }
 
-  .scientific-dag-studio-backdrop {
-    position: fixed;
-    z-index: 100;
-    inset: 0;
-    display: grid;
-    place-items: center;
-    padding: clamp(0.5rem, 3vw, 2rem);
-    background: rgb(5 6 7 / 88%);
-    backdrop-filter: blur(10px);
-  }
-
-  .scientific-dag-studio-dialog {
+  .scientific-dag-studio-dialog[data-slot="dialog-content"] {
     display: flex;
     width: min(1120px, 100%);
+    max-width: min(1120px, calc(100vw - 2rem));
     max-height: min(900px, calc(100vh - 2rem));
     flex-direction: column;
+    gap: 0;
     overflow: hidden;
     border: 1px solid var(--studio-line-strong);
     border-radius: 1rem;
     background: var(--studio-backdrop);
+    padding: 0;
     box-shadow: 0 28px 90px rgb(0 0 0 / 65%);
     color: var(--studio-text);
   }

@@ -944,6 +944,7 @@ export function Liquid({
   const native = supported && !failed;
 
   useEffect(() => {
+    let cancelled = false;
     const source = sourceRef.current;
     const content = contentRef.current;
     const output = outputRef.current;
@@ -952,8 +953,15 @@ export function Liquid({
       { source, content, output },
       initialOptions,
     );
-    if (native && !instanceRef.current) setFailed(true);
+    if (native && !instanceRef.current) {
+      // Local patch over the CanvasUI registry copy: preserve the failure
+      // fallback while moving the state transition out of the effect body.
+      queueMicrotask(() => {
+        if (!cancelled) setFailed(true);
+      });
+    }
     return () => {
+      cancelled = true;
       instanceRef.current?.destroy();
       instanceRef.current = null;
     };
