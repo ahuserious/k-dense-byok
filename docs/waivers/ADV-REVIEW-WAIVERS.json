@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "waivers": [
+    {
+      "id": "S9-20260808-dag-builder-surface-cross-lane",
+      "file": "web/src/components/dag-builder-surface.tsx",
+      "severity": "P2",
+      "rationalePattern": "set-state-in-effect|setArchonVisited|synchronously within an effect",
+      "reason": "cross-lane: S1's rewrite of dag-builder-surface.tsx removes this line; verified at merge by the orchestrator's merge-gate lint run",
+      "approvedBy": "orchestrator"
+    }
+  ]
+}

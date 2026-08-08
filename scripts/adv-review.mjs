@@ -13,7 +13,7 @@ function parseArguments(argv) {
     root: repoRoot,
     base: null,
     lane: "R1",
-    waivers: "docs/lanes/ADV-REVIEW-WAIVERS.json",
+    waivers: "docs/waivers/ADV-REVIEW-WAIVERS.json",
     output: null,
     dryRun: false,
     fixtureOutput: null,

@@ -1,14 +1,3 @@
-# CanvasUI license and attribution
-
-`Liquid.tsx` was installed from the CanvasUI shadcn registry component
-`@canvas-ui/liquid-react` using the registry configured in `web/components.json`.
-
-- Source site: <https://canvasui.dev>
-- Registry documentation: <https://canvasui.dev/docs/installation>
-- Source repository: <https://github.com/DavidHDev/canvas-ui>
-- Retrieved: 2026-08-08, per `docs/design/sources.md`
-- Installation command: `npx shadcn@latest add @canvas-ui/liquid-react`
-
 # MIT + Commons Clause License Condition v1.0
 
 Copyright (c) 2026 David Haz

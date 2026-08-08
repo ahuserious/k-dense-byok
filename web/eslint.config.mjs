@@ -16,7 +16,7 @@ const eslintConfig = defineConfig([
   {
     files: ["src/components/dag-builder-surface.tsx"],
     rules: {
-      // S9-20260808-dag-builder-surface-cross-lane — remove at integration hardening: file rewritten by S1, error gone on the merged tip.
+      // docs/waivers/ADV-REVIEW-WAIVERS.json#S9-20260808-dag-builder-surface-cross-lane — remove at integration hardening: file rewritten by S1, error gone on the merged tip.
       "react-hooks/set-state-in-effect": "off",
     },
   },
