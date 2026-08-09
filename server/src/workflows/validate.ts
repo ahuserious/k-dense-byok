@@ -7,6 +7,7 @@ import {
   WorkflowGraphDocumentSchema,
   type EvidencePolicy,
   type ModelRequest,
+  type NodeSpecV1,
   type NodeLimits,
   type RequestedModel,
   type RescuePolicy,
@@ -42,6 +43,50 @@ export const DEFAULT_WORKFLOW_RESCUE_POLICY: RescuePolicy = {
     "post-compaction",
   ],
 };
+
+export const DEFAULT_NODE_SPEC_V1 = {
+  version: 1,
+  reasoningEffort: "high",
+  hyperparameters: { temperature: 1, top_p: 1, sampling: {} },
+  conditions: { exists: [] },
+  harness: "pi",
+  databases: [],
+  skills: { mode: "auto", list: [] },
+  subagents: { mode: "auto" },
+  autonomy: "strict",
+  deliberation: {
+    bestOfNPersonalityCount: 2,
+    mimeographs: { mode: "auto", personalityRefs: [] },
+  },
+  billingMode: "inherit",
+} as const;
+
+export interface ResolvedNodeSpecV1 {
+  version: 1;
+  model?: ModelRequest;
+  reasoningEffort: RequestedModel["reasoning"];
+  hyperparameters: {
+    temperature: number;
+    top_p: number;
+    sampling: Record<string, string | number | boolean>;
+  };
+  conditions: { when?: string; exists: string[] };
+  harness: "pi" | "claude-code" | "codex" | "opencode" | "copilot";
+  databases: string[];
+  skills: { mode: "auto" | "auto-manual" | "manual"; list: string[] };
+  subagents: { mode: "auto" | "auto-manual" };
+  autonomy: "strict" | "loose";
+  deliberation: {
+    personalityStoreRef?: string;
+    bestOfNPersonalityCount: number;
+    mimeographs: {
+      mode: "auto" | "manual";
+      personalityRefs: string[];
+    };
+  };
+  billingMode: "inherit" | "api" | "subscription";
+  budget: { maxTokens: number; maxCostUsd: number };
+}
 
 /**
  * Apply canonical defaults without repairing invalid references or topology.
@@ -233,6 +278,84 @@ function cloneRescuePolicy(policy: RescuePolicy): RescuePolicy {
   return { ...policy, triggers: [...policy.triggers] };
 }
 
+function inheritedNodeModel(
+  node: WorkflowNode,
+  document: WorkflowGraphDocument,
+): ModelRequest | undefined {
+  if (
+    node.kind === "agent" || node.kind === "research-until-goal" ||
+    node.kind === "best-of-n"
+  ) {
+    return node.model ?? document.defaultModel;
+  }
+  return document.defaultModel;
+}
+
+/** Resolve optional NodeSpec v1 fields without mutating the persisted graph. */
+export function resolveNodeSpecV1(
+  document: WorkflowGraphDocument,
+  node: WorkflowNode,
+): ResolvedNodeSpecV1 {
+  const settings: NodeSpecV1 = node.settings ?? {};
+  const model = settings.model ?? inheritedNodeModel(node, document);
+  const effectiveLimits = effectiveNodeLimits(node, document);
+  const workflowDatabases = document.settings?.databases ?? [];
+  const nodeDatabases = settings.databases ?? [];
+  return {
+    version: 1,
+    ...(model ? { model: structuredClone(model) } : {}),
+    reasoningEffort:
+      settings.reasoningEffort ?? model?.requested.reasoning ??
+      DEFAULT_NODE_SPEC_V1.reasoningEffort,
+    hyperparameters: {
+      temperature:
+        settings.hyperparameters?.temperature ??
+        DEFAULT_NODE_SPEC_V1.hyperparameters.temperature,
+      top_p:
+        settings.hyperparameters?.top_p ??
+        DEFAULT_NODE_SPEC_V1.hyperparameters.top_p,
+      sampling: { ...(settings.hyperparameters?.sampling ?? {}) },
+    },
+    conditions: {
+      ...(settings.conditions?.when ? { when: settings.conditions.when } : {}),
+      exists: [...(settings.conditions?.exists ?? [])],
+    },
+    harness:
+      settings.harness ?? document.settings?.defaultHarness ??
+      DEFAULT_NODE_SPEC_V1.harness,
+    databases: [...new Set([...workflowDatabases, ...nodeDatabases])],
+    skills: {
+      mode: settings.skills?.mode ?? DEFAULT_NODE_SPEC_V1.skills.mode,
+      list: [...(settings.skills?.list ?? [])],
+    },
+    subagents: {
+      mode: settings.subagents?.mode ?? DEFAULT_NODE_SPEC_V1.subagents.mode,
+    },
+    autonomy: settings.autonomy ?? DEFAULT_NODE_SPEC_V1.autonomy,
+    deliberation: {
+      ...(settings.deliberation?.personalityStoreRef
+        ? { personalityStoreRef: settings.deliberation.personalityStoreRef }
+        : {}),
+      bestOfNPersonalityCount:
+        settings.deliberation?.bestOfNPersonalityCount ??
+        DEFAULT_NODE_SPEC_V1.deliberation.bestOfNPersonalityCount,
+      mimeographs: {
+        mode:
+          settings.deliberation?.mimeographs?.mode ??
+          DEFAULT_NODE_SPEC_V1.deliberation.mimeographs.mode,
+        personalityRefs: [
+          ...(settings.deliberation?.mimeographs?.personalityRefs ?? []),
+        ],
+      },
+    },
+    billingMode: settings.billingMode ?? DEFAULT_NODE_SPEC_V1.billingMode,
+    budget: {
+      maxTokens: effectiveLimits.maxTokens,
+      maxCostUsd: effectiveLimits.maxCostUsd,
+    },
+  };
+}
+
 export interface WorkflowNodeDemand {
   minimumModelCalls: number;
   maximumModelCalls: number;
@@ -254,8 +377,14 @@ function effectiveNodeLimits(
     maxParallelism: node.limits?.maxParallelism ?? document.limits.maxParallelism,
     maxSubagents: node.limits?.maxSubagents ?? document.limits.maxSubagents,
     timeoutMs: node.limits?.timeoutMs ?? document.limits.timeoutMs,
-    maxTokens: node.limits?.maxTokens ?? document.limits.maxTokens,
-    maxCostUsd: node.limits?.maxCostUsd ?? document.limits.maxCostUsd,
+    maxTokens: Math.min(
+      node.limits?.maxTokens ?? document.limits.maxTokens,
+      node.settings?.budget?.maxTokens ?? document.limits.maxTokens,
+    ),
+    maxCostUsd: Math.min(
+      node.limits?.maxCostUsd ?? document.limits.maxCostUsd,
+      node.settings?.budget?.maxCostUsd ?? document.limits.maxCostUsd,
+    ),
     maxRetries: node.limits?.maxRetries ?? document.limits.maxRetries,
   };
 }
@@ -409,6 +538,29 @@ function validateNode(
   issues: WorkflowValidationIssue[],
 ): void {
   if (node.limits) validateNodeLimits(node.limits, nodePath, document, issues);
+  if (node.settings?.model) {
+    validateModelRequest(node.settings.model, `${nodePath}/settings/model`, issues);
+  }
+  if (
+    node.settings?.budget?.maxTokens !== undefined &&
+    node.settings.budget.maxTokens > document.limits.maxTokens
+  ) {
+    issues.push({
+      code: "node-budget-exceeds-workflow-limit",
+      path: `${nodePath}/settings/budget/maxTokens`,
+      message: "NodeSpec maxTokens cannot exceed the workflow maxTokens limit.",
+    });
+  }
+  if (
+    node.settings?.budget?.maxCostUsd !== undefined &&
+    node.settings.budget.maxCostUsd > document.limits.maxCostUsd
+  ) {
+    issues.push({
+      code: "node-budget-exceeds-workflow-limit",
+      path: `${nodePath}/settings/budget/maxCostUsd`,
+      message: "NodeSpec maxCostUsd cannot exceed the workflow maxCostUsd limit.",
+    });
+  }
   if (node.rescue) validateRescuePolicy(node.rescue, `${nodePath}/rescue`, issues);
   if (node.evidence) {
     if (node.evidence.evaluator) {

@@ -1,0 +1,43 @@
+{
+  "schemaVersion": "1.0",
+  "id": "fixture-foundation-v1",
+  "name": "Persisted foundation workflow",
+  "entryNodeId": "worker",
+  "defaultModel": {
+    "requested": {
+      "source": "fixed",
+      "provider": "ollama",
+      "model": "qwen3:32b",
+      "auth": { "kind": "local" },
+      "reasoning": "high"
+    },
+    "resolution": { "mode": "exact" }
+  },
+  "limits": {
+    "maxIterations": 10,
+    "maxModelCalls": 10,
+    "maxParallelism": 2,
+    "maxSubagents": 2,
+    "timeoutMs": 60000,
+    "maxTokens": 100000,
+    "maxCostUsd": 10,
+    "maxRetries": 2
+  },
+  "evidence": {
+    "enabled": false,
+    "minimumIndependentSources": 0,
+    "requireArtifactReferences": false,
+    "onUnsupportedOutput": "fail"
+  },
+  "nodes": [
+    {
+      "id": "worker",
+      "name": "Worker",
+      "kind": "agent",
+      "terminal": true,
+      "workspace": { "isolation": "read-only", "writePaths": [] },
+      "prompt": "Complete the fixture task."
+    }
+  ],
+  "edges": []
+}

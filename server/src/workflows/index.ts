@@ -1,5 +1,6 @@
 export * from "./schema.ts";
 export * from "./run-state.ts";
+export * from "./behavior-registry.ts";
 export * from "./store.ts";
 export * from "./validate.ts";
 export * from "./dynamic-workflow-adapter.ts";

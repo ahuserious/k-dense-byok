@@ -1,6 +1,7 @@
 import { Type, type Static } from "typebox";
 
 export const WORKFLOW_GRAPH_SCHEMA_VERSION = "1.0" as const;
+export const NODE_SPEC_V1_VERSION = 1 as const;
 export const MAX_WORKFLOW_NODES = 256;
 export const MAX_WORKFLOW_EDGES = 1_024;
 export const MAX_WORKFLOW_ARTIFACTS = 512;
@@ -15,6 +16,12 @@ const IdentifierSchema = Type.String({
 const ShortTextSchema = Type.String({ minLength: 1, maxLength: 256 });
 const DescriptionSchema = Type.String({ minLength: 1, maxLength: 4_096 });
 const InstructionSchema = Type.String({ minLength: 1, maxLength: 32_768 });
+
+const ReferenceSchema = Type.String({
+  minLength: 1,
+  maxLength: 256,
+  pattern: "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+});
 
 export const WorkflowLimitsSchema = Type.Object(
   {
@@ -126,6 +133,137 @@ export const ModelRequestSchema = Type.Object(
   { additionalProperties: false },
 );
 
+const HarnessSchema = Type.Union([
+  Type.Literal("pi"),
+  Type.Literal("claude-code"),
+  Type.Literal("codex"),
+  Type.Literal("opencode"),
+  Type.Literal("copilot"),
+]);
+
+const SamplingValueSchema = Type.Union([
+  Type.Number(),
+  Type.String({ maxLength: 256 }),
+  Type.Boolean(),
+]);
+
+const SamplingMapSchema = Type.Record(
+  Type.String({ pattern: "^[A-Za-z][A-Za-z0-9_.-]{0,63}$" }),
+  SamplingValueSchema,
+  { maxProperties: 16 },
+);
+
+const NodeHyperparametersSchema = Type.Object(
+  {
+    temperature: Type.Optional(Type.Number({ minimum: 0, maximum: 2 })),
+    top_p: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+    sampling: Type.Optional(SamplingMapSchema),
+  },
+  { additionalProperties: false },
+);
+
+const NodeConditionsSchema = Type.Object(
+  {
+    when: Type.Optional(InstructionSchema),
+    exists: Type.Optional(
+      Type.Array(Type.String({ minLength: 1, maxLength: 1_024 }), {
+        maxItems: 64,
+      }),
+    ),
+  },
+  { additionalProperties: false },
+);
+
+const NodeSkillsSchema = Type.Object(
+  {
+    mode: Type.Optional(
+      Type.Union([
+        Type.Literal("auto"),
+        Type.Literal("auto-manual"),
+        Type.Literal("manual"),
+      ]),
+    ),
+    list: Type.Optional(Type.Array(ReferenceSchema, { maxItems: 64 })),
+  },
+  { additionalProperties: false },
+);
+
+const NodeSubagentSchema = Type.Object(
+  {
+    mode: Type.Optional(
+      Type.Union([Type.Literal("auto"), Type.Literal("auto-manual")]),
+    ),
+  },
+  { additionalProperties: false },
+);
+
+const MimeographsStaffingSchema = Type.Object(
+  {
+    mode: Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("manual")])),
+    personalityRefs: Type.Optional(Type.Array(ReferenceSchema, { maxItems: 32 })),
+  },
+  { additionalProperties: false },
+);
+
+const NodeDeliberationSchema = Type.Object(
+  {
+    personalityStoreRef: Type.Optional(ReferenceSchema),
+    bestOfNPersonalityCount: Type.Optional(
+      Type.Integer({ minimum: 1, maximum: 32 }),
+    ),
+    mimeographs: Type.Optional(MimeographsStaffingSchema),
+  },
+  { additionalProperties: false },
+);
+
+const NodeBudgetHooksSchema = Type.Object(
+  {
+    maxTokens: Type.Optional(
+      Type.Integer({ minimum: 1, maximum: 100_000_000 }),
+    ),
+    maxCostUsd: Type.Optional(Type.Number({ minimum: 0, maximum: 1_000_000 })),
+  },
+  { additionalProperties: false },
+);
+
+/** Versioned settings shared by every typed workflow node kind. */
+export const NodeSpecV1Schema = Type.Object(
+  {
+    version: Type.Optional(Type.Literal(NODE_SPEC_V1_VERSION)),
+    model: Type.Optional(ModelRequestSchema),
+    reasoningEffort: Type.Optional(ReasoningLevelSchema),
+    hyperparameters: Type.Optional(NodeHyperparametersSchema),
+    conditions: Type.Optional(NodeConditionsSchema),
+    harness: Type.Optional(HarnessSchema),
+    databases: Type.Optional(Type.Array(ReferenceSchema, { maxItems: 64 })),
+    skills: Type.Optional(NodeSkillsSchema),
+    subagents: Type.Optional(NodeSubagentSchema),
+    autonomy: Type.Optional(
+      Type.Union([Type.Literal("strict"), Type.Literal("loose")]),
+    ),
+    deliberation: Type.Optional(NodeDeliberationSchema),
+    billingMode: Type.Optional(
+      Type.Union([
+        Type.Literal("inherit"),
+        Type.Literal("api"),
+        Type.Literal("subscription"),
+      ]),
+    ),
+    budget: Type.Optional(NodeBudgetHooksSchema),
+  },
+  { additionalProperties: false },
+);
+
+/** Workflow-wide defaults consumed by NodeSpec v1 resolution. */
+export const WorkflowSettingsV1Schema = Type.Object(
+  {
+    version: Type.Optional(Type.Literal(NODE_SPEC_V1_VERSION)),
+    defaultHarness: Type.Optional(HarnessSchema),
+    databases: Type.Optional(Type.Array(ReferenceSchema, { maxItems: 64 })),
+  },
+  { additionalProperties: false },
+);
+
 export const RescuePolicySchema = Type.Object(
   {
     enabled: Type.Boolean(),
@@ -191,6 +329,7 @@ const CommonNodeProperties = {
   limits: Type.Optional(NodeLimitsSchema),
   rescue: Type.Optional(RescuePolicySchema),
   evidence: Type.Optional(EvidencePolicySchema),
+  settings: Type.Optional(NodeSpecV1Schema),
 };
 
 const ModelDrivenNodeProperties = {
@@ -389,6 +528,7 @@ export const WorkflowGraphDocumentSchema = Type.Object(
     description: Type.Optional(DescriptionSchema),
     entryNodeId: IdentifierSchema,
     defaultModel: Type.Optional(ModelRequestSchema),
+    settings: Type.Optional(WorkflowSettingsV1Schema),
     limits: WorkflowLimitsSchema,
     rescue: Type.Optional(RescuePolicySchema),
     evidence: EvidencePolicySchema,
@@ -408,6 +548,8 @@ export type WorkflowLimits = Static<typeof WorkflowLimitsSchema>;
 export type NodeLimits = Static<typeof NodeLimitsSchema>;
 export type RequestedModel = Static<typeof RequestedModelSchema>;
 export type ModelRequest = Static<typeof ModelRequestSchema>;
+export type NodeSpecV1 = Static<typeof NodeSpecV1Schema>;
+export type WorkflowSettingsV1 = Static<typeof WorkflowSettingsV1Schema>;
 export type RescuePolicy = Static<typeof RescuePolicySchema>;
 export type EvidencePolicy = Static<typeof EvidencePolicySchema>;
 export type NodeWorkspacePolicy = Static<typeof NodeWorkspacePolicySchema>;

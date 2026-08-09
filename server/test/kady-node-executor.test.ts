@@ -537,6 +537,40 @@ describe("production Kady DAG node executor", () => {
     });
   });
 
+  it("feeds NodeSpec token and cost caps into durable usage admission", async () => {
+    const node: WorkflowNode = {
+      ...baseNode("agent"),
+      kind: "agent",
+      prompt: "Analyze within the frozen NodeSpec budget.",
+      model: openRouterModel(),
+      settings: { budget: { maxTokens: 1_000, maxCostUsd: 0.25 } },
+    };
+    const document = graph(node);
+    let admission: KadyWorkflowUsageAdmission | undefined;
+    const host = new FakeHost([analysis("bounded")]);
+
+    await executorFor(host, document, {
+      reserveUsage: (value) => {
+        admission = value;
+        return {
+          descriptor: supervisedDescriptor(value.slotId),
+          reconcile() {},
+        };
+      },
+    })(contextFor(document));
+
+    expect(admission).toMatchObject({
+      maxTokens: 1_000,
+      maxCostUsd: 0.25,
+      runMaxTokens: 32_000,
+      runMaxCostUsd: 8,
+    });
+    expect(host.calls[0].options.limits).toEqual({
+      maxTokens: 1_000,
+      maxCostUsd: 0.25,
+    });
+  });
+
   it.each([
     ["ollama", "qwen3:32b"],
     ["openai-compatible", "lab/model"],

@@ -1,3 +1,4 @@
+import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 import type {
   ModelRequest,
@@ -222,6 +223,165 @@ export interface WorkflowRunState {
   lastError?: WorkflowRunErrorInfo;
   recoverable: boolean;
   diagnostics: WorkflowRunDiagnostic[];
+}
+
+export const RUN_STATE_V1_SCHEMA_VERSION = 1 as const;
+
+const RunStateV1IdentifierSchema = Type.String({
+  minLength: 1,
+  maxLength: 128,
+  pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+});
+
+const RunStateV1NodeStatusSchema = Type.Union([
+  Type.Literal("pending"),
+  Type.Literal("running"),
+  Type.Literal("waiting"),
+  Type.Literal("blocked"),
+  Type.Literal("succeeded"),
+  Type.Literal("failed"),
+  Type.Literal("skipped"),
+  Type.Literal("interrupted"),
+  Type.Literal("cancelled"),
+]);
+
+const RunStateV1ErrorSchema = Type.Object(
+  {
+    code: Type.String({ minLength: 1, maxLength: 64 }),
+    message: Type.String({ minLength: 1, maxLength: 2_048 }),
+    retryable: Type.Boolean(),
+  },
+  { additionalProperties: false },
+);
+
+/** JSON-schema contract consumed by the future S8 chat live-graph adapter. */
+export const RunStateV1Schema = Type.Object(
+  {
+    schemaVersion: Type.Literal(RUN_STATE_V1_SCHEMA_VERSION),
+    runId: RunStateV1IdentifierSchema,
+    workflowId: RunStateV1IdentifierSchema,
+    workflowRevision: Type.Integer({ minimum: 1 }),
+    status: Type.Union([
+      Type.Literal("queued"),
+      Type.Literal("running"),
+      Type.Literal("waiting"),
+      Type.Literal("blocked"),
+      Type.Literal("paused"),
+      Type.Literal("interrupted"),
+      Type.Literal("succeeded"),
+      Type.Literal("failed"),
+      Type.Literal("cancelled"),
+    ]),
+    nodes: Type.Array(
+      Type.Object(
+        {
+          id: RunStateV1IdentifierSchema,
+          status: RunStateV1NodeStatusSchema,
+          progress: Type.Object(
+            {
+              completed: Type.Integer({ minimum: 0 }),
+              total: Type.Integer({ minimum: 1 }),
+              message: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })),
+            },
+            { additionalProperties: false },
+          ),
+          executionId: Type.Optional(RunStateV1IdentifierSchema),
+        },
+        { additionalProperties: false },
+      ),
+      { maxItems: 256 },
+    ),
+    topology: Type.Object(
+      {
+        nodes: Type.Array(
+          Type.Object(
+            { id: RunStateV1IdentifierSchema },
+            { additionalProperties: false },
+          ),
+          { maxItems: 256 },
+        ),
+        edges: Type.Array(
+          Type.Object(
+            {
+              id: RunStateV1IdentifierSchema,
+              from: RunStateV1IdentifierSchema,
+              to: RunStateV1IdentifierSchema,
+            },
+            { additionalProperties: false },
+          ),
+          { maxItems: 1_024 },
+        ),
+      },
+      { additionalProperties: false },
+    ),
+    backgroundAgentTrailingNode: Type.Optional(
+      Type.Object(
+        {
+          slotId: RunStateV1IdentifierSchema,
+          agentId: RunStateV1IdentifierSchema,
+          nodeId: Type.Optional(RunStateV1IdentifierSchema),
+          status: RunStateV1NodeStatusSchema,
+        },
+        { additionalProperties: false },
+      ),
+    ),
+    errorRouting: Type.Optional(
+      Type.Object(
+        {
+          source: Type.Literal("chat-stream"),
+          surface: Type.Literal(true),
+          nodeId: Type.Optional(RunStateV1IdentifierSchema),
+          error: RunStateV1ErrorSchema,
+        },
+        { additionalProperties: false },
+      ),
+    ),
+    updatedAt: Type.Integer({ minimum: 0 }),
+  },
+  { additionalProperties: false },
+);
+
+export type RunStateV1 = Static<typeof RunStateV1Schema>;
+
+function assertRunStateV1(value: unknown): asserts value is RunStateV1 {
+  const schemaErrors = [...Value.Errors(RunStateV1Schema, value)];
+  if (schemaErrors.length > 0) {
+    const firstError = schemaErrors[0];
+    throw new Error(
+      `Invalid RunState v1 at ${firstError.instancePath || "/"}: ${firstError.message}`,
+    );
+  }
+  const state = value as RunStateV1;
+  for (const node of state.nodes) {
+    if (node.progress.completed > node.progress.total) {
+      throw new Error(`Invalid RunState v1 progress for node ${node.id}.`);
+    }
+  }
+  const topologyNodeIds = new Set(state.topology.nodes.map((node) => node.id));
+  if (topologyNodeIds.size !== state.topology.nodes.length) {
+    throw new Error("Invalid RunState v1 topology: duplicate node id.");
+  }
+  if (state.topology.edges.some((edge) =>
+    !topologyNodeIds.has(edge.from) || !topologyNodeIds.has(edge.to)
+  )) {
+    throw new Error("Invalid RunState v1 topology: edge references an unknown node.");
+  }
+}
+
+export function serializeRunStateV1(state: RunStateV1): string {
+  assertRunStateV1(state);
+  return JSON.stringify(state);
+}
+
+export function parseRunStateV1(serialized: string): RunStateV1 {
+  let value: unknown;
+  try {
+    value = JSON.parse(serialized);
+  } catch {
+    throw new Error("Invalid RunState v1 JSON.");
+  }
+  assertRunStateV1(value);
+  return structuredClone(value);
 }
 
 const TERMINAL_RUN_STATUSES = new Set<WorkflowRunStatus>([
