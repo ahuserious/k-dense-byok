@@ -40,6 +40,12 @@ export interface VendoredNodeSpecRuntimeBinding {
   fallbackModel?: string;
 }
 
+/** Mutable for exactly one DAG node execution; shared by its loops and retries. */
+export interface VendoredNodeCostBudgetState {
+  ceilingUsd?: number;
+  spentUsd: number;
+}
+
 const SUPPORTED_AUTH_KINDS = new Set(['api-key', 'oauth']);
 
 function issue(
@@ -233,6 +239,47 @@ function rejectUnboundFields(
   nodePath: string,
   issues: VendoredNodeSpecIssue[]
 ): void {
+  // The frozen contract defines explicit canonical defaults as equivalent to
+  // omission. Normalize them before deciding whether a pending field is
+  // populated so save/run validation cannot reject a semantically empty value.
+  const normalized = {
+    temperature:
+      settings.hyperparameters?.temperature === 1
+        ? undefined
+        : settings.hyperparameters?.temperature,
+    topP:
+      settings.hyperparameters?.top_p === 1 ? undefined : settings.hyperparameters?.top_p,
+    sampling:
+      settings.hyperparameters?.sampling !== undefined &&
+      Object.keys(settings.hyperparameters.sampling).length === 0
+        ? undefined
+        : settings.hyperparameters?.sampling,
+    conditionWhen: settings.conditions?.when,
+    conditionExists:
+      settings.conditions?.exists?.length === 0 ? undefined : settings.conditions?.exists,
+    harness: settings.harness === 'pi' ? undefined : settings.harness,
+    databases: settings.databases?.length === 0 ? undefined : settings.databases,
+    skillsMode: settings.skills?.mode === 'auto' ? undefined : settings.skills?.mode,
+    skillsList: settings.skills?.list?.length === 0 ? undefined : settings.skills?.list,
+    subagentsMode:
+      settings.subagents?.mode === 'auto' ? undefined : settings.subagents?.mode,
+    autonomy: settings.autonomy === 'strict' ? undefined : settings.autonomy,
+    personalityStoreRef: settings.deliberation?.personalityStoreRef,
+    bestOfNPersonalityCount:
+      settings.deliberation?.bestOfNPersonalityCount === 2
+        ? undefined
+        : settings.deliberation?.bestOfNPersonalityCount,
+    mimeographMode:
+      settings.deliberation?.mimeographs?.mode === 'auto'
+        ? undefined
+        : settings.deliberation?.mimeographs?.mode,
+    mimeographPersonalityRefs:
+      settings.deliberation?.mimeographs?.personalityRefs?.length === 0
+        ? undefined
+        : settings.deliberation?.mimeographs?.personalityRefs,
+    billingMode: settings.billingMode === 'inherit' ? undefined : settings.billingMode,
+    maxTokens: settings.budget?.maxTokens,
+  };
   const reject = (
     populated: boolean,
     code: string,
@@ -252,40 +299,40 @@ function rejectUnboundFields(
   };
 
   reject(
-    settings.hyperparameters?.temperature !== undefined,
+    normalized.temperature !== undefined,
     'vendored-temperature-unbound',
     'hyperparameters/temperature',
     'hyperparameters.temperature',
     'S4'
   );
   reject(
-    settings.hyperparameters?.top_p !== undefined,
+    normalized.topP !== undefined,
     'vendored-top-p-unbound',
     'hyperparameters/top_p',
     'hyperparameters.top_p',
     'S4'
   );
   reject(
-    settings.hyperparameters?.sampling !== undefined,
+    normalized.sampling !== undefined,
     'vendored-sampling-unbound',
     'hyperparameters/sampling',
     'hyperparameters.sampling',
     'S4'
   );
-  reject(settings.conditions?.when !== undefined, 'vendored-condition-when-unbound', 'conditions/when', 'conditions.when', 'S4');
-  reject(settings.conditions?.exists !== undefined, 'vendored-condition-exists-unbound', 'conditions/exists', 'conditions.exists', 'S4');
-  reject(settings.harness !== undefined, 'vendored-harness-unbound', 'harness', 'harness', 'S4');
-  reject(settings.databases !== undefined, 'vendored-databases-unbound', 'databases', 'databases', 'S4');
-  reject(settings.skills?.mode !== undefined, 'vendored-skills-mode-unbound', 'skills/mode', 'skills.mode', 'S4');
-  reject(settings.skills?.list !== undefined, 'vendored-skills-list-unbound', 'skills/list', 'skills.list', 'S4');
-  reject(settings.subagents?.mode !== undefined, 'vendored-subagents-mode-unbound', 'subagents/mode', 'subagents.mode', 'S4');
-  reject(settings.autonomy !== undefined, 'vendored-autonomy-unbound', 'autonomy', 'autonomy', 'S4');
-  reject(settings.deliberation?.personalityStoreRef !== undefined, 'vendored-personality-store-unbound', 'deliberation/personalityStoreRef', 'deliberation.personalityStoreRef', 'S5');
-  reject(settings.deliberation?.bestOfNPersonalityCount !== undefined, 'vendored-personality-count-unbound', 'deliberation/bestOfNPersonalityCount', 'deliberation.bestOfNPersonalityCount', 'S5');
-  reject(settings.deliberation?.mimeographs?.mode !== undefined, 'vendored-mimeograph-mode-unbound', 'deliberation/mimeographs/mode', 'deliberation.mimeographs.mode', 'S5');
-  reject(settings.deliberation?.mimeographs?.personalityRefs !== undefined, 'vendored-mimeograph-personalities-unbound', 'deliberation/mimeographs/personalityRefs', 'deliberation.mimeographs.personalityRefs', 'S5');
-  reject(settings.billingMode !== undefined, 'vendored-billing-mode-unbound', 'billingMode', 'billingMode', 'S4');
-  reject(settings.budget?.maxTokens !== undefined, 'vendored-token-budget-unbound', 'budget/maxTokens', 'budget.maxTokens', 'S4');
+  reject(normalized.conditionWhen !== undefined, 'vendored-condition-when-unbound', 'conditions/when', 'conditions.when', 'S4');
+  reject(normalized.conditionExists !== undefined, 'vendored-condition-exists-unbound', 'conditions/exists', 'conditions.exists', 'S4');
+  reject(normalized.harness !== undefined, 'vendored-harness-unbound', 'harness', 'harness', 'S4');
+  reject(normalized.databases !== undefined, 'vendored-databases-unbound', 'databases', 'databases', 'S4');
+  reject(normalized.skillsMode !== undefined, 'vendored-skills-mode-unbound', 'skills/mode', 'skills.mode', 'S4');
+  reject(normalized.skillsList !== undefined, 'vendored-skills-list-unbound', 'skills/list', 'skills.list', 'S4');
+  reject(normalized.subagentsMode !== undefined, 'vendored-subagents-mode-unbound', 'subagents/mode', 'subagents.mode', 'S4');
+  reject(normalized.autonomy !== undefined, 'vendored-autonomy-unbound', 'autonomy', 'autonomy', 'S4');
+  reject(normalized.personalityStoreRef !== undefined, 'vendored-personality-store-unbound', 'deliberation/personalityStoreRef', 'deliberation.personalityStoreRef', 'S5');
+  reject(normalized.bestOfNPersonalityCount !== undefined, 'vendored-personality-count-unbound', 'deliberation/bestOfNPersonalityCount', 'deliberation.bestOfNPersonalityCount', 'S5');
+  reject(normalized.mimeographMode !== undefined, 'vendored-mimeograph-mode-unbound', 'deliberation/mimeographs/mode', 'deliberation.mimeographs.mode', 'S5');
+  reject(normalized.mimeographPersonalityRefs !== undefined, 'vendored-mimeograph-personalities-unbound', 'deliberation/mimeographs/personalityRefs', 'deliberation.mimeographs.personalityRefs', 'S5');
+  reject(normalized.billingMode !== undefined, 'vendored-billing-mode-unbound', 'billingMode', 'billingMode', 'S4');
+  reject(normalized.maxTokens !== undefined, 'vendored-token-budget-unbound', 'budget/maxTokens', 'budget.maxTokens', 'S4');
 }
 
 export function validateVendoredNodeSpecSemantics(
@@ -322,8 +369,8 @@ export function validateVendoredNodeSpecSemantics(
     }
 
     const binding = resolveVendoredNodeSpecRuntimeBinding(node, workflow.provider);
-    if (binding.reasoning !== undefined) {
-      if (!binding.provider || routePresetEffort(binding.provider, binding.reasoning) === null) {
+    if (binding.reasoning !== undefined && binding.provider !== undefined) {
+      if (routePresetEffort(binding.provider, binding.reasoning) === null) {
         issue(
           issues,
           'vendored-reasoning-effort-unbound',
@@ -335,6 +382,7 @@ export function validateVendoredNodeSpecSemantics(
     }
     if (
       settings.budget?.maxCostUsd !== undefined &&
+      binding.provider !== undefined &&
       binding.provider !== 'claude'
     ) {
       issue(
@@ -404,35 +452,91 @@ export function resolveVendoredNodeSpecRuntimeBinding(
   };
 }
 
-/** Select one existing credential channel without exposing credential values. */
+export function createVendoredNodeCostBudgetState(
+  ceilingUsd: number | undefined
+): VendoredNodeCostBudgetState {
+  return { ...(ceilingUsd !== undefined ? { ceilingUsd } : {}), spentUsd: 0 };
+}
+
+export function optionsWithRemainingVendoredNodeBudget<T extends { maxBudgetUsd?: number }>(
+  options: T | undefined,
+  budget: VendoredNodeCostBudgetState,
+  nodeId: string
+): T | undefined {
+  if (budget.ceilingUsd === undefined) return options;
+  const remainingUsd = budget.ceilingUsd - budget.spentUsd;
+  if (remainingUsd <= 0) {
+    throw new Error(
+      `Node '${nodeId}' exhausted its cumulative cost ceiling of $${budget.ceilingUsd.toFixed(2)} before the next provider call.`
+    );
+  }
+  return { ...(options ?? ({} as T)), maxBudgetUsd: remainingUsd };
+}
+
+export function recordVendoredNodeSpend(
+  budget: VendoredNodeCostBudgetState,
+  costUsd: number,
+  nodeId: string
+): void {
+  if (!Number.isFinite(costUsd) || costUsd < 0) {
+    throw new Error(`Node '${nodeId}' reported an invalid provider cost.`);
+  }
+  budget.spentUsd += costUsd;
+  if (budget.ceilingUsd !== undefined && budget.spentUsd > budget.ceilingUsd) {
+    throw new Error(
+      `Node '${nodeId}' exceeded its cumulative cost ceiling of $${budget.ceilingUsd.toFixed(2)} (spent $${budget.spentUsd.toFixed(2)}).`
+    );
+  }
+}
+
+/** Select one per-run credential channel; operator/global fallback is forbidden. */
 export function applyVendoredNodeAuthSelection(
   env: Record<string, string> | undefined,
   provider: string,
-  auth: VendoredNodeSpecRuntimeBinding['auth']
+  auth: VendoredNodeSpecRuntimeBinding['auth'],
+  nodeId: string
 ): Record<string, string> | undefined {
   if (!auth) return env;
   const selectedEnv = { ...(env ?? {}) };
   if (provider === 'claude') {
     if (auth.kind === 'api-key') {
+      if (!selectedEnv.CLAUDE_API_KEY && !selectedEnv.ANTHROPIC_API_KEY) {
+        throw new Error(
+          `Node '${nodeId}' requested Claude API-key auth, but no per-run Claude API key was resolved; operator/global credentials are disabled for explicit NodeSpec auth.`
+        );
+      }
       selectedEnv.CLAUDE_USE_GLOBAL_AUTH = 'false';
       selectedEnv.CLAUDE_CODE_OAUTH_TOKEN = '';
       selectedEnv.ANTHROPIC_OAUTH_TOKEN = '';
-    } else {
-      const hasExplicitOAuth = Boolean(
-        selectedEnv.CLAUDE_CODE_OAUTH_TOKEN ||
-          selectedEnv.ANTHROPIC_OAUTH_TOKEN ||
-          process.env.CLAUDE_CODE_OAUTH_TOKEN ||
-          process.env.ANTHROPIC_OAUTH_TOKEN
-      );
-      selectedEnv.CLAUDE_USE_GLOBAL_AUTH = hasExplicitOAuth ? 'false' : 'true';
+    } else if (auth.kind === 'oauth') {
+      if (!selectedEnv.CLAUDE_CODE_OAUTH_TOKEN && !selectedEnv.ANTHROPIC_OAUTH_TOKEN) {
+        throw new Error(
+          `Node '${nodeId}' requested Claude OAuth auth, but no per-run OAuth credential was resolved; operator/global credentials are disabled for explicit NodeSpec auth.`
+        );
+      }
+      selectedEnv.CLAUDE_USE_GLOBAL_AUTH = 'false';
       selectedEnv.CLAUDE_API_KEY = '';
       selectedEnv.ANTHROPIC_API_KEY = '';
+    } else {
+      throw new Error(`Node '${nodeId}' requested unsupported Claude auth kind '${auth.kind}'.`);
     }
   } else if (provider === 'codex') {
     if (auth.kind === 'api-key') {
+      if (!selectedEnv.OPENAI_API_KEY) {
+        throw new Error(
+          `Node '${nodeId}' requested Codex API-key auth, but no per-run OpenAI API key was resolved; operator/global credentials are disabled for explicit NodeSpec auth.`
+        );
+      }
       selectedEnv.CODEX_HOME = '';
-    } else {
+    } else if (auth.kind === 'oauth') {
+      if (!selectedEnv.CODEX_HOME) {
+        throw new Error(
+          `Node '${nodeId}' requested Codex OAuth auth, but no per-run CODEX_HOME credential was resolved; operator/global credentials are disabled for explicit NodeSpec auth.`
+        );
+      }
       selectedEnv.OPENAI_API_KEY = '';
+    } else {
+      throw new Error(`Node '${nodeId}' requested unsupported Codex auth kind '${auth.kind}'.`);
     }
   }
   return selectedEnv;

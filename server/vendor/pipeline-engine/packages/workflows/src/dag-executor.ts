@@ -94,6 +94,9 @@ import {
 import {
   applyVendoredNodeAuthSelection,
   assertVendoredNodeSpecSemantics,
+  createVendoredNodeCostBudgetState,
+  optionsWithRemainingVendoredNodeBudget,
+  recordVendoredNodeSpend,
   resolveVendoredNodeSpecRuntimeBinding,
 } from './node-spec-enforcement';
 
@@ -651,7 +654,8 @@ async function resolveNodeProviderAndModel(
   const selectedAuthEnv = applyVendoredNodeAuthSelection(
     config.envVars,
     provider,
-    runtimeBinding.auth
+    runtimeBinding.auth,
+    node.id
   );
   if (selectedAuthEnv && Object.keys(selectedAuthEnv).length > 0) {
     baseOptions.env = selectedAuthEnv;
@@ -816,7 +820,8 @@ async function executeNodeInternal(
   nodeOutputs: Map<string, NodeOutput>,
   resumeSessionId: string | undefined,
   configuredCommandFolder?: string,
-  issueContext?: string
+  issueContext?: string,
+  nodeCostBudget = createVendoredNodeCostBudgetState(nodeOptions?.maxBudgetUsd)
 ): Promise<NodeExecutionResult> {
   const nodeStartTime = Date.now();
   const nodeContext: SendMessageContext = { workflowId: workflowRun.id, nodeName: node.id };
@@ -919,7 +924,8 @@ async function executeNodeInternal(
   let structuredOutput: unknown;
   let newSessionId: string | undefined;
   let nodeTokens: TokenUsage | undefined;
-  let nodeCostUsd: number | undefined;
+  let nodeCostUsd: number | undefined =
+    nodeCostBudget.spentUsd > 0 ? nodeCostBudget.spentUsd : undefined;
   let nodeStopReason: string | undefined;
   let nodeNumTurns: number | undefined;
   let nodeModelUsage: Record<string, unknown> | undefined;
@@ -946,13 +952,8 @@ async function executeNodeInternal(
     nodeOptions?.outputFormat
       ? STRUCTURED_OUTPUT_MAX_REASKS
       : 0;
-  let accumulatedCostUsd: number | undefined;
-
-  // One sendQuery stream pass. Resets the per-attempt accumulators it mutates
-  // (output text, structured output, the batched-message buffer, per-pass cost,
-  // idle-timeout flag) so a prior reask attempt's state never leaks into this one,
-  // then streams. Throws on SDK error / budget cap (propagates to the outer catch
-  // — those failures are never reasked).
+  // One sendQuery stream pass. Resets response-shaped state while preserving
+  // nodeCostBudget across reasks and caller-level retries.
   const runStreamPass = async (
     attemptPrompt: string,
     attemptResumeId: string | undefined
@@ -960,10 +961,14 @@ async function executeNodeInternal(
     nodeOutputText = '';
     structuredOutput = undefined;
     batchMessages.length = 0; // else a failed attempt's prose flushes during reask
-    nodeCostUsd = undefined;
     nodeIdleTimedOut = false;
+    const passOptions = optionsWithRemainingVendoredNodeBudget(
+      nodeOptionsWithAbort,
+      nodeCostBudget,
+      node.id
+    );
     for await (const msg of withIdleTimeout(
-      aiClient.sendQuery(attemptPrompt, cwd, attemptResumeId, nodeOptionsWithAbort),
+      aiClient.sendQuery(attemptPrompt, cwd, attemptResumeId, passOptions),
       effectiveIdleTimeout,
       () => {
         nodeIdleTimedOut = true;
@@ -1143,7 +1148,13 @@ async function executeNodeInternal(
         }
         if (msg.sessionId) newSessionId = msg.sessionId;
         if (msg.tokens) nodeTokens = msg.tokens;
-        if (msg.cost !== undefined) nodeCostUsd = msg.cost;
+        if (msg.cost !== undefined) {
+          try {
+            recordVendoredNodeSpend(nodeCostBudget, msg.cost, node.id);
+          } finally {
+            nodeCostUsd = nodeCostBudget.spentUsd;
+          }
+        }
         if (msg.stopReason !== undefined) nodeStopReason = msg.stopReason;
         if (msg.numTurns !== undefined) nodeNumTurns = msg.numTurns;
         if (msg.modelUsage) nodeModelUsage = msg.modelUsage;
@@ -1292,13 +1303,6 @@ async function executeNodeInternal(
       // Fresh session per reask attempt (resume only the original session on the
       // first pass) so a prior invalid turn isn't carried forward.
       await runStreamPass(reaskPrompt, reaskAttempt === 0 ? resumeSessionId : undefined);
-      if (nodeCostUsd !== undefined) {
-        accumulatedCostUsd = (accumulatedCostUsd ?? 0) + nodeCostUsd;
-      }
-      // Carry the running total onto nodeCostUsd every pass so the exhaustion throw
-      // paths (which jump straight to the outer catch) report cost across ALL reask
-      // attempts, not just the last pass. runStreamPass clears it next iteration.
-      nodeCostUsd = accumulatedCostUsd;
 
       // When output_format is set and the provider returned structured_output, use
       // it instead of the concatenated assistant text. Each provider normalizes its
@@ -2141,6 +2145,7 @@ async function executeLoopNode(
   let loopFinalStopReason: string | undefined;
   let loopTotalNumTurns: number | undefined;
   let loopTotalTokens: TokenUsage | undefined;
+  const nodeCostBudget = createVendoredNodeCostBudgetState(resolvedOptions?.maxBudgetUsd);
   // Helper to log event store errors consistently
   const logEventStoreError = (err: Error, iteration: number): void => {
     getLog().error({ err, nodeId: node.id, iteration }, 'loop_node.iteration_event_failed');
@@ -2227,10 +2232,14 @@ async function executeLoopNode(
       );
       const finalPrompt = substituteNodeOutputRefs(substitutedPrompt, nodeOutputs);
 
-      const iterationOptions: SendQueryOptions | undefined = {
-        ...resolvedOptions,
-        abortSignal: iterationAbortController.signal,
-      };
+      const iterationOptions = optionsWithRemainingVendoredNodeBudget<SendQueryOptions>(
+        {
+          ...resolvedOptions,
+          abortSignal: iterationAbortController.signal,
+        },
+        nodeCostBudget,
+        node.id
+      );
 
       const generator = aiClient.sendQuery(finalPrompt, cwd, resumeSessionId, iterationOptions);
       let lastToolStartedAt: { toolName: string; startedAt: number } | null = null;
@@ -2281,7 +2290,11 @@ async function executeLoopNode(
           }
           if (msg.sessionId) currentSessionId = msg.sessionId;
           if (msg.cost !== undefined) {
-            loopTotalCostUsd = (loopTotalCostUsd ?? 0) + msg.cost;
+            try {
+              recordVendoredNodeSpend(nodeCostBudget, msg.cost, node.id);
+            } finally {
+              loopTotalCostUsd = nodeCostBudget.spentUsd;
+            }
           }
           if (msg.tokens !== undefined) {
             // Provider-supplied numbers — see the NaN guard rationale at the
@@ -3447,6 +3460,7 @@ export async function executeDagWorkflow(
 
           // 6. Execute with retry for transient failures
           const retryConfig = getEffectiveNodeRetryConfig(node);
+          const nodeCostBudget = createVendoredNodeCostBudgetState(nodeOptions?.maxBudgetUsd);
           let output: NodeExecutionResult = {
             state: 'failed',
             output: '',
@@ -3472,7 +3486,8 @@ export async function executeDagWorkflow(
               // ensures the source is never mutated, so retries can safely resume from it.
               resumeSessionId,
               configuredCommandFolder,
-              issueContext
+              issueContext,
+              nodeCostBudget
             );
 
             if (output.state !== 'failed') break;

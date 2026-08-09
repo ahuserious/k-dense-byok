@@ -250,6 +250,289 @@ describe('vendored NodeSpec execution bindings', () => {
     expect(deps.store.failWorkflowRun).toHaveBeenCalled();
   });
 
+  test('cumulative loop ceiling blocks the next provider call after prior iteration spend exhausts it', async () => {
+    const sendQuery = mock(async function* () {
+      yield { type: 'assistant' as const, content: 'Continue iterating.' };
+      yield { type: 'result' as const, sessionId: 'loop-session', cost: 1 };
+    });
+    const getAgentProvider = mock(() => ({
+      sendQuery,
+      getType: () => 'claude',
+      getCapabilities: () => ({
+        sessionResume: true,
+        mcp: true,
+        hooks: true,
+        skills: true,
+        agents: true,
+        toolRestrictions: true,
+        structuredOutput: 'enforced' as const,
+        envInjection: true,
+        costControl: true,
+        effortControl: true,
+        thinkingControl: true,
+        fallbackModel: true,
+        sandbox: true,
+        nativeTools: true,
+      }),
+    }));
+    const deps: WorkflowDeps = {
+      store: createStore(),
+      getAgentProvider,
+      loadConfig: mock(async () => config),
+    };
+
+    await executeDagWorkflow(
+      deps,
+      createPlatform(),
+      'conversation-id',
+      runDir,
+      {
+        name: 'cumulative-loop-budget',
+        nodes: [
+          {
+            id: 'looping',
+            loop: { prompt: 'Continue.', until: 'DONE', max_iterations: 3 },
+            settings: { version: 1, budget: { maxCostUsd: 1 } },
+          },
+        ],
+      },
+      createWorkflowRun(),
+      'claude',
+      undefined,
+      join(runDir, 'artifacts'),
+      join(runDir, 'logs'),
+      'main',
+      'docs/',
+      config
+    );
+
+    expect(sendQuery).toHaveBeenCalledTimes(1);
+    expect(deps.store.failWorkflowRun).toHaveBeenCalled();
+  });
+
+  test('two loop iterations consume one ceiling and the second receives only the remainder', async () => {
+    const observedCaps: Array<number | undefined> = [];
+    let invocation = 0;
+    const sendQuery = mock(async function* (
+      _prompt: string,
+      _cwd: string,
+      _resumeSessionId?: string,
+      options?: SendQueryOptions
+    ) {
+      observedCaps.push(options?.maxBudgetUsd);
+      invocation++;
+      yield { type: 'assistant' as const, content: 'Continue iterating.' };
+      yield {
+        type: 'result' as const,
+        sessionId: `loop-session-${invocation}`,
+        cost: invocation === 1 ? 0.6 : 0.4,
+      };
+    });
+    const getAgentProvider = mock(() => ({
+      sendQuery,
+      getType: () => 'claude',
+      getCapabilities: () => ({
+        sessionResume: true,
+        mcp: true,
+        hooks: true,
+        skills: true,
+        agents: true,
+        toolRestrictions: true,
+        structuredOutput: 'enforced' as const,
+        envInjection: true,
+        costControl: true,
+        effortControl: true,
+        thinkingControl: true,
+        fallbackModel: true,
+        sandbox: true,
+        nativeTools: true,
+      }),
+    }));
+    const deps: WorkflowDeps = {
+      store: createStore(),
+      getAgentProvider,
+      loadConfig: mock(async () => config),
+    };
+
+    await executeDagWorkflow(
+      deps,
+      createPlatform(),
+      'conversation-id',
+      runDir,
+      {
+        name: 'shared-loop-budget',
+        nodes: [
+          {
+            id: 'looping',
+            loop: { prompt: 'Continue.', until: 'DONE', max_iterations: 3 },
+            settings: { version: 1, budget: { maxCostUsd: 1 } },
+          },
+        ],
+      },
+      createWorkflowRun(),
+      'claude',
+      undefined,
+      join(runDir, 'artifacts'),
+      join(runDir, 'logs'),
+      'main',
+      'docs/',
+      config
+    );
+
+    expect(sendQuery).toHaveBeenCalledTimes(2);
+    expect(observedCaps).toHaveLength(2);
+    expect(observedCaps[0]).toBe(1);
+    expect(observedCaps[1]).toBeCloseTo(0.4, 10);
+    expect(deps.store.failWorkflowRun).toHaveBeenCalled();
+  });
+
+  test('outer retry resumes the same accumulator and receives only the remaining ceiling', async () => {
+    const observedCaps: Array<number | undefined> = [];
+    let invocation = 0;
+    const sendQuery = mock(async function* (
+      _prompt: string,
+      _cwd: string,
+      _resumeSessionId?: string,
+      options?: SendQueryOptions
+    ) {
+      observedCaps.push(options?.maxBudgetUsd);
+      invocation++;
+      if (invocation === 1) {
+        yield {
+          type: 'result' as const,
+          sessionId: 'failed-attempt',
+          cost: 0.6,
+          isError: true,
+          errorSubtype: 'error_during_execution',
+        };
+        return;
+      }
+      yield { type: 'assistant' as const, content: 'Retry succeeded.' };
+      yield { type: 'result' as const, sessionId: 'successful-attempt', cost: 0.3 };
+    });
+    const getAgentProvider = mock(() => ({
+      sendQuery,
+      getType: () => 'claude',
+      getCapabilities: () => ({
+        sessionResume: true,
+        mcp: true,
+        hooks: true,
+        skills: true,
+        agents: true,
+        toolRestrictions: true,
+        structuredOutput: 'enforced' as const,
+        envInjection: true,
+        costControl: true,
+        effortControl: true,
+        thinkingControl: true,
+        fallbackModel: true,
+        sandbox: true,
+        nativeTools: true,
+      }),
+    }));
+    const deps: WorkflowDeps = {
+      store: createStore(),
+      getAgentProvider,
+      loadConfig: mock(async () => config),
+    };
+
+    await executeDagWorkflow(
+      deps,
+      createPlatform(),
+      'conversation-id',
+      runDir,
+      {
+        name: 'cumulative-retry-budget',
+        nodes: [
+          {
+            id: 'retrying',
+            prompt: 'Try.',
+            retry: { max_attempts: 1, delay_ms: 0, on_error: 'all' },
+            settings: { version: 1, budget: { maxCostUsd: 1 } },
+          },
+        ],
+      },
+      createWorkflowRun(),
+      'claude',
+      undefined,
+      join(runDir, 'artifacts'),
+      join(runDir, 'logs'),
+      'main',
+      'docs/',
+      config
+    );
+
+    expect(observedCaps).toHaveLength(2);
+    expect(observedCaps[0]).toBe(1);
+    expect(observedCaps[1]).toBeCloseTo(0.4, 10);
+    expect(deps.store.completeWorkflowRun).toHaveBeenCalled();
+  });
+
+  test('explicit OAuth never falls through to an operator credential', async () => {
+    const previousOperatorToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'operator-token-must-not-be-used';
+    const getAgentProvider = mock(() => {
+      throw new Error('provider must not be constructed');
+    });
+    const deps: WorkflowDeps = {
+      store: createStore(),
+      getAgentProvider,
+      loadConfig: mock(async () => ({ ...config, envVars: {} })),
+    };
+    const platform = createPlatform();
+
+    try {
+      await executeDagWorkflow(
+        deps,
+        platform,
+        'conversation-id',
+        runDir,
+        {
+          name: 'no-auth-fallthrough',
+          nodes: [
+            {
+              id: 'protected',
+              prompt: 'Must not run.',
+              settings: {
+                version: 1,
+                model: {
+                  requested: {
+                    source: 'fixed',
+                    provider: 'claude',
+                    model: 'claude-sonnet-4',
+                    auth: { kind: 'oauth' },
+                    reasoning: 'high',
+                  },
+                  resolution: { mode: 'exact' },
+                },
+              },
+            },
+          ],
+        },
+        createWorkflowRun(),
+        'claude',
+        undefined,
+        join(runDir, 'artifacts'),
+        join(runDir, 'logs'),
+        'main',
+        'docs/',
+        { ...config, envVars: {} }
+      );
+    } finally {
+      if (previousOperatorToken === undefined) {
+        delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      } else {
+        process.env.CLAUDE_CODE_OAUTH_TOKEN = previousOperatorToken;
+      }
+    }
+
+    expect(getAgentProvider).not.toHaveBeenCalled();
+    const messages = (platform.sendMessage as ReturnType<typeof mock>).mock.calls.map(
+      call => call[1] as string
+    );
+    expect(messages.join('\n')).toContain('operator/global credentials are disabled');
+  });
+
   test('programmatic run rejects unbound settings before provider resolution', async () => {
     const getAgentProvider = mock(() => {
       throw new Error('provider must not be resolved');
@@ -272,7 +555,7 @@ describe('vendored NodeSpec execution bindings', () => {
             {
               id: 'invalid',
               prompt: 'Must not run.',
-              settings: { version: 1, hyperparameters: { temperature: 1 } },
+              settings: { version: 1, hyperparameters: { temperature: 0.5 } },
             },
           ],
         },

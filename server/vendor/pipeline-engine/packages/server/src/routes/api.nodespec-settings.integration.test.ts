@@ -106,6 +106,43 @@ async function validateSettings(settingsValue: unknown): Promise<string> {
   return body.errors?.join('\n') ?? '';
 }
 
+async function roundTripSettings(name: string, settingsValue: unknown): Promise<unknown> {
+  registeredCwd = join(tmpdir(), `${name}-${crypto.randomUUID()}`);
+  await mkdir(registeredCwd, { recursive: true });
+  try {
+    const app = createApp();
+    const definition = {
+      name,
+      description: 'Exercise NodeSpec persistence.',
+      nodes: [{ id: 'research', prompt: 'Analyze.', settings: settingsValue }],
+    };
+    const validateResponse = await app.request('/api/workflows/validate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ definition }),
+    });
+    expect(validateResponse.status).toBe(200);
+    expect(await validateResponse.json()).toEqual({ valid: true });
+
+    const query = `cwd=${encodeURIComponent(registeredCwd)}`;
+    const putResponse = await app.request(`/api/workflows/${name}?${query}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ definition }),
+    });
+    expect(putResponse.status).toBe(200);
+
+    const getResponse = await app.request(`/api/workflows/${name}?${query}`);
+    expect(getResponse.status).toBe(200);
+    const getBody = (await getResponse.json()) as {
+      workflow: { nodes: Array<{ settings?: unknown }> };
+    };
+    return getBody.workflow.nodes[0]?.settings;
+  } finally {
+    await rm(registeredCwd, { recursive: true, force: true });
+  }
+}
+
 describe('NodeSpec v1 vendored persistence contract', () => {
   test('validate -> PUT -> GET -> parseWorkflow -> adapter args preserves every bound settings byte', async () => {
     registeredCwd = join(tmpdir(), `nodespec-persistence-${crypto.randomUUID()}`);
@@ -193,6 +230,49 @@ describe('NodeSpec v1 vendored persistence contract', () => {
     expect(errors).toContain('ambiguous-kady-current-fallback');
   });
 
+  test('inherited-provider settings validate, save, and reload byte-equivalently', async () => {
+    const inheritedSettings = {
+      version: 1,
+      reasoningEffort: 'high',
+      budget: { maxCostUsd: 2.5 },
+    };
+    const reloaded = await roundTripSettings('nodespec-inherited-provider', inheritedSettings);
+    expect(settingsBytes(reloaded)).toEqual(settingsBytes(inheritedSettings));
+  });
+
+  const explicitDefaultCases: Array<[string, unknown]> = [
+    ['temperature', { version: 1, hyperparameters: { temperature: 1 } }],
+    ['top-p', { version: 1, hyperparameters: { top_p: 1 } }],
+    ['sampling', { version: 1, hyperparameters: { sampling: {} } }],
+    ['condition-exists', { version: 1, conditions: { exists: [] } }],
+    ['harness', { version: 1, harness: 'pi' }],
+    ['databases', { version: 1, databases: [] }],
+    ['skills-mode', { version: 1, skills: { mode: 'auto' } }],
+    ['skills-list', { version: 1, skills: { list: [] } }],
+    ['subagents-mode', { version: 1, subagents: { mode: 'auto' } }],
+    ['autonomy', { version: 1, autonomy: 'strict' }],
+    ['personality-count', { version: 1, deliberation: { bestOfNPersonalityCount: 2 } }],
+    [
+      'mimeograph-mode',
+      { version: 1, deliberation: { mimeographs: { mode: 'auto' } } },
+    ],
+    [
+      'mimeograph-personality-refs',
+      { version: 1, deliberation: { mimeographs: { personalityRefs: [] } } },
+    ],
+    ['billing-mode', { version: 1, billingMode: 'inherit' }],
+  ];
+
+  for (const [fieldName, explicitDefault] of explicitDefaultCases) {
+    test(`explicit canonical ${fieldName} default equals omission`, async () => {
+      const reloaded = await roundTripSettings(
+        `nodespec-explicit-default-${fieldName}`,
+        explicitDefault
+      );
+      expect(settingsBytes(reloaded)).toEqual(settingsBytes(explicitDefault));
+    });
+  }
+
   test('validate rejects a fallback identical to the requested model identity', async () => {
     const requested = fixedModel('claude-sonnet-4');
     const errors = await validateSettings({
@@ -242,7 +322,7 @@ describe('NodeSpec v1 vendored persistence contract', () => {
                 {
                   id: 'research',
                   prompt: 'Analyze.',
-                  settings: { version: 1, hyperparameters: { temperature: 1 } },
+                  settings: { version: 1, hyperparameters: { temperature: 0.5 } },
                 },
               ],
             },
