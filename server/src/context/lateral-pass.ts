@@ -34,6 +34,7 @@ export interface LateralPassMessage {
 
 export interface LateralPassModelRequest {
   model: string;
+  runId: string;
   sourceSessionId: string;
   userPrompt: string;
   goal: string;
@@ -193,6 +194,7 @@ export function registerLateralPassBehavior(
       const transcript = parseMessages(payload.transcript);
       const summary = parseLateralPassSummary(await dependencies.summarize({
         model,
+        runId: dispatch.runId,
         sourceSessionId,
         userPrompt: payload.userPrompt,
         goal: payload.goal,

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   readTrustedDagFusionCompactionAudit,
   type TrustedDagFusionCompactionAudit,
@@ -31,7 +32,9 @@ export type CompactionWatcherErrorCode =
   | "INVALID_AUDIT_INPUT"
   | "INVALID_MODEL_VERDICT"
   | "INVALID_BEHAVIOR_DISPATCH"
+  | "OPERATION_IN_PROGRESS"
   | "REDEPLOY_REJECTED"
+  | "RESTART_PARTIAL_SUCCESS"
   | "RESTART_REJECTED";
 
 export class CompactionWatcherError extends Error {
@@ -42,6 +45,17 @@ export class CompactionWatcherError extends Error {
   ) {
     super(message, options);
     this.name = "CompactionWatcherError";
+  }
+}
+
+export class CompactionWatcherPartialSuccessError extends CompactionWatcherError {
+  constructor(
+    message: string,
+    readonly operation: WatcherOperationRecord,
+    options?: ErrorOptions,
+  ) {
+    super("RESTART_PARTIAL_SUCCESS", message, options);
+    this.name = "CompactionWatcherPartialSuccessError";
   }
 }
 
@@ -79,7 +93,8 @@ export interface WatcherRestartRequest {
   /** Always true: the watcher, not the origin adapter, owns this restart. */
   resume: true;
   originIndependent: true;
-  upstreamResumable?: boolean;
+  recovery: DurableRestartProof;
+  resumeResponse?: WatcherResumeResponse;
   reason: string;
 }
 
@@ -91,6 +106,7 @@ export interface WatcherRestartReceipt {
 export interface WatcherRepairRequest {
   runId: string;
   nodeId?: string;
+  auditIdentity: string;
   model: string;
   reason: string;
   semanticVerdict?: CompactionSemanticVerdict;
@@ -99,7 +115,71 @@ export interface WatcherRepairRequest {
 export interface WatcherRepairReceipt {
   redeployed: boolean;
   workflowRevision?: number;
+  recovery?: DurableRestartProof;
   detail?: string;
+}
+
+export interface DurableRestartProof {
+  runId: string;
+  checkpointId: string;
+  restartToken: string;
+  verified: true;
+  sideEffectSafety: "no-side-effects" | "idempotent" | "compensated";
+}
+
+export interface WatcherResumeResponse {
+  resumable?: boolean;
+  restartRequired?: boolean;
+  restartWarning?: string;
+}
+
+export interface WatcherRescueProposalRequest {
+  runId: string;
+  nodeId?: string;
+  reason: string;
+  resumeResponse?: WatcherResumeResponse;
+  recovery?: DurableRestartProof;
+}
+
+export interface WatcherRescueProposalReceipt {
+  proposalId: string;
+  detail?: string;
+}
+
+export type WatcherOperationPhase =
+  | "repairing"
+  | "repair-failed"
+  | "redeployed"
+  | "restart-failed"
+  | "completed";
+
+export interface WatcherOperationRecord {
+  version: 1;
+  operationKey: string;
+  sequence: number;
+  runId: string;
+  nodeId?: string;
+  auditIdentity: string;
+  phase: WatcherOperationPhase;
+  updatedAt: number;
+  workflowRevision?: number;
+  recovery?: DurableRestartProof;
+  detail?: string;
+}
+
+export interface WatcherOperationTransaction {
+  readonly current: WatcherOperationRecord | undefined;
+  compareAndSwap(
+    expectedPhase: WatcherOperationPhase | undefined,
+    next: Omit<WatcherOperationRecord, "version" | "operationKey" | "sequence" | "updatedAt">,
+  ): WatcherOperationRecord;
+}
+
+export interface WatcherOperationStore {
+  runExclusive<T>(
+    operationKey: string,
+    operation: (transaction: WatcherOperationTransaction) => Promise<T>,
+  ): Promise<T>;
 }
 
 export interface CompactionWatcherBehaviorResult extends WorkflowBehaviorResult {
@@ -107,6 +187,12 @@ export interface CompactionWatcherBehaviorResult extends WorkflowBehaviorResult 
   resumed?: boolean;
   redeployed?: boolean;
   workflowRevision?: number;
+  operationKey?: string;
+  proposal?: {
+    proposalId: string;
+    reason: string;
+    resumeResponse?: WatcherResumeResponse;
+  };
 }
 
 export interface CompactionWatcherDependencies {
@@ -114,6 +200,8 @@ export interface CompactionWatcherDependencies {
   semanticModel: CompactionSemanticModel;
   restartWorkflow(request: WatcherRestartRequest): Promise<WatcherRestartReceipt>;
   repairAndRedeploy(request: WatcherRepairRequest): Promise<WatcherRepairReceipt>;
+  proposeRescue(request: WatcherRescueProposalRequest): Promise<WatcherRescueProposalReceipt>;
+  operationStore: WatcherOperationStore;
   readFingerprintAudit?: (
     sandboxRoot: string,
     childRunId: string,
@@ -148,12 +236,9 @@ export interface RestartStoppedWorkflowRequest {
   runId: string;
   status: string;
   nodeId?: string;
-  /** Shape consumed from the deferred S2b vendored API integration seam. */
-  resumeResponse?: {
-    resumable?: unknown;
-    restartRequired?: unknown;
-    restartWarning?: unknown;
-  };
+  recovery?: DurableRestartProof;
+  /** Exact normalized shape consumed from the deferred S2b API seam. */
+  resumeResponse?: WatcherResumeResponse;
 }
 
 export interface CompactionWatcher {
@@ -303,6 +388,115 @@ function semanticVerdictFromPayload(
     : parseCompactionSemanticVerdict(payload.semanticVerdict);
 }
 
+function resumeResponseFromPayload(value: unknown): WatcherResumeResponse | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !plainRecord(value) ||
+    Object.keys(value).some((key) => ![
+      "resumable",
+      "restartRequired",
+      "restartWarning",
+    ].includes(key)) ||
+    (value.resumable !== undefined && typeof value.resumable !== "boolean") ||
+    (value.restartRequired !== undefined && typeof value.restartRequired !== "boolean") ||
+    (value.restartWarning !== undefined && (
+      typeof value.restartWarning !== "string" ||
+      utf8Bytes(value.restartWarning) > MAX_FINDING_BYTES
+    ))
+  ) {
+    throw new CompactionWatcherError(
+      "INVALID_BEHAVIOR_DISPATCH",
+      "Watcher resume response is malformed or exceeds its bounds.",
+    );
+  }
+  return {
+    ...(value.resumable !== undefined ? { resumable: value.resumable } : {}),
+    ...(value.restartRequired !== undefined
+      ? { restartRequired: value.restartRequired }
+      : {}),
+    ...(value.restartWarning !== undefined
+      ? { restartWarning: value.restartWarning }
+      : {}),
+  };
+}
+
+function durableRestartProof(value: unknown, runId: string): DurableRestartProof | undefined {
+  if (
+    !plainRecord(value) ||
+    Object.keys(value).some((key) => ![
+      "runId",
+      "checkpointId",
+      "restartToken",
+      "verified",
+      "sideEffectSafety",
+    ].includes(key)) ||
+    value.runId !== runId ||
+    !boundedText(value.checkpointId) ||
+    utf8Bytes(value.checkpointId) > MAX_FINDING_BYTES ||
+    !boundedText(value.restartToken) ||
+    utf8Bytes(value.restartToken) > MAX_FINDING_BYTES ||
+    value.verified !== true ||
+    !["no-side-effects", "idempotent", "compensated"].includes(
+      value.sideEffectSafety as string,
+    )
+  ) return undefined;
+  return {
+    runId,
+    checkpointId: value.checkpointId,
+    restartToken: value.restartToken,
+    verified: true,
+    sideEffectSafety: value.sideEffectSafety as DurableRestartProof["sideEffectSafety"],
+  };
+}
+
+function auditIdentityFromPayload(payload: Record<string, unknown>): string {
+  if (
+    typeof payload.auditIdentity !== "string" ||
+    !/^[a-f0-9]{64}$/.test(payload.auditIdentity)
+  ) {
+    throw new CompactionWatcherError(
+      "INVALID_BEHAVIOR_DISPATCH",
+      "Fix-redeploy requires a deterministic audit identity.",
+    );
+  }
+  return payload.auditIdentity;
+}
+
+function operationKey(runId: string, nodeId: string | undefined, auditIdentity: string): string {
+  return createHash("sha256")
+    .update(runId, "utf8")
+    .update("\0")
+    .update(nodeId ?? "", "utf8")
+    .update("\0")
+    .update(auditIdentity, "utf8")
+    .digest("hex");
+}
+
+function compactionAuditIdentity(
+  request: WatchCompactionRequest,
+  audit: TrustedDagFusionCompactionAudit,
+): string {
+  const hash = createHash("sha256");
+  hash.update(request.childRunId, "utf8");
+  hash.update("\0");
+  hash.update(request.preCompactionRecord, "utf8");
+  hash.update("\0");
+  hash.update(request.compactedSummary, "utf8");
+  hash.update("\0");
+  hash.update(JSON.stringify(audit), "utf8");
+  return hash.digest("hex");
+}
+
+function recoveryBlockReason(
+  recovery: DurableRestartProof | undefined,
+  resumeResponse: WatcherResumeResponse | undefined,
+): string | undefined {
+  if (!recovery) return "durable-recovery-proof-missing-or-invalid";
+  if (resumeResponse?.resumable === false) return "upstream-marked-non-resumable";
+  if (resumeResponse?.restartRequired === true) return "upstream-requires-new-run";
+  return undefined;
+}
+
 function fingerprintFailure(audit: TrustedDagFusionCompactionAudit): string | undefined {
   if (audit.occurred && audit.checks.length === 0) return "audit:MISSING_CHECKS";
   const failed = audit.checks.find((check) => !check.passed);
@@ -342,6 +536,32 @@ export function createCompactionWatcher(
   const readFingerprintAudit = dependencies.readFingerprintAudit ??
     readTrustedDagFusionCompactionAudit;
 
+  const proposeInsteadOfRestart = async (
+    runId: string,
+    nodeId: string | undefined,
+    reason: string,
+    resumeResponse: WatcherResumeResponse | undefined,
+    recovery: DurableRestartProof | undefined,
+  ): Promise<CompactionWatcherBehaviorResult> => {
+    const proposal = await dependencies.proposeRescue({
+      runId,
+      ...(nodeId ? { nodeId } : {}),
+      reason,
+      ...(resumeResponse ? { resumeResponse } : {}),
+      ...(recovery ? { recovery } : {}),
+    });
+    return {
+      handled: true,
+      resumable: false,
+      proposal: {
+        proposalId: proposal.proposalId,
+        reason,
+        ...(resumeResponse ? { resumeResponse } : {}),
+      },
+      detail: proposal.detail ?? `Created rescue proposal ${proposal.proposalId}.`,
+    };
+  };
+
   dependencies.registry.register(
     COMPACTION_WATCHER_BEHAVIOR,
     ["restart-workflow", "escalate-fix-redeploy"],
@@ -351,14 +571,25 @@ export function createCompactionWatcher(
       const reason = reasonFromPayload(payload);
 
       if (dispatch.capability === "restart-workflow") {
+        const resumeResponse = resumeResponseFromPayload(payload.resumeResponse);
+        const recovery = durableRestartProof(payload.recovery, dispatch.runId);
+        const blocked = recoveryBlockReason(recovery, resumeResponse);
+        if (blocked) {
+          return proposeInsteadOfRestart(
+            dispatch.runId,
+            nodeId,
+            `${reason}:${blocked}`,
+            resumeResponse,
+            recovery,
+          );
+        }
         const restart = await dependencies.restartWorkflow({
           runId: dispatch.runId,
           ...(nodeId ? { nodeId } : {}),
           resume: true,
           originIndependent: true,
-          ...(typeof payload.upstreamResumable === "boolean"
-            ? { upstreamResumable: payload.upstreamResumable }
-            : {}),
+          recovery: recovery!,
+          ...(resumeResponse ? { resumeResponse } : {}),
           reason,
         });
         if (!restart.resumed) {
@@ -382,46 +613,194 @@ export function createCompactionWatcher(
         );
       }
       const semanticVerdict = semanticVerdictFromPayload(payload);
-      const repair = await dependencies.repairAndRedeploy({
-        runId: dispatch.runId,
-        ...(nodeId ? { nodeId } : {}),
-        model: repairModel,
-        reason,
-        ...(semanticVerdict ? { semanticVerdict } : {}),
+      const auditIdentity = auditIdentityFromPayload(payload);
+      const resumeResponse = resumeResponseFromPayload(payload.resumeResponse);
+      const key = operationKey(dispatch.runId, nodeId, auditIdentity);
+      return dependencies.operationStore.runExclusive(key, async (transaction) => {
+        let operation = transaction.current;
+        if (operation?.phase === "completed") {
+          return {
+            handled: true,
+            resumable: true,
+            redeployed: true,
+            resumed: true,
+            workflowRevision: operation.workflowRevision,
+            operationKey: key,
+            detail: operation.detail ?? `Watcher operation ${key} already completed.`,
+          };
+        }
+        if (operation?.phase === "repairing") {
+          throw new CompactionWatcherPartialSuccessError(
+            `Watcher operation ${key} was interrupted while repair state was ambiguous.`,
+            operation,
+          );
+        }
+
+        if (!operation || operation.phase === "repair-failed") {
+          const expectedPhase = operation?.phase;
+          operation = transaction.compareAndSwap(expectedPhase, {
+            runId: dispatch.runId,
+            ...(nodeId ? { nodeId } : {}),
+            auditIdentity,
+            phase: "repairing",
+          });
+          let repair: WatcherRepairReceipt;
+          try {
+            repair = await dependencies.repairAndRedeploy({
+              runId: dispatch.runId,
+              ...(nodeId ? { nodeId } : {}),
+              auditIdentity,
+              model: repairModel,
+              reason,
+              ...(semanticVerdict ? { semanticVerdict } : {}),
+            });
+          } catch (error) {
+            operation = transaction.compareAndSwap("repairing", {
+              runId: dispatch.runId,
+              ...(nodeId ? { nodeId } : {}),
+              auditIdentity,
+              phase: "repairing",
+              detail: error instanceof Error
+                ? `Repair outcome is unknown: ${error.message}`
+                : "Repair outcome is unknown.",
+            });
+            throw new CompactionWatcherPartialSuccessError(
+              `Watcher operation ${key} may have redeployed before repair failed. Automatic repair retry is disabled until the persisted operation is reconciled.`,
+              operation,
+              { cause: error },
+            );
+          }
+          const recovery = durableRestartProof(repair.recovery, dispatch.runId);
+          if (!repair.redeployed) {
+            const detail = repair.detail ??
+              "Watcher repair explicitly reported that no revision was deployed.";
+            transaction.compareAndSwap("repairing", {
+              runId: dispatch.runId,
+              ...(nodeId ? { nodeId } : {}),
+              auditIdentity,
+              phase: "repair-failed",
+              detail,
+            });
+            throw new CompactionWatcherError("REDEPLOY_REJECTED", detail);
+          }
+          if (
+            !Number.isSafeInteger(repair.workflowRevision) ||
+            (repair.workflowRevision ?? 0) < 1 ||
+            !recovery
+          ) {
+            operation = transaction.compareAndSwap("repairing", {
+              runId: dispatch.runId,
+              ...(nodeId ? { nodeId } : {}),
+              auditIdentity,
+              phase: "repairing",
+              detail: repair.detail ??
+                "A deployment was reported without its durable revision or restart proof.",
+            });
+            throw new CompactionWatcherPartialSuccessError(
+              `Watcher operation ${key} reported a deployment without trustworthy restart state. Automatic repair retry is disabled until it is reconciled.`,
+              operation,
+            );
+          }
+          // Persist the exact deployed revision and recovery proof before any
+          // restart attempt. A retry can now resume here without redeploying.
+          operation = transaction.compareAndSwap("repairing", {
+            runId: dispatch.runId,
+            ...(nodeId ? { nodeId } : {}),
+            auditIdentity,
+            phase: "redeployed",
+            workflowRevision: repair.workflowRevision,
+            recovery,
+            ...(repair.detail ? { detail: repair.detail } : {}),
+          });
+        }
+
+        const recovery = durableRestartProof(operation.recovery, dispatch.runId);
+        if (!recovery || operation.workflowRevision === undefined) {
+          throw new CompactionWatcherPartialSuccessError(
+            `Watcher operation ${key} has no trustworthy persisted restart state.`,
+            operation,
+          );
+        }
+        const blocked = recoveryBlockReason(recovery, resumeResponse);
+        if (blocked) {
+          const proposal = await proposeInsteadOfRestart(
+            dispatch.runId,
+            nodeId,
+            `${reason}:${blocked}`,
+            resumeResponse,
+            recovery,
+          );
+          operation = transaction.compareAndSwap(operation.phase, {
+            runId: dispatch.runId,
+            ...(nodeId ? { nodeId } : {}),
+            auditIdentity,
+            phase: "restart-failed",
+            workflowRevision: operation.workflowRevision,
+            recovery,
+            detail: proposal.detail,
+          });
+          return {
+            ...proposal,
+            redeployed: true,
+            workflowRevision: operation.workflowRevision,
+            operationKey: key,
+          };
+        }
+
+        let restart: WatcherRestartReceipt;
+        try {
+          restart = await dependencies.restartWorkflow({
+            runId: dispatch.runId,
+            ...(nodeId ? { nodeId } : {}),
+            resume: true,
+            originIndependent: true,
+            recovery,
+            ...(resumeResponse ? { resumeResponse } : {}),
+            reason: `redeployed:${reason}`,
+          });
+          if (!restart.resumed) {
+            throw new CompactionWatcherError(
+              "RESTART_REJECTED",
+              restart.detail ?? `Watcher restart was rejected for ${dispatch.runId}.`,
+            );
+          }
+        } catch (error) {
+          operation = transaction.compareAndSwap(operation.phase, {
+            runId: dispatch.runId,
+            ...(nodeId ? { nodeId } : {}),
+            auditIdentity,
+            phase: "restart-failed",
+            workflowRevision: operation.workflowRevision,
+            recovery,
+            detail: error instanceof Error ? error.message : "Restart failed.",
+          });
+          throw new CompactionWatcherPartialSuccessError(
+            `Workflow revision ${operation.workflowRevision} was redeployed, but restart failed. Retry operation ${key} to resume without another deployment.`,
+            operation,
+            { cause: error },
+          );
+        }
+
+        operation = transaction.compareAndSwap(operation.phase, {
+          runId: dispatch.runId,
+          ...(nodeId ? { nodeId } : {}),
+          auditIdentity,
+          phase: "completed",
+          workflowRevision: operation.workflowRevision,
+          recovery,
+          detail: restart.detail ??
+            `Watcher repaired, redeployed, and resumed ${dispatch.runId}.`,
+        });
+        return {
+          handled: true,
+          resumable: true,
+          redeployed: true,
+          resumed: true,
+          workflowRevision: operation.workflowRevision,
+          operationKey: key,
+          detail: operation.detail,
+        };
       });
-      if (!repair.redeployed) {
-        throw new CompactionWatcherError(
-          "REDEPLOY_REJECTED",
-          repair.detail ?? `Watcher repair did not redeploy ${dispatch.runId}.`,
-        );
-      }
-      const restart = await dependencies.restartWorkflow({
-        runId: dispatch.runId,
-        ...(nodeId ? { nodeId } : {}),
-        resume: true,
-        originIndependent: true,
-        ...(typeof payload.upstreamResumable === "boolean"
-          ? { upstreamResumable: payload.upstreamResumable }
-          : {}),
-        reason: `redeployed:${reason}`,
-      });
-      if (!restart.resumed) {
-        throw new CompactionWatcherError(
-          "RESTART_REJECTED",
-          restart.detail ?? `Watcher restart was rejected after redeploying ${dispatch.runId}.`,
-        );
-      }
-      return {
-        handled: true,
-        resumable: true,
-        redeployed: true,
-        resumed: true,
-        ...(repair.workflowRevision !== undefined
-          ? { workflowRevision: repair.workflowRevision }
-          : {}),
-        detail: repair.detail ?? restart.detail ??
-          `Watcher repaired, redeployed, and resumed ${dispatch.runId}.`,
-      };
     },
   );
 
@@ -436,6 +815,7 @@ export function createCompactionWatcher(
       if (!fingerprintAudit.occurred) {
         return { status: "not-compacted", fingerprintAudit };
       }
+      const auditIdentity = compactionAuditIdentity(request, fingerprintAudit);
       const deterministicFailure = fingerprintFailure(fingerprintAudit);
       if (deterministicFailure) {
         const behavior = await dependencies.registry.dispatch(
@@ -444,7 +824,10 @@ export function createCompactionWatcher(
             capability: "escalate-fix-redeploy",
             runId: request.runId,
             ...(request.nodeId ? { nodeId: request.nodeId } : {}),
-            payload: { reason: `fingerprint-audit:${deterministicFailure}` },
+            payload: {
+              reason: `fingerprint-audit:${deterministicFailure}`,
+              auditIdentity,
+            },
           },
         ) as CompactionWatcherBehaviorResult;
         return { status: "repaired-and-restarted", fingerprintAudit, behavior };
@@ -475,6 +858,7 @@ export function createCompactionWatcher(
           payload: {
             reason: "semantic-context-rot",
             semanticVerdict,
+            auditIdentity,
           },
         },
       ) as CompactionWatcherBehaviorResult;
@@ -500,8 +884,9 @@ export function createCompactionWatcher(
           ...(request.nodeId ? { nodeId: request.nodeId } : {}),
           payload: {
             reason: `watcher-observed:${request.status}`,
-            ...(typeof request.resumeResponse?.resumable === "boolean"
-              ? { upstreamResumable: request.resumeResponse.resumable }
+            ...(request.recovery ? { recovery: request.recovery } : {}),
+            ...(request.resumeResponse
+              ? { resumeResponse: request.resumeResponse }
               : {}),
           },
         },
