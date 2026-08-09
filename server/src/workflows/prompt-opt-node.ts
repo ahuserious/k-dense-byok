@@ -43,6 +43,7 @@ import {
   createPromptOptimizationInterviewContract,
   type PromptOptimizationInterviewContract,
 } from "./prompt-opt-interview-contract.ts";
+import { promptOptimizationArtifactPath } from "./prompt-opt-artifact-path.ts";
 import {
   promptOptimizationOuterModelCallSlotId,
 } from "./prompt-opt-model-slots.ts";
@@ -362,7 +363,7 @@ export function validatePromptOptimizationNode(
       issues,
       "prompt-optimization-artifact-invalid-declaration",
       `${nodePath}/artifactId`,
-      `Artifact ${node.artifactId} must name ${node.id} as writer and provide one exact file path.`,
+      `Artifact ${node.artifactId} must name ${node.id} as writer and provide one owned artifact namespace path.`,
     );
   } else {
     const normalizedArtifactPath = normalizeWorkflowProjectPath(artifact.path);
@@ -644,7 +645,7 @@ function signalFor(signal: AbortSignal | undefined): AbortSignal {
   return signal ?? new AbortController().signal;
 }
 
-/** Atomic host writer for the graph-declared path; child agents remain read-only. */
+/** Atomic host writer for one derived run+node+attempt path; child agents remain read-only. */
 export async function writePromptOptimizationArtifact(
   artifact: PromptOptimizationArtifact,
   context: PromptOptimizationArtifactWriteContext,
@@ -965,13 +966,18 @@ export async function executePromptOptimizationNode(
     (candidate) => candidate.id === options.node.artifactId,
   );
   if (!artifactDeclaration?.path) {
-    throw new Error(`Prompt optimization artifact ${options.node.artifactId} has no exact declared path.`);
+    throw new Error(`Prompt optimization artifact ${options.node.artifactId} has no declared namespace path.`);
   }
   const artifactReference = await (options.writeArtifact ?? writePromptOptimizationArtifact)(
     artifact,
     {
       sandboxPath: options.sandboxPath,
-      artifactPath: artifactDeclaration.path,
+      artifactPath: promptOptimizationArtifactPath({
+        declaredPath: artifactDeclaration.path,
+        runId: options.runId,
+        nodeId: options.node.id,
+        attempt: options.attempt,
+      }),
     },
   );
   const output = optimizationOutput(artifact, artifactReference);

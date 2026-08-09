@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import fs from "node:fs/promises";
+import fs, { type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import {
   validateAnswer,
@@ -18,6 +18,8 @@ export type PromptOptimizationInterviewStatus =
 
 export interface PromptOptimizationInterviewStateV1 {
   stateVersion: typeof PROMPT_OPTIMIZATION_INTERVIEW_STATE_VERSION;
+  /** Monotonic compare-and-swap revision for cross-process mutations. */
+  revision: number;
   runId: string;
   nodeId: string;
   executionId: string;
@@ -47,6 +49,9 @@ export interface PromptOptimizationInterviewContractOptions {
 
 const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SAFE_NODE_ID = /^[a-z][a-z0-9_-]{0,63}$/;
+const INTERVIEW_LOCK_WAIT_MS = 5;
+const INTERVIEW_LOCK_TIMEOUT_MS = 5_000;
+const INTERVIEW_STALE_LOCK_MS = 30_000;
 
 function safeKey(value: string, pattern: RegExp, label: string): string {
   if (!pattern.test(value)) throw new Error(`${label} is not a safe workflow identifier.`);
@@ -115,11 +120,15 @@ function assertStoredState(
   record.questionSetSha256 ??= expectedQuestionSetSha256;
   record.attempt ??= 1;
   record.waitOccurrence ??= 1;
+  record.revision ??= 1;
   if (!Number.isSafeInteger(record.attempt) || record.attempt < 1) {
     throw new Error("Prompt optimization interview state has an invalid attempt number.");
   }
   if (!Number.isSafeInteger(record.waitOccurrence) || record.waitOccurrence < 1) {
     throw new Error("Prompt optimization interview state has an invalid wait occurrence.");
+  }
+  if (!Number.isSafeInteger(record.revision) || record.revision < 1) {
+    throw new Error("Prompt optimization interview state has an invalid revision.");
   }
 }
 
@@ -179,6 +188,43 @@ export class PromptOptimizationInterviewContract {
     );
   }
 
+  private async withMutationLock<T>(
+    runId: string,
+    nodeId: string,
+    mutate: () => Promise<T>,
+  ): Promise<T> {
+    const target = this.statePath(runId, nodeId);
+    const lockPath = `${target}.lock`;
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    const lockDeadline = Date.now() + INTERVIEW_LOCK_TIMEOUT_MS;
+    let lock: FileHandle | undefined;
+    while (!lock) {
+      try {
+        lock = await fs.open(lockPath, "wx", 0o600);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const lockStat = await fs.stat(lockPath).catch(() => undefined);
+        if (lockStat && Date.now() - lockStat.mtimeMs >= INTERVIEW_STALE_LOCK_MS) {
+          await fs.unlink(lockPath).catch(() => undefined);
+          continue;
+        }
+        if (Date.now() >= lockDeadline) {
+          throw new Error("Timed out acquiring the durable prompt optimization interview lock.");
+        }
+        await new Promise((resolve) => setTimeout(resolve, INTERVIEW_LOCK_WAIT_MS));
+      }
+    }
+    try {
+      return await mutate();
+    } finally {
+      try {
+        await lock.close();
+      } finally {
+        await fs.unlink(lockPath).catch(() => undefined);
+      }
+    }
+  }
+
   private async persist(state: PromptOptimizationInterviewStateV1): Promise<void> {
     const target = this.statePath(state.runId, state.nodeId);
     const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
@@ -193,6 +239,26 @@ export class PromptOptimizationInterviewContract {
     } finally {
       await fs.unlink(temporary).catch(() => undefined);
     }
+  }
+
+  private async compareAndSwap(
+    runId: string,
+    nodeId: string,
+    expectedRevision: number | null,
+    next: PromptOptimizationInterviewStateV1,
+  ): Promise<{ swapped: boolean; state: PromptOptimizationInterviewStateV1 | null }> {
+    return this.withMutationLock(runId, nodeId, async () => {
+      const current = await this.read(runId, nodeId);
+      if ((current?.revision ?? null) !== expectedRevision) {
+        return { swapped: false, state: current };
+      }
+      const stored: PromptOptimizationInterviewStateV1 = {
+        ...next,
+        revision: (expectedRevision ?? 0) + 1,
+      };
+      await this.persist(stored);
+      return { swapped: true, state: stored };
+    });
   }
 
   async read(runId: string, nodeId: string): Promise<PromptOptimizationInterviewStateV1 | null> {
@@ -224,32 +290,39 @@ export class PromptOptimizationInterviewContract {
     if (!Number.isFinite(input.deadlineAt) || input.deadlineAt <= now) {
       throw new Error("Prompt optimization interview has no time remaining in the node envelope.");
     }
-    const existing = await this.read(input.runId, input.nodeId);
     const questionSetSha256 = promptOptimizationQuestionSetSha256(input.questions);
-    if (existing) {
+    for (;;) {
+      const existing = await this.read(input.runId, input.nodeId);
       if (
+        existing &&
+        existing.executionId === input.executionId &&
+        existing.questionSetSha256 === questionSetSha256 &&
+        existing.status !== "pending"
+      ) {
+        // A terminal answer always wins over a stale recovery snapshot.
+        return { state: existing, event: resumedEvent(existing) };
+      }
+
+      let next: PromptOptimizationInterviewStateV1;
+      if (
+        existing &&
         existing.executionId === input.executionId &&
         existing.questionSetSha256 === questionSetSha256
       ) {
-        if (existing.status === "pending") {
-          const recovered: PromptOptimizationInterviewStateV1 = {
-            ...existing,
-            attempt: input.attempt,
-            waitOccurrence: existing.waitOccurrence + 1,
-            updatedAt: now,
-            // Recovery may never mint a fresh interview timeout envelope.
-            deadlineAt: Math.min(existing.deadlineAt, Math.floor(input.deadlineAt)),
-          };
-          await this.persist(recovered);
-          return { state: recovered, event: waitingEvent(recovered) };
-        }
-        return {
-          state: existing,
-          event: resumedEvent(existing),
+        next = {
+          ...existing,
+          attempt: input.attempt,
+          waitOccurrence: existing.waitOccurrence + 1,
+          updatedAt: now,
+          // Recovery may never mint a fresh interview timeout envelope.
+          deadlineAt: Math.min(existing.deadlineAt, Math.floor(input.deadlineAt)),
         };
-      }
-      if (existing.status === "answered" && existing.questionSetSha256 === questionSetSha256) {
-        const carried: PromptOptimizationInterviewStateV1 = {
+      } else if (
+        existing &&
+        (existing.status === "answered" || existing.status === "cancelled") &&
+        existing.questionSetSha256 === questionSetSha256
+      ) {
+        next = {
           ...existing,
           executionId: input.executionId,
           attempt: input.attempt,
@@ -257,26 +330,37 @@ export class PromptOptimizationInterviewContract {
           deadlineAt: Math.floor(input.deadlineAt),
           carriedFromExecutionId: existing.executionId,
         };
-        await this.persist(carried);
-        return { state: carried, event: resumedEvent(carried) };
+      } else {
+        next = {
+          stateVersion: PROMPT_OPTIMIZATION_INTERVIEW_STATE_VERSION,
+          revision: existing?.revision ?? 1,
+          runId: input.runId,
+          nodeId: input.nodeId,
+          executionId: input.executionId,
+          attempt: input.attempt,
+          waitOccurrence: (existing?.waitOccurrence ?? 0) + 1,
+          status: "pending",
+          questions: structuredClone(input.questions),
+          questionSetSha256,
+          createdAt: now,
+          updatedAt: now,
+          deadlineAt: Math.floor(input.deadlineAt),
+        };
       }
+      const committed = await this.compareAndSwap(
+        input.runId,
+        input.nodeId,
+        existing?.revision ?? null,
+        next,
+      );
+      if (!committed.swapped || !committed.state) continue;
+      return {
+        state: committed.state,
+        event: committed.state.status === "pending"
+          ? waitingEvent(committed.state)
+          : resumedEvent(committed.state),
+      };
     }
-    const state: PromptOptimizationInterviewStateV1 = {
-      stateVersion: PROMPT_OPTIMIZATION_INTERVIEW_STATE_VERSION,
-      runId: input.runId,
-      nodeId: input.nodeId,
-      executionId: input.executionId,
-      attempt: input.attempt,
-      waitOccurrence: (existing?.waitOccurrence ?? 0) + 1,
-      status: "pending",
-      questions: structuredClone(input.questions),
-      questionSetSha256,
-      createdAt: now,
-      updatedAt: now,
-      deadlineAt: Math.floor(input.deadlineAt),
-    };
-    await this.persist(state);
-    return { state, event: waitingEvent(state) };
   }
 
   async answer(
@@ -289,46 +373,57 @@ export class PromptOptimizationInterviewContract {
     }
     const invalid = validateAnswer(answer);
     if (invalid) throw new Error(`Invalid prompt optimization interview answer: ${invalid}`);
-    const state = await this.read(runId, nodeId);
-    if (!state) throw new Error("No durable prompt optimization interview exists for this run and node.");
-    if (state.status !== "pending") {
-      throw new Error(`Prompt optimization interview is already ${state.status}.`);
-    }
-    const now = Math.max(0, Math.floor(this.now()));
-    if (now >= state.deadlineAt) return this.timeout(runId, nodeId);
-    if (!answer.cancelled) {
-      const answerable = new Set(
-        state.questions.questions.filter((question) => question.type !== "info").map((question) => question.id),
-      );
-      const seen = new Set<string>();
-      for (const response of answer.responses) {
-        if (!answerable.has(response.id) || seen.has(response.id)) {
-          throw new Error(`Invalid or duplicate prompt optimization interview response id: ${response.id}`);
+    for (;;) {
+      const state = await this.read(runId, nodeId);
+      if (!state) throw new Error("No durable prompt optimization interview exists for this run and node.");
+      if (state.status !== "pending") {
+        // Successful terminal answer writes are idempotent. A timeout remains
+        // a rejected late submission rather than being reported as an answer.
+        if (state.status === "answered" || state.status === "cancelled") {
+          return { state, event: resumedEvent(state) };
         }
-        seen.add(response.id);
+        throw new Error(`Prompt optimization interview is already ${state.status}.`);
       }
+      const now = Math.max(0, Math.floor(this.now()));
+      if (now >= state.deadlineAt) return this.timeout(runId, nodeId);
+      if (!answer.cancelled) {
+        const answerable = new Set(
+          state.questions.questions.filter((question) => question.type !== "info").map((question) => question.id),
+        );
+        const seen = new Set<string>();
+        for (const response of answer.responses) {
+          if (!answerable.has(response.id) || seen.has(response.id)) {
+            throw new Error(`Invalid or duplicate prompt optimization interview response id: ${response.id}`);
+          }
+          seen.add(response.id);
+        }
+      }
+      const next: PromptOptimizationInterviewStateV1 = {
+        ...state,
+        status: answer.cancelled ? "cancelled" : "answered",
+        answer: structuredClone(answer),
+        updatedAt: now,
+      };
+      const committed = await this.compareAndSwap(runId, nodeId, state.revision, next);
+      if (!committed.swapped || !committed.state) continue;
+      return { state: committed.state, event: resumedEvent(committed.state) };
     }
-    const next: PromptOptimizationInterviewStateV1 = {
-      ...state,
-      status: answer.cancelled ? "cancelled" : "answered",
-      answer: structuredClone(answer),
-      updatedAt: now,
-    };
-    await this.persist(next);
-    return { state: next, event: resumedEvent(next) };
   }
 
   async timeout(runId: string, nodeId: string): Promise<PromptOptimizationInterviewTransition> {
-    const state = await this.read(runId, nodeId);
-    if (!state) throw new Error("No durable prompt optimization interview exists for this run and node.");
-    if (state.status !== "pending") return { state, event: resumedEvent(state) };
-    const next: PromptOptimizationInterviewStateV1 = {
-      ...state,
-      status: "timed-out",
-      updatedAt: Math.max(0, Math.floor(this.now())),
-    };
-    await this.persist(next);
-    return { state: next, event: resumedEvent(next) };
+    for (;;) {
+      const state = await this.read(runId, nodeId);
+      if (!state) throw new Error("No durable prompt optimization interview exists for this run and node.");
+      if (state.status !== "pending") return { state, event: resumedEvent(state) };
+      const next: PromptOptimizationInterviewStateV1 = {
+        ...state,
+        status: "timed-out",
+        updatedAt: Math.max(0, Math.floor(this.now())),
+      };
+      const committed = await this.compareAndSwap(runId, nodeId, state.revision, next);
+      if (!committed.swapped || !committed.state) continue;
+      return { state: committed.state, event: resumedEvent(committed.state) };
+    }
   }
 
   async waitForAnswer(

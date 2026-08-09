@@ -7,6 +7,7 @@ import {
   PromptOptimizationArtifactSchema,
   PromptOptimizationEnvelopeError,
   PromptOptimizationNodeSchema,
+  PROMPT_OPTIMIZATION_INTERVIEW_PREFIX,
   createTypedWorkflowPromptDeliberationPort,
   executePromptOptimizationNode,
   validatePromptOptimizationNode,
@@ -20,9 +21,13 @@ import { handlePromptOptimizationInterviewAnswer } from "../src/workflows/prompt
 import {
   promptOptimizationModelCallSlots,
 } from "../src/workflows/prompt-opt-model-slots.ts";
+import { promptOptimizationArtifactPath } from "../src/workflows/prompt-opt-artifact-path.ts";
 import { NodeSpecV1Schema, type WorkflowGraphDocument } from "../src/workflows/schema.ts";
 import type { WorkflowModelResolutionReceipt } from "../src/workflows/run-state.ts";
-import type { WorkflowNodeExecutor } from "../src/workflows/runner.ts";
+import {
+  verifyWorkflowArtifactReceipt,
+  type WorkflowNodeExecutor,
+} from "../src/workflows/runner.ts";
 import type { WorkflowValidationIssue } from "../src/workflows/validate.ts";
 
 const temporaryDirectories: string[] = [];
@@ -122,6 +127,15 @@ function graph(overrides: Record<string, unknown> = {}) {
     }],
     ...overrides,
   };
+}
+
+function runArtifactPath(runId: string, attempt = 1): string {
+  return promptOptimizationArtifactPath({
+    declaredPath: artifactPath,
+    runId,
+    nodeId: "optimize-prompt",
+    attempt,
+  });
 }
 
 function sourceContextFor(
@@ -504,6 +518,91 @@ describe("prompt-optimization node", () => {
     expect(writeDurableEvent).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps a submitted answer when stale recovery races and proceeds with it", async () => {
+    const sandboxPath = await temporarySandbox();
+    const firstProcess = createPromptOptimizationInterviewContract({ sandboxPath, now: () => 1_000 });
+    const interviewUser = {
+      title: "Optimization constraints",
+      description: "Clarify the target audience.",
+      questions: [{ id: "audience", type: "text" as const, question: "Audience?" }],
+    };
+    const persistedQuestions = {
+      ...interviewUser,
+      description: `${PROMPT_OPTIMIZATION_INTERVIEW_PREFIX}${interviewUser.description}`,
+    };
+    await firstProcess.launch({
+      runId: "run-answer-race",
+      nodeId: "optimize-prompt",
+      executionId: "execution-answer-race",
+      attempt: 1,
+      deadlineAt: 61_000,
+      questions: persistedQuestions,
+    });
+
+    const recoveringProcess = createPromptOptimizationInterviewContract({
+      sandboxPath,
+      now: () => 2_000,
+    });
+    type CompareAndSwap = (...args: unknown[]) => Promise<unknown>;
+    const mutableRecovery = recoveringProcess as unknown as { compareAndSwap: CompareAndSwap };
+    const originalCompareAndSwap = mutableRecovery.compareAndSwap.bind(recoveringProcess);
+    let allowRecovery!: () => void;
+    let recoveryReachedCompare!: () => void;
+    const recoveryGate = new Promise<void>((resolve) => { allowRecovery = resolve; });
+    const recoveryReached = new Promise<void>((resolve) => { recoveryReachedCompare = resolve; });
+    mutableRecovery.compareAndSwap = async (...args) => {
+      recoveryReachedCompare();
+      await recoveryGate;
+      return originalCompareAndSwap(...args);
+    };
+    const recovery = recoveringProcess.launch({
+      runId: "run-answer-race",
+      nodeId: "optimize-prompt",
+      executionId: "execution-answer-race",
+      attempt: 1,
+      deadlineAt: 61_000,
+      questions: structuredClone(persistedQuestions),
+    });
+    await recoveryReached;
+
+    const submitted = await firstProcess.answer("run-answer-race", "optimize-prompt", {
+      responses: [{ id: "audience", value: "domain experts" }],
+    });
+    allowRecovery();
+    const recovered = await recovery;
+    expect(submitted.state.status).toBe("answered");
+    expect(recovered.state).toMatchObject({
+      status: "answered",
+      answer: { responses: [{ id: "audience", value: "domain experts" }] },
+    });
+    const idempotentSubmit = await firstProcess.answer("run-answer-race", "optimize-prompt", {
+      responses: [{ id: "audience", value: "domain experts" }],
+    });
+    expect(idempotentSubmit.state.revision).toBe(submitted.state.revision);
+
+    const deliberate = vi.fn(iterativeDeliberation().deliberate);
+    const durableEvents = vi.fn(discardDurableEvent);
+    const result = await executePromptOptimizationNode({
+      projectId: "project-a",
+      sandboxPath,
+      runId: "run-answer-race",
+      executionId: "execution-answer-race",
+      attempt: 1,
+      graph: graph(),
+      node: node({ iterations: 1, interviewUser }),
+      deliberation: { deliberate },
+      writeDurableEvent: durableEvents,
+      interviewContract: recoveringProcess,
+      writeArtifact: memoryWriter,
+      now: () => 2_000,
+    });
+    expect(durableEvents).not.toHaveBeenCalled();
+    expect(deliberate.mock.calls[0][0].interview?.responses).toEqual([
+      { id: "audience", value: "domain experts" },
+    ]);
+    expect(result.artifact.interview?.responses[0].value).toBe("domain experts");
+  });
+
   it("routes the toggle through typed council/fusion and propagates policies", async () => {
     const seen: Array<PromptOptimizationNodeExecutorContext["node"]> = [];
     const typedExecutor: WorkflowNodeExecutor = async (context) => {
@@ -728,15 +827,50 @@ describe("prompt-optimization node", () => {
       winningPrompt: "Summarize the experiment. Revision 1. Revision 2.",
       envelope: { spentTokens: 2, spentCostUsd: 0.02 },
     });
+    const expectedArtifactPath = runArtifactPath("run-artifact");
     expect(result.artifactReference).toMatchObject({
-      path: artifactPath,
+      path: expectedArtifactPath,
       size: expect.any(Number),
       sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
     expect(result.artifacts).toEqual([result.artifactReference]);
-    expect(JSON.parse(await fs.readFile(path.join(sandboxPath, artifactPath), "utf8")))
+    expect(JSON.parse(await fs.readFile(path.join(sandboxPath, expectedArtifactPath), "utf8")))
       .toEqual(result.artifact);
     expect(result.completionEvent.data?.artifacts).toEqual([result.artifactReference]);
+  });
+
+  it("writes concurrent runs to distinct run+node+attempt artifacts with valid receipts", async () => {
+    const sandboxPath = await temporarySandbox();
+    const executeRun = (runId: string, executionId: string) => executePromptOptimizationNode({
+      projectId: "project-a",
+      sandboxPath,
+      runId,
+      executionId,
+      attempt: 1,
+      graph: graph(),
+      node: node({ iterations: 1 }),
+      deliberation: iterativeDeliberation(),
+      writeDurableEvent: discardDurableEvent,
+      now: () => 10_000,
+    });
+    const [first, second] = await Promise.all([
+      executeRun("run-concurrent-a", "execution-concurrent-a"),
+      executeRun("run-concurrent-b", "execution-concurrent-b"),
+    ]);
+    expect(first.artifactReference.path).toBe(runArtifactPath("run-concurrent-a"));
+    expect(second.artifactReference.path).toBe(runArtifactPath("run-concurrent-b"));
+    expect(first.artifactReference.path).not.toBe(second.artifactReference.path);
+    expect(first.artifactReference.path).toContain("/node-optimize-prompt-");
+    expect(first.artifactReference.path).toContain("/attempt-1.json");
+    expect(runArtifactPath("run-concurrent-a", 2)).not.toBe(first.artifactReference.path);
+    expect(verifyWorkflowArtifactReceipt({ sandbox: sandboxPath }, first.artifactReference))
+      .toEqual(first.artifactReference);
+    expect(verifyWorkflowArtifactReceipt({ sandbox: sandboxPath }, second.artifactReference))
+      .toEqual(second.artifactReference);
+    expect(JSON.parse(await fs.readFile(path.join(sandboxPath, first.artifactReference.path), "utf8")))
+      .toMatchObject({ runId: "run-concurrent-a", nodeId: "optimize-prompt" });
+    expect(JSON.parse(await fs.readFile(path.join(sandboxPath, second.artifactReference.path), "utf8")))
+      .toMatchObject({ runId: "run-concurrent-b", nodeId: "optimize-prompt" });
   });
 
   it("leaves no orphaned declared artifact when deliberation fails mid-run", async () => {
@@ -764,6 +898,7 @@ describe("prompt-optimization node", () => {
       writeDurableEvent: discardDurableEvent,
       now: () => 1_000,
     })).rejects.toThrow("provider failed");
-    await expect(fs.stat(path.join(sandboxPath, artifactPath))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.stat(path.join(sandboxPath, runArtifactPath("run-failure"))))
+      .rejects.toMatchObject({ code: "ENOENT" });
   });
 });

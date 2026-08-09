@@ -35,6 +35,14 @@ The S6 test imports remain direct and do not depend on these edits.
   - `    case "prompt-optimization": return promptOptimizationModelCallSlots(node);`
 - `server/src/workflows/run-state.ts` — anchor: inside `receiptMatchesNode(...)`, replace the `);` that immediately closes `const compoundRuntimeAllowed = node.kind === "fusion" && (`
   - `    ) || (node.kind === "prompt-optimization" && promptOptimizationAllowsCompoundRuntime(node, receipt.resolved.runtime));`
+- `server/src/workflows/runner.ts` — anchor: with the workflow imports at the top of the file
+  - `import { promptOptimizationArtifactPath } from "./prompt-opt-artifact-path.ts";`
+- `server/src/workflows/runner.ts` — anchor: inside `normalizeArtifacts(...)`, immediately after the parameter line `  executionId: string,`
+  - `  attempt: number,`
+- `server/src/workflows/runner.ts` — anchor: inside `normalizeArtifacts(...)`, replace the predicate line `(declared) => declared.writerNodeId === node.id && declared.path === artifact.path,`
+  - `      (declared) => declared.writerNodeId === node.id && (declared.path === artifact.path || (node.kind === "prompt-optimization" && declared.path !== undefined && promptOptimizationArtifactPath({ declaredPath: declared.path, runId, nodeId: node.id, attempt }) === artifact.path)),`
+- `server/src/workflows/runner.ts` — anchor: in the `normalizeArtifacts(...)` call, immediately after the argument line `        executionId,`
+  - `        attempt,`
 - `server/src/workflows/runner.ts` — anchor: inside the object passed to `executeNode(...)`, immediately before the exact line `        signal,`
   - `        ...(node.kind === "prompt-optimization" ? { writeDurableEvent: ({ eventId, ...event }: WorkflowRunEventInput) => { writer.append("prompt-optimization-event", [node.id, attempt, eventId], event); } } : {}),`
 
@@ -60,7 +68,7 @@ the runner lease and event sequence.
 ## E. NodeSpec v1 enforcement-table additions
 
 - `docs/contracts/NODESPEC-V1.md` — anchor: enforcement table, immediately after the `reasoningEffort` row
-  - `| Prompt optimization node \`interviewUser\` | BOUND — occurrence-aware run+node state hashes the question set, reuses matching answered state across retries, durably writes fresh valid run_waiting/run_resumed transitions after recovery, folds answers into every iteration, and rejects placement downstream of concurrent fan-out while waiting remains run-scoped |`
+  - `| Prompt optimization node \`interviewUser\` | BOUND — revisioned compare-and-swap makes submitted answers terminal and idempotent, occurrence-aware run+node state hashes the question set, reuses matching answered state across retries, durably writes fresh valid run_waiting/run_resumed transitions after recovery, folds answers into every iteration, and rejects placement downstream of concurrent fan-out while waiting remains run-scoped |`
 - `docs/contracts/NODESPEC-V1.md` — anchor: immediately after the preceding S6 row
   - `| Prompt optimization node \`fusionDeliberation.enabled\` | BOUND — false dispatches typed council deliberation; true requires and dispatches the typed Fusion configuration; configured council/Kady-panel child rounds execute independently inside the outer optimization-iteration cap |`
 - `docs/contracts/NODESPEC-V1.md` — anchor: immediately after the preceding S6 row
@@ -70,7 +78,7 @@ the runner lease and event sequence.
 - `docs/contracts/NODESPEC-V1.md` — anchor: immediately after the preceding S6 row
   - `| Prompt optimization evidence policy | FAIL-CLOSED(S6) — node overrides or enabled workflow evidence are rejected before provider calls pending full evaluator support |`
 - `docs/contracts/NODESPEC-V1.md` — anchor: immediately after the preceding S6 row
-  - `| Prompt optimization \`artifactId\` / artifact v1 | BOUND — the host atomically writes the exact graph-declared owned path and returns a checksummed runner-normalized receipt containing original prompt, iterations, winner, rationale, and cumulative usage |`
+  - `| Prompt optimization \`artifactId\` / artifact v1 | BOUND — the graph-declared owned path is a namespace; the host atomically writes a unique run+node+attempt child path and returns a checksummed runner-normalized receipt containing original prompt, iterations, winner, rationale, and cumulative usage |`
 
 No pre-existing `FAIL-CLOSED(S6)` row exists at contract freeze `03f9eb3`; the
 merge adds the BOUND rows above plus the explicit evidence-policy fail-closed row.
