@@ -287,22 +287,23 @@ const MOCK_CONV = {
   codebase_id: null,
 };
 
-function makeApp(): { app: OpenAPIHono; mockWebAdapter: WebAdapter } {
+function makeApp() {
   const app = new OpenAPIHono({ defaultHook: validationErrorHook });
   const mockWebAdapter = {
     setConversationDbId: mock((_platformId: string, _dbId: string) => {}),
     emitSSE: mock(async () => {}),
     emitLockEvent: mock(async () => {}),
   } as unknown as WebAdapter;
+  const mockAcquireLock = mock(async (_id: string, fn: () => Promise<void>) => {
+    await fn();
+    return { status: 'started' };
+  });
   const mockLockManager = {
-    acquireLock: mock(async (_id: string, fn: () => Promise<void>) => {
-      await fn();
-      return { status: 'started' };
-    }),
+    acquireLock: mockAcquireLock,
     getStats: mock(() => ({ active: 0, queued: 0 })),
   } as unknown as ConversationLockManager;
   registerApiRoutes(app, mockWebAdapter, mockLockManager);
-  return { app, mockWebAdapter };
+  return { app, mockWebAdapter, mockAcquireLock };
 }
 
 // ---------------------------------------------------------------------------
@@ -1075,13 +1076,24 @@ describe('GET /api/workflows/runs/by-worker/:platformId', () => {
   });
 });
 
-function expectShippedRecoveryGuidance(message: string, runId: string): void {
-  expect(message).toContain(`POST /api/workflows/runs/${runId}/resume`);
-  expect(message).toContain(`/legacy/workflows/runs/${runId}`);
-  const retiredCliNames = ['pipeline-engine', ['arc', 'hon'].join('')];
-  for (const cliName of retiredCliNames) {
-    expect(message.toLowerCase()).not.toContain(`${cliName} `);
-  }
+function expectNonResumableRecovery(
+  body: {
+    error?: string;
+    message?: string;
+    resumable?: boolean;
+    restartRequired?: boolean;
+    restartWarning?: string;
+  },
+  runId: string
+): void {
+  const guidance = body.error ?? body.message ?? '';
+  expect(body.resumable).toBe(false);
+  expect(body.restartRequired).toBe(true);
+  expect(body.restartWarning).toContain('repeat side effects');
+  expect(body.restartWarning).toContain('additional cost');
+  expect(guidance).toContain('Start a new run');
+  expect(guidance).not.toContain(`/api/workflows/runs/${runId}/resume`);
+  expect(guidance).not.toContain(`/legacy/workflows/runs/${runId}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1115,7 +1127,7 @@ describe('POST /api/workflows/runs/:runId/resume', () => {
     expect(body.error).toContain('Cannot resume');
   });
 
-  test('returns 400 with shipped recovery surfaces when run has no parent_conversation_id', async () => {
+  test('marks a run without a parent conversation non-resumable', async () => {
     mockGetWorkflowRun.mockResolvedValueOnce({
       ...MOCK_FAILED_RUN,
       parent_conversation_id: null,
@@ -1125,8 +1137,8 @@ describe('POST /api/workflows/runs/:runId/resume', () => {
       method: 'POST',
     });
     expect(response.status).toBe(400);
-    const body = (await response.json()) as { error: string };
-    expectShippedRecoveryGuidance(body.error, 'run-uuid-4');
+    const body = (await response.json()) as { error: string; resumable: boolean };
+    expectNonResumableRecovery(body, 'run-uuid-4');
     expect(mockHandleMessage).not.toHaveBeenCalled();
   });
 
@@ -1141,6 +1153,8 @@ describe('POST /api/workflows/runs/:runId/resume', () => {
       method: 'POST',
     });
     expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: string; resumable: boolean };
+    expectNonResumableRecovery(body, 'run-uuid-4');
     expect(mockHandleMessage).not.toHaveBeenCalled();
   });
 
@@ -1161,8 +1175,8 @@ describe('POST /api/workflows/runs/:runId/resume', () => {
       method: 'POST',
     });
     expect(response.status).toBe(400);
-    const body = (await response.json()) as { error: string };
-    expectShippedRecoveryGuidance(body.error, 'run-uuid-4');
+    const body = (await response.json()) as { error: string; resumable: boolean };
+    expectNonResumableRecovery(body, 'run-uuid-4');
     expect(mockHandleMessage).not.toHaveBeenCalled();
   });
 
@@ -1462,9 +1476,13 @@ describe('POST /api/workflows/runs/:runId/reject', () => {
       headers: { 'Content-Type': 'application/json' },
     });
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { success: boolean; message: string };
+    const body = (await response.json()) as {
+      success: boolean;
+      message: string;
+      resumable: boolean;
+    };
     expect(body.success).toBe(true);
-    expect(body.message).toContain('On-reject prompt');
+    expectNonResumableRecovery(body, 'run-paused-1');
     expect(mockUpdateWorkflowRun).toHaveBeenCalledWith('run-on-reject', {
       status: 'failed',
       metadata: { rejection_reason: 'needs more tests', rejection_count: 1 },
@@ -1553,6 +1571,52 @@ describe('approve/reject auto-resume', () => {
     expect(dispatchedMessage).toBe('/workflow run deploy Deploy feature X');
   });
 
+  test('approve: an advertised HTTP recovery action succeeds after dispatch failure', async () => {
+    const runId = 'run-auto-resume-retry';
+    const parentConversation = {
+      id: 'parent-conv-uuid',
+      platform_conversation_id: 'web-plat-retry',
+      platform_type: 'web',
+    };
+    mockGetWorkflowRun
+      .mockResolvedValueOnce({
+        ...MOCK_PAUSED_RUN,
+        id: runId,
+        parent_conversation_id: parentConversation.id,
+      })
+      .mockResolvedValueOnce({
+        ...MOCK_FAILED_RUN,
+        id: runId,
+        parent_conversation_id: parentConversation.id,
+      });
+    mockGetConversationById
+      .mockResolvedValueOnce(parentConversation)
+      .mockResolvedValueOnce(parentConversation);
+    mockHandleMessage.mockImplementationOnce(async () => {});
+
+    const { app, mockAcquireLock } = makeApp();
+    mockAcquireLock.mockImplementationOnce(async () => {
+      throw new Error('temporary dispatch failure');
+    });
+    const approveResponse = await app.request(`/api/workflows/runs/${runId}/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ comment: 'LGTM' }),
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    expect(approveResponse.status).toBe(200);
+    const approveBody = (await approveResponse.json()) as { message: string };
+    expect(approveBody.message).toContain(`POST /api/workflows/runs/${runId}/resume`);
+    expect(approveBody.message).not.toContain(`/legacy/workflows/runs/${runId}`);
+
+    const resumeResponse = await app.request(`/api/workflows/runs/${runId}/resume`, {
+      method: 'POST',
+    });
+    expect(resumeResponse.status).toBe(200);
+    const resumeBody = (await resumeResponse.json()) as { success: boolean };
+    expect(resumeBody.success).toBe(true);
+  });
+
   test('approve: skips dispatch when parent_conversation_id is null (CLI-dispatched run)', async () => {
     mockGetWorkflowRun.mockResolvedValueOnce({
       ...MOCK_PAUSED_RUN,
@@ -1567,8 +1631,8 @@ describe('approve/reject auto-resume', () => {
     });
 
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { message: string };
-    expectShippedRecoveryGuidance(body.message, 'run-paused-1');
+    const body = (await response.json()) as { message: string; resumable: boolean };
+    expectNonResumableRecovery(body, 'run-paused-1');
     expect(mockHandleMessage).not.toHaveBeenCalled();
     expect(mockGetConversationById).not.toHaveBeenCalled();
   });
@@ -1588,8 +1652,8 @@ describe('approve/reject auto-resume', () => {
     });
 
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { message: string };
-    expectShippedRecoveryGuidance(body.message, 'run-paused-1');
+    const body = (await response.json()) as { message: string; resumable: boolean };
+    expectNonResumableRecovery(body, 'run-paused-1');
     expect(mockHandleMessage).not.toHaveBeenCalled();
   });
 
@@ -1616,8 +1680,8 @@ describe('approve/reject auto-resume', () => {
     });
 
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { message: string };
-    expectShippedRecoveryGuidance(body.message, 'run-paused-1');
+    const body = (await response.json()) as { message: string; resumable: boolean };
+    expectNonResumableRecovery(body, 'run-paused-1');
     expect(mockHandleMessage).not.toHaveBeenCalled();
   });
 
@@ -1664,7 +1728,7 @@ describe('approve/reject auto-resume', () => {
     expect(dispatchedMessage).toBe('/workflow run deploy Review PR');
   });
 
-  test('reject: surfaces shipped recovery paths when on_reject parent is non-web', async () => {
+  test('reject: marks an on_reject run with a non-web parent non-resumable', async () => {
     mockGetWorkflowRun.mockResolvedValueOnce({
       ...MOCK_PAUSED_RUN,
       id: 'run-reject-non-web',
@@ -1694,8 +1758,8 @@ describe('approve/reject auto-resume', () => {
     });
 
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { message: string };
-    expectShippedRecoveryGuidance(body.message, 'run-reject-non-web');
+    const body = (await response.json()) as { message: string; resumable: boolean };
+    expectNonResumableRecovery(body, 'run-reject-non-web');
     expect(mockHandleMessage).not.toHaveBeenCalled();
   });
 

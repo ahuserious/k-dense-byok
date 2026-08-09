@@ -253,6 +253,17 @@ const cwdQuerySchema = z.object({ cwd: z.string().optional() });
 const workflowTargetQuerySchema = cwdQuerySchema.extend({
   source: z.enum(['project', 'global']).optional(),
 });
+const workflowRunNonResumableResponseSchema = z.object({
+  error: z.string(),
+  resumable: z.literal(false),
+  restartRequired: z.literal(true),
+  restartWarning: z.string(),
+});
+const workflowRunGateActionResponseSchema = workflowRunActionResponseSchema.extend({
+  resumable: z.literal(false).optional(),
+  restartRequired: z.literal(true).optional(),
+  restartWarning: z.string().optional(),
+});
 
 const getWorkflowsRoute = createRoute({
   method: 'get',
@@ -760,7 +771,14 @@ const resumeWorkflowRunRoute = createRoute({
       content: { 'application/json': { schema: workflowRunActionResponseSchema } },
       description: 'Resumed',
     },
-    400: jsonError('Bad request'),
+    400: {
+      content: {
+        'application/json': {
+          schema: z.union([errorSchema, workflowRunNonResumableResponseSchema]),
+        },
+      },
+      description: 'Bad request or run without a resumable web origin',
+    },
     404: jsonError('Not found'),
     500: jsonError('Server error'),
   },
@@ -794,7 +812,7 @@ const approveWorkflowRunRoute = createRoute({
   },
   responses: {
     200: {
-      content: { 'application/json': { schema: workflowRunActionResponseSchema } },
+      content: { 'application/json': { schema: workflowRunGateActionResponseSchema } },
       description: 'Approved',
     },
     400: jsonError('Bad request'),
@@ -814,7 +832,7 @@ const rejectWorkflowRunRoute = createRoute({
   },
   responses: {
     200: {
-      content: { 'application/json': { schema: workflowRunActionResponseSchema } },
+      content: { 'application/json': { schema: workflowRunGateActionResponseSchema } },
       description: 'Rejected',
     },
     400: jsonError('Bad request'),
@@ -1038,7 +1056,7 @@ const githubDeviceStartRoute = createRoute({
       content: { 'application/json': { schema: deviceStartResponseSchema } },
       description: 'Device + user codes',
     },
-    401: jsonError('Web auth required (X-Pipeline-User header missing)'),
+    401: jsonError('Web authentication required'),
     500: jsonError('Device flow not configured or failed'),
   },
 });
@@ -1056,7 +1074,7 @@ const githubDevicePollRoute = createRoute({
       content: { 'application/json': { schema: devicePollResponseSchema } },
       description: 'Poll status',
     },
-    401: jsonError('Web auth required (X-Pipeline-User header missing)'),
+    401: jsonError('Web authentication required'),
     500: jsonError('Device flow not configured or failed'),
   },
 });
@@ -1071,7 +1089,7 @@ const githubConnectionStatusRoute = createRoute({
       content: { 'application/json': { schema: githubConnectionStatusSchema } },
       description: 'Connection status',
     },
-    401: jsonError('Web auth required (X-Pipeline-User header missing)'),
+    401: jsonError('Web authentication required'),
   },
 });
 
@@ -1085,7 +1103,7 @@ const githubDisconnectRoute = createRoute({
       content: { 'application/json': { schema: githubDisconnectResponseSchema } },
       description: 'Disconnected',
     },
-    401: jsonError('Web auth required (X-Pipeline-User header missing)'),
+    401: jsonError('Web authentication required'),
   },
 });
 
@@ -1100,7 +1118,7 @@ const providerKeyListRoute = createRoute({
       content: { 'application/json': { schema: providerKeyListResponseSchema } },
       description: 'Connections (metadata only) + connectable provider catalog',
     },
-    401: jsonError('Web auth required (X-Pipeline-User header missing)'),
+    401: jsonError('Web authentication required'),
   },
 });
 
@@ -1119,7 +1137,7 @@ const providerKeySetRoute = createRoute({
       description: 'Key stored (encrypted); response carries no secret value',
     },
     400: jsonError('Unknown provider or empty key'),
-    401: jsonError('Web auth required (X-Pipeline-User header missing)'),
+    401: jsonError('Web authentication required'),
     404: jsonError('Per-user provider keys not enabled on this install'),
   },
 });
@@ -1135,7 +1153,7 @@ const providerKeyDeleteRoute = createRoute({
       content: { 'application/json': { schema: providerKeyDeleteResponseSchema } },
       description: 'Disconnected (idempotent)',
     },
-    401: jsonError('Web auth required (X-Pipeline-User header missing)'),
+    401: jsonError('Web authentication required'),
     404: jsonError('Per-user provider keys not enabled on this install'),
   },
 });
@@ -1152,7 +1170,7 @@ const providerOAuthStartRoute = createRoute({
       description: 'Login session started (mode + URL/user-code)',
     },
     400: jsonError('Provider does not support subscription login'),
-    401: jsonError('Web auth required (X-Pipeline-User header missing)'),
+    401: jsonError('Web authentication required'),
     404: jsonError('Per-user provider keys not enabled on this install'),
     503: jsonError('OAuth callback port still held by a previous login attempt — retry shortly'),
   },
@@ -1172,7 +1190,7 @@ const providerOAuthPollRoute = createRoute({
       content: { 'application/json': { schema: providerOAuthPollResponseSchema } },
       description: 'Poll status',
     },
-    401: jsonError('Web auth required (X-Pipeline-User header missing)'),
+    401: jsonError('Web authentication required'),
     404: jsonError('Per-user provider keys not enabled on this install'),
   },
 });
@@ -1356,42 +1374,58 @@ export function registerApiRoutes(
   type ProxyIdentityHeader =
     | { status: 'missing' }
     | { status: 'conflict' }
-    | { status: 'present'; value: string; legacyHeaderUsed: boolean };
+    | { status: 'present'; value: string };
 
-  function readProxyIdentityHeader(c: Context): ProxyIdentityHeader {
-    const configuredHeaderName = process.env.ARCHON_WEB_AUTH_HEADER?.trim();
-    if (configuredHeaderName) {
-      const value = c.req.header(configuredHeaderName)?.trim();
-      return value
-        ? { status: 'present', value, legacyHeaderUsed: false }
-        : { status: 'missing' };
-    }
+  type TrustedProxyIdentityHeader = {
+    name: string;
+    source: 'pipeline-env' | 'legacy-env' | 'legacy-default';
+  };
 
-    const canonicalValue = c.req.header(CANONICAL_WEB_IDENTITY_HEADER)?.trim();
-    const legacyValue = c.req.header(LEGACY_WEB_IDENTITY_HEADER)?.trim();
-    if (canonicalValue && legacyValue && canonicalValue !== legacyValue) {
-      return { status: 'conflict' };
-    }
-    if (canonicalValue) {
-      return { status: 'present', value: canonicalValue, legacyHeaderUsed: Boolean(legacyValue) };
-    }
-    if (legacyValue) {
-      return { status: 'present', value: legacyValue, legacyHeaderUsed: true };
-    }
-    return { status: 'missing' };
+  function resolveTrustedProxyIdentityHeader(): TrustedProxyIdentityHeader {
+    const canonicalOverride = process.env.PIPELINE_WEB_AUTH_HEADER?.trim();
+    if (canonicalOverride) return { name: canonicalOverride, source: 'pipeline-env' };
+
+    const legacyOverride = process.env.ARCHON_WEB_AUTH_HEADER?.trim();
+    if (legacyOverride) return { name: legacyOverride, source: 'legacy-env' };
+
+    return { name: LEGACY_WEB_IDENTITY_HEADER, source: 'legacy-default' };
   }
 
-  function warnIfLegacyIdentityHeaderUsed(header: ProxyIdentityHeader): void {
-    if (header.status !== 'present' || !header.legacyHeaderUsed) return;
-    if (legacyWebIdentityHeaderWarningLogged) return;
+  const trustedProxyIdentityHeader = resolveTrustedProxyIdentityHeader();
+
+  function warnIfLegacyIdentityHeaderConfigured(header: TrustedProxyIdentityHeader): void {
+    if (header.source === 'pipeline-env' || legacyWebIdentityHeaderWarningLogged) return;
     legacyWebIdentityHeaderWarningLogged = true;
     getLog().warn(
       {
-        legacyHeader: LEGACY_WEB_IDENTITY_HEADER,
-        replacementHeader: CANONICAL_WEB_IDENTITY_HEADER,
+        trustedHeader: header.name,
+        legacySource:
+          header.source === 'legacy-env' ? 'ARCHON_WEB_AUTH_HEADER' : 'legacy-default',
+        replacementEnv: 'PIPELINE_WEB_AUTH_HEADER',
       },
       'web_auth.legacy_identity_header_deprecated'
     );
+  }
+
+  // Resolve and warn at route-registration/startup time, not only after the
+  // first authenticated request, so an unsafe legacy deployment is visible
+  // before it serves traffic.
+  warnIfLegacyIdentityHeaderConfigured(trustedProxyIdentityHeader);
+
+  function readProxyIdentityHeader(c: Context): ProxyIdentityHeader {
+    const trustedValue = c.req.header(trustedProxyIdentityHeader.name)?.trim();
+    if (trustedValue) {
+      for (const knownHeader of [
+        CANONICAL_WEB_IDENTITY_HEADER,
+        LEGACY_WEB_IDENTITY_HEADER,
+      ]) {
+        if (knownHeader.toLowerCase() === trustedProxyIdentityHeader.name.toLowerCase()) continue;
+        const untrustedValue = c.req.header(knownHeader)?.trim();
+        if (untrustedValue && untrustedValue !== trustedValue) return { status: 'conflict' };
+      }
+      return { status: 'present', value: trustedValue };
+    }
+    return { status: 'missing' };
   }
 
   // Reject ambiguous proxy identities even when the optional API gate is off:
@@ -1413,8 +1447,9 @@ export function registerApiRoutes(
   // /api/* and untouched. No-op when web auth is disabled (solo/local unchanged).
   // `resolveAuthContext`/`apiError` are function declarations below → hoisted.
   //
-  // SECURITY: resolveAuthContext also accepts the trusted reverse-proxy header
-  // (ARCHON_WEB_AUTH_HEADER, default `X-Pipeline-User`) as an identity. That header
+  // SECURITY: resolveAuthContext also accepts exactly one trusted reverse-proxy
+  // header (PIPELINE_WEB_AUTH_HEADER, then deprecated ARCHON_WEB_AUTH_HEADER,
+  // then the legacy default `X-Archon-User`) as an identity. That header
   // is only safe to trust when the app is reachable solely through a proxy that
   // STRIPS it from inbound requests (or the app binds 127.0.0.1). If you retire
   // the proxy auth sidecar, the proxy MUST still strip that header — otherwise a
@@ -1435,8 +1470,8 @@ export function registerApiRoutes(
    * old header-only seam. Resolution order:
    *   1. Better Auth session (when web auth is enabled) → canonical
    *      remote_agent_users row via the 'web' platform identity.
-   *   2. Trusted reverse-proxy header (ARCHON_WEB_AUTH_HEADER, default
-   *      `X-Pipeline-User`) — kept for proxy deploys and the auth-service sidecar.
+   *   2. The single configured trusted reverse-proxy header — kept for proxy
+   *      deploys and the auth-service sidecar.
    *   3. undefined → NULL attribution, never elevated.
    *
    * `role` rides along on the canonical user row (defaults 'admin'); it is the
@@ -1475,7 +1510,6 @@ export function registerApiRoutes(
     // 2. Trusted reverse-proxy header.
     const identityHeader = readProxyIdentityHeader(c);
     if (identityHeader.status !== 'present') return undefined;
-    warnIfLegacyIdentityHeaderUsed(identityHeader);
     try {
       const user = await userDb.findOrCreateUserByPlatformIdentity(
         'web',
@@ -1542,7 +1576,6 @@ export function registerApiRoutes(
       return { error: apiError(c, 400, 'Conflicting web identity headers') };
     }
     if (identityHeader.status === 'missing') return { error: apiError(c, 401, failMessage) };
-    warnIfLegacyIdentityHeaderUsed(identityHeader);
     try {
       const user = await userDb.findOrCreateUserByPlatformIdentity(
         'web',
@@ -2171,11 +2204,9 @@ export function registerApiRoutes(
    * `workflowApproveCommand` / `workflowRejectCommand` already auto-resume via
    * `workflowRunCommand({ resume: true })`; this is the web-side equivalent.
    *
-   * Returns `true` when a resume dispatch was initiated, `false` otherwise (no
-   * parent conversation on the run, parent conversation deleted, parent was on
-   * a non-web platform, or dispatch threw). Failures are non-fatal: the gate
-   * decision is recorded regardless; when this returns `false` the response
-   * text instructs the user to re-run the workflow command.
+   * Distinguishes a successful dispatch, a run that has no resumable web
+   * origin, and a retryable dispatch failure. The distinction prevents the API
+   * from advertising the web resume endpoint for a run class it rejects.
    *
    * **Cross-adapter guard**: only web-sourced parents qualify.
    * `dispatchToOrchestrator` is wired to the web adapter + its lock manager,
@@ -2184,6 +2215,14 @@ export function registerApiRoutes(
    * the resumed output. Non-web parents skip auto-resume and the originating
    * platform's own re-run flow applies.
    */
+  type AutoResumeAfterGateResult =
+    | { status: 'resumed' }
+    | {
+        status: 'non-resumable';
+        reason: 'missing-parent' | 'missing-web-origin' | 'non-web-parent';
+      }
+    | { status: 'retryable' };
+
   async function tryAutoResumeAfterGate(
     run: WorkflowRun,
     action: 'approve' | 'reject',
@@ -2192,8 +2231,10 @@ export function registerApiRoutes(
     // dispatch would fall back to the conversation creator's prefs/credentials.
     // Undefined on solo installs (no web identity) → creator fallback applies.
     gateActorUserId?: string
-  ): Promise<boolean> {
-    if (!run.parent_conversation_id) return false;
+  ): Promise<AutoResumeAfterGateResult> {
+    if (!run.parent_conversation_id) {
+      return { status: 'non-resumable', reason: 'missing-parent' };
+    }
     // Literal event names per action — greppable for ops tooling. Keeping the
     // branch explicit rather than templating avoids the earlier 3-segment
     // `api.workflow_*.dispatched` shape that broke `{domain}.{action}_{state}`.
@@ -2232,7 +2273,7 @@ export function registerApiRoutes(
           },
           events.skippedNoPlatformConv
         );
-        return false;
+        return { status: 'non-resumable', reason: 'missing-web-origin' };
       }
       if (parentConv.platform_type !== 'web') {
         getLog().debug(
@@ -2243,7 +2284,7 @@ export function registerApiRoutes(
           },
           events.skippedNonWebParent
         );
-        return false;
+        return { status: 'non-resumable', reason: 'non-web-parent' };
       }
       const resumeMessage = `/workflow run ${run.workflow_name} ${run.user_message ?? ''}`.trim();
       await dispatchToOrchestrator(platformConvId, resumeMessage, { userId: gateActorUserId });
@@ -2251,19 +2292,41 @@ export function registerApiRoutes(
         { runId: run.id, workflowName: run.workflow_name, platformConvId },
         events.dispatched
       );
-      return true;
+      return { status: 'resumed' };
     } catch (err) {
       getLog().warn({ err: err as Error, runId: run.id }, events.failed);
-      return false;
+      return { status: 'retryable' };
     }
+  }
+
+  const WORKFLOW_RESTART_WARNING =
+    'Before restarting, review completed work: a new run may repeat side effects and incur additional cost.';
+
+  function workflowNonResumableDetails(
+    reason: 'missing-parent' | 'missing-web-origin' | 'non-web-parent'
+  ): {
+    resumable: false;
+    restartRequired: true;
+    restartWarning: string;
+    message: string;
+  } {
+    const originReason =
+      reason === 'non-web-parent'
+        ? 'its parent conversation is not a web conversation'
+        : reason === 'missing-web-origin'
+          ? 'its parent web conversation is unavailable'
+          : 'it has no parent web conversation';
+    return {
+      resumable: false,
+      restartRequired: true,
+      restartWarning: WORKFLOW_RESTART_WARNING,
+      message: `This run is not resumable because ${originReason}. Start a new run from the workflow's original entry point. ${WORKFLOW_RESTART_WARNING}`,
+    };
   }
 
   function workflowRecoveryGuidance(runId: string): string {
     const encodedRunId = encodeURIComponent(runId);
-    return (
-      `Use the shipped \`POST /api/workflows/runs/${encodedRunId}/resume\` endpoint ` +
-      `or open \`/legacy/workflows/runs/${encodedRunId}\` in the Console.`
-    );
+    return `Use the shipped \`POST /api/workflows/runs/${encodedRunId}/resume\` endpoint.`;
   }
 
   // ---------------------------------------------------------------------------
@@ -3196,18 +3259,32 @@ export function registerApiRoutes(
       // findResumableRunByParentConversation) picks up the failed run and
       // hydrates it. Mirrors the approve/reject auto-resume path.
       if (!run.parent_conversation_id) {
-        return apiError(
-          c,
-          400,
-          `This run was created outside the web UI. ${workflowRecoveryGuidance(runId)}`
+        const recovery = workflowNonResumableDetails('missing-parent');
+        return c.json(
+          {
+            error: recovery.message,
+            resumable: recovery.resumable,
+            restartRequired: recovery.restartRequired,
+            restartWarning: recovery.restartWarning,
+          },
+          400
         );
       }
       const parentConv = await conversationDb.getConversationById(run.parent_conversation_id);
       if (!parentConv?.platform_conversation_id || parentConv.platform_type !== 'web') {
-        return apiError(
-          c,
-          400,
-          `Cannot resume from web UI: the run's parent conversation is not a web conversation. ${workflowRecoveryGuidance(runId)}`
+        const recovery = workflowNonResumableDetails(
+          parentConv?.platform_type && parentConv.platform_type !== 'web'
+            ? 'non-web-parent'
+            : 'missing-web-origin'
+        );
+        return c.json(
+          {
+            error: recovery.message,
+            resumable: recovery.resumable,
+            restartRequired: recovery.restartRequired,
+            restartWarning: recovery.restartWarning,
+          },
+          400
         );
       }
       const resumeMessage = `/workflow run ${run.workflow_name} ${run.user_message ?? ''}`.trim();
@@ -3308,13 +3385,24 @@ export function registerApiRoutes(
       // `parent_conversation_id` on the run (set by orchestrator-agent for any
       // web-dispatched workflow — foreground, interactive, and background via
       // the pre-created run) and a web-platform parent (guarded in the helper).
-      const autoResumed = await tryAutoResumeAfterGate(run, 'approve', await resolveWebUserId(c));
+      const autoResume = await tryAutoResumeAfterGate(run, 'approve', await resolveWebUserId(c));
+
+      if (autoResume.status === 'non-resumable') {
+        const recovery = workflowNonResumableDetails(autoResume.reason);
+        return c.json({
+          success: true,
+          resumable: recovery.resumable,
+          restartRequired: recovery.restartRequired,
+          restartWarning: recovery.restartWarning,
+          message: `Workflow approved: ${run.workflow_name}. ${recovery.message}`,
+        });
+      }
 
       return c.json({
         success: true,
-        message: autoResumed
+        message: autoResume.status === 'resumed'
           ? `Workflow approved: ${run.workflow_name}. Resuming workflow.`
-          : `Workflow approved: ${run.workflow_name}. ${workflowRecoveryGuidance(runId)} You can also send a new message in the originating conversation.`,
+          : `Workflow approved: ${run.workflow_name}. ${workflowRecoveryGuidance(runId)}`,
       });
     } catch (error) {
       getLog().error({ err: error, runId }, 'api.workflow_run_approve_failed');
@@ -3365,11 +3453,22 @@ export function registerApiRoutes(
         // without requiring the user to re-run the workflow command. Mirrors
         // what `workflowRejectCommand` does in the CLI. Same cross-adapter
         // guard as approve — only web parents auto-resume.
-        const autoResumed = await tryAutoResumeAfterGate(run, 'reject', await resolveWebUserId(c));
+        const autoResume = await tryAutoResumeAfterGate(run, 'reject', await resolveWebUserId(c));
+
+        if (autoResume.status === 'non-resumable') {
+          const recovery = workflowNonResumableDetails(autoResume.reason);
+          return c.json({
+            success: true,
+            resumable: recovery.resumable,
+            restartRequired: recovery.restartRequired,
+            restartWarning: recovery.restartWarning,
+            message: `Workflow rejected: ${run.workflow_name}. ${recovery.message}`,
+          });
+        }
 
         return c.json({
           success: true,
-          message: autoResumed
+          message: autoResume.status === 'resumed'
             ? `Workflow rejected: ${run.workflow_name}. Running on-reject prompt.`
             : `Workflow rejected: ${run.workflow_name}. On-reject prompt will run when the run resumes. ${workflowRecoveryGuidance(runId)}`,
         });

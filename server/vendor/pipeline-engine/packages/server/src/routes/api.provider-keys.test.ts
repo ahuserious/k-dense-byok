@@ -243,7 +243,14 @@ function makeApp(): OpenAPIHono {
     }),
     getStats: mock(() => ({ active: 0, queued: 0 })),
   } as unknown as ConversationLockManager;
-  registerApiRoutes(app, mockWebAdapter, mockLockManager);
+  const previousHeader = process.env.PIPELINE_WEB_AUTH_HEADER;
+  process.env.PIPELINE_WEB_AUTH_HEADER = 'X-Pipeline-User';
+  try {
+    registerApiRoutes(app, mockWebAdapter, mockLockManager);
+  } finally {
+    if (previousHeader === undefined) delete process.env.PIPELINE_WEB_AUTH_HEADER;
+    else process.env.PIPELINE_WEB_AUTH_HEADER = previousHeader;
+  }
   return app;
 }
 

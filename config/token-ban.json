@@ -107,6 +107,16 @@
       "path": "server/vendor/pipeline-engine/packages/core/src/config/config-types.ts",
       "identifiers": ["archon"],
       "comment": "deprecated-compat: previous default forge identity accepted for matching only"
+    },
+    {
+      "path": "server/src/agent/skills.ts",
+      "identifiers": ["archon"],
+      "comment": "deprecated-compat: fingerprinted removed committed skill retired during seeded-project upgrade"
+    },
+    {
+      "path": "server/test/skills-toggle.test.ts",
+      "identifiers": ["archon"],
+      "comment": "deprecated-compat: upgrade coverage for fingerprinted removed committed skill"
     }
   ]
 }

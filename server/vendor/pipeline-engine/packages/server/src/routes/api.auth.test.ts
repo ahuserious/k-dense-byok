@@ -147,15 +147,19 @@ mock.module('@archon/core/utils/commands', () => ({
 
 import { registerApiRoutes, resetLegacyWebIdentityHeaderWarningForTests } from './api';
 
+const originalPipelineWebAuthHeader = process.env.PIPELINE_WEB_AUTH_HEADER;
 const originalWebAuthHeader = process.env.ARCHON_WEB_AUTH_HEADER;
 
 beforeEach(() => {
+  delete process.env.PIPELINE_WEB_AUTH_HEADER;
   delete process.env.ARCHON_WEB_AUTH_HEADER;
   resetLegacyWebIdentityHeaderWarningForTests();
   mockWarn.mockClear();
 });
 
 afterEach(() => {
+  if (originalPipelineWebAuthHeader === undefined) delete process.env.PIPELINE_WEB_AUTH_HEADER;
+  else process.env.PIPELINE_WEB_AUTH_HEADER = originalPipelineWebAuthHeader;
   if (originalWebAuthHeader === undefined) delete process.env.ARCHON_WEB_AUTH_HEADER;
   else process.env.ARCHON_WEB_AUTH_HEADER = originalWebAuthHeader;
 });
@@ -264,19 +268,31 @@ describe('server-side /api/* gate', () => {
     expect(res.status).toBe(200);
   });
 
-  test('gate on + X-Pipeline-User header → protected route passes', async () => {
+  test('legacy default trusts only X-Archon-User and warns at startup', async () => {
     apiGateEnabled = true;
-    const res = await makeApp().request('/api/conversations', {
-      headers: { 'X-Pipeline-User': 'alice' },
+    const app = makeApp();
+    const untrusted = await app.request('/api/conversations', {
+      headers: { 'X-Pipeline-User': 'not-trusted' },
     });
-    expect(res.status).toBe(200);
-    expect(mockWarn).not.toHaveBeenCalledWith(
-      expect.anything(),
+    expect(untrusted.status).toBe(401);
+    expect(mockFindOrCreateUser).not.toHaveBeenCalled();
+    expect(mockWarn).toHaveBeenCalledWith(
+      {
+        trustedHeader: 'X-Archon-User',
+        legacySource: 'legacy-default',
+        replacementEnv: 'PIPELINE_WEB_AUTH_HEADER',
+      },
       'web_auth.legacy_identity_header_deprecated'
     );
+    makeApp();
+    expect(
+      mockWarn.mock.calls.filter(
+        call => call[1] === 'web_auth.legacy_identity_header_deprecated'
+      )
+    ).toHaveLength(1);
   });
 
-  test('gate on + legacy identity header → protected route passes with a warning', async () => {
+  test('legacy default header authenticates and preserves attribution', async () => {
     apiGateEnabled = true;
     const res = await makeApp().request('/api/conversations', {
       // deprecated-compat: supported only for the reverse-proxy migration window.
@@ -288,30 +304,54 @@ describe('server-side /api/* gate', () => {
       'legacy-alice',
       'legacy-alice'
     );
+  });
+
+  test('explicit legacy configuration still rejects the canonical alternate header', async () => {
+    apiGateEnabled = true;
+    process.env.ARCHON_WEB_AUTH_HEADER = 'X-Archon-User';
+    const res = await makeApp().request('/api/conversations', {
+      headers: { 'X-Pipeline-User': 'not-trusted' },
+    });
+    expect(res.status).toBe(401);
+    expect(mockFindOrCreateUser).not.toHaveBeenCalled();
     expect(mockWarn).toHaveBeenCalledWith(
       {
-        legacyHeader: 'X-Archon-User',
-        replacementHeader: 'X-Pipeline-User',
+        trustedHeader: 'X-Archon-User',
+        legacySource: 'ARCHON_WEB_AUTH_HEADER',
+        replacementEnv: 'PIPELINE_WEB_AUTH_HEADER',
       },
       'web_auth.legacy_identity_header_deprecated'
     );
   });
 
-  test('matching canonical and legacy identity headers resolve one identity', async () => {
+  test('explicit canonical configuration rejects the legacy alternate but authenticates canonical', async () => {
     apiGateEnabled = true;
-    const res = await makeApp().request('/api/conversations', {
-      headers: {
-        'X-Pipeline-User': 'same-user',
-        // deprecated-compat: supported only for the reverse-proxy migration window.
-        'X-Archon-User': 'same-user',
-      },
+    process.env.PIPELINE_WEB_AUTH_HEADER = 'X-Pipeline-User';
+    process.env.ARCHON_WEB_AUTH_HEADER = 'X-Archon-User';
+    const app = makeApp();
+    const untrusted = await app.request('/api/conversations', {
+      headers: { 'X-Archon-User': 'not-trusted' },
     });
-    expect(res.status).toBe(200);
-    expect(mockFindOrCreateUser).toHaveBeenCalledTimes(1);
-    expect(mockFindOrCreateUser).toHaveBeenCalledWith('web', 'same-user', 'same-user');
+    expect(untrusted.status).toBe(401);
+    expect(mockFindOrCreateUser).not.toHaveBeenCalled();
+
+    const trusted = await app.request('/api/conversations', {
+      headers: { 'X-Pipeline-User': 'canonical-user' },
+    });
+    expect(trusted.status).toBe(200);
+    expect(mockFindOrCreateUser).toHaveBeenCalledWith(
+      'web',
+      'canonical-user',
+      'canonical-user'
+    );
+    expect(mockWarn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'web_auth.legacy_identity_header_deprecated'
+    );
   });
 
-  test('conflicting canonical and legacy identity headers fail closed', async () => {
+  test('trusted and alternate identity headers with conflicting values fail closed', async () => {
+    process.env.PIPELINE_WEB_AUTH_HEADER = 'X-Pipeline-User';
     const res = await makeApp().request('/api/conversations', {
       headers: {
         'X-Pipeline-User': 'canonical-user',
@@ -361,6 +401,7 @@ describe('?mine filter — non-enforcing', () => {
   });
 
   test('runs: ?mine=true with X-Pipeline-User header → filters by resolved userId', async () => {
+    process.env.PIPELINE_WEB_AUTH_HEADER = 'X-Pipeline-User';
     const app = makeApp();
     const res = await app.request('/api/workflows/runs?mine=true', {
       headers: { 'X-Pipeline-User': 'alice' },
@@ -386,6 +427,7 @@ describe('?mine filter — non-enforcing', () => {
   });
 
   test('runs: ?mine=true with a Better Auth session → session wins over header', async () => {
+    process.env.PIPELINE_WEB_AUTH_HEADER = 'X-Pipeline-User';
     authEnabled = true;
     authInstance = {
       api: {
@@ -411,6 +453,7 @@ describe('?mine filter — non-enforcing', () => {
   });
 
   test('conversations: ?mine=true with X-Pipeline-User header → filters by userId', async () => {
+    process.env.PIPELINE_WEB_AUTH_HEADER = 'X-Pipeline-User';
     const app = makeApp();
     const res = await app.request('/api/conversations?mine=true', {
       headers: { 'X-Pipeline-User': 'bob' },
@@ -441,6 +484,7 @@ describe('?mine filter — non-enforcing', () => {
   // Resilience: a Better Auth session lookup that throws (e.g. DB outage) must
   // fall through to the trusted proxy header rather than dropping attribution.
   test('runs: ?mine=true — session lookup throws → falls through to header', async () => {
+    process.env.PIPELINE_WEB_AUTH_HEADER = 'X-Pipeline-User';
     authEnabled = true;
     authInstance = {
       api: {

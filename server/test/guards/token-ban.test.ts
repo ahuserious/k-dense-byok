@@ -18,7 +18,7 @@ describe("Phase R token ban", () => {
       }>;
     };
 
-    expect(config.deprecatedCompatibilityIdentifiers).toHaveLength(8);
+    expect(config.deprecatedCompatibilityIdentifiers).toHaveLength(10);
     for (const rule of config.deprecatedCompatibilityIdentifiers) {
       expect(rule.path).not.toMatch(/[*?]/);
       expect(rule.comment).toMatch(/^deprecated-compat:/);
