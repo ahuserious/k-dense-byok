@@ -10,6 +10,7 @@ import { createProject, resolvePaths } from "../src/projects.ts";
 import {
   WorkflowBudgetError,
   WorkflowBudgetStore,
+  reservePipelineNodeBudgets,
   reserveWorkflowBudget,
   workflowBudgetReservationId,
   workflowRunBudgetSummary,
@@ -165,6 +166,51 @@ function mixedBudgetRaceWorker(args: {
 }
 
 describe("durable workflow budget reservations", () => {
+  describe("Tier A S4 pipeline NodeSpec admission", () => {
+    it("atomically reserves API hooks while retaining subscription token caps", async () => {
+      createProject({ name: "Pipeline budget", projectId: "pipeline-budget", spendLimitUsd: 5 });
+      const admission = await reservePipelineNodeBudgets({
+        projectId: "pipeline-budget",
+        admissionId: "request-one",
+        hooks: [
+          { nodeId: "api-node", maxTokens: 1_000, maxCostUsd: 3, billingMode: "api" },
+          {
+            nodeId: "subscription-node",
+            maxTokens: 2_000,
+            maxCostUsd: 9,
+            billingMode: "subscription",
+          },
+        ],
+      });
+      expect(admission?.handle.record).toMatchObject({
+        status: "active",
+        maxTokens: 3_000,
+        maxCostUsd: 3,
+        modelCallCount: 2,
+        reservedCostUsd: 3,
+      });
+      expect(projectCostSummary("pipeline-budget").workflowReservedUsd).toBe(3);
+    });
+
+    it("rejects the aggregate before provider work when per-node caps exceed the project", async () => {
+      createProject({ name: "Pipeline reject", projectId: "pipeline-reject", spendLimitUsd: 2 });
+      const providerCalls: string[] = [];
+      const admitThenCallProvider = async () => {
+        await reservePipelineNodeBudgets({
+          projectId: "pipeline-reject",
+          admissionId: "request-rejected",
+          hooks: [
+            { nodeId: "expensive", maxTokens: 1_000, maxCostUsd: 3, billingMode: "api" },
+          ],
+        });
+        providerCalls.push("provider");
+      };
+      await expect(admitThenCallProvider()).rejects.toMatchObject({ code: "LIMIT_EXCEEDED" });
+      expect(providerCalls).toEqual([]);
+      expect(projectCostSummary("pipeline-reject").workflowReservedUsd).toBe(0);
+    });
+  });
+
   it("projects one run's ceilings and commitments without reasons or false token claims", async () => {
     createProject({ name: "Run projection", projectId: "run-projection", spendLimitUsd: 100 });
     let now = 1_000;

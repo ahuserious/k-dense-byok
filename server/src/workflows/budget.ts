@@ -158,6 +158,19 @@ export interface WorkflowRunBudgetCeilings {
   maxModelCalls: number;
 }
 
+export interface PipelineNodeBudgetHook {
+  nodeId: string;
+  maxTokens: number;
+  maxCostUsd: number;
+  billingMode: "inherit" | "api" | "subscription";
+}
+
+export interface PipelineBudgetAdmission {
+  runId: string;
+  hooks: PipelineNodeBudgetHook[];
+  handle: WorkflowBudgetReservationHandle;
+}
+
 /**
  * Constant-size, reason-free projection of one run's durable reservations.
  * `missingUsageMaximumTokens` is the persisted token envelope for terminal
@@ -1464,6 +1477,66 @@ export function reserveWorkflowBudget(
   input: ReserveWorkflowBudgetInput,
 ): Promise<WorkflowBudgetReservationHandle> {
   return workflowBudgetStore.reserve(input);
+}
+
+/**
+ * Atomically reserve a legacy pipeline's complete NodeSpec budget envelope.
+ * Subscription-selected nodes retain token ceilings and audit metadata but do
+ * not consume the project's USD cap. One reservation prevents partial per-node
+ * admission if the aggregate cannot fit.
+ */
+export async function reservePipelineNodeBudgets(input: {
+  projectId: string;
+  admissionId: string;
+  hooks: PipelineNodeBudgetHook[];
+  leaseDurationMs?: number;
+}): Promise<PipelineBudgetAdmission | null> {
+  if (input.hooks.length === 0) return null;
+  const seen = new Set<string>();
+  let maxTokens = 0;
+  let maxCostUsd = 0;
+  for (const hook of input.hooks) {
+    if (!hook.nodeId || seen.has(hook.nodeId)) {
+      budgetError("INVALID_ARGUMENT", "Pipeline NodeSpec budget hooks require unique node ids.");
+    }
+    seen.add(hook.nodeId);
+    maxTokens = safeTokenCount(maxTokens + safeTokenCount(
+      hook.maxTokens,
+      `Node ${hook.nodeId} budget.maxTokens`,
+    ), "pipeline aggregate maxTokens");
+    const nodeCost = safeMoney(hook.maxCostUsd, `Node ${hook.nodeId} budget.maxCostUsd`);
+    maxCostUsd = safeMoney(
+      maxCostUsd + (hook.billingMode === "subscription" ? 0 : nodeCost),
+      "pipeline aggregate maxCostUsd",
+    );
+  }
+  if (maxTokens < 1) {
+    budgetError("INVALID_ARGUMENT", "Pipeline NodeSpec budgets must admit at least one token.");
+  }
+  const identity = crypto.createHash("sha256")
+    .update(input.admissionId)
+    .digest("hex")
+    .slice(0, 32);
+  const runId = `pipeline:${identity}`;
+  const handle = await reserveWorkflowBudget({
+    projectId: input.projectId,
+    reservationId: workflowBudgetReservationId("pipeline", identity),
+    runId,
+    runMaxCostUsd: maxCostUsd,
+    runMaxTokens: maxTokens,
+    runMaxModelCalls: input.hooks.length,
+    modelCallCount: input.hooks.length,
+    maxCostUsd,
+    maxTokens,
+    ...(input.leaseDurationMs === undefined
+      ? {}
+      : { leaseDurationMs: input.leaseDurationMs }),
+  });
+  return {
+    runId,
+    hooks: structuredClone(input.hooks),
+    handle,
+  };
 }
 
 export function reconcileStaleWorkflowBudgetReservations(

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { getAgentDir, ProjectTrustStore } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,13 +11,21 @@ import {
   type ProjectPaths,
 } from "../src/projects.ts";
 import {
+  assertWorkflowNodeControlPackageSeeded,
+  dispatchWorkflowHarness,
   disposeAllWorkflowDelegationSessions,
   disposeWorkflowDelegationSession,
   getOrCreateWorkflowDelegationSession,
+  s4NodeBindingIssues,
+  seedWorkflowNodeControlPackage,
+  WorkflowHarnessDispatchError,
   workflowDelegationSessionCount,
   workflowDelegationSessionSnapshot,
 } from "../src/agent/workflow-delegation-session.ts";
-import { dagFusionPackageDir } from "../src/agent/dag-fusion-bridge.ts";
+import {
+  dagFusionPackageDir,
+  seedDagFusionPackage,
+} from "../src/agent/dag-fusion-bridge.ts";
 import {
   disposeProjectSessions,
   getOrCreateProfileSession,
@@ -104,6 +113,96 @@ function dependencies(
 }
 
 describe("dedicated workflow delegation session", () => {
+  describe("Tier A S4 harness and child-policy dispatch", () => {
+    it("dispatches pi through the fully bound session factory", async () => {
+      const paths = ensureProjectExists(PROJECT_ID);
+      const session = { projectId: PROJECT_ID } as never;
+      const pi = vi.fn(async () => session);
+      await expect(dispatchWorkflowHarness("pi", PROJECT_ID, paths, { pi }))
+        .resolves.toBe(session);
+      expect(pi).toHaveBeenCalledWith(PROJECT_ID, paths);
+    });
+
+    it("distinguishes an uninstalled CLI from an installed but unbound adapter", async () => {
+      const paths = ensureProjectExists(PROJECT_ID);
+      await expect(dispatchWorkflowHarness("codex", PROJECT_ID, paths, {
+        findExecutable: () => null,
+      })).rejects.toMatchObject<Partial<WorkflowHarnessDispatchError>>({
+        code: "WORKFLOW_HARNESS_NOT_INSTALLED",
+        harness: "codex",
+      });
+      await expect(dispatchWorkflowHarness("codex", PROJECT_ID, paths, {
+        findExecutable: () => "/opt/tools/codex",
+      })).rejects.toMatchObject<Partial<WorkflowHarnessDispatchError>>({
+        code: "WORKFLOW_HARNESS_NOT_BOUND",
+        harness: "codex",
+      });
+    });
+
+    it("reports unsafe static binding inputs for validation integration", () => {
+      expect(s4NodeBindingIssues({
+        hyperparameters: { sampling: { model: "override" } },
+        conditions: { exists: ["../outside"] },
+      }, "/nodes/0/settings")).toEqual([
+        expect.objectContaining({ path: "/nodes/0/settings/hyperparameters/sampling/model" }),
+        expect.objectContaining({ path: "/nodes/0/settings/conditions/exists/0" }),
+      ]);
+    });
+
+    it("seeds and executes the child provider-sampling and tool-policy binding", async () => {
+      const paths = ensureProjectExists(PROJECT_ID);
+      seedDagFusionPackage(paths);
+      seedWorkflowNodeControlPackage(paths);
+      expect(() => assertWorkflowNodeControlPackageSeeded(paths)).not.toThrow();
+      const extensionPath = path.join(
+        paths.kadyDir,
+        "workflow-node-control-v1",
+        "index.mjs",
+      );
+      const extension = await import(`${pathToFileURL(extensionPath).href}?test=${Date.now()}`);
+      const handlers = new Map<string, (event: never) => unknown>();
+      const activeTools: string[][] = [];
+      extension.default({
+        on(name: string, handler: (event: never) => unknown) {
+          handlers.set(name, handler);
+        },
+        getAllTools: () => [
+          { name: "read" },
+          { name: "subagent" },
+          { name: "bash" },
+        ],
+        setActiveTools(tools: string[]) {
+          activeTools.push(tools);
+        },
+      });
+      const policy = {
+        version: 1,
+        harness: "pi",
+        providerRequest: {
+          temperature: 0.35,
+          top_p: 0.75,
+          sampling: { seed: 23, model: "must-not-override" },
+        },
+        toolPolicy: { allowedTools: ["read", "subagent", "not-installed"] },
+      };
+      const envelope = Buffer.from(JSON.stringify(policy)).toString("base64url");
+      expect(handlers.get("input")?.({
+        text: `KADY_NODE_CONTROL_V1:${envelope}\nactual task`,
+        images: [],
+      } as never)).toMatchObject({ action: "transform", text: "actual task" });
+      expect(activeTools).toEqual([["read", "subagent"]]);
+      expect(handlers.get("before_provider_request")?.({
+        payload: { model: "resolved-model", messages: [] },
+      } as never)).toEqual({
+        model: "resolved-model",
+        messages: [],
+        temperature: 0.35,
+        top_p: 0.75,
+        seed: 23,
+      });
+    });
+  });
+
   it("keeps one headless in-memory Pi host per project and disposes it deterministically", async () => {
     const paths = ensureProjectExists(PROJECT_ID);
     const [first, second] = await Promise.all([

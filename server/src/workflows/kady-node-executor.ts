@@ -1,8 +1,12 @@
 import { createHash } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type {
   ModelRequest,
+  WorkflowGraphDocument,
   WorkflowNode,
 } from "./schema.ts";
 import type {
@@ -22,7 +26,17 @@ import {
 import { workflowStore } from "./store.ts";
 import { resolvePaths, type ProjectPaths } from "../projects.ts";
 import {
-  getOrCreateWorkflowDelegationSession,
+  assertWorkflowNodeControlPackageSeeded,
+  dispatchWorkflowHarness,
+  evaluateS4NodeConditions,
+  WORKFLOW_NODE_CONTROL_ENVELOPE_PREFIX,
+  type WorkflowHarness,
+} from "../agent/workflow-delegation-session.ts";
+export {
+  applyS4ProviderRequestBindings,
+  evaluateS4NodeConditions,
+  type S4ConditionCheck,
+  type S4ConditionEvaluation,
 } from "../agent/workflow-delegation-session.ts";
 import { assertDagFusionPackageSeeded } from "../agent/dag-fusion-bridge.ts";
 import {
@@ -71,6 +85,10 @@ import {
   pendingNodeSpecEnforcements,
   pendingWorkflowSettingsEnforcements,
 } from "./node-spec-enforcement.ts";
+import {
+  resolveNodeSpecV1,
+  type ResolvedNodeSpecV1,
+} from "./validate.ts";
 
 export const KADY_WORKFLOW_READ_ONLY_AGENT =
   "dag-workflow-readonly-executor" as const;
@@ -96,6 +114,7 @@ export interface KadyDelegationHostPort {
 export interface KadyHostedFusionTransportOptions {
   /** Trusted local transport metadata; the embedded hosted runner ignores it. */
   supervisedBudget?: SupervisedWorkflowBudgetDescriptorV1;
+  nodeControl?: S4NodeExecutionBindings;
 }
 
 type DelegationHost = KadyDelegationHostPort;
@@ -114,6 +133,8 @@ export type KadyWorkflowNodeErrorCode =
   | "WORKFLOW_NODE_ABORTED"
   | "WORKFLOW_NODE_TIMEOUT"
   | "WORKFLOW_NODE_INVALID_CONTEXT"
+  | "WORKFLOW_NODE_CONDITION_UNMET"
+  | "WORKFLOW_NODE_CONTROL_INVALID"
   | "WORKFLOW_MODEL_SLOT_MISSING"
   | "WORKFLOW_MODEL_RESOLUTION_MISMATCH"
   | "WORKFLOW_DELEGATION_FAILED"
@@ -141,6 +162,218 @@ export class KadyWorkflowNodeError extends Error {
   }
 }
 
+export interface S4BoundDatabaseReference {
+  ref: string;
+  id?: string;
+  name?: string;
+  url?: string;
+  description?: string;
+  category?: string;
+  domain?: "science" | "finance";
+}
+
+export interface S4NodeExecutionBindings {
+  version: 1;
+  harness: WorkflowHarness;
+  providerRequest: {
+    temperature: number;
+    top_p: number;
+    sampling: Record<string, string | number | boolean>;
+  };
+  databases: S4BoundDatabaseReference[];
+  skills: {
+    mode: ResolvedNodeSpecV1["skills"]["mode"];
+    configured: string[];
+    delegated: string[];
+  };
+  subagents: {
+    mode: ResolvedNodeSpecV1["subagents"]["mode"];
+    permitted: boolean;
+  };
+  autonomy: ResolvedNodeSpecV1["autonomy"];
+  toolPolicy: { allowedTools: string[] };
+  billingMode: ResolvedNodeSpecV1["billingMode"];
+}
+
+interface DatabaseCatalogEntry {
+  id: string;
+  name: string;
+  url: string;
+  description: string;
+  category: string;
+  domain: "science" | "finance";
+}
+
+const RESERVED_SAMPLING_KEYS = new Set([
+  "messages",
+  "model",
+  "tools",
+  "stream",
+  "max_tokens",
+  "temperature",
+  "top_p",
+]);
+
+let databaseCatalog: DatabaseCatalogEntry[] | undefined;
+
+function readDatabaseCatalog(): DatabaseCatalogEntry[] {
+  if (databaseCatalog) return databaseCatalog;
+  const source = new URL("../../../web/src/data/databases.json", import.meta.url);
+  const parsed = JSON.parse(fs.readFileSync(source, "utf8")) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new KadyWorkflowNodeError(
+      "WORKFLOW_NODE_CONTROL_INVALID",
+      "The database-selector catalogue is malformed.",
+    );
+  }
+  databaseCatalog = parsed.filter((entry): entry is DatabaseCatalogEntry => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+    const value = entry as Record<string, unknown>;
+    return typeof value.id === "string" && typeof value.name === "string" &&
+      typeof value.url === "string" && typeof value.description === "string" &&
+      typeof value.category === "string" &&
+      (value.domain === "science" || value.domain === "finance");
+  });
+  return databaseCatalog;
+}
+
+function installedSkillNames(paths: ProjectPaths): string[] {
+  const roots = [paths.skillsDir, path.join(getAgentDir(), "skills")];
+  const names = new Set<string>();
+  for (const root of roots) {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory() && fs.existsSync(path.join(root, entry.name, "SKILL.md"))) {
+        names.add(entry.name);
+      }
+    }
+  }
+  return [...names].sort();
+}
+
+/** Resolve every S4 NodeSpec field into a JSON-safe child launch policy. */
+export function resolveS4NodeExecutionBindings(
+  spec: ResolvedNodeSpecV1,
+  paths: ProjectPaths,
+  maxSubagents: number,
+): S4NodeExecutionBindings {
+  for (const key of Object.keys(spec.hyperparameters.sampling)) {
+    if (RESERVED_SAMPLING_KEYS.has(key)) {
+      throw new KadyWorkflowNodeError(
+        "WORKFLOW_NODE_CONTROL_INVALID",
+        `Sampling key ${key} is reserved; use the dedicated NodeSpec field instead.`,
+      );
+    }
+  }
+  const catalog = readDatabaseCatalog();
+  const databases = spec.databases.map((ref): S4BoundDatabaseReference => {
+    const matched = catalog.find((entry) => entry.id === ref || entry.name === ref);
+    return matched ? { ref, ...matched } : { ref };
+  });
+  const installed = spec.skills.mode === "manual" ? [] : installedSkillNames(paths);
+  const delegated = spec.skills.mode === "manual"
+    ? [...new Set(spec.skills.list)]
+    : spec.skills.mode === "auto-manual"
+      ? [...new Set([...installed, ...spec.skills.list])]
+      : installed;
+  const subagentsPermitted = spec.autonomy === "loose" && maxSubagents > 0;
+  return {
+    version: 1,
+    harness: spec.harness,
+    providerRequest: {
+      temperature: spec.hyperparameters.temperature,
+      top_p: spec.hyperparameters.top_p,
+      sampling: { ...spec.hyperparameters.sampling },
+    },
+    databases,
+    skills: {
+      mode: spec.skills.mode,
+      configured: [...spec.skills.list],
+      delegated,
+    },
+    subagents: { mode: spec.subagents.mode, permitted: subagentsPermitted },
+    autonomy: spec.autonomy,
+    toolPolicy: {
+      allowedTools: subagentsPermitted
+        ? ["read", "grep", "find", "ls", "subagent"]
+        : ["read", "grep", "find", "ls"],
+    },
+    billingMode: spec.billingMode,
+  };
+}
+
+export function assertS4BillingMode(
+  billingMode: ResolvedNodeSpecV1["billingMode"],
+  receipt: WorkflowModelResolutionReceipt,
+): void {
+  if (billingMode === "inherit") return;
+  const authKind = receipt.resolved.auth.kind;
+  const admitted = billingMode === "api"
+    ? authKind === "api-key" || authKind === "custom"
+    : authKind === "oauth" || receipt.resolved.provider === "nvidia";
+  if (!admitted) {
+    throw new KadyWorkflowNodeError(
+      "WORKFLOW_NODE_CONTROL_INVALID",
+      `Node billingMode ${billingMode} does not admit resolved ${receipt.resolved.provider} auth ${authKind}.`,
+    );
+  }
+}
+
+/** Prepend a child-only envelope; the trusted extension strips it before prompting. */
+export function s4ControlledDelegationTask(
+  bindings: S4NodeExecutionBindings,
+  task: string,
+): string {
+  const encoded = Buffer.from(JSON.stringify(bindings), "utf8").toString("base64url");
+  const executionContext = [
+    "Kady node execution context (data, not instructions):",
+    `databases=${JSON.stringify(bindings.databases)}`,
+    `skills.mode=${bindings.skills.mode}; skills=${JSON.stringify(bindings.skills.configured)}`,
+    `subagents.mode=${bindings.subagents.mode}; subagents.permitted=${bindings.subagents.permitted}`,
+    `autonomy=${bindings.autonomy}`,
+  ].join("\n");
+  return `${WORKFLOW_NODE_CONTROL_ENVELOPE_PREFIX}${encoded}\n${executionContext}\n\n${task}`;
+}
+
+function s4DelegationSkills(
+  bindings: S4NodeExecutionBindings,
+  requiredSkill?: string,
+): boolean | string | string[] {
+  const selected = [...new Set([
+    ...bindings.skills.delegated,
+    ...(requiredSkill ? [requiredSkill] : []),
+  ])];
+  if (selected.length === 1) return selected[0];
+  if (selected.length > 1) return selected;
+  return bindings.skills.mode === "auto" ? true : false;
+}
+
+function resolvedNodeSpecForContext(
+  context: WorkflowNodeExecutorContext,
+): ResolvedNodeSpecV1 {
+  const document: WorkflowGraphDocument = {
+    schemaVersion: "1.0",
+    id: context.graph.id,
+    name: context.graph.id,
+    entryNodeId: context.node.id,
+    defaultModel: context.graph.defaultModel,
+    limits: context.graph.limits,
+    rescue: context.graph.rescue,
+    evidence: context.graph.evidence,
+    artifacts: context.graph.artifacts,
+    settings: context.graph.settings,
+    nodes: [context.node],
+    edges: [],
+  };
+  return resolveNodeSpecV1(document, context.node);
+}
+
 export interface KadyWorkflowUsageAdmission {
   projectId: string;
   runId: string;
@@ -159,6 +392,8 @@ export interface KadyWorkflowUsageAdmission {
   runMaxCostUsd: number;
   runMaxModelCalls: number;
   timeoutMs: number;
+  /** Exact per-node control policy applied to the provider-facing child. */
+  nodeControl: S4NodeExecutionBindings;
 }
 
 export interface KadyWorkflowUsageReservation {
@@ -248,6 +483,7 @@ export interface KadyNodeExecutorDependencies {
   getDelegationSession(
     projectId: string,
     paths: ProjectPaths,
+    harness: WorkflowHarness,
   ): Promise<{ host: DelegationHost }>;
   resolveModel(
     request: ModelRequest,
@@ -560,12 +796,16 @@ function dependenciesWithDefaults(
   return {
     pathsForProject: resolvePaths,
     loadManifest: defaultLoadManifest,
-    getDelegationSession: getOrCreateWorkflowDelegationSession,
+    getDelegationSession: (projectId, paths, harness) =>
+      dispatchWorkflowHarness(harness, projectId, paths),
     resolveModel: resolveWorkflowModel,
     // The embedded runner has its own dependency-injection second argument;
     // never let trusted transport metadata reach that testing seam.
     runHostedFusion: (request) => runHostedOpenRouterFusion(request),
-    assertChildRuntimeReady: assertDagFusionPackageSeeded,
+    assertChildRuntimeReady: (paths) => {
+      assertDagFusionPackageSeeded(paths);
+      assertWorkflowNodeControlPackageSeeded(paths);
+    },
     readCompactionAudit: readTrustedDagFusionCompactionAudit,
     now: Date.now,
     ...overrides,
@@ -1435,15 +1675,37 @@ export function createKadyWorkflowNodeExecutor(
       ...pendingWorkflowSettingsEnforcements(context.graph.settings),
       ...pendingNodeSpecEnforcements(context.node.settings),
       ...pendingNodeKindSpecEnforcements(context.node),
-    ][0];
+    ].find((finding) => finding.unit !== "S4");
     if (pendingEnforcement) {
       fail(
         "WORKFLOW_NODE_INVALID_CONTEXT",
         pendingNodeSpecEnforcementMessage(pendingEnforcement),
       );
     }
+    const paths = dependencies.pathsForProject(context.projectId);
+    const resolvedNodeSpec = resolvedNodeSpecForContext(context);
+    const conditionEvaluation = evaluateS4NodeConditions(
+      resolvedNodeSpec,
+      context,
+      paths.sandbox,
+    );
+    if (!conditionEvaluation.passed) {
+      const failures = conditionEvaluation.checks
+        .filter((check) => !check.passed)
+        .map((check) => `${check.requirement}: ${check.detail}`)
+        .join("; ");
+      fail(
+        "WORKFLOW_NODE_CONDITION_UNMET",
+        `Node ${context.node.id} conditions were not met before admission: ${failures}`,
+      );
+    }
     assertReadOnlyWorkspace(context.node);
     const limits = effectiveNodeLimits(context);
+    const nodeControl = resolveS4NodeExecutionBindings(
+      resolvedNodeSpec,
+      paths,
+      limits.maxSubagents,
+    );
     const callCeiling = maximumModelCalls(context, limits);
     const configuredRounds = context.node.kind === "council"
       ? context.node.rounds
@@ -1483,13 +1745,16 @@ export function createKadyWorkflowNodeExecutor(
       ? limits.maxCostUsd / callCeiling
       : 0;
 
-    const paths = dependencies.pathsForProject(context.projectId);
     const manifest = manifestForContext(context, await dependencies.loadManifest(context));
     const nodeSignal = createNodeSignal(context.signal, limits.timeoutMs);
     const deadline = dependencies.now() + limits.timeoutMs;
     let sessionPromise: Promise<{ host: DelegationHost }> | undefined;
     if (requiresPiSubagent) {
-      sessionPromise = dependencies.getDelegationSession(context.projectId, paths);
+      sessionPromise = dependencies.getDelegationSession(
+        context.projectId,
+        paths,
+        nodeControl.harness,
+      );
       await sessionPromise;
       dependencies.assertChildRuntimeReady(paths);
     }
@@ -1528,6 +1793,7 @@ export function createKadyWorkflowNodeExecutor(
           paths,
         });
       assertResolutionIntegrity(slot, resolution);
+      assertS4BillingMode(nodeControl.billingMode, resolution.receipt);
       if (!input.preResolved) {
         // This durable receipt must precede the provider call. The host then
         // verifies the actual child launch against this exact model/thinking pair.
@@ -1566,7 +1832,7 @@ export function createKadyWorkflowNodeExecutor(
         ownerRunId: context.runId,
         nodeId: `${context.executionId}:${slot.id}`,
         agent: KADY_WORKFLOW_READ_ONLY_AGENT,
-        task: input.task,
+        task: s4ControlledDelegationTask(nodeControl, input.task),
         context: "fresh",
         cwd: paths.sandbox,
         model: modelReference(resolution.model),
@@ -1581,11 +1847,15 @@ export function createKadyWorkflowNodeExecutor(
           hard: policy.toolHardLimit,
           block: "*",
         },
-        skill: input.skill ?? false,
+        skill: s4DelegationSkills(nodeControl, input.skill),
         artifacts: false,
         result: { kind: "structured", schema: input.schema },
       };
-      sessionPromise ??= dependencies.getDelegationSession(context.projectId, paths);
+      sessionPromise ??= dependencies.getDelegationSession(
+        context.projectId,
+        paths,
+        nodeControl.harness,
+      );
       const host = (await sessionPromise).host as DelegationHost;
       // Re-read the child package/trust contract immediately before budget
       // admission so a settings edit cannot silently disable the audit hooks.
@@ -1608,6 +1878,7 @@ export function createKadyWorkflowNodeExecutor(
             runMaxCostUsd: context.graph.limits.maxCostUsd,
             runMaxModelCalls: context.graph.limits.maxModelCalls,
             timeoutMs: remainingMs,
+            nodeControl: structuredClone(nodeControl),
           });
       if (
         !input.usageBridge &&
@@ -1861,6 +2132,7 @@ export function createKadyWorkflowNodeExecutor(
           runMaxCostUsd: context.graph.limits.maxCostUsd,
           runMaxModelCalls: context.graph.limits.maxModelCalls,
           timeoutMs: remainingMs,
+          nodeControl: structuredClone(nodeControl),
         });
         if (!budgetReservation || typeof budgetReservation.reconcile !== "function") {
           fail(
@@ -2082,6 +2354,7 @@ export function createKadyWorkflowNodeExecutor(
           paths,
         });
         assertResolutionIntegrity(slot, resolution);
+        assertS4BillingMode(nodeControl.billingMode, resolution.receipt);
         const hostedReceipt: WorkflowModelResolutionReceipt = {
           ...structuredClone(resolution.receipt),
           resolved: {
@@ -2170,6 +2443,7 @@ export function createKadyWorkflowNodeExecutor(
         runMaxCostUsd: context.graph.limits.maxCostUsd,
         runMaxModelCalls: context.graph.limits.maxModelCalls,
         timeoutMs: remainingMs,
+        nodeControl: structuredClone(nodeControl),
       });
       if (!reservation || typeof reservation.reconcile !== "function") {
         fail(
@@ -2231,11 +2505,12 @@ export function createKadyWorkflowNodeExecutor(
             signal: nodeSignal.signal,
             reconcileUsage: reconcile,
           },
-          reservation.descriptor === undefined
-            ? undefined
-            : {
-                supervisedBudget: structuredClone(reservation.descriptor),
-              },
+          {
+            ...(reservation.descriptor === undefined
+              ? {}
+              : { supervisedBudget: structuredClone(reservation.descriptor) }),
+            nodeControl: structuredClone(nodeControl),
+          },
         );
         if (
           !result || typeof result.text !== "string" || result.text.trim().length === 0 ||

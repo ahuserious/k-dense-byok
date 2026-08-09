@@ -13,8 +13,13 @@ import type {
 } from "../pi-packages/dag-fusion-drive/index.ts";
 import type { ProjectPaths } from "../src/projects.ts";
 import {
+  applyS4ProviderRequestBindings,
+  assertS4BillingMode,
   createKadyWorkflowNodeExecutor,
+  evaluateS4NodeConditions,
   KADY_WORKFLOW_READ_ONLY_AGENT,
+  resolveS4NodeExecutionBindings,
+  s4ControlledDelegationTask,
   type KadyHostedFusionTransportOptions,
   type KadySupervisedDelegateOptions,
   type KadyWorkflowUsageAdmission,
@@ -34,16 +39,21 @@ import type {
   WorkflowNode,
   WorkflowSettingsV1,
 } from "../src/workflows/schema.ts";
-import { validateWorkflowGraphDocument } from "../src/workflows/validate.ts";
+import {
+  resolveNodeSpecV1,
+  validateWorkflowGraphDocument,
+} from "../src/workflows/validate.ts";
 import {
   resolveWorkflowModel,
   type ResolvedWorkflowModel,
   type WorkflowModelResolutionContext,
 } from "../src/agent/workflow-model-resolution.ts";
-import type {
-  WorkflowNodeExecutor,
-  WorkflowNodeExecutorContext,
+import {
+  runWorkflowDag,
+  type WorkflowNodeExecutor,
+  type WorkflowNodeExecutorContext,
 } from "../src/workflows/runner.ts";
+import { WorkflowStore } from "../src/workflows/store.ts";
 import type {
   HostedOpenRouterFusionRequest,
   HostedOpenRouterFusionResult,
@@ -466,6 +476,277 @@ function supervisedDescriptor(slotId: string): SupervisedWorkflowBudgetDescripto
 }
 
 describe("production Kady DAG node executor", () => {
+  describe("Tier A S4 per-node bindings", () => {
+    it("round-trips and resolves every S4 NodeSpec control field", () => {
+      const node: WorkflowNode = {
+        ...baseNode("agent"),
+        kind: "agent",
+        prompt: "Exercise S4 controls.",
+        settings: {
+          hyperparameters: { temperature: 0.25, top_p: 0.8, sampling: { seed: 7 } },
+          conditions: { when: "inputs.ready", exists: ["input:dataset"] },
+          harness: "pi",
+          databases: ["arxiv"],
+          skills: { mode: "manual", list: ["database-lookup"] },
+          subagents: { mode: "auto-manual" },
+          autonomy: "loose",
+          billingMode: "api",
+          budget: { maxTokens: 900, maxCostUsd: 0.5 },
+        },
+      };
+      const document = graph(node);
+      document.settings = { defaultHarness: "pi", databases: ["nasa-apis"] };
+      const persisted = JSON.parse(JSON.stringify(document)) as WorkflowGraphDocument;
+      const spec = resolveNodeSpecV1(persisted, persisted.nodes[0]);
+      const bindings = resolveS4NodeExecutionBindings(spec, projectPaths(), 2);
+
+      expect(bindings).toMatchObject({
+        harness: "pi",
+        providerRequest: { temperature: 0.25, top_p: 0.8, sampling: { seed: 7 } },
+        skills: { mode: "manual", configured: ["database-lookup"] },
+        subagents: { mode: "auto-manual", permitted: true },
+        autonomy: "loose",
+        billingMode: "api",
+      });
+      expect(bindings.databases.map((database) => database.id)).toEqual([
+        "nasa-apis",
+        "arxiv",
+      ]);
+      expect(spec.budget).toEqual({ maxTokens: 900, maxCostUsd: 0.5 });
+    });
+
+    it.each([
+      { conditions: { when: "inputs.ready" }, variables: { ready: false } },
+      { conditions: { exists: ["missing/input.csv"] }, variables: {} },
+      { conditions: { exists: ["../outside"] }, variables: {} },
+    ] as const)("rejects unmet or unsafe conditions before receipt, reservation, or provider access", async ({
+      conditions,
+      variables,
+    }) => {
+      const node: WorkflowNode = {
+        ...baseNode("agent"),
+        kind: "agent",
+        prompt: "Must not run.",
+        settings: { conditions },
+      };
+      const document = graph(node);
+      const events: string[] = [];
+      const host = new FakeHost([analysis("must not run")], events);
+      const onReserve = vi.fn();
+      const onResolve = vi.fn();
+      const context = contextFor(document, events);
+      context.runInput.variables = { ...variables };
+
+      await expect(
+        executorFor(host, document, { onReserve, onResolve })(context),
+      ).rejects.toMatchObject({ code: "WORKFLOW_NODE_CONDITION_UNMET" });
+      expect(onResolve).not.toHaveBeenCalled();
+      expect(onReserve).not.toHaveBeenCalled();
+      expect(events.some((event) => event.startsWith("record:"))).toBe(false);
+      expect(host.calls).toHaveLength(0);
+    });
+
+    it("places hyperparameters and all session controls in the provider-bound receipt", async () => {
+      const node: WorkflowNode = {
+        ...baseNode("agent"),
+        kind: "agent",
+        prompt: "Use the bound execution context.",
+        settings: {
+          hyperparameters: { temperature: 0.3, top_p: 0.7, sampling: { seed: 11 } },
+          databases: ["arxiv"],
+          skills: { mode: "manual", list: ["database-lookup"] },
+          subagents: { mode: "auto-manual" },
+          autonomy: "loose",
+        },
+      };
+      const document = graph(node);
+      const host = new FakeHost([analysis("bound")]);
+      let admission: KadyWorkflowUsageAdmission | undefined;
+      await executorFor(host, document, {
+        onReserve(value) {
+          admission = value;
+        },
+      })(contextFor(document));
+
+      expect(admission?.nodeControl).toMatchObject({
+        providerRequest: { temperature: 0.3, top_p: 0.7, sampling: { seed: 11 } },
+        databases: [expect.objectContaining({
+          id: "arxiv",
+          url: expect.stringMatching(/^https:/),
+          description: expect.any(String),
+        })],
+        skills: { mode: "manual", configured: ["database-lookup"] },
+        subagents: { mode: "auto-manual", permitted: true },
+        autonomy: "loose",
+      });
+      expect(host.calls[0].request.skill).toContain("database-lookup");
+      expect(host.calls[0].request.task).toContain("KADY_NODE_CONTROL_V1:");
+      expect(host.calls[0].request.task).toContain('"id":"arxiv"');
+      expect(applyS4ProviderRequestBindings(
+        { model: "resolved/model", messages: [] },
+        admission!.nodeControl.providerRequest,
+      )).toEqual({
+        model: "resolved/model",
+        messages: [],
+        temperature: 0.3,
+        top_p: 0.7,
+        seed: 11,
+      });
+    });
+
+    it("enforces strict versus loose autonomy as a child tool/subagent gate", () => {
+      const strictDocument = graph({
+        ...baseNode("agent"),
+        kind: "agent",
+        prompt: "Strict.",
+        settings: { autonomy: "strict", subagents: { mode: "auto-manual" } },
+      });
+      const looseDocument = structuredClone(strictDocument);
+      looseDocument.nodes[0].settings = {
+        autonomy: "loose",
+        subagents: { mode: "auto-manual" },
+      };
+      const strict = resolveS4NodeExecutionBindings(
+        resolveNodeSpecV1(strictDocument, strictDocument.nodes[0]),
+        projectPaths(),
+        2,
+      );
+      const loose = resolveS4NodeExecutionBindings(
+        resolveNodeSpecV1(looseDocument, looseDocument.nodes[0]),
+        projectPaths(),
+        2,
+      );
+      expect(strict.subagents.permitted).toBe(false);
+      expect(strict.toolPolicy.allowedTools).not.toContain("subagent");
+      expect(loose.subagents.permitted).toBe(true);
+      expect(loose.toolPolicy.allowedTools).toContain("subagent");
+    });
+
+    it("binds auto, auto-manual, and manual skill selection into delegation", () => {
+      const paths = projectPaths("skill-mode-test");
+      fs.mkdirSync(path.join(paths.skillsDir, "installed-skill"), { recursive: true });
+      fs.writeFileSync(
+        path.join(paths.skillsDir, "installed-skill", "SKILL.md"),
+        "# Installed\n",
+      );
+      const bindingsFor = (mode: "auto" | "auto-manual" | "manual") => {
+        const document = graph({
+          ...baseNode("agent"),
+          kind: "agent",
+          prompt: "Skills.",
+          settings: { skills: { mode, list: ["selected-skill"] } },
+        });
+        return resolveS4NodeExecutionBindings(
+          resolveNodeSpecV1(document, document.nodes[0]),
+          paths,
+          1,
+        ).skills.delegated;
+      };
+      expect(bindingsFor("auto")).toContain("installed-skill");
+      expect(bindingsFor("auto")).not.toContain("selected-skill");
+      expect(bindingsFor("auto-manual")).toEqual(
+        expect.arrayContaining(["installed-skill", "selected-skill"]),
+      );
+      expect(bindingsFor("manual")).toEqual(["selected-skill"]);
+    });
+
+    it("evaluates named inputs without treating them as filesystem paths", () => {
+      const result = evaluateS4NodeConditions(
+        { conditions: { when: "inputs.ready", exists: ["input:dataset"] } },
+        {
+          runInput: { variables: { ready: true, dataset: null } },
+          attempt: 1,
+          resumed: false,
+          inbound: [],
+        },
+        projectPaths().sandbox,
+      );
+      expect(result.passed).toBe(true);
+      expect(result.checks.map((check) => check.kind)).toEqual(["named-input", "when"]);
+    });
+
+    it("enforces explicit API versus subscription billing selections", () => {
+      const apiReceipt = resolvedReceipt(openRouterModel()).receipt;
+      expect(() => assertS4BillingMode("api", apiReceipt)).not.toThrow();
+      expect(() => assertS4BillingMode("subscription", apiReceipt)).toThrow(
+        /does not admit/,
+      );
+    });
+
+    it("serializes a stable child-only control envelope", () => {
+      const document = graph({
+        ...baseNode("agent"),
+        kind: "agent",
+        prompt: "Envelope.",
+      });
+      const bindings = resolveS4NodeExecutionBindings(
+        resolveNodeSpecV1(document, document.nodes[0]),
+        projectPaths(),
+        1,
+      );
+      expect(s4ControlledDelegationTask(bindings, "task")).toMatch(
+        /^KADY_NODE_CONTROL_V1:[A-Za-z0-9_-]+\n/,
+      );
+    });
+  });
+
+  describe.skip("POST-INTEGRATION(S4) validation, persistence, and runner path", () => {
+    it("accepts, persists, and executes every S4 field through the validated graph", async () => {
+      const node: WorkflowNode = {
+        ...baseNode("agent"),
+        kind: "agent",
+        prompt: "Merged S4 path.",
+        model: openRouterModel(),
+        settings: {
+          hyperparameters: { temperature: 0.2, top_p: 0.9, sampling: { seed: 5 } },
+          conditions: { when: "inputs.ready", exists: ["input:dataset"] },
+          harness: "pi",
+          databases: ["arxiv"],
+          skills: { mode: "auto-manual", list: ["database-lookup"] },
+          subagents: { mode: "auto-manual" },
+          autonomy: "loose",
+          billingMode: "api",
+          budget: { maxTokens: 1_000, maxCostUsd: 1 },
+        },
+      };
+      const document = graph(node);
+      document.settings = { defaultHarness: "pi", databases: ["nasa-apis"] };
+      const validation = validateWorkflowGraphDocument(JSON.parse(JSON.stringify(document)));
+      expect(validation).toMatchObject({ ok: true });
+      if (!validation.ok) return;
+      const store = new WorkflowStore();
+      const stored = store.saveDefinition(
+        "node-executor-test",
+        validation.document.id,
+        validation.document,
+      );
+      const persisted = store.readDefinition(
+        "node-executor-test",
+        validation.document.id,
+      );
+      expect(persisted).toEqual(stored);
+      expect(persisted?.graph.nodes[0].settings).toEqual(node.settings);
+      const host = new FakeHost([analysis("merged")]);
+      const manifest = store.createRun("node-executor-test", {
+        workflowId: stored.id,
+        requestId: "s4-post-integration",
+        requestedBy: "api",
+        input: {
+          goal: "Run all merged S4 bindings.",
+          variables: { ready: true, dataset: "dataset.csv" },
+        },
+      });
+      await expect(runWorkflowDag({
+        projectId: "node-executor-test",
+        runId: manifest.id,
+        store,
+        executeNode: executorFor(host, stored.graph),
+      })).resolves.toMatchObject({
+        state: { status: "succeeded" },
+      });
+    });
+  });
+
   it("records exact resolution before an explicit read-only Delegation V2 call", async () => {
     const node: WorkflowNode = {
       ...baseNode("agent"),
@@ -509,7 +790,7 @@ describe("production Kady DAG node executor", () => {
       thinking: "low",
       turnBudget: { maxTurns: 12, graceTurns: 0 },
       toolBudget: { soft: 24, hard: 32, block: "*" },
-      skill: false,
+      skill: true,
       artifacts: false,
       result: { kind: "structured" },
     });
@@ -797,7 +1078,7 @@ describe("production Kady DAG node executor", () => {
     ]);
   });
 
-  it.each([
+  it.each(([
     {
       label: "conditions.when",
       settings: { conditions: { when: "inputs.ready" } },
@@ -916,7 +1197,7 @@ describe("production Kady DAG node executor", () => {
     workflowSettings?: WorkflowSettingsV1;
     code: string;
     unit: "S4" | "S5";
-  }>)("fails closed on non-default $label before receipt, reservation, or provider call", async ({
+  }>).filter(({ unit }) => unit === "S5"))("fails closed on non-default $label before receipt, reservation, or provider call", async ({
     settings,
     workflowSettings,
     code,
@@ -2490,7 +2771,12 @@ describe("production Kady DAG node executor", () => {
       "hosted-provider",
     ]);
     expect(runHostedFusion).toHaveBeenCalledOnce();
-    expect(hostedTransports).toEqual([{ supervisedBudget: descriptor }]);
+    expect(hostedTransports).toEqual([expect.objectContaining({
+      supervisedBudget: descriptor,
+      nodeControl: expect.objectContaining({
+        providerRequest: { temperature: 1, top_p: 1, sampling: {} },
+      }),
+    })]);
     expect(hostedCalls[0].resolved.members.map((member) => member.receipt.resolved)).toEqual([
       expect.objectContaining({ provider: "openrouter", model: "vendor/one", runtime: "openrouter-fusion" }),
       expect.objectContaining({ provider: "openrouter", model: "vendor/two", runtime: "openrouter-fusion" }),

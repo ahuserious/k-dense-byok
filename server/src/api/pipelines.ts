@@ -20,6 +20,7 @@
  * Both lean on reference-era agent code (pre-0.42 protocol) and belong to the
  * background-watch epic (E5); they are intentionally NOT ported here.
  */
+import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import * as pipelineEngine from "../agent/pipeline-engine/client.ts";
 import { PipelineEngineUnavailableError, sumRunCost } from "../agent/pipeline-engine/client.ts";
@@ -27,6 +28,118 @@ import { recordRun } from "../cost/ledger.ts";
 import { startRun as indexStartRun } from "../agent/runs-index.ts";
 import { currentProjectId } from "../scope.ts";
 import { corsResponseHeaders } from "../cors.ts";
+import {
+  reservePipelineNodeBudgets,
+  WorkflowBudgetError,
+  type PipelineBudgetAdmission,
+  type PipelineNodeBudgetHook,
+} from "../workflows/budget.ts";
+
+const livePipelineAdmissions = new Map<string, PipelineBudgetAdmission>();
+
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function finiteNonNegative(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  return Number.isSafeInteger(value) && (value as number) > 0
+    ? value as number
+    : undefined;
+}
+
+function strictest(values: Array<number | undefined>): number | undefined {
+  const present = values.filter((value): value is number => value !== undefined);
+  return present.length === 0 ? undefined : Math.min(...present);
+}
+
+/** Extract effective per-node NodeSpec billing hooks from the engine's loose response. */
+export function pipelineNodeBudgetHooks(definition: unknown): PipelineNodeBudgetHook[] {
+  let root = recordOf(definition);
+  for (const key of ["workflow", "definition", "data"] as const) {
+    const nested = recordOf(root?.[key]);
+    if (nested && Array.isArray(nested.nodes)) root = nested;
+  }
+  const nodes = root?.nodes;
+  if (!Array.isArray(nodes)) return [];
+  const workflowLimits = recordOf(root?.limits);
+  const hooks: PipelineNodeBudgetHook[] = [];
+  for (const [index, candidate] of nodes.entries()) {
+    const node = recordOf(candidate);
+    const settings = recordOf(node?.settings);
+    const budget = recordOf(settings?.budget);
+    if (!budget) continue;
+    if (positiveInteger(budget.maxTokens) === undefined) {
+      throw new WorkflowBudgetError(
+        "INVALID_ARGUMENT",
+        `Pipeline node ${String(node?.id ?? index)} has invalid budget.maxTokens.`,
+      );
+    }
+    if (finiteNonNegative(budget.maxCostUsd) === undefined) {
+      throw new WorkflowBudgetError(
+        "INVALID_ARGUMENT",
+        `Pipeline node ${String(node?.id ?? index)} has invalid budget.maxCostUsd.`,
+      );
+    }
+    const nodeLimits = recordOf(node?.limits);
+    const maxTokens = strictest([
+      positiveInteger(budget.maxTokens),
+      positiveInteger(nodeLimits?.maxTokens),
+      positiveInteger(workflowLimits?.maxTokens),
+    ]);
+    const maxCostUsd = strictest([
+      finiteNonNegative(budget.maxCostUsd),
+      finiteNonNegative(nodeLimits?.maxCostUsd),
+      finiteNonNegative(workflowLimits?.maxCostUsd),
+    ]);
+    if (maxTokens === undefined || maxCostUsd === undefined) {
+      throw new WorkflowBudgetError(
+        "INVALID_ARGUMENT",
+        `Pipeline node ${String(node?.id ?? index)} has an incomplete NodeSpec budget; maxTokens and maxCostUsd must resolve before provider access.`,
+      );
+    }
+    const configuredBillingMode = settings?.billingMode;
+    if (
+      configuredBillingMode !== undefined && configuredBillingMode !== "inherit" &&
+      configuredBillingMode !== "api" && configuredBillingMode !== "subscription"
+    ) {
+      throw new WorkflowBudgetError(
+        "INVALID_ARGUMENT",
+        `Pipeline node ${String(node?.id ?? index)} has invalid settings.billingMode.`,
+      );
+    }
+    const billingMode = configuredBillingMode ?? "inherit";
+    hooks.push({
+      nodeId: String(node?.id ?? `node-${index}`),
+      maxTokens,
+      maxCostUsd,
+      billingMode,
+    });
+  }
+  return hooks;
+}
+
+function engineRunId(value: unknown): string | undefined {
+  const root = recordOf(value);
+  const run = recordOf(root?.run);
+  const candidate = root?.runId ?? root?.run_id ?? root?.id ?? run?.id ?? run?.runId;
+  return typeof candidate === "string" && candidate.length > 0 ? candidate : undefined;
+}
+
+function mapPipelineRunError(reply: FastifyReply, error: unknown): unknown {
+  if (error instanceof WorkflowBudgetError) {
+    reply.code(error.code === "LIMIT_EXCEEDED" ? 402 : error.code === "INVALID_ARGUMENT" ? 400 : 409);
+    return { detail: error.message, budget: "rejected", code: error.code };
+  }
+  return mapError(reply, error);
+}
 
 // Map an engine-call failure to the right HTTP status: 503 when the engine is simply
 // down (recoverable — it just needs to start), 502 for any other upstream error.
@@ -154,7 +267,15 @@ export async function registerPipelineRoutes(app: FastifyInstance): Promise<void
 
   // --- run lifecycle (proxied) ---
   app.post<{ Params: { name: string } }>("/pipelines/:name/run", async (req, reply) => {
+    let admission: PipelineBudgetAdmission | null = null;
     try {
+      const definition = await pipelineEngine.getWorkflow(req.params.name);
+      const hooks = pipelineNodeBudgetHooks(definition);
+      admission = await reservePipelineNodeBudgets({
+        projectId: currentProjectId(),
+        admissionId: crypto.randomUUID(),
+        hooks,
+      });
       // If the client picked a Kady model (the chat-merged catalogue, an "openrouter/..."
       // ref), thread it into the engine's run options as `requestOptions.model` so its Pi
       // resolves the SAME model chat would. The body shape is otherwise loose/unknown, so
@@ -171,9 +292,18 @@ export async function registerPipelineRoutes(app: FastifyInstance): Promise<void
               },
             }
           : body;
-      return await pipelineEngine.runWorkflow(req.params.name, runBody);
+      const result = await pipelineEngine.runWorkflow(req.params.name, runBody);
+      const runId = engineRunId(result);
+      if (admission && runId) livePipelineAdmissions.set(runId, admission);
+      return result;
     } catch (err) {
-      return mapError(reply, err);
+      if (admission) {
+        await admission.handle.settle({
+          status: "failed",
+          reason: "pipeline engine did not return terminal usage ownership",
+        }).catch(() => undefined);
+      }
+      return mapPipelineRunError(reply, err);
     }
   });
 
@@ -212,6 +342,29 @@ export async function registerPipelineRoutes(app: FastifyInstance): Promise<void
       try {
         const run = await pipelineEngine.getRun(req.params.runId);
         const totals = sumRunCost(run);
+        const admission = livePipelineAdmissions.get(req.params.runId);
+        if (admission) {
+          const entry = await admission.handle.settle({
+            status: "completed",
+            usage: {
+              input: totals.tokensIn,
+              output: totals.tokensOut,
+              total: totals.tokensIn + totals.tokensOut,
+              cost: Math.min(totals.costUsd, admission.handle.record.maxCostUsd),
+              cacheRead: 0,
+              cacheWrite: 0,
+            },
+          });
+          livePipelineAdmissions.delete(req.params.runId);
+          return {
+            reconciled: totals,
+            entry,
+            budgetAdmission: {
+              runId: admission.runId,
+              nodeIds: admission.hooks.map((hook) => hook.nodeId),
+            },
+          };
+        }
         const sessionId = `pipeline-${req.params.runId}`.replace(/[^A-Za-z0-9._-]/g, "-");
         const entry = recordRun({
           sessionId,
