@@ -69,7 +69,7 @@
   ],
   "deprecatedCompatibilityIdentifiers": [
     {
-      "path": "server/vendor/pipeline-engine/packages/server/src/routes/api.ts",
+      "path": "server/vendor/pipeline-engine/packages/server/src/trusted-proxy-header.ts",
       "identifiers": ["X-Archon-User"],
       "comment": "deprecated-compat: previous default proxy identity header"
     },
@@ -90,13 +90,13 @@
     },
     {
       "path": "server/src/api/dag-workflows.ts",
-      "identifiers": ["legacy-archon"],
-      "comment": "deprecated-compat: previous legacy-workflow preview route"
+      "identifiers": ["legacy-archon", "archon-workflow-yaml/v1"],
+      "comment": "deprecated-compat: previous legacy-workflow preview route and response discriminator"
     },
     {
       "path": "server/test/dag-workflows-api.test.ts",
-      "identifiers": ["legacy-archon"],
-      "comment": "deprecated-compat: coverage for previous legacy-workflow preview route"
+      "identifiers": ["legacy-archon", "archon-workflow-yaml/v1"],
+      "comment": "deprecated-compat: coverage for previous legacy-workflow preview route and response discriminator"
     },
     {
       "path": "docs/dag-workflows-legacy-migration.md",

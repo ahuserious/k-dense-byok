@@ -159,7 +159,20 @@ describe("DAG workflow API", () => {
     });
     expect(deprecatedPreview.statusCode).toBe(200);
     expect(deprecatedPreview.headers["cache-control"]).toBe("no-store");
-    expect(deprecatedPreview.json()).toEqual(preview.json());
+    const deprecatedBody = deprecatedPreview.json();
+    expect(deprecatedBody).toMatchObject({
+      sourceFormat: "archon-workflow-yaml/v1",
+      graph: {
+        id: "legacy-preview",
+        nodes: [{ model: { requested: { reasoning: "low" } } }],
+      },
+      blockers: [],
+      legacyRuns: { mode: "archive-only", resumable: false },
+    });
+    expect(deprecatedBody).toEqual({
+      ...preview.json(),
+      sourceFormat: "archon-workflow-yaml/v1",
+    });
 
     const list = await app.inject({
       method: "GET",

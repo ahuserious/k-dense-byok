@@ -6,6 +6,12 @@ import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi';
 import { streamSSE } from 'hono/streaming';
 import { cors } from 'hono/cors';
 import type { WebAdapter } from '../adapters/web';
+import {
+  CANONICAL_WEB_IDENTITY_HEADER,
+  LEGACY_WEB_IDENTITY_HEADER,
+  resolveTrustedProxyIdentityHeader,
+  type TrustedProxyIdentityHeader,
+} from '../trusted-proxy-header';
 import { rm, readFile, writeFile, unlink, mkdir, readdir, stat } from 'fs/promises';
 import { readFileSync } from 'fs';
 import { normalize, join, sep, basename } from 'path';
@@ -95,9 +101,6 @@ function getLog(): ReturnType<typeof createLogger> {
   return cachedLog;
 }
 
-const CANONICAL_WEB_IDENTITY_HEADER = 'X-Pipeline-User';
-// deprecated-compat: remove after the reverse-proxy header migration window.
-const LEGACY_WEB_IDENTITY_HEADER = 'X-Archon-User';
 let legacyWebIdentityHeaderWarningLogged = false;
 
 export function resetLegacyWebIdentityHeaderWarningForTests(): void {
@@ -1376,21 +1379,6 @@ export function registerApiRoutes(
     | { status: 'conflict' }
     | { status: 'present'; value: string };
 
-  type TrustedProxyIdentityHeader = {
-    name: string;
-    source: 'pipeline-env' | 'legacy-env' | 'legacy-default';
-  };
-
-  function resolveTrustedProxyIdentityHeader(): TrustedProxyIdentityHeader {
-    const canonicalOverride = process.env.PIPELINE_WEB_AUTH_HEADER?.trim();
-    if (canonicalOverride) return { name: canonicalOverride, source: 'pipeline-env' };
-
-    const legacyOverride = process.env.ARCHON_WEB_AUTH_HEADER?.trim();
-    if (legacyOverride) return { name: legacyOverride, source: 'legacy-env' };
-
-    return { name: LEGACY_WEB_IDENTITY_HEADER, source: 'legacy-default' };
-  }
-
   const trustedProxyIdentityHeader = resolveTrustedProxyIdentityHeader();
 
   function warnIfLegacyIdentityHeaderConfigured(header: TrustedProxyIdentityHeader): void {
@@ -1449,7 +1437,7 @@ export function registerApiRoutes(
   //
   // SECURITY: resolveAuthContext also accepts exactly one trusted reverse-proxy
   // header (PIPELINE_WEB_AUTH_HEADER, then deprecated ARCHON_WEB_AUTH_HEADER,
-  // then the legacy default `X-Archon-User`) as an identity. That header
+  // then the legacy default exported by trusted-proxy-header) as an identity. That header
   // is only safe to trust when the app is reachable solely through a proxy that
   // STRIPS it from inbound requests (or the app binds 127.0.0.1). If you retire
   // the proxy auth sidecar, the proxy MUST still strip that header — otherwise a

@@ -177,6 +177,9 @@ export async function registerDagWorkflowRoutes(
   const previewLegacyWorkflow = async (
     request: FastifyRequest<LegacyWorkflowPreviewRoute>,
     reply: FastifyReply,
+    sourceFormat:
+      | "pipeline-workflow-yaml/v1"
+      | "archon-workflow-yaml/v1",
   ) => {
     try {
       const body = isRecord(request.body) ? request.body : {};
@@ -214,7 +217,7 @@ export async function registerDagWorkflowRoutes(
           | "max",
       });
       reply.header("Cache-Control", "no-store");
-      return preview;
+      return { ...preview, sourceFormat };
     } catch (error) {
       if (!(error instanceof LegacyPipelineImportError)) {
         reply.code(500);
@@ -227,7 +230,8 @@ export async function registerDagWorkflowRoutes(
 
   app.post<LegacyWorkflowPreviewRoute>(
     "/dag-workflow-imports/legacy-pipeline/preview",
-    previewLegacyWorkflow,
+    (request, reply) =>
+      previewLegacyWorkflow(request, reply, "pipeline-workflow-yaml/v1"),
   );
   // deprecated-compat: retain the former migration URL for existing scripts.
   app.post<LegacyWorkflowPreviewRoute>(
@@ -240,7 +244,11 @@ export async function registerDagWorkflowRoutes(
         },
         "dag_workflows.legacy_preview_path_deprecated",
       );
-      return previewLegacyWorkflow(request, reply);
+      return previewLegacyWorkflow(
+        request,
+        reply,
+        "archon-workflow-yaml/v1",
+      );
     },
   );
 

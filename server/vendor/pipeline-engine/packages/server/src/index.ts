@@ -77,6 +77,10 @@ import { DashboardEventPoller } from './adapters/web/dashboard-event-poller';
 import { PgNotifyListener } from './adapters/web/pg-notify-listener';
 import { registerApiRoutes } from './routes/api';
 import {
+  assessTrustedProxyHeaderExposure,
+  PUBLIC_HEADER_TRUST_ACKNOWLEDGEMENT,
+} from './trusted-proxy-header';
+import {
   handleMessage,
   pool,
   ConversationLockManager,
@@ -918,26 +922,29 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     }
   }
 
-  // Security guardrail (advisory): the web identity header (ARCHON_WEB_AUTH_HEADER,
-  // default X-Pipeline-User) is trusted as-is — Pipeline Engine attributes web requests to
-  // whoever the header names. That is only sound when Pipeline Engine is reachable SOLELY
-  // through a reverse proxy that authenticates and sets the header (loopback bind).
-  // On a non-loopback bind any client that can reach the port can forge it:
-  // cosmetic misattribution without per-user GitHub, but in per-user mode a forged
-  // header can read/disconnect another user's GitHub connection or bind a
-  // device-flow token under their identity. WARN (not fatal) so existing exposed
-  // installs without per-user identity keep starting — but the misconfiguration is
-  // surfaced. The default header name means the trust is live even when
-  // ARCHON_WEB_AUTH_HEADER is unset, so per-user mode alone arms this check.
-  // Web auth (Better Auth) also keeps the header active as a fallback (proxy
-  // deploys / auth-service sidecar), so an enabled install on a public bind
-  // gets the same advisory.
-  const webAuthHeaderTrustActive =
-    Boolean(process.env.ARCHON_WEB_AUTH_HEADER) || isPerUserGitHubEnabled() || isWebAuthEnabled();
-  if (webAuthHeaderTrustActive && hostname !== '127.0.0.1' && hostname !== 'localhost') {
+  // Security guardrail: a trusted proxy identity header is only sound when the
+  // engine is reachable solely through the proxy that strips and replaces it.
+  // Evaluate this before Bun.serve so a rejected public bind never opens a socket.
+  const headerExposure = assessTrustedProxyHeaderExposure({
+    hostname,
+    perUserGitHubEnabled: isPerUserGitHubEnabled(),
+    perUserProviderKeysEnabled: isPerUserProviderKeysEnabled(),
+    webAuthEnabled: isWebAuthEnabled(),
+  });
+  if (headerExposure.action === 'acknowledged') {
     getLog().warn(
-      { hostname, headerName: process.env.ARCHON_WEB_AUTH_HEADER || 'X-Pipeline-User' },
-      'web_auth.header_trust_on_public_bind'
+      { hostname, headerName: headerExposure.trustedHeader.name },
+      'web_auth.header_trust_public_bind_acknowledged'
+    );
+  } else if (headerExposure.action === 'reject') {
+    getLog().fatal(
+      { hostname, headerName: headerExposure.trustedHeader.name },
+      'web_auth.header_trust_public_bind_rejected'
+    );
+    throw new Error(
+      `The server cannot trust ${headerExposure.trustedHeader.name} while bound to ` +
+        `${hostname}. Bind to 127.0.0.1, or acknowledge that an authenticating reverse proxy ` +
+        `strips and replaces this header by setting ${PUBLIC_HEADER_TRUST_ACKNOWLEDGEMENT}=1.`
     );
   }
 
