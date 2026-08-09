@@ -66,6 +66,7 @@ import type {
   SupervisedWorkflowBudgetDescriptorV1,
 } from "./supervised-budget.ts";
 import {
+  pendingNodeKindSpecEnforcements,
   pendingNodeSpecEnforcementMessage,
   pendingNodeSpecEnforcements,
   pendingWorkflowSettingsEnforcements,
@@ -1433,6 +1434,7 @@ export function createKadyWorkflowNodeExecutor(
     const pendingEnforcement = [
       ...pendingWorkflowSettingsEnforcements(context.graph.settings),
       ...pendingNodeSpecEnforcements(context.node.settings),
+      ...pendingNodeKindSpecEnforcements(context.node),
     ][0];
     if (pendingEnforcement) {
       fail(

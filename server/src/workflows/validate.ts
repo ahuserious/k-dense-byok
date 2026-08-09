@@ -22,6 +22,7 @@ import {
   workflowEvidencePolicyEvaluator,
 } from "./evidence-policy.ts";
 import {
+  pendingNodeKindSpecEnforcements,
   pendingNodeSpecEnforcementMessage,
   pendingNodeSpecEnforcements,
   pendingWorkflowSettingsEnforcements,
@@ -309,15 +310,24 @@ export function resolveNodeSpecV1(
   document: WorkflowGraphDocument,
   node: WorkflowNode,
   legacyModel?: ModelRequest,
+  applySettingsModel = true,
 ): ResolvedNodeSpecV1 {
   const settings: NodeSpecV1 = node.settings ?? {};
-  const model = settings.model ?? legacyModel ?? inheritedNodeModel(node, document);
+  const model = applySettingsModel
+    ? settings.model ?? legacyModel ?? inheritedNodeModel(node, document)
+    : legacyModel;
+  const reasoningOverride =
+    node.kind === "fusion" &&
+      node.fusion.mode === "openrouter-router" &&
+      settings.reasoningEffort === "high"
+      ? undefined
+      : settings.reasoningEffort;
   const reasoningEffort =
     settings.reasoningEffort ?? model?.requested.reasoning ??
     DEFAULT_NODE_SPEC_V1.reasoningEffort;
   const executableModel = model === undefined
     ? undefined
-    : modelRequestWithReasoningOverride(model, settings.reasoningEffort);
+    : modelRequestWithReasoningOverride(model, reasoningOverride);
   const effectiveLimits = effectiveNodeLimits(node, document);
   const workflowDatabases = document.settings?.databases ?? [];
   const nodeDatabases = settings.databases ?? [];
@@ -578,12 +588,24 @@ function validateNode(
       message: pendingNodeSpecEnforcementMessage(finding),
     });
   }
+  for (const finding of pendingNodeKindSpecEnforcements(node)) {
+    issues.push({
+      code: finding.code,
+      path: `${nodePath}/settings/${finding.pathSuffix}`,
+      message: pendingNodeSpecEnforcementMessage(finding),
+    });
+  }
   const resolveModel = (
     legacyModel?: ModelRequest,
     inheritNodeModel = true,
+    applySettingsModel = true,
   ): ModelRequest | undefined => {
-    if (!inheritNodeModel && !legacyModel && !node.settings?.model) return undefined;
-    return resolveNodeSpecV1(document, node, legacyModel).model;
+    if (
+      !inheritNodeModel &&
+      !legacyModel &&
+      (!applySettingsModel || !node.settings?.model)
+    ) return undefined;
+    return resolveNodeSpecV1(document, node, legacyModel, applySettingsModel).model;
   };
   const nodeSpecModel = node.settings?.model ? resolveModel() : undefined;
   if (nodeSpecModel) {
@@ -593,9 +615,14 @@ function validateNode(
     legacyModel: ModelRequest | undefined,
     legacyPath: string,
     inheritNodeModel = true,
+    applySettingsModel = true,
   ): ModelRequest | undefined => {
-    const resolvedModel = resolveModel(legacyModel, inheritNodeModel);
-    if (resolvedModel && !nodeSpecModel) {
+    const resolvedModel = resolveModel(
+      legacyModel,
+      inheritNodeModel,
+      applySettingsModel,
+    );
+    if (resolvedModel && (!nodeSpecModel || !applySettingsModel)) {
       validateModelRequest(resolvedModel, legacyPath, issues);
     }
     return resolvedModel;
@@ -626,6 +653,8 @@ function validateNode(
       validateResolvedModel(
         node.evidence.evaluator,
         `${nodePath}/evidence/evaluator`,
+        false,
+        false,
       );
     }
     validateEvidenceRescueAvailability(
@@ -637,7 +666,7 @@ function validateNode(
   }
   if (
     requiresWorkflowEvidencePolicyEvaluation(document, node) &&
-    !resolveModel(workflowEvidencePolicyEvaluator(document, node), false)
+    !resolveModel(workflowEvidencePolicyEvaluator(document, node), false, false)
   ) {
     issues.push({
       code: "missing-evidence-policy-evaluator",
@@ -647,6 +676,18 @@ function validateNode(
     });
   }
   validateWorkspacePolicy(node, nodePath, issues);
+
+  if (
+    node.settings?.model !== undefined &&
+    (node.kind === "council" || node.kind === "fusion" || node.kind === "evidence-gate")
+  ) {
+    issues.push({
+      code: "ambiguous-node-spec-model",
+      path: `${nodePath}/settings/model`,
+      message:
+        `NodeSpec model has no unambiguous primary slot on ${node.kind}; explicit role models remain authoritative.`,
+    });
+  }
 
   switch (node.kind) {
     case "agent":
@@ -671,12 +712,14 @@ function validateNode(
         validateInheritedModel(model, nodePath, document, issues);
       }
       if (node.model && node.candidateModels) {
-        validateResolvedModel(node.model, `${nodePath}/model`);
+        validateResolvedModel(node.model, `${nodePath}/model`, false, false);
       }
       for (const [index, candidateModel] of (node.candidateModels ?? []).entries()) {
         validateResolvedModel(
           candidateModel,
           `${nodePath}/candidateModels/${index}`,
+          false,
+          false,
         );
       }
       if (
@@ -694,6 +737,7 @@ function validateNode(
         node.evaluator ?? document.defaultModel,
         `${nodePath}/evaluator`,
         false,
+        false,
       )) {
         issues.push({
           code: "missing-evaluator-model",
@@ -704,9 +748,14 @@ function validateNode(
       break;
     case "council":
       validateUniqueMemberIds(node.members, `${nodePath}/members`, issues);
-      validateResolvedModel(node.chair, `${nodePath}/chair`);
+      validateResolvedModel(node.chair, `${nodePath}/chair`, false, false);
       for (const [index, member] of node.members.entries()) {
-        validateResolvedModel(member.model, `${nodePath}/members/${index}/model`);
+        validateResolvedModel(
+          member.model,
+          `${nodePath}/members/${index}/model`,
+          false,
+          false,
+        );
       }
       break;
     case "fusion":
@@ -714,6 +763,8 @@ function validateNode(
         const router = validateResolvedModel(
           node.fusion.router,
           `${nodePath}/fusion/router`,
+          false,
+          false,
         )!;
         validateHostedOpenRouterModelRequest(
           router,
@@ -729,6 +780,8 @@ function validateNode(
           const request = validateResolvedModel(
             member.model,
             path,
+            false,
+            false,
           )!;
           participants.push({ request, path: `${path}/requested/reasoning` });
           validateHostedOpenRouterModelRequest(
@@ -742,6 +795,8 @@ function validateNode(
         const judge = validateResolvedModel(
           node.fusion.judge,
           `${nodePath}/fusion/judge`,
+          false,
+          false,
         )!;
         participants.push({
           request: judge,
@@ -761,11 +816,15 @@ function validateNode(
           validateResolvedModel(
             member.model,
             `${nodePath}/fusion/members/${index}/model`,
+            false,
+            false,
           );
         }
         validateResolvedModel(
           node.fusion.synthesizer,
           `${nodePath}/fusion/synthesizer`,
+          false,
+          false,
         );
       }
       break;
@@ -793,11 +852,13 @@ function validateNode(
           node.evaluator,
           `${nodePath}/evaluator`,
           false,
+          false,
         );
       } else if (needsModelEvaluator) {
         evaluator = validateResolvedModel(
           workflowEvidenceGateEvaluator(document, node),
           `${nodePath}/evaluator`,
+          false,
           false,
         );
       }

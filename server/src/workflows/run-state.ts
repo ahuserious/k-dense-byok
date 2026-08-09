@@ -714,41 +714,53 @@ function modelRequestsForNode(
   node: WorkflowNode,
 ): ModelRequest[] {
   const requests: ModelRequest[] = [];
-  const add = (legacyModel: ModelRequest | undefined): void => {
-    const request = resolvedNodeSlotModel(graph, node, legacyModel);
+  const add = (
+    legacyModel: ModelRequest | undefined,
+    applySettingsModel: boolean,
+  ): void => {
+    const request = resolvedNodeSlotModel(
+      graph,
+      node,
+      legacyModel,
+      applySettingsModel,
+    );
     if (request) requests.push(request);
   };
   switch (node.kind) {
     case "agent":
     case "research-until-goal":
-      add(node.model ?? graph.defaultModel);
+      add(node.model ?? graph.defaultModel, true);
       break;
     case "council":
-      node.members.forEach((member) => add(member.model));
-      add(node.chair);
+      node.members.forEach((member) => add(member.model, false));
+      add(node.chair, false);
       break;
     case "fusion":
-      node.fusion.members.forEach((member) => add(member.model));
+      node.fusion.members.forEach((member) => add(member.model, false));
       if (node.fusion.mode === "openrouter-router") {
-        add(node.fusion.router);
-        add(node.fusion.judge);
+        add(node.fusion.router, false);
+        add(node.fusion.judge, false);
       } else {
-        add(node.fusion.synthesizer);
+        add(node.fusion.synthesizer, false);
       }
       break;
     case "best-of-n":
-      (node.candidateModels ?? [node.model ?? graph.defaultModel]).forEach(add);
-      add(node.evaluator ?? graph.defaultModel);
+      if (node.candidateModels) {
+        node.candidateModels.forEach((candidate) => add(candidate, false));
+      } else {
+        add(node.model ?? graph.defaultModel, true);
+      }
+      add(node.evaluator ?? graph.defaultModel, false);
       break;
     case "evidence-gate":
-      add(workflowEvidenceGateEvaluator(graph, node));
+      add(workflowEvidenceGateEvaluator(graph, node), false);
       break;
     case "lean4":
-      add(node.solverModel ?? graph.defaultModel);
+      add(node.solverModel ?? graph.defaultModel, true);
       break;
   }
   if (requiresWorkflowEvidencePolicyEvaluation(graph, node)) {
-    add(workflowEvidencePolicyEvaluator(graph, node));
+    add(workflowEvidencePolicyEvaluator(graph, node), false);
   }
   return requests;
 }
@@ -767,9 +779,10 @@ function resolvedNodeSlotModel(
   graph: WorkflowGraphDocument,
   node: WorkflowNode,
   legacyModel: ModelRequest | undefined,
+  applySettingsModel: boolean,
 ): ModelRequest | undefined {
-  if (!legacyModel && !node.settings?.model) return undefined;
-  return resolveNodeSpecV1(graph, node, legacyModel).model;
+  if (!legacyModel && (!applySettingsModel || !node.settings?.model)) return undefined;
+  return resolveNodeSpecV1(graph, node, legacyModel, applySettingsModel).model;
 }
 
 function withEvidencePolicySlot(
@@ -782,6 +795,7 @@ function withEvidencePolicySlot(
     graph,
     node,
     workflowEvidencePolicyEvaluator(graph, node),
+    false,
   );
   return evaluator
     ? [
@@ -810,7 +824,7 @@ export function workflowModelCallSlotsForNode(
         node,
         modelCallSlot(
           "agent",
-          resolvedNodeSlotModel(graph, node, node.model ?? graph.defaultModel),
+          resolvedNodeSlotModel(graph, node, node.model ?? graph.defaultModel, true),
         ),
       );
     case "research-until-goal":
@@ -819,7 +833,7 @@ export function workflowModelCallSlotsForNode(
         node,
         modelCallSlot(
           "research-iteration-1",
-          resolvedNodeSlotModel(graph, node, node.model ?? graph.defaultModel),
+          resolvedNodeSlotModel(graph, node, node.model ?? graph.defaultModel, true),
         ),
       );
     case "council": {
@@ -828,12 +842,12 @@ export function workflowModelCallSlotsForNode(
         for (const member of node.members) {
           slots.push({
             id: `council-round-${round}-member-${member.id}`,
-            request: resolvedNodeSlotModel(graph, node, member.model)!,
+            request: resolvedNodeSlotModel(graph, node, member.model, false)!,
           });
         }
         slots.push({
           id: `council-round-${round}-chair`,
-          request: resolvedNodeSlotModel(graph, node, node.chair)!,
+          request: resolvedNodeSlotModel(graph, node, node.chair, false)!,
         });
       }
       return withEvidencePolicySlot(graph, node, slots);
@@ -843,15 +857,15 @@ export function workflowModelCallSlotsForNode(
         return withEvidencePolicySlot(graph, node, [
           ...node.fusion.members.map((member) => ({
             id: `fusion-panel-${member.id}`,
-            request: resolvedNodeSlotModel(graph, node, member.model)!,
+            request: resolvedNodeSlotModel(graph, node, member.model, false)!,
           })),
           {
             id: "fusion-judge-deliberation",
-            request: resolvedNodeSlotModel(graph, node, node.fusion.judge)!,
+            request: resolvedNodeSlotModel(graph, node, node.fusion.judge, false)!,
           },
           {
             id: "fusion-judge-final",
-            request: resolvedNodeSlotModel(graph, node, node.fusion.judge)!,
+            request: resolvedNodeSlotModel(graph, node, node.fusion.judge, false)!,
           },
         ]);
       }
@@ -860,13 +874,13 @@ export function workflowModelCallSlotsForNode(
         for (const member of node.fusion.members) {
           slots.push({
             id: `fusion-round-${round}-member-${member.id}`,
-            request: resolvedNodeSlotModel(graph, node, member.model)!,
+            request: resolvedNodeSlotModel(graph, node, member.model, false)!,
           });
         }
       }
       slots.push({
         id: "fusion-synthesizer",
-        request: resolvedNodeSlotModel(graph, node, node.fusion.synthesizer)!,
+        request: resolvedNodeSlotModel(graph, node, node.fusion.synthesizer, false)!,
       });
       return withEvidencePolicySlot(graph, node, slots);
     }
@@ -876,11 +890,12 @@ export function workflowModelCallSlotsForNode(
         graph,
         node,
         node.model ?? graph.defaultModel,
+        true,
       );
       const slots: WorkflowModelCallSlot[] = [];
       for (let index = 0; index < candidateCount; index += 1) {
         const request = node.candidateModels?.[index]
-          ? resolvedNodeSlotModel(graph, node, node.candidateModels[index])
+          ? resolvedNodeSlotModel(graph, node, node.candidateModels[index], false)
           : repeatedRequest;
         if (request) {
           slots.push({
@@ -893,6 +908,7 @@ export function workflowModelCallSlotsForNode(
         graph,
         node,
         node.evaluator ?? graph.defaultModel,
+        false,
       );
       if (evaluator) {
         slots.push({ id: "candidate-evaluator", request: structuredClone(evaluator) });
@@ -909,6 +925,7 @@ export function workflowModelCallSlotsForNode(
               graph,
               node,
               workflowEvidenceGateEvaluator(graph, node),
+              false,
             ),
           )
         : [];
@@ -924,6 +941,7 @@ export function workflowModelCallSlotsForNode(
                 graph,
                 node,
                 node.solverModel ?? graph.defaultModel,
+                true,
               ),
             )
           : [],
@@ -947,6 +965,7 @@ export function workflowModelCallSlotForNode(
         graph,
         node,
         node.model ?? graph.defaultModel,
+        true,
       );
       return request && iteration >= 1 && iteration <= maximumIterations
         ? { id: slotId, request: structuredClone(request) }

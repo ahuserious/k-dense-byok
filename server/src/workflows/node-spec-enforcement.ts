@@ -1,4 +1,4 @@
-import type { NodeSpecV1, WorkflowSettingsV1 } from "./schema.ts";
+import type { NodeSpecV1, WorkflowNode, WorkflowSettingsV1 } from "./schema.ts";
 
 export type NodeSpecEnforcementUnit = "S4" | "S5";
 
@@ -7,6 +7,7 @@ export interface PendingNodeSpecEnforcement {
   pathSuffix: string;
   field: string;
   unit: NodeSpecEnforcementUnit;
+  owner: string;
 }
 
 function pending(
@@ -14,8 +15,11 @@ function pending(
   pathSuffix: string,
   field: string,
   unit: NodeSpecEnforcementUnit,
+  owner = unit === "S4"
+    ? "per-node-control unit (S4)"
+    : "deliberation/personality-store unit (S5)",
 ): PendingNodeSpecEnforcement {
-  return { code, pathSuffix, field, unit };
+  return { code, pathSuffix, field, unit, owner };
 }
 
 /** Non-default NodeSpec fields that are frozen but not yet bound to execution. */
@@ -117,6 +121,27 @@ export function pendingNodeSpecEnforcements(
   return findings;
 }
 
+/** Node-kind-specific fields awaiting the owning runtime's effective definition. */
+export function pendingNodeKindSpecEnforcements(
+  node: WorkflowNode,
+): PendingNodeSpecEnforcement[] {
+  if (
+    node.kind === "fusion" &&
+    node.fusion.mode === "openrouter-router" &&
+    node.settings?.reasoningEffort !== undefined &&
+    node.settings.reasoningEffort !== "high"
+  ) {
+    return [pending(
+      "hosted-fusion-reasoning-enforcement-pending",
+      "reasoningEffort",
+      "reasoningEffort on hosted Fusion",
+      "S5",
+      "fusion-topology unit (S5)",
+    )];
+  }
+  return [];
+}
+
 /** Non-default workflow settings that would otherwise bypass the node-level gate. */
 export function pendingWorkflowSettingsEnforcements(
   settings: WorkflowSettingsV1 | undefined,
@@ -145,8 +170,5 @@ export function pendingWorkflowSettingsEnforcements(
 export function pendingNodeSpecEnforcementMessage(
   finding: PendingNodeSpecEnforcement,
 ): string {
-  const owner = finding.unit === "S4"
-    ? "per-node-control unit (S4)"
-    : "deliberation/personality-store unit (S5)";
-  return `NodeSpec ${finding.field} is frozen in the contract, but enforcement lands in the ${owner}; non-default values fail closed until ${finding.unit} enforcement.`;
+  return `NodeSpec ${finding.field} is frozen in the contract, but enforcement lands in the ${finding.owner}; non-default values fail closed until ${finding.unit} enforcement.`;
 }
