@@ -19,6 +19,7 @@ const PROCESS_START_IDENTITY = `${Date.now()}-${randomBytes(24).toString("hex")}
 const PHASES = new Set<WatcherOperationPhase>([
   "repairing",
   "repair-failed",
+  "proposal",
   "redeployed",
   "restart-failed",
   "completed",
@@ -178,7 +179,16 @@ function parseRecord(value: unknown, operationKey: string): WatcherOperationReco
       (value.workflowRevision as number) < 1
     )) ||
     (value.recovery !== undefined && !validRecovery(value.recovery, value.runId)) ||
+    (value.proposalId !== undefined && (
+      typeof value.proposalId !== "string" || value.proposalId.length === 0
+    )) ||
+    (value.proposalReason !== undefined && (
+      typeof value.proposalReason !== "string" || value.proposalReason.length === 0
+    )) ||
     (value.detail !== undefined && typeof value.detail !== "string") ||
+    (value.phase === "proposal" && (
+      value.proposalId === undefined || value.proposalReason === undefined
+    )) ||
     (["redeployed", "restart-failed", "completed"].includes(value.phase) && (
       value.workflowRevision === undefined || value.recovery === undefined
     ))

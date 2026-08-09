@@ -60,11 +60,17 @@ export class CompactionWatcherPartialSuccessError extends CompactionWatcherError
 }
 
 /**
- * Marks a failure that happened before the repair runner was invoked. The
- * watcher may safely persist this as retryable because no deployment side
- * effect can have occurred.
+ * Marks a repair failure whose caller proved that no deployment side effect
+ * occurred. Admission rejection and stale-definition CAS are retryable here.
  */
-export class CompactionWatcherAdmissionError extends Error {
+export class CompactionWatcherRetryableRepairError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "CompactionWatcherRetryableRepairError";
+  }
+}
+
+export class CompactionWatcherAdmissionError extends CompactionWatcherRetryableRepairError {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = "CompactionWatcherAdmissionError";
@@ -128,6 +134,10 @@ export interface WatcherRepairReceipt {
   redeployed: boolean;
   workflowRevision?: number;
   recovery?: DurableRestartProof;
+  proposal?: {
+    proposalId: string;
+    reason: string;
+  };
   detail?: string;
 }
 
@@ -161,6 +171,7 @@ export interface WatcherRescueProposalReceipt {
 export type WatcherOperationPhase =
   | "repairing"
   | "repair-failed"
+  | "proposal"
   | "redeployed"
   | "restart-failed"
   | "completed";
@@ -176,6 +187,8 @@ export interface WatcherOperationRecord {
   updatedAt: number;
   workflowRevision?: number;
   recovery?: DurableRestartProof;
+  proposalId?: string;
+  proposalReason?: string;
   detail?: string;
 }
 
@@ -641,6 +654,20 @@ export function createCompactionWatcher(
             detail: operation.detail ?? `Watcher operation ${key} already completed.`,
           };
         }
+        if (operation?.phase === "proposal") {
+          return {
+            handled: true,
+            resumable: false,
+            redeployed: false,
+            resumed: false,
+            operationKey: key,
+            proposal: {
+              proposalId: operation.proposalId!,
+              reason: operation.proposalReason!,
+            },
+            detail: operation.detail ?? `Watcher operation ${key} requires rescue approval.`,
+          };
+        }
         if (operation?.phase === "repairing") {
           throw new CompactionWatcherPartialSuccessError(
             `Watcher operation ${key} was interrupted while repair state was ambiguous.`,
@@ -667,8 +694,8 @@ export function createCompactionWatcher(
               ...(semanticVerdict ? { semanticVerdict } : {}),
             });
           } catch (error) {
-            if (error instanceof CompactionWatcherAdmissionError) {
-              const detail = `Repair admission rejected before runner execution: ${error.message}`;
+            if (error instanceof CompactionWatcherRetryableRepairError) {
+              const detail = `Repair stopped before deployment: ${error.message}`;
               transaction.compareAndSwap("repairing", {
                 runId: dispatch.runId,
                 ...(nodeId ? { nodeId } : {}),
@@ -699,6 +726,29 @@ export function createCompactionWatcher(
           if (!repair.redeployed) {
             const detail = repair.detail ??
               "Watcher repair explicitly reported that no revision was deployed.";
+            if (repair.proposal) {
+              operation = transaction.compareAndSwap("repairing", {
+                runId: dispatch.runId,
+                ...(nodeId ? { nodeId } : {}),
+                auditIdentity,
+                phase: "proposal",
+                proposalId: repair.proposal.proposalId,
+                proposalReason: repair.proposal.reason,
+                detail,
+              });
+              return {
+                handled: true,
+                resumable: false,
+                redeployed: false,
+                resumed: false,
+                operationKey: key,
+                proposal: {
+                  proposalId: repair.proposal.proposalId,
+                  reason: repair.proposal.reason,
+                },
+                detail,
+              };
+            }
             transaction.compareAndSwap("repairing", {
               runId: dispatch.runId,
               ...(nodeId ? { nodeId } : {}),

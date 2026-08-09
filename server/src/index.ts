@@ -286,7 +286,6 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await modalJobManager.recoverAllProjects();
 
   app.addHook("onClose", async () => {
-    contextEngineering.close();
     await workflowController?.close({
       // Give every hosted leaf its complete acknowledgement window plus a
       // scheduling margin before deciding whether shutdown owns quarantine.
@@ -297,13 +296,17 @@ export async function buildApp(options: BuildAppOptions = {}) {
     // for actual controller idleness before concluding no hosted owner can
     // still enter quarantine after the check below.
     await workflowController?.waitForIdle();
-    if (options.workflowSupervisor) return;
+    if (options.workflowSupervisor) {
+      contextEngineering.close();
+      return;
+    }
     // A late acknowledgement may arrive after the bounded caller has already
     // failed closed. Graceful shutdown retains the process and exact owner
     // until that quarantine releases or its release attempt visibly fails.
     await waitForHostedFusionQuarantines();
     assertNoHostedFusionQuarantine();
     await disposeAllWorkflowDelegationSessions();
+    contextEngineering.close();
   });
 
   if (options.workflowSupervisor) {

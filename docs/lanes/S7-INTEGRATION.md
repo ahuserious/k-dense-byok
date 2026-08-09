@@ -12,10 +12,12 @@ const contextEngineering = new ContextEngineeringProduction(workflowController, 
 ```
 
 The DAG Fusion bridge terminal hook feeds the durable fingerprint and semantic
-records into the coordinator:
+records into the coordinator through the server-local write-ahead queue. Failed
+deliveries retain their record with exponential backoff, and registration drains
+the queue on process boot:
 
 ```ts
-this.removeCompactionSink = installDagFusionCompactionEventSink((event) => this.handleDagFusionCompaction(event).catch(this.onError));
+this.removeCompactionSink = installDagFusionCompactionEventSink((event) => this.handleDagFusionCompaction(event), { onError: this.onError });
 ```
 
 The session route dispatches lateral pass through the registered behavior:

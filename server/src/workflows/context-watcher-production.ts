@@ -29,12 +29,19 @@ import { FileCompactionWatcherOperationStore } from
   "./compaction-watcher-operation-store.ts";
 import type {
   CompactionSemanticModelRequest,
+  DurableRestartProof,
   WatcherRepairRequest,
   WatcherRestartRequest,
 } from "./compaction-watcher.ts";
+import { CompactionWatcherRetryableRepairError } from "./compaction-watcher.ts";
 import { registerContextEngineering } from "./context-watcher.ts";
 import type { WorkflowRunController } from "./controller.ts";
-import { workflowStore, type WorkflowStore } from "./store.ts";
+import {
+  WorkflowStoreError,
+  workflowStore,
+  type WorkflowRunRecord,
+  type WorkflowStore,
+} from "./store.ts";
 
 const CONTEXT_ENGINEERING_LEDGER_SESSION = "context-engineering";
 const STOPPED_RUN_POLL_MS = 5_000;
@@ -162,6 +169,25 @@ function nativeRestartToken(runId: string, lastSeq: number, graphSha256: string)
   return `native:${runId}:${lastSeq}:${graphSha256}`;
 }
 
+function recoverableSourceProof(source: WorkflowRunRecord): DurableRestartProof | undefined {
+  if (
+    source.state.status !== "interrupted" || !source.state.recoverable ||
+    !Number.isSafeInteger(source.state.lastSeq) || source.state.lastSeq < 1 ||
+    !/^[a-f0-9]{64}$/.test(source.manifest.graphSha256)
+  ) return undefined;
+  return {
+    runId: source.manifest.id,
+    checkpointId: `event:${source.state.lastSeq}`,
+    restartToken: nativeRestartToken(
+      source.manifest.id,
+      source.state.lastSeq,
+      source.manifest.graphSha256,
+    ),
+    verified: true,
+    sideEffectSafety: "idempotent",
+  };
+}
+
 class ProjectContextEngineeringRuntime {
   readonly registry = new WorkflowBehaviorRegistry();
   readonly registration;
@@ -230,6 +256,26 @@ class ProjectContextEngineeringRuntime {
   private async repairAndRedeploy(request: WatcherRepairRequest) {
     const source = this.store.readRun(this.projectId, request.runId);
     if (!source) throw new Error(`Context repair source run ${request.runId} is missing.`);
+    const sourceRecovery = recoverableSourceProof(source);
+    if (!sourceRecovery) {
+      const reason = `context-repair-requires-verified-recovery:${request.reason}`;
+      const proposal = proposalReceipt(this.projectId, {
+        runId: request.runId,
+        ...(request.nodeId ? { nodeId: request.nodeId } : {}),
+        reason,
+      });
+      return {
+        redeployed: false,
+        proposal: { proposalId: proposal.proposalId, reason },
+        detail: `${proposal.detail} No replacement was created or started.`,
+      };
+    }
+    const definitionAtAudit = this.store.readDefinition(
+      this.projectId,
+      source.manifest.workflowId,
+    );
+    if (!definitionAtAudit) throw new Error(`Workflow ${source.manifest.workflowId} is missing.`);
+    const expectedRevision = definitionAtAudit.revision;
     const repairedGraph = await this.completeJson({
       projectId: this.projectId,
       model: request.model,
@@ -237,17 +283,37 @@ class ProjectContextEngineeringRuntime {
         "Repair the supplied WorkflowGraphDocument to remove the detected context rot.",
         "Preserve all additive capabilities and return the complete repaired document.",
       ].join(" "),
-      input: { request, workflow: source.manifest.graph },
+      input: {
+        request,
+        workflowRevision: expectedRevision,
+        workflow: definitionAtAudit.graph,
+      },
     });
     const current = this.store.readDefinition(this.projectId, source.manifest.workflowId);
     if (!current) throw new Error(`Workflow ${source.manifest.workflowId} is missing.`);
-    const saved = this.store.saveDefinition(
-      this.projectId,
-      source.manifest.workflowId,
-      repairedGraph,
-      { expectedRevision: current.revision },
-    );
-    if (saved.revision === current.revision) {
+    if (current.revision !== expectedRevision) {
+      throw new CompactionWatcherRetryableRepairError(
+        `Workflow ${source.manifest.workflowId} changed from revision ${expectedRevision} to ${current.revision} while repair was running.`,
+      );
+    }
+    let saved: ReturnType<WorkflowStore["saveDefinition"]>;
+    try {
+      saved = this.store.saveDefinition(
+        this.projectId,
+        source.manifest.workflowId,
+        repairedGraph,
+        { expectedRevision },
+      );
+    } catch (error) {
+      if (error instanceof WorkflowStoreError && error.code === "CONFLICT") {
+        throw new CompactionWatcherRetryableRepairError(
+          `Workflow ${source.manifest.workflowId} changed after revision ${expectedRevision} was audited.`,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+    if (saved.revision === expectedRevision) {
       return { redeployed: false, detail: "Repair model did not produce a new workflow revision." };
     }
     const replacement = this.store.createRun(this.projectId, {
@@ -264,6 +330,10 @@ class ProjectContextEngineeringRuntime {
             sourceRunId: request.runId,
             auditIdentity: request.auditIdentity,
             workflowRevision: saved.revision,
+            sourceCheckpointId: sourceRecovery.checkpointId,
+            sourceLastSeq: source.state.lastSeq,
+            sourceGraphSha256: source.manifest.graphSha256,
+            sideEffectSafety: sourceRecovery.sideEffectSafety,
           },
         },
       },
@@ -273,10 +343,10 @@ class ProjectContextEngineeringRuntime {
       workflowRevision: saved.revision,
       recovery: {
         runId: request.runId,
-        checkpointId: `definition:${saved.revision}`,
+        checkpointId: sourceRecovery.checkpointId,
         restartToken: `replacement:${replacement.id}:${request.auditIdentity}`,
         verified: true as const,
-        sideEffectSafety: "idempotent" as const,
+        sideEffectSafety: sourceRecovery.sideEffectSafety,
       },
       detail: `Persisted workflow revision ${saved.revision} and replacement ${replacement.id}.`,
     };
@@ -307,8 +377,18 @@ class ProjectContextEngineeringRuntime {
       | undefined;
     if (
       !run || repair?.sourceRunId !== request.runId ||
-      repair.auditIdentity !== replacement[2]
+      repair.auditIdentity !== replacement[2] ||
+      repair.sourceCheckpointId !== request.recovery.checkpointId ||
+      repair.sideEffectSafety !== request.recovery.sideEffectSafety ||
+      !Number.isSafeInteger(repair.sourceLastSeq) ||
+      typeof repair.sourceGraphSha256 !== "string"
     ) return { resumed: false, detail: "Replacement restart proof does not match its manifest." };
+    const source = this.store.readRun(this.projectId, request.runId);
+    if (
+      !source || source.state.status !== "interrupted" || !source.state.recoverable ||
+      source.state.lastSeq !== repair.sourceLastSeq ||
+      source.manifest.graphSha256 !== repair.sourceGraphSha256
+    ) return { resumed: false, detail: "Replacement source recovery proof is no longer valid." };
     if (run.state.status === "queued") this.controller.start(this.projectId, run.manifest.id);
     else if (!["running", "waiting", "blocked", "paused", "succeeded"].includes(run.state.status)) {
       return { resumed: false, detail: `Replacement run is ${run.state.status}.` };
@@ -334,8 +414,9 @@ export class ContextEngineeringProduction {
     this.store = options.store ?? workflowStore;
     this.completeJson = options.completeJson ?? productionCompleteJson;
     this.onError = options.onError ?? (() => {});
-    this.removeCompactionSink = installDagFusionCompactionEventSink((event) =>
-      this.handleDagFusionCompaction(event).catch(this.onError)
+    this.removeCompactionSink = installDagFusionCompactionEventSink(
+      (event) => this.handleDagFusionCompaction(event),
+      { onError: this.onError },
     );
   }
 
@@ -378,6 +459,9 @@ export class ContextEngineeringProduction {
       }
       return;
     }
+    throw new Error(
+      `Compaction event source run ${event.ownerRunId} is not yet available for durable delivery.`,
+    );
   }
 
   async scanStoppedRuns(): Promise<void> {
@@ -386,19 +470,7 @@ export class ContextEngineeringProduction {
         if (!["blocked", "failed", "interrupted"].includes(run.state.status)) continue;
         const identity = `${project.id}:${run.manifest.id}:${run.state.status}:${run.state.lastSeq}`;
         if (this.seenStoppedRuns.has(identity)) continue;
-        const recovery = run.state.status === "interrupted" && run.state.recoverable
-          ? {
-              runId: run.manifest.id,
-              checkpointId: `event:${run.state.lastSeq}`,
-              restartToken: nativeRestartToken(
-                run.manifest.id,
-                run.state.lastSeq,
-                run.manifest.graphSha256,
-              ),
-              verified: true as const,
-              sideEffectSafety: "idempotent" as const,
-            }
-          : undefined;
+        const recovery = recoverableSourceProof(run);
         await this.forProject(project.id).registration.watcher.restartStoppedWorkflow({
           runId: run.manifest.id,
           status: run.state.status,
