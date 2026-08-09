@@ -42,13 +42,15 @@ The matrix applies to every `nodes[].status` and to
 | `waiting` | `pending`, `running`, `waiting`, `blocked`, `succeeded`, `failed`, `skipped`, `interrupted`, `cancelled` |
 | `blocked` | `pending`, `running`, `waiting`, `blocked`, `succeeded`, `failed`, `skipped`, `interrupted`, `cancelled` |
 | `paused` | `pending`, `running`, `waiting`, `blocked`, `succeeded`, `failed`, `skipped`, `interrupted`, `cancelled` |
-| `interrupted` | `pending`, `running`, `waiting`, `blocked`, `succeeded`, `failed`, `skipped`, `interrupted`, `cancelled` |
+| `interrupted` | `pending`, `succeeded`, `failed`, `skipped`, `interrupted`, `cancelled` |
 | `succeeded` | `succeeded`, `skipped` |
 | `failed` | `pending`, `succeeded`, `failed`, `skipped`, `interrupted`, `cancelled` |
 | `cancelled` | `pending`, `succeeded`, `failed`, `skipped`, `interrupted`, `cancelled` |
 
-Thus every terminal run status (`succeeded`, `failed`, or `cancelled`) rejects
-active node statuses (`running`, `waiting`, or `blocked`).
+Thus interrupted and terminal run statuses (`succeeded`, `failed`, or
+`cancelled`) reject active node statuses (`running`, `waiting`, or `blocked`). A
+`succeeded` run must also contain at least one `nodes[]` entry whose status is
+`succeeded`; a projection containing only skipped nodes cannot represent success.
 
 `serializeRunStateV1()` validates before JSON serialization;
 `parseRunStateV1()` validates structure, progress bounds, unique state and topology

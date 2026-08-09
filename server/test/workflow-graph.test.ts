@@ -425,6 +425,73 @@ describe("workflow graph contract", () => {
     );
   });
 
+  it("rejects settings.model on slotless Lean verify nodes", () => {
+    const document = validWorkflow();
+    const lean = nodeOfKind(document, "lean4");
+    lean.evidence = {
+      enabled: false,
+      minimumIndependentSources: 0,
+      requireArtifactReferences: false,
+      onUnsupportedOutput: "fail",
+    };
+    lean.settings = { model: exactModel("openrouter", "discarded-verify-model") };
+
+    expect(issueCodes(validateWorkflowGraphDocument(document))).toContain(
+      "unexpected-lean-node-spec-model",
+    );
+    expect(workflowModelCallSlotsForNode(document, lean)).toEqual([]);
+  });
+
+  it("keeps Lean verify without NodeSpec settings deterministic and slotless", () => {
+    const document = validWorkflow();
+    const lean = nodeOfKind(document, "lean4");
+    lean.evidence = {
+      enabled: false,
+      minimumIndependentSources: 0,
+      requireArtifactReferences: false,
+      onUnsupportedOutput: "fail",
+    };
+
+    expect(validateWorkflowGraphDocument(document)).toMatchObject({ ok: true });
+    expect(workflowModelCallSlotsForNode(document, lean)).toEqual([]);
+  });
+
+  it("rejects non-default reasoning on a slotless artifact-only evidence gate", () => {
+    const document = validWorkflow();
+    const gate = nodeOfKind(document, "evidence-gate");
+    gate.checks = ["artifact-exists"];
+    delete gate.evaluator;
+    gate.settings = { reasoningEffort: "xhigh" };
+
+    expect(issueCodes(validateWorkflowGraphDocument(document))).toContain(
+      "slotless-node-reasoning-effort",
+    );
+    expect(workflowModelCallSlotsForNode(document, gate)).toEqual([]);
+
+    gate.settings.reasoningEffort = "high";
+    expect(validateWorkflowGraphDocument(document)).toMatchObject({ ok: true });
+    expect(workflowModelCallSlotsForNode(document, gate)).toEqual([]);
+  });
+
+  it("binds non-default reasoning when an artifact-only gate has an evaluator slot", () => {
+    const document = validWorkflow();
+    const gate = nodeOfKind(document, "evidence-gate");
+    gate.checks = ["artifact-exists"];
+    gate.evaluator = exactModel("openrouter", "artifact-evaluator");
+    gate.settings = { reasoningEffort: "xhigh" };
+
+    expect(validateWorkflowGraphDocument(document)).toMatchObject({ ok: true });
+    expect(workflowModelCallSlotsForNode(document, gate)).toEqual([
+      {
+        id: "evidence-evaluator",
+        request: {
+          ...gate.evaluator,
+          requested: { ...gate.evaluator.requested, reasoning: "xhigh" },
+        },
+      },
+    ]);
+  });
+
   it("allows trusted Lean failure receipts without a model policy and keeps enabled policies strict", () => {
     const document = validWorkflow();
     const lean = nodeOfKind(document, "lean4");

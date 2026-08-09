@@ -375,7 +375,7 @@ const RUN_STATE_V1_STATUS_COHERENCE: Record<
   waiting: ALL_RUN_STATE_V1_NODE_STATUSES,
   blocked: ALL_RUN_STATE_V1_NODE_STATUSES,
   paused: ALL_RUN_STATE_V1_NODE_STATUSES,
-  interrupted: ALL_RUN_STATE_V1_NODE_STATUSES,
+  interrupted: TERMINAL_RUN_STATE_V1_NODE_STATUSES,
   succeeded: new Set(["succeeded", "skipped"]),
   failed: TERMINAL_RUN_STATE_V1_NODE_STATUSES,
   cancelled: TERMINAL_RUN_STATE_V1_NODE_STATUSES,
@@ -417,6 +417,14 @@ function assertRunStateV1(value: unknown): asserts value is RunStateV1 {
       state.status,
       state.backgroundAgentTrailingNode.status,
       `background-agent trailing slot ${state.backgroundAgentTrailingNode.slotId}`,
+    );
+  }
+  if (
+    state.status === "succeeded" &&
+    !state.nodes.some((node) => node.status === "succeeded")
+  ) {
+    throw new Error(
+      "Invalid RunState v1 status coherence: a succeeded run requires at least one succeeded node.",
     );
   }
   const topologyNodeIds = new Set(state.topology.nodes.map((node) => node.id));

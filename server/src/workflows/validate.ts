@@ -573,6 +573,41 @@ function uniqueItemsById<T extends { id: string }>(
   return uniqueItems;
 }
 
+function nodeHasModelOrEvidenceEvaluatorSlot(
+  node: WorkflowNode,
+  document: WorkflowGraphDocument,
+): boolean {
+  if (
+    requiresWorkflowEvidencePolicyEvaluation(document, node) &&
+    workflowEvidencePolicyEvaluator(document, node) !== undefined
+  ) {
+    return true;
+  }
+
+  switch (node.kind) {
+    case "agent":
+    case "research-until-goal":
+      return node.settings?.model !== undefined || node.model !== undefined ||
+        document.defaultModel !== undefined;
+    case "council":
+    case "fusion":
+      return true;
+    case "best-of-n":
+      return node.candidateModels !== undefined || node.settings?.model !== undefined ||
+        node.model !== undefined || node.evaluator !== undefined ||
+        document.defaultModel !== undefined;
+    case "evidence-gate":
+      return (
+        node.evaluator !== undefined ||
+        node.checks.some((check) => check !== "artifact-exists")
+      ) && workflowEvidenceGateEvaluator(document, node) !== undefined;
+    case "lean4":
+      return node.mode === "solve" &&
+        (node.settings?.model !== undefined || node.solverModel !== undefined ||
+          document.defaultModel !== undefined);
+  }
+}
+
 function validateNode(
   node: WorkflowNode,
   nodePath: string,
@@ -676,6 +711,19 @@ function validateNode(
     });
   }
   validateWorkspacePolicy(node, nodePath, issues);
+
+  if (
+    node.settings?.reasoningEffort !== undefined &&
+    node.settings.reasoningEffort !== DEFAULT_NODE_SPEC_V1.reasoningEffort &&
+    !nodeHasModelOrEvidenceEvaluatorSlot(node, document)
+  ) {
+    issues.push({
+      code: "slotless-node-reasoning-effort",
+      path: `${nodePath}/settings/reasoningEffort`,
+      message:
+        "Non-default NodeSpec reasoningEffort requires a model slot or evidence-evaluator slot.",
+    });
+  }
 
   if (
     node.settings?.model !== undefined &&
@@ -879,6 +927,14 @@ function validateNode(
       break;
     }
     case "lean4":
+      if (node.mode === "verify" && node.settings?.model) {
+        issues.push({
+          code: "unexpected-lean-node-spec-model",
+          path: `${nodePath}/settings/model`,
+          message:
+            "Lean verify mode is deterministic and has no primary model slot; settings.model would be discarded.",
+        });
+      }
       if (node.mode === "verify" && node.solverModel) {
         issues.push({
           code: "unexpected-lean-solver-model",

@@ -127,6 +127,51 @@ describe("RunState v1 contract", () => {
     },
   );
 
+  it("rejects an interrupted run with a running node during serialization and parsing", () => {
+    const state = runState();
+    state.status = "interrupted";
+    state.nodes[0].status = "interrupted";
+    state.nodes[1].status = "running";
+    state.backgroundAgentTrailingNode!.status = "interrupted";
+
+    expect(() => serializeRunStateV1(state)).toThrow(
+      /status coherence: run interrupted.*node synthesis.*status running/,
+    );
+    expect(() => parseRunStateV1(JSON.stringify(state))).toThrow(
+      /status coherence: run interrupted.*node synthesis.*status running/,
+    );
+  });
+
+  it("rejects an interrupted run with a waiting trailing agent during serialization and parsing", () => {
+    const state = runState();
+    state.status = "interrupted";
+    state.nodes[0].status = "succeeded";
+    state.nodes[1].status = "interrupted";
+    state.backgroundAgentTrailingNode!.status = "waiting";
+
+    expect(() => serializeRunStateV1(state)).toThrow(
+      /status coherence: run interrupted.*background-agent trailing slot.*status waiting/,
+    );
+    expect(() => parseRunStateV1(JSON.stringify(state))).toThrow(
+      /status coherence: run interrupted.*background-agent trailing slot.*status waiting/,
+    );
+  });
+
+  it("rejects a succeeded run with no succeeded node during serialization and parsing", () => {
+    const state = runState();
+    state.status = "succeeded";
+    state.nodes[0].status = "skipped";
+    state.nodes[1].status = "skipped";
+    state.backgroundAgentTrailingNode!.status = "skipped";
+
+    expect(() => serializeRunStateV1(state)).toThrow(
+      /succeeded run requires at least one succeeded node/,
+    );
+    expect(() => parseRunStateV1(JSON.stringify(state))).toThrow(
+      /succeeded run requires at least one succeeded node/,
+    );
+  });
+
   it.each([
     {
       runStatus: "queued" as const,
@@ -162,6 +207,16 @@ describe("RunState v1 contract", () => {
     state.status = "failed";
     state.nodes[0].status = "failed";
     state.nodes[1].status = "skipped";
+    state.backgroundAgentTrailingNode!.status = "cancelled";
+
+    expect(parseRunStateV1(serializeRunStateV1(state))).toEqual(state);
+  });
+
+  it("accepts an interrupted run when every node and trailing agent is interrupted or terminal", () => {
+    const state = runState();
+    state.status = "interrupted";
+    state.nodes[0].status = "succeeded";
+    state.nodes[1].status = "interrupted";
     state.backgroundAgentTrailingNode!.status = "cancelled";
 
     expect(parseRunStateV1(serializeRunStateV1(state))).toEqual(state);

@@ -18,9 +18,9 @@ values until that Wave B unit binds the field.
 | Field | Enforcement status |
 | --- | --- |
 | `version` | BOUND — schema discriminator |
-| `model` | BOUND — primary/inherited model slot only; ambiguous compound configurations fail validation |
+| `model` | BOUND — primary/inherited model slot only; ambiguous compound configurations and deterministic Lean verify nodes fail validation |
 | `model.requested.auth.kind` | BOUND — existing provider/auth resolution |
-| `reasoningEffort` | BOUND on standard nodes; FAIL-CLOSED(S5) on hosted Fusion nodes when non-default |
+| `reasoningEffort` | BOUND when a model or evidence-evaluator slot exists; rejected when slotless; FAIL-CLOSED(S5) on hosted Fusion nodes when non-default |
 | `hyperparameters.temperature` | FAIL-CLOSED(S4) |
 | `hyperparameters.top_p` | FAIL-CLOSED(S4) |
 | `hyperparameters.sampling` | FAIL-CLOSED(S4) |
@@ -48,8 +48,8 @@ values until that Wave B unit binds the field.
 | Field | Semantics |
 | --- | --- |
 | `version` | Contract discriminator; omitted means NodeSpec version `1`. |
-| `model` | Authoritative only for the node's primary/inherited model slot; explicit evaluator, member, chair, judge, router, and synthesizer requests retain their declared models, and compound configurations without an unambiguous primary slot fail validation. |
-| `reasoningEffort` | Authoritative per-node reasoning override for standard nodes: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; hosted Fusion accepts only absence or the default `high` pending S5 fusion-topology binding. |
+| `model` | Authoritative only for the node's primary/inherited model slot; explicit evaluator, member, chair, judge, router, and synthesizer requests retain their declared models, compound configurations without an unambiguous primary slot fail validation, and deterministic Lean verify nodes reject the field because they have no primary slot. |
+| `reasoningEffort` | Authoritative per-node reasoning override when a model or evidence-evaluator slot exists: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; non-default values are rejected on slotless nodes, and hosted Fusion accepts only absence or the default `high` pending S5 fusion-topology binding. |
 | `hyperparameters.temperature` | Frozen sampling-temperature shape; only the default `1` is accepted pending S4 binding. |
 | `hyperparameters.top_p` | Frozen nucleus-sampling shape; only the default `1` is accepted pending S4 binding. |
 | `hyperparameters.sampling` | Frozen extensible sampling-map shape; only an empty map is accepted pending S4 binding. |
