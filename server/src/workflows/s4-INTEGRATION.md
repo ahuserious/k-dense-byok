@@ -126,3 +126,57 @@ to `describe(...)`. That suite passes the complete S4 NodeSpec through semantic
 validation, durable `WorkflowStore` persistence, `runWorkflowDag()`, the Kady
 executor, receipt/reservation construction, and delegation. Keep all Tier A
 suites enabled.
+
+Also in `server/test/pipelines.test.ts`, change only:
+
+```ts
+describe.skip("POST-INTEGRATION(S4) settings-bearing vendored loader", ...)
+```
+
+to `describe(...)`. This is the S3/S4 merge proof that the vendored loader
+preserves `settings.budget`; the enabled Tier A tests continue covering the
+current loader/API legacy shape (`provider`, `model`, and `maxBudgetUsd`).
+
+## 7. Engine idempotency and accounting watermark
+
+The vendored engine is outside S4 ownership, so the merge commit must make the
+fields already sent by `POST /pipelines/:name/run` authoritative:
+
+1. At the run-request schema/handler anchor that currently accepts
+   `conversationId` and `message`, accept `idempotencyKey`,
+   `kadyAdmissionId`, and `metadata`. Require the two ids to be identical and
+   unique in durable run storage. In the same transaction that creates a run,
+   insert that key; on a duplicate key return the existing run's accepted
+   result without starting another executor.
+2. Persist and echo `metadata.kadyAdmissionId` on both list and detail run
+   responses. Extend `GET /api/workflows/runs` with an exact `admissionId`
+   filter. Its response must include
+   `admissionQuery: { admissionId, authoritative: true }` after the durable
+   lookup, including when `runs` is empty. Without that watermark Kady treats
+   absence as unknown and retains the reservation.
+3. At the terminal run transaction, persist
+   `metadata.kady_completion_watermark` only after all node results and usage
+   are durable. Its exact shape is:
+
+   ```ts
+   {
+     version: 1,
+     admissionId: string,
+     nodeIds: string[],
+     usageByNode: Record<string, {
+       costUsd: number,
+       tokensIn: number,
+       tokensOut: number,
+     }>,
+   }
+   ```
+
+   `nodeIds` and `usageByNode` must cover every admitted model node exactly.
+   Do not derive this watermark from best-effort event rows. A terminal run
+   without this complete durable watermark is intentionally full-charged by
+   the server-owned reconciliation worker.
+
+These engine changes are required for safe negative admission lookup and
+observed-cost settlement. Kady already passes the idempotency key, persists
+the project/run/reservation correlation before dispatch, recovers it on
+restart, and runs reconciliation independently of clients.

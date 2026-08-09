@@ -176,6 +176,7 @@ export interface PipelineNodeBudgetHook {
 export interface PipelineBudgetAdmission {
   admissionId: string;
   runId: string;
+  workflowNodeCount: number;
   hooks: PipelineNodeBudgetHook[];
   handle: WorkflowBudgetReservationHandle;
 }
@@ -191,10 +192,12 @@ export interface PipelineAdmissionRecordV1 {
   reservationId: string;
   budgetRunId: string;
   correlationLabel: string;
+  requestSha256: string;
+  workflowNodeCount: number;
   nodeIds: string[];
   capCountedNodeIds: string[];
   engineRunId?: string;
-  status: "reserved" | "dispatched" | "settled";
+  status: "reserved" | "dispatched" | "indeterminate" | "settled";
   createdAt: number;
   updatedAt: number;
 }
@@ -765,6 +768,8 @@ function parsePipelineAdmission(
     "reservationId",
     "budgetRunId",
     "correlationLabel",
+    "requestSha256",
+    "workflowNodeCount",
     "nodeIds",
     "capCountedNodeIds",
     "engineRunId",
@@ -784,6 +789,8 @@ function parsePipelineAdmission(
     typeof value.reservationId !== "string" || !RESERVATION_ID_RE.test(value.reservationId) ||
     typeof value.budgetRunId !== "string" || !RUN_ID_RE.test(value.budgetRunId) ||
     value.correlationLabel !== expectedLabel ||
+    typeof value.requestSha256 !== "string" || !SHA256_RE.test(value.requestSha256) ||
+    !Number.isSafeInteger(value.workflowNodeCount) || (value.workflowNodeCount as number) < 1 ||
     !Array.isArray(value.nodeIds) ||
     value.nodeIds.some((nodeId) => typeof nodeId !== "string" || nodeId.length < 1) ||
     new Set(value.nodeIds).size !== value.nodeIds.length ||
@@ -794,7 +801,8 @@ function parsePipelineAdmission(
     (value.engineRunId !== undefined && (
       typeof value.engineRunId !== "string" || !ENGINE_RUN_ID_RE.test(value.engineRunId)
     )) ||
-    !(value.status === "reserved" || value.status === "dispatched" || value.status === "settled") ||
+    !(value.status === "reserved" || value.status === "dispatched" ||
+      value.status === "indeterminate" || value.status === "settled") ||
     !Number.isSafeInteger(value.createdAt) || (value.createdAt as number) < 0 ||
     !Number.isSafeInteger(value.updatedAt) || (value.updatedAt as number) < (value.createdAt as number)
   ) {
@@ -1648,25 +1656,41 @@ export function pipelineAdmissionCorrelationLabel(admissionId: string): string {
   return `${PIPELINE_ADMISSION_LABEL_PREFIX}${admissionId}`;
 }
 
+export function pipelineAdmissionId(value: string): string {
+  if (PIPELINE_ADMISSION_ID_RE.test(value)) return value;
+  return `kadypipe_${crypto.createHash("sha256").update(value).digest("hex").slice(0, 32)}`;
+}
+
 export function pipelineAdmissionIdFromEngineSnapshot(snapshot: unknown): string | undefined {
   const root = isRecord(snapshot) ? snapshot : undefined;
   const run = isRecord(root?.run) ? root.run : root;
+  const metadata = isRecord(run?.metadata) ? run.metadata : undefined;
+  const metadataId = metadata?.kadyAdmissionId ?? metadata?.kady_admission_id;
+  const validMetadataId = typeof metadataId === "string" && PIPELINE_ADMISSION_ID_RE.test(metadataId)
+    ? metadataId
+    : undefined;
   const userMessage = run && typeof run.user_message === "string"
     ? run.user_message
     : run && typeof run.userMessage === "string"
       ? run.userMessage
       : undefined;
-  if (!userMessage) return undefined;
+  if (!userMessage) return validMetadataId;
   const matches = [...userMessage.matchAll(
     /(?:^|\s)KADY_PIPELINE_ADMISSION:(kadypipe_[a-f0-9]{32})(?=\s|$)/g,
   )];
-  return matches.length === 1 ? matches[0][1] : undefined;
+  if (matches.length === 0) return validMetadataId;
+  if (matches.length !== 1 || (validMetadataId && validMetadataId !== matches[0][1])) return undefined;
+  return matches[0][1];
 }
 
 export function persistPipelineAdmission(
   admission: PipelineBudgetAdmission,
   workflowName: string,
+  requestSha256: string,
 ): PipelineAdmissionRecordV1 {
+  if (!SHA256_RE.test(requestSha256)) {
+    budgetError("INVALID_ARGUMENT", "Pipeline admission request digest must be SHA-256.");
+  }
   const projectId = admission.handle.record.projectId;
   const admissionId = admission.admissionId;
   const correlationLabel = pipelineAdmissionCorrelationLabel(admissionId);
@@ -1684,6 +1708,8 @@ export function persistPipelineAdmission(
         existing.reservationId === admission.handle.record.id &&
         existing.budgetRunId === admission.runId &&
         existing.correlationLabel === correlationLabel &&
+        existing.requestSha256 === requestSha256 &&
+        existing.workflowNodeCount === admission.workflowNodeCount &&
         isDeepStrictEqual(existing.nodeIds, nodeIds) &&
         isDeepStrictEqual(existing.capCountedNodeIds, capCountedNodeIds)
       ) return structuredClone(existing);
@@ -1701,6 +1727,8 @@ export function persistPipelineAdmission(
       reservationId: reservation.id,
       budgetRunId: reservation.runId,
       correlationLabel,
+      requestSha256,
+      workflowNodeCount: admission.workflowNodeCount,
       nodeIds,
       capCountedNodeIds,
       status: "reserved",
@@ -1715,7 +1743,7 @@ export function persistPipelineAdmission(
 export function updatePipelineAdmission(
   projectId: string,
   admissionId: string,
-  update: { status: "dispatched" | "settled"; engineRunId?: string },
+  update: { status: "dispatched" | "indeterminate" | "settled"; engineRunId?: string },
 ): PipelineAdmissionRecordV1 {
   if (update.engineRunId !== undefined && !ENGINE_RUN_ID_RE.test(update.engineRunId)) {
     budgetError("INVALID_ARGUMENT", `Invalid pipeline engine run id: ${update.engineRunId}`);
@@ -1760,6 +1788,7 @@ export function recoverPipelineAdmission(
     admission: {
       admissionId,
       runId: record.budgetRunId,
+      workflowNodeCount: record.workflowNodeCount,
       hooks: [],
       handle: {
         record: cloneRecord(reservation),
@@ -1769,6 +1798,32 @@ export function recoverPipelineAdmission(
       },
     },
   };
+}
+
+export function findPipelineAdmission(
+  projectId: string,
+  admissionId: string,
+): ReturnType<typeof recoverPipelineAdmission> | undefined {
+  const record = readPipelineAdmissionRecord(resolvePaths(projectId), admissionId);
+  return record ? recoverPipelineAdmission(projectId, admissionId) : undefined;
+}
+
+export function listPipelineAdmissions(projectId: string): PipelineAdmissionRecordV1[] {
+  const paths = resolvePaths(projectId);
+  const directory = pipelineAdmissionsDirectory(paths);
+  if (!assertSafeDirectoryChain(paths, directory, false)) return [];
+  const records: PipelineAdmissionRecordV1[] = [];
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const match = /^(kadypipe_[a-f0-9]{32})\.json$/.exec(entry.name);
+    if (!match || entry.isSymbolicLink() || !entry.isFile()) {
+      budgetError("CORRUPT", `Unexpected or unsafe pipeline admission entry: ${entry.name}`);
+    }
+    const record = readPipelineAdmissionRecord(paths, match[1]);
+    if (!record) budgetError("CORRUPT", `Pipeline admission ${match[1]} disappeared during listing.`);
+    records.push(record);
+  }
+  return records.sort((left, right) => left.createdAt - right.createdAt ||
+    left.admissionId.localeCompare(right.admissionId));
 }
 
 /**
@@ -1781,16 +1836,17 @@ export function recoverPipelineAdmission(
 export async function reservePipelineNodeBudgets(input: {
   projectId: string;
   admissionId: string;
+  workflowNodeCount: number;
   hooks: PipelineNodeBudgetHook[];
   leaseDurationMs?: number;
 }): Promise<PipelineBudgetAdmission> {
   if (input.hooks.length === 0) {
     budgetError("INVALID_ARGUMENT", "An executable pipeline must have at least one resolved budget hook.");
   }
-  const admissionId = `kadypipe_${crypto.createHash("sha256")
-    .update(input.admissionId)
-    .digest("hex")
-    .slice(0, 32)}`;
+  if (!Number.isSafeInteger(input.workflowNodeCount) || input.workflowNodeCount < 1) {
+    budgetError("INVALID_ARGUMENT", "Pipeline workflow node count must be a positive integer.");
+  }
+  const admissionId = pipelineAdmissionId(input.admissionId);
   const seen = new Set<string>();
   let maxTokens = 0;
   let maxCostUsd = 0;
@@ -1838,6 +1894,7 @@ export async function reservePipelineNodeBudgets(input: {
   return {
     admissionId,
     runId,
+    workflowNodeCount: input.workflowNodeCount,
     hooks: structuredClone(input.hooks),
     handle,
   };

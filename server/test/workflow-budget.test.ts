@@ -172,6 +172,7 @@ describe("durable workflow budget reservations", () => {
       const admission = await reservePipelineNodeBudgets({
         projectId: "pipeline-budget",
         admissionId: "request-one",
+        workflowNodeCount: 2,
         hooks: [
           {
             nodeId: "api-node",
@@ -206,6 +207,7 @@ describe("durable workflow budget reservations", () => {
         await reservePipelineNodeBudgets({
           projectId: "pipeline-reject",
           admissionId: "request-rejected",
+          workflowNodeCount: 1,
           hooks: [
             {
               nodeId: "expensive",
@@ -228,6 +230,7 @@ describe("durable workflow budget reservations", () => {
       await expect(reservePipelineNodeBudgets({
         projectId: "pipeline-zero",
         admissionId: "request-zero",
+        workflowNodeCount: 1,
         hooks: [{
           nodeId: "unfunded",
           maxTokens: 1_000,
