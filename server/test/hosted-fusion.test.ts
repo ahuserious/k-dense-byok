@@ -3,6 +3,16 @@ import { describe, expect, it, vi } from "vitest";
 import type { ProjectPaths } from "../src/projects.ts";
 import type { WorkflowModelResolutionReceipt } from "../src/workflows/run-state.ts";
 import type { ModelRequest, WorkflowNode } from "../src/workflows/schema.ts";
+import { buildFusionRequestBody } from "../src/agent/fusion-bridge.ts";
+import {
+  effectiveHostedFusionDefinition,
+  materializeEffectiveHostedFusionNode,
+  type HostedOpenRouterFusionNode,
+} from "../src/workflows/hosted-fusion-definition.ts";
+import {
+  validateWorkflowGraphDocument,
+} from "../src/workflows/validate.ts";
+import { workflowModelCallSlotsForNode } from "../src/workflows/run-state.ts";
 import {
   buildHostedFusionConfig,
   hostedFusionQuarantineSnapshot,
@@ -75,6 +85,50 @@ function fusion(reasoning: "off" | "low" | "high" | "xhigh" = "high"): HostedFus
       { id: "two", role: "Adversarial analysis", model: openRouterModel("vendor/two", reasoning) },
     ],
     judge: openRouterModel("vendor/judge", reasoning),
+  };
+}
+
+function hostedNode(reasoningEffort: "low" | "xhigh"): HostedOpenRouterFusionNode {
+  return {
+    id: "hosted",
+    name: "Hosted Fusion",
+    description: "Hosted Fusion",
+    kind: "fusion",
+    terminal: true,
+    goal: "Fuse the strongest supported answer.",
+    workspace: { isolation: "read-only", writePaths: [] },
+    settings: { reasoningEffort },
+    fusion: fusion("high"),
+    preserveMinorityReports: true,
+  };
+}
+
+function hostedGraph(node: HostedOpenRouterFusionNode) {
+  return {
+    schemaVersion: "1.0" as const,
+    id: "hosted-definition",
+    name: "Hosted definition",
+    description: "Hosted definition",
+    entryNodeId: node.id,
+    defaultModel: openRouterModel("default"),
+    limits: {
+      maxIterations: 10,
+      maxModelCalls: 20,
+      maxParallelism: 8,
+      maxSubagents: 8,
+      timeoutMs: 30_000,
+      maxTokens: 100_000,
+      maxCostUsd: 100,
+      maxRetries: 0,
+    },
+    evidence: {
+      enabled: false,
+      minimumIndependentSources: 0,
+      requireArtifactReferences: false,
+      onUnsupportedOutput: "fail" as const,
+    },
+    nodes: [node],
+    edges: [],
   };
 }
 
@@ -224,6 +278,33 @@ function fakeDependencies(
 }
 
 describe("hosted OpenRouter Fusion", () => {
+  it("uses one effective reasoning definition through validation, slots, receipts, accounting, and provider payload", () => {
+    const authored = hostedNode("xhigh");
+    const effective = effectiveHostedFusionDefinition(authored);
+    expect(effective.reasoningEffort).toBe("xhigh");
+    expect(effective.accounting).toEqual({ panelCalls: 2, judgeCalls: 2, modelCallCount: 4 });
+    expect(effective.slots).toHaveLength(4);
+    expect(effective.slots.every((slot) => slot.request.requested.reasoning === "xhigh"))
+      .toBe(true);
+
+    const graph = hostedGraph(authored);
+    const validation = validateWorkflowGraphDocument(graph);
+    expect(validation).toMatchObject({ ok: true });
+    expect(workflowModelCallSlotsForNode(graph, authored)).toEqual(effective.slots);
+
+    const runtimeNode = materializeEffectiveHostedFusionNode(authored);
+    expect(runtimeNode.settings?.reasoningEffort).toBeUndefined();
+    const config = buildHostedFusionConfig(runtimeNode.fusion, resolved(runtimeNode.fusion));
+    expect(config.reasoning_effort).toBe("xhigh");
+    const providerPayload = buildFusionRequestBody({ messages: [] }, config, {
+      allowJudgeFallback: false,
+    });
+    expect(providerPayload).toMatchObject({
+      model: "openrouter/fusion",
+      plugins: [{ reasoning: { effort: "xhigh" } }],
+    });
+  });
+
   it("builds the exact panel, judge, shared-reasoning router config", () => {
     const definition = fusion("off");
     const config = buildHostedFusionConfig(definition, resolved(definition));

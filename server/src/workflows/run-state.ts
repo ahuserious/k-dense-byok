@@ -19,6 +19,10 @@ import {
 } from "./evidence-policy.ts";
 import { trustedLeanArtifactPaths } from "./lean4-artifacts.ts";
 import { resolveNodeSpecV1 } from "./validate.ts";
+import {
+  effectiveHostedFusionDefinition,
+  type HostedOpenRouterFusionNode,
+} from "./hosted-fusion-definition.ts";
 
 export const WORKFLOW_RUN_STORAGE_VERSION = 1 as const;
 export const WORKFLOW_RUN_EVENT_SCHEMA_VERSION = 1 as const;
@@ -744,11 +748,14 @@ function modelRequestsForNode(
       add(node.chair, false);
       break;
     case "fusion":
-      node.fusion.members.forEach((member) => add(member.model, false));
       if (node.fusion.mode === "openrouter-router") {
-        add(node.fusion.router, false);
-        add(node.fusion.judge, false);
+        const effective = effectiveHostedFusionDefinition(
+          node as HostedOpenRouterFusionNode,
+        ).fusion;
+        effective.members.forEach((member) => requests.push(member.model));
+        requests.push(effective.router, effective.judge);
       } else {
+        node.fusion.members.forEach((member) => add(member.model, false));
         add(node.fusion.synthesizer, false);
       }
       break;
@@ -862,20 +869,14 @@ export function workflowModelCallSlotsForNode(
     }
     case "fusion": {
       if (node.fusion.mode === "openrouter-router") {
-        return withEvidencePolicySlot(graph, node, [
-          ...node.fusion.members.map((member) => ({
-            id: `fusion-panel-${member.id}`,
-            request: resolvedNodeSlotModel(graph, node, member.model, false)!,
-          })),
-          {
-            id: "fusion-judge-deliberation",
-            request: resolvedNodeSlotModel(graph, node, node.fusion.judge, false)!,
-          },
-          {
-            id: "fusion-judge-final",
-            request: resolvedNodeSlotModel(graph, node, node.fusion.judge, false)!,
-          },
-        ]);
+        const effective = effectiveHostedFusionDefinition(
+          node as HostedOpenRouterFusionNode,
+        );
+        return withEvidencePolicySlot(
+          graph,
+          node,
+          effective.slots.map((slot) => structuredClone(slot)),
+        );
       }
       const slots: WorkflowModelCallSlot[] = [];
       for (let round = 1; round <= node.fusion.rounds; round += 1) {

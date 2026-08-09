@@ -52,6 +52,8 @@ import { trustedLeanArtifactPaths } from "../src/workflows/lean4-artifacts.ts";
 import type {
   SupervisedWorkflowBudgetDescriptorV1,
 } from "../src/workflows/supervised-budget.ts";
+import { withDeliberationBindings } from "../src/workflows/deliberation-runtime.ts";
+import { DEFAULT_PERSONALITY_STORE_REF } from "../src/personality-store/store.ts";
 
 const TEST_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "kady-node-executor-"));
 
@@ -865,34 +867,6 @@ describe("production Kady DAG node executor", () => {
       unit: "S4",
     },
     {
-      label: "deliberation.personalityStoreRef",
-      settings: { deliberation: { personalityStoreRef: "scientific-agents/v1" } },
-      code: "node-deliberation-enforcement-pending",
-      unit: "S5",
-    },
-    {
-      label: "deliberation.bestOfNPersonalityCount",
-      settings: { deliberation: { bestOfNPersonalityCount: 4 } },
-      code: "node-deliberation-enforcement-pending",
-      unit: "S5",
-    },
-    {
-      label: "deliberation.mimeographs.mode",
-      settings: { deliberation: { mimeographs: { mode: "manual" } } },
-      code: "node-deliberation-enforcement-pending",
-      unit: "S5",
-    },
-    {
-      label: "deliberation.mimeographs.personalityRefs",
-      settings: {
-        deliberation: {
-          mimeographs: { personalityRefs: ["skeptical-reviewer"] },
-        },
-      },
-      code: "node-deliberation-enforcement-pending",
-      unit: "S5",
-    },
-    {
       label: "billing mode",
       settings: { billingMode: "subscription" },
       code: "node-billing-mode-enforcement-pending",
@@ -954,6 +928,99 @@ describe("production Kady DAG node executor", () => {
     });
 
     expect(events.some((event) => event.startsWith("record:"))).toBe(false);
+    expect(onReserve).not.toHaveBeenCalled();
+    expect(onResolve).not.toHaveBeenCalled();
+    expect(host.calls).toHaveLength(0);
+  });
+
+  it("binds every deliberation staffing field into execution and model-call receipts", async () => {
+    const node: WorkflowNode = {
+      ...baseNode("council"),
+      kind: "council",
+      goal: "Audit genome evidence and uncertainty.",
+      members: [
+        { id: "genomics", role: "Genome reviewer", model: openRouterModel("vendor/genomics") },
+        { id: "statistics", role: "Uncertainty reviewer", model: openRouterModel("vendor/statistics") },
+      ],
+      chair: openRouterModel("vendor/chair"),
+      rounds: 1,
+      preserveMinorityReports: true,
+      settings: {
+        deliberation: {
+          personalityStoreRef: DEFAULT_PERSONALITY_STORE_REF,
+          bestOfNPersonalityCount: 2,
+          mimeographs: {
+            mode: "manual",
+            personalityRefs: ["genomics", "statistician"],
+          },
+        },
+      },
+    };
+    const document = graph(node);
+    const events: string[] = [];
+    const host = new FakeHost([
+      { position: "genome", rationale: "genome rationale", evidence: ["genome"], concerns: [] },
+      { position: "uncertainty", rationale: "uncertainty rationale", evidence: ["uncertainty"], concerns: [] },
+      { decision: "qualified", rationale: "chair rationale", consensus: true, minorityReports: [] },
+    ], events);
+    const loadStore = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      storeRef: DEFAULT_PERSONALITY_STORE_REF,
+      source: "ahuserious/scientific-agents",
+      revision: "fixture",
+      digest: "0".repeat(64),
+      personalities: [
+        { ref: "genomics", title: "Genomics Scientist", instructions: "Inspect genome variants." },
+        { ref: "statistician", title: "Statistician", instructions: "Audit estimands and uncertainty." },
+      ],
+    }));
+
+    expect(validateWorkflowGraphDocument(document)).toMatchObject({ ok: true });
+    const result = await withDeliberationBindings(
+      executorFor(host, document),
+      { loadStore },
+    )(contextFor(document, events));
+
+    expect(loadStore).toHaveBeenCalledWith(DEFAULT_PERSONALITY_STORE_REF);
+    expect(events.filter((event) => event.startsWith("record:"))).toEqual([
+      "record:council-round-1-member-genomics",
+      "record:council-round-1-member-statistics",
+      "record:council-round-1-chair",
+    ]);
+    expect(host.calls[0].request.task).toContain("Personality store: scientific-agents/v1");
+    expect(host.calls[0].request.task).toContain("Staffing mode: manual");
+    expect(host.calls[0].request.task).toContain("Selected personality count: 2");
+    expect(host.calls[0].request.task).toContain("mimeograph-genomics");
+    expect(host.calls[1].request.task).toContain("mimeograph-statistician");
+    expect(result.output).toMatchObject({ kind: "council", decision: "qualified" });
+  });
+
+  it("rejects deliberation settings on non-deliberation node kinds", async () => {
+    const node: WorkflowNode = {
+      ...baseNode("agent"),
+      kind: "agent",
+      prompt: "Do not execute unsupported deliberation staffing.",
+      settings: {
+        deliberation: { personalityStoreRef: DEFAULT_PERSONALITY_STORE_REF },
+      },
+    };
+    const document = graph(node);
+    const events: string[] = [];
+    const host = new FakeHost([analysis("must not run")], events);
+    const onReserve = vi.fn();
+    const onResolve = vi.fn();
+
+    const validation = validateWorkflowGraphDocument(document);
+    expect(validation).toMatchObject({ ok: false });
+    if (!validation.ok) {
+      expect(validation.issues).toContainEqual(expect.objectContaining({
+        code: "deliberation-node-kind-unsupported",
+        path: "/nodes/0/settings/deliberation",
+      }));
+    }
+    await expect(
+      executorFor(host, document, { onReserve, onResolve })(contextFor(document, events)),
+    ).rejects.toMatchObject({ code: "WORKFLOW_NODE_INVALID_CONTEXT" });
     expect(onReserve).not.toHaveBeenCalled();
     expect(onResolve).not.toHaveBeenCalled();
     expect(host.calls).toHaveLength(0);
@@ -2317,11 +2384,11 @@ describe("production Kady DAG node executor", () => {
     expect(delegationCalls).toBe(1);
   });
 
-  it("rejects non-default hosted Fusion reasoning before receipts or provider work", async () => {
+  it("binds non-default hosted Fusion reasoning through receipts and provider work", async () => {
     const node: WorkflowNode = {
       ...baseNode("fusion"),
       kind: "fusion",
-      goal: "Reject unsupported hosted reasoning plumbing.",
+      goal: "Execute hosted reasoning plumbing.",
       settings: { reasoningEffort: "xhigh" },
       fusion: {
         mode: "openrouter-router",
@@ -2337,34 +2404,56 @@ describe("production Kady DAG node executor", () => {
     const document = graph(node);
     const validation = validateWorkflowGraphDocument(document);
     const events: string[] = [];
-    const onReserve = vi.fn();
-    const onResolve = vi.fn();
-    const runHostedFusion = vi.fn(async () => {
-      throw new Error("hosted Fusion must not run");
+    const resolvedRequests: ModelRequest[] = [];
+    const hostedRequests: HostedOpenRouterFusionRequest[] = [];
+    const runHostedFusion = vi.fn(async (request: HostedOpenRouterFusionRequest) => {
+      hostedRequests.push(request);
+      const usage = {
+        input: 100,
+        output: 50,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: 0.5,
+        turns: 1,
+        toolCalls: 0,
+        durationMs: 25,
+      };
+      await request.reconcileUsage({
+        identity: request.identity,
+        reason: "terminal-response",
+        responseStatus: "completed",
+        usage,
+        progress: { started: true, tokens: 150, toolCalls: 0, durationMs: 25 },
+      });
+      return { text: "Hosted xhigh answer", textTruncated: false, usage };
     });
 
-    expect(validation).toMatchObject({ ok: false });
-    if (!validation.ok) {
-      expect(validation.issues).toContainEqual(expect.objectContaining({
-        code: "hosted-fusion-reasoning-enforcement-pending",
-        path: "/nodes/0/settings/reasoningEffort",
-        message: expect.stringContaining("fusion-topology unit (S5)"),
-      }));
-    }
-    await expect(
+    expect(validation).toMatchObject({ ok: true });
+    const result = await withDeliberationBindings(
       executorFor(new FakeHost([], events), document, {
-        onReserve,
-        onResolve,
+        onResolve: (request) => resolvedRequests.push(structuredClone(request)),
         runHostedFusion,
-      })(contextFor(document, events)),
-    ).rejects.toMatchObject({
-      code: "WORKFLOW_NODE_INVALID_CONTEXT",
-      message: expect.stringContaining("fusion-topology unit (S5)"),
-    });
-    expect(events.some((event) => event.startsWith("record:"))).toBe(false);
-    expect(onResolve).not.toHaveBeenCalled();
-    expect(onReserve).not.toHaveBeenCalled();
-    expect(runHostedFusion).not.toHaveBeenCalled();
+        reserveUsage: (admission) => ({
+          descriptor: supervisedDescriptor(admission.slotId),
+          reconcile() {},
+        }),
+      }),
+    )(contextFor(document, events));
+
+    expect(events.filter((event) => event.startsWith("record:"))).toEqual([
+      "record:fusion-panel-one",
+      "record:fusion-panel-two",
+      "record:fusion-judge-deliberation",
+      "record:fusion-judge-final",
+    ]);
+    expect(resolvedRequests).toHaveLength(4);
+    expect(resolvedRequests.every((request) => request.requested.reasoning === "xhigh")).toBe(true);
+    expect(hostedRequests[0].fusion.router.requested.reasoning).toBe("xhigh");
+    expect(hostedRequests[0].fusion.members.every(
+      (member) => member.model.requested.reasoning === "xhigh",
+    )).toBe(true);
+    expect(hostedRequests[0].fusion.judge.requested.reasoning).toBe("xhigh");
+    expect(result.output).toMatchObject({ answer: "Hosted xhigh answer" });
   });
 
   it("keeps default-effort hosted Fusion slots identical to persisted requests", () => {

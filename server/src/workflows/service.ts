@@ -23,6 +23,10 @@ import {
   type TrustedLeanVerifier,
 } from "./kady-node-executor.ts";
 import { createTrustedLeanVerifier } from "./lean4-verifier.ts";
+import {
+  withDeliberationBindings,
+  type DeliberationExecutorDependencies,
+} from "./deliberation-runtime.ts";
 import type { WorkflowNodeExecutor } from "./runner.ts";
 import type { WorkflowStore } from "./store.ts";
 import {
@@ -54,6 +58,8 @@ export interface CreateProductionWorkflowControllerOptions {
   nodeExecutorFactory?: KadyWorkflowNodeExecutorFactory;
   /** Trusted transport overrides, such as the out-of-process workflow supervisor. */
   nodeExecutorDependencies?: Partial<KadyNodeExecutorDependencies>;
+  /** Server-only personality loader override used by focused runtime tests. */
+  deliberationDependencies?: DeliberationExecutorDependencies;
 }
 
 function workflowBudgetLeaseDuration(timeoutMs: number): number {
@@ -144,13 +150,17 @@ export function createProductionWorkflowController(
     reserveBudget: options.reserveBudget,
   });
   const nodeExecutorFactory = options.nodeExecutorFactory ?? createKadyWorkflowNodeExecutor;
-  const executeNode = nodeExecutorFactory({
+  const kadyExecutor = nodeExecutorFactory({
     reserveUsage,
     verifyLean: options.leanVerifier ?? createTrustedLeanVerifier(),
     ...(options.nodeExecutorDependencies
       ? { dependencies: options.nodeExecutorDependencies }
       : {}),
   });
+  const executeNode = withDeliberationBindings(
+    kadyExecutor,
+    options.deliberationDependencies,
+  );
 
   return new WorkflowRunController({
     store: options.store,

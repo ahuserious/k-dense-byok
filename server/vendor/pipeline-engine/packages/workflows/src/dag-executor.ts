@@ -92,6 +92,17 @@ import {
   type ResolvedAiProfile,
 } from './model-validation';
 
+export {
+  FUSION_TOPOLOGY_KINDS,
+  executeFusionTopology,
+  type FusionTopologyAgent,
+  type FusionTopologyInvocation,
+  type FusionTopologyKind,
+  type FusionTopologyNode,
+  type FusionTopologyProvider,
+  type FusionTopologyResult,
+} from './dag-executor-topologies';
+
 /**
  * Closed-set node type for telemetry — mirrors the DagNode discriminators.
  * The final `'prompt'` arm is the fallthrough: a future node type added to

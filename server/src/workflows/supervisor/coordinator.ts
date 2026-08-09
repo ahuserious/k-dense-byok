@@ -23,6 +23,7 @@ import {
   waitForHostedFusionQuarantines,
   type HostedOpenRouterFusionResult,
 } from "../hosted-fusion.ts";
+import { hostedFusionAccounting } from "../hosted-fusion-definition.ts";
 import type {
   SerializedHostedOpenRouterFusionRequest,
   WorkflowSupervisorAttemptSnapshot,
@@ -799,10 +800,11 @@ export class WorkflowSupervisorCoordinator {
     if (budget.provider !== "openrouter" || budget.authType !== "api_key") {
       throw new Error("Hosted Fusion requires an OpenRouter API-key budget descriptor.");
     }
+    const accounting = hostedFusionAccounting(input.request.resolved.members.length);
     this.validateBudgetEnvelope(input.projectId, budget, {
       maxTokens: input.request.maxTokens,
       maxCostUsd: input.request.maxCostUsd,
-      modelCallCount: input.request.resolved.members.length + 2,
+      modelCallCount: accounting.modelCallCount,
     });
     const attempt = this.beginAttempt({
       operationId,
