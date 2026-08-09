@@ -21,8 +21,11 @@ export interface PromptOptimizationInterviewStateV1 {
   runId: string;
   nodeId: string;
   executionId: string;
+  attempt: number;
   status: PromptOptimizationInterviewStatus;
   questions: InterviewParamsT;
+  questionSetSha256: string;
+  carriedFromExecutionId?: string;
   createdAt: number;
   updatedAt: number;
   deadlineAt: number;
@@ -48,9 +51,24 @@ function safeKey(value: string, pattern: RegExp, label: string): string {
   return value.replaceAll(":", "_");
 }
 
-function transitionEventId(prefix: string, runId: string, nodeId: string): string {
-  const digest = createHash("sha256").update(`${runId}\0${nodeId}`).digest("hex").slice(0, 24);
+function transitionEventId(prefix: string, runId: string, nodeId: string, attempt: number): string {
+  const digest = createHash("sha256").update(`${runId}\0${nodeId}\0${attempt}`).digest("hex").slice(0, 24);
   return `prompt_opt_interview_${prefix}_${digest}`;
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).filter((key) => record[key] !== undefined).sort().map((key) =>
+      `${JSON.stringify(key)}:${canonicalJson(record[key])}`
+    ).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+export function promptOptimizationQuestionSetSha256(questions: InterviewParamsT): string {
+  return createHash("sha256").update(canonicalJson(questions)).digest("hex");
 }
 
 function assertStoredState(
@@ -75,39 +93,37 @@ function assertStoredState(
   ) {
     throw new Error("Prompt optimization interview state is malformed or belongs to another run.");
   }
+  const expectedQuestionSetSha256 = promptOptimizationQuestionSetSha256(record.questions);
+  if (
+    record.questionSetSha256 !== undefined &&
+    record.questionSetSha256 !== expectedQuestionSetSha256
+  ) {
+    throw new Error("Prompt optimization interview question-set hash does not match its persisted questions.");
+  }
+  // Migrate states written by the first S6 seam without invalidating a paused run.
+  record.questionSetSha256 ??= expectedQuestionSetSha256;
+  record.attempt ??= 1;
+  if (!Number.isSafeInteger(record.attempt) || record.attempt < 1) {
+    throw new Error("Prompt optimization interview state has an invalid attempt number.");
+  }
 }
 
 function waitingEvent(state: PromptOptimizationInterviewStateV1): WorkflowRunEventInput {
   return {
-    eventId: transitionEventId("waiting", state.runId, state.nodeId),
+    eventId: transitionEventId("waiting", state.runId, state.nodeId, state.attempt),
     type: "run_waiting",
-    executionId: state.executionId,
-    nodeId: state.nodeId,
     data: {
-      reason: "prompt-optimization-interview-user",
-      durable: true,
-      deadlineAt: state.deadlineAt,
-      questionCount: state.questions.questions.length,
-      endpoint: `/dag-workflow-runs/${encodeURIComponent(state.runId)}/nodes/${encodeURIComponent(state.nodeId)}/prompt-opt-interview`,
+      reason: `Prompt optimization ${state.nodeId} is waiting for durable structured answers.`,
     },
   };
 }
 
 function resumedEvent(state: PromptOptimizationInterviewStateV1): WorkflowRunEventInput {
   return {
-    eventId: transitionEventId(`resumed_${state.status}`, state.runId, state.nodeId),
+    eventId: transitionEventId(`resumed_${state.status}`, state.runId, state.nodeId, state.attempt),
     type: "run_resumed",
-    executionId: state.executionId,
-    nodeId: state.nodeId,
     data: {
-      reason: "prompt-optimization-interview-user",
-      durable: true,
-      status: state.status,
-      timedOut: state.status === "timed-out",
-      cancelled: state.status === "cancelled",
-      responseCount: state.answer && !state.answer.cancelled
-        ? state.answer.responses.length
-        : 0,
+      resumeNumber: state.attempt,
     },
   };
 }
@@ -170,30 +186,51 @@ export class PromptOptimizationInterviewContract {
     runId: string;
     nodeId: string;
     executionId: string;
+    attempt: number;
     questions: InterviewParamsT;
     deadlineAt: number;
   }): Promise<PromptOptimizationInterviewTransition> {
-    const existing = await this.read(input.runId, input.nodeId);
-    if (existing) {
-      if (existing.executionId !== input.executionId) {
-        throw new Error("A durable prompt optimization interview already exists for this run and node.");
-      }
-      return {
-        state: existing,
-        event: existing.status === "pending" ? waitingEvent(existing) : resumedEvent(existing),
-      };
-    }
     const now = Math.max(0, Math.floor(this.now()));
+    if (!Number.isSafeInteger(input.attempt) || input.attempt < 1) {
+      throw new Error("Prompt optimization interview requires a positive attempt number.");
+    }
     if (!Number.isFinite(input.deadlineAt) || input.deadlineAt <= now) {
       throw new Error("Prompt optimization interview has no time remaining in the node envelope.");
+    }
+    const existing = await this.read(input.runId, input.nodeId);
+    const questionSetSha256 = promptOptimizationQuestionSetSha256(input.questions);
+    if (existing) {
+      if (
+        existing.executionId === input.executionId &&
+        existing.questionSetSha256 === questionSetSha256
+      ) {
+        return {
+          state: existing,
+          event: existing.status === "pending" ? waitingEvent(existing) : resumedEvent(existing),
+        };
+      }
+      if (existing.status === "answered" && existing.questionSetSha256 === questionSetSha256) {
+        const carried: PromptOptimizationInterviewStateV1 = {
+          ...existing,
+          executionId: input.executionId,
+          attempt: input.attempt,
+          updatedAt: now,
+          deadlineAt: Math.floor(input.deadlineAt),
+          carriedFromExecutionId: existing.executionId,
+        };
+        await this.persist(carried);
+        return { state: carried, event: resumedEvent(carried) };
+      }
     }
     const state: PromptOptimizationInterviewStateV1 = {
       stateVersion: PROMPT_OPTIMIZATION_INTERVIEW_STATE_VERSION,
       runId: input.runId,
       nodeId: input.nodeId,
       executionId: input.executionId,
+      attempt: input.attempt,
       status: "pending",
       questions: structuredClone(input.questions),
+      questionSetSha256,
       createdAt: now,
       updatedAt: now,
       deadlineAt: Math.floor(input.deadlineAt),

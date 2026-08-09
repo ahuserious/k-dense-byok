@@ -23,6 +23,7 @@ import type { WorkflowValidationIssue } from "../src/workflows/validate.ts";
 
 const temporaryDirectories: string[] = [];
 const artifactPath = ".kady/workflows/prompt-optimizations/result.json";
+const discardDurableEvent = async () => {};
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) =>
@@ -197,11 +198,30 @@ describe("prompt-optimization node", () => {
       sandboxPath: "/unused",
       runId: "run-evidence",
       executionId: "execution-evidence",
+      attempt: 1,
       graph: evidenceGraph,
       node: node(),
       deliberation: { deliberate },
+      writeDurableEvent: discardDurableEvent,
       writeArtifact: memoryWriter,
     })).rejects.toThrow(/evidence-policy-unsupported/);
+    expect(deliberate).not.toHaveBeenCalled();
+  });
+
+  it("fails at node start when the runner did not supply a durable event writer", async () => {
+    const deliberate = vi.fn(iterativeDeliberation().deliberate);
+    await expect(executePromptOptimizationNode({
+      projectId: "project-a",
+      sandboxPath: "/unused",
+      runId: "run-no-writer",
+      executionId: "execution-no-writer",
+      attempt: 1,
+      graph: graph(),
+      node: node({ iterations: 1 }),
+      deliberation: { deliberate },
+      writeDurableEvent: undefined as never,
+      writeArtifact: memoryWriter,
+    })).rejects.toThrow("PROMPT_OPTIMIZATION_DURABLE_EVENT_WRITER_REQUIRED");
     expect(deliberate).not.toHaveBeenCalled();
   });
 
@@ -220,12 +240,14 @@ describe("prompt-optimization node", () => {
       sandboxPath: "/unused",
       runId: "run-cap",
       executionId: "execution-cap",
+      attempt: 1,
       graph: graph(),
       node: node({
         iterations: 3,
         settings: { version: 1, budget: { maxTokens: 6, maxCostUsd: 3 } },
       }),
       deliberation: { deliberate },
+      writeDurableEvent: discardDurableEvent,
       writeArtifact,
       now: () => 1_000,
     })).rejects.toMatchObject({
@@ -253,6 +275,7 @@ describe("prompt-optimization node", () => {
       sandboxPath,
       runId: "run-interview",
       executionId: "execution-interview",
+      attempt: 1,
       graph: graph({ limits: { ...graph().limits, timeoutMs: 10_000 } }),
       node: node({
         iterations: 1,
@@ -262,6 +285,7 @@ describe("prompt-optimization node", () => {
         },
       }),
       deliberation: { deliberate },
+      writeDurableEvent: discardDurableEvent,
       interviewContract: contract,
       writeArtifact: memoryWriter,
       now: () => clock,
@@ -295,6 +319,7 @@ describe("prompt-optimization node", () => {
       sandboxPath,
       runId: "run-interview-timeout",
       executionId: "execution-interview-timeout",
+      attempt: 1,
       graph: graph({ limits: { ...graph().limits, timeoutMs: 10_000 } }),
       node: node({
         iterations: 1,
@@ -304,6 +329,7 @@ describe("prompt-optimization node", () => {
         },
       }),
       deliberation: { deliberate },
+      writeDurableEvent: discardDurableEvent,
       interviewContract: contract,
       writeArtifact: memoryWriter,
       now: () => clock,
@@ -315,6 +341,68 @@ describe("prompt-optimization node", () => {
       completedIterations: 0,
     });
     expect(deliberate).not.toHaveBeenCalled();
+  });
+
+  it("reuses answered interview state after a retryable post-answer failure", async () => {
+    const sandboxPath = await temporarySandbox();
+    const contract = createPromptOptimizationInterviewContract({
+      sandboxPath,
+      now: () => 1_000,
+      pollIntervalMs: 5,
+    });
+    const questions = {
+      title: "Optimization constraints",
+      questions: [{ id: "audience", type: "text" as const, question: "Audience?" }],
+    };
+    const writeDurableEvent = vi.fn(discardDurableEvent);
+    const firstDeliberation = vi.fn(async () => {
+      throw new Error("retryable failure after interview");
+    });
+    const firstAttempt = executePromptOptimizationNode({
+      projectId: "project-a",
+      sandboxPath,
+      runId: "run-answer-retry",
+      executionId: "execution-attempt-1",
+      attempt: 1,
+      graph: graph(),
+      node: node({ iterations: 1, interviewUser: questions }),
+      deliberation: { deliberate: firstDeliberation },
+      writeDurableEvent,
+      interviewContract: contract,
+      writeArtifact: memoryWriter,
+      now: () => 1_000,
+    });
+    await waitForPersistedInterview(contract, "run-answer-retry", "optimize-prompt");
+    await handlePromptOptimizationInterviewAnswer({
+      contract,
+      runId: "run-answer-retry",
+      nodeId: "optimize-prompt",
+      answer: { responses: [{ id: "audience", value: "domain experts" }] },
+    });
+    await expect(firstAttempt).rejects.toThrow("retryable failure after interview");
+
+    const secondDeliberation = vi.fn(iterativeDeliberation().deliberate);
+    const secondAttempt = await executePromptOptimizationNode({
+      projectId: "project-a",
+      sandboxPath,
+      runId: "run-answer-retry",
+      executionId: "execution-attempt-2",
+      attempt: 2,
+      graph: graph(),
+      node: node({ iterations: 1, interviewUser: structuredClone(questions) }),
+      deliberation: { deliberate: secondDeliberation },
+      writeDurableEvent,
+      interviewContract: contract,
+      writeArtifact: memoryWriter,
+      now: () => 1_000,
+    });
+    expect(secondDeliberation).toHaveBeenCalledTimes(1);
+    expect(secondDeliberation.mock.calls[0][0].interview?.responses).toEqual([
+      { id: "audience", value: "domain experts" },
+    ]);
+    expect(secondAttempt.artifact.interview?.responses[0].value).toBe("domain experts");
+    // The retry reused answers and therefore did not create a second pause/resume pair.
+    expect(writeDurableEvent).toHaveBeenCalledTimes(2);
   });
 
   it("routes the toggle through typed council/fusion and propagates policies", async () => {
@@ -359,6 +447,7 @@ describe("prompt-optimization node", () => {
       runInput: {},
       attempt: 1,
       executionId: "execution-source",
+      writeDurableEvent: discardDurableEvent,
       branchId: "entry",
       resumed: false,
       inbound: [],
@@ -375,12 +464,14 @@ describe("prompt-optimization node", () => {
         sandboxPath: "/unused",
         runId: enabled ? "run-fusion" : "run-council",
         executionId: enabled ? "execution-fusion" : "execution-council",
+        attempt: 1,
         graph: graph(),
         node: node({
           ...parent,
           fusionDeliberation: { ...parent.fusionDeliberation, enabled },
         }),
         deliberation,
+        writeDurableEvent: discardDurableEvent,
         writeArtifact: memoryWriter,
         now: () => 1_000,
       });
@@ -402,9 +493,11 @@ describe("prompt-optimization node", () => {
       sandboxPath,
       runId: "run-artifact",
       executionId: "execution-artifact",
+      attempt: 1,
       graph: graph(),
       node: node(),
       deliberation: iterativeDeliberation(),
+      writeDurableEvent: discardDurableEvent,
       now: () => 123_456,
     });
     expect(Value.Check(PromptOptimizationArtifactSchema, result.artifact)).toBe(true);
@@ -434,6 +527,7 @@ describe("prompt-optimization node", () => {
       sandboxPath,
       runId: "run-failure",
       executionId: "execution-failure",
+      attempt: 1,
       graph: graph(),
       node: node(),
       deliberation: {
@@ -447,6 +541,7 @@ describe("prompt-optimization node", () => {
           };
         },
       },
+      writeDurableEvent: discardDurableEvent,
       now: () => 1_000,
     })).rejects.toThrow("provider failed");
     await expect(fs.stat(path.join(sandboxPath, artifactPath))).rejects.toMatchObject({ code: "ENOENT" });

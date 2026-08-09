@@ -100,6 +100,7 @@ export interface ExecutePromptOptimizationNodeOptions {
   sandboxPath: string;
   runId: string;
   executionId: string;
+  attempt: number;
   node: PromptOptimizationNode;
   graph: Pick<
     WorkflowGraphDocument,
@@ -110,7 +111,7 @@ export interface ExecutePromptOptimizationNodeOptions {
   interviewContract?: PromptOptimizationInterviewContract;
   writeArtifact?: PromptOptimizationArtifactWriter;
   now?: () => number;
-  onEvent?: (
+  writeDurableEvent: (
     event: WorkflowRunEventInput,
   ) => void | Promise<void>;
 }
@@ -125,6 +126,7 @@ export interface PromptOptimizationNodeExecutionResult
 export interface PromptOptimizationNodeExecutorContext
   extends Omit<WorkflowNodeExecutorContext, "node"> {
   node: PromptOptimizationNode;
+  writeDurableEvent: ExecutePromptOptimizationNodeOptions["writeDurableEvent"];
 }
 
 export type PromptOptimizationNodeExecutor = (
@@ -142,7 +144,6 @@ export interface CreatePromptOptimizationNodeExecutorOptions {
   ) => PromptOptimizationInterviewContract;
   writeArtifact?: PromptOptimizationArtifactWriter;
   now?: () => number;
-  onEvent?: ExecutePromptOptimizationNodeOptions["onEvent"];
 }
 
 export class PromptOptimizationEnvelopeError extends Error {
@@ -698,14 +699,20 @@ async function runInterviewUserStep(
     runId: options.runId,
     nodeId: options.node.id,
     executionId: options.executionId,
+    attempt: options.attempt,
     questions: params,
     deadlineAt: Math.min(envelope.deadlineAt, now() + requestedTimeoutMs),
   });
-  await options.onEvent?.(launched.event);
+  // Reused answers do not pause the new attempt, so emitting run_resumed here
+  // would be an invalid running -> resumed transition.
   const settled = launched.state.status === "pending"
-    ? await contract.waitForAnswer(options.runId, options.node.id, signal)
+    ? await (async () => {
+        await options.writeDurableEvent(launched.event);
+        const transition = await contract.waitForAnswer(options.runId, options.node.id, signal);
+        await options.writeDurableEvent(transition.event);
+        return transition;
+      })()
     : launched;
-  await options.onEvent?.(settled.event);
   if (settled.state.status === "timed-out") {
     throw new PromptOptimizationEnvelopeError(
       "Prompt optimization interview timed out inside the node's cumulative envelope; no provider deliberation was started.",
@@ -742,6 +749,14 @@ function optimizationOutput(
 export async function executePromptOptimizationNode(
   options: ExecutePromptOptimizationNodeOptions,
 ): Promise<PromptOptimizationNodeExecutionResult> {
+  if (typeof options.writeDurableEvent !== "function") {
+    throw new Error(
+      "PROMPT_OPTIMIZATION_DURABLE_EVENT_WRITER_REQUIRED: prompt optimization must persist waiting/resumed RunState events.",
+    );
+  }
+  if (!Number.isSafeInteger(options.attempt) || options.attempt < 1) {
+    throw new Error("Prompt optimization requires a positive runner attempt number.");
+  }
   assertPromptOptimizationContract(options.node, options.graph);
   if (!options.deliberation || typeof options.deliberation.deliberate !== "function") {
     throw new Error("Prompt optimization requires a typed council/fusion deliberation port.");
@@ -1088,10 +1103,12 @@ export function createPromptOptimizationNodeExecutor(
       sandboxPath,
       runId: context.runId,
       executionId: context.executionId,
+      attempt: context.attempt,
       node: structuredClone(context.node),
       graph: context.graph,
       signal: context.signal,
       deliberation: options.deliberation(context),
+      writeDurableEvent: context.writeDurableEvent,
       interviewContract: options.interviewContractForContext?.(context, sandboxPath) ??
         createPromptOptimizationInterviewContract({
           sandboxPath,
@@ -1099,7 +1116,6 @@ export function createPromptOptimizationNodeExecutor(
         }),
       ...(options.writeArtifact ? { writeArtifact: options.writeArtifact } : {}),
       ...(options.now ? { now: options.now } : {}),
-      ...(options.onEvent ? { onEvent: options.onEvent } : {}),
     });
   };
 }

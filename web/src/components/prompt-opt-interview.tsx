@@ -19,6 +19,9 @@ interface PromptOptimizationInterviewState {
 }
 
 type AnswerValue = string | string[];
+const POLL_INTERVAL_MS = 2_000;
+const FAILURE_BACKOFF_START_MS = 500;
+const FAILURE_BACKOFF_CAP_MS = 8_000;
 
 function optionLabel(option: string | { label: string }): string {
   return typeof option === "string" ? option : option.label;
@@ -37,10 +40,12 @@ export function PromptOptimizationInterview({
   runId,
   nodeId,
   projectId,
+  runActive,
 }: {
   runId: string;
   nodeId: string;
   projectId?: string;
+  runActive: boolean;
 }) {
   const scopedProjectId = useProjectScopeId();
   const effectiveProjectId = projectId ?? scopedProjectId;
@@ -51,26 +56,41 @@ export function PromptOptimizationInterview({
   const basePath = `/dag-workflow-runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/prompt-opt-interview`;
 
   useEffect(() => {
+    if (!runActive) return;
     let disposed = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const refresh = async () => {
+    let consecutiveFailures = 0;
+    const controller = new AbortController();
+    const schedule = (delayMs: number) => {
+      if (!disposed && runActive) timer = setTimeout(refresh, delayMs);
+    };
+    async function refresh() {
       try {
-        const response = await apiFetch(basePath, {}, effectiveProjectId);
+        const response = await apiFetch(basePath, { signal: controller.signal }, effectiveProjectId);
         const body = await response.json() as { state?: PromptOptimizationInterviewState | null };
         if (!response.ok) throw new Error("Unable to load prompt optimization interview.");
         if (disposed) return;
+        consecutiveFailures = 0;
+        setError(null);
         setState(body.state ?? null);
-        if (body.state?.status === "pending") timer = setTimeout(refresh, 2_000);
+        if (!body.state || body.state.status === "pending") schedule(POLL_INTERVAL_MS);
       } catch (cause) {
-        if (!disposed) setError(cause instanceof Error ? cause.message : "Interview failed.");
+        if (disposed || controller.signal.aborted) return;
+        consecutiveFailures += 1;
+        setError(cause instanceof Error ? cause.message : "Interview failed.");
+        schedule(Math.min(
+          FAILURE_BACKOFF_CAP_MS,
+          FAILURE_BACKOFF_START_MS * (2 ** (consecutiveFailures - 1)),
+        ));
       }
-    };
+    }
     void refresh();
     return () => {
       disposed = true;
+      controller.abort();
       if (timer) clearTimeout(timer);
     };
-  }, [basePath, effectiveProjectId]);
+  }, [basePath, effectiveProjectId, runActive]);
 
   useEffect(() => {
     if (!state) return;
@@ -118,6 +138,7 @@ export function PromptOptimizationInterview({
     }
   };
 
+  if (!runActive) return null;
   if (!state) return error ? <p className="text-xs text-destructive">{error}</p> : null;
   if (state.status !== "pending") {
     return (
