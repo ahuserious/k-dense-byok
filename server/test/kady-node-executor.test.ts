@@ -29,9 +29,12 @@ import {
 } from "../src/workflows/run-state.ts";
 import type {
   ModelRequest,
+  NodeSpecV1,
   WorkflowGraphDocument,
   WorkflowNode,
+  WorkflowSettingsV1,
 } from "../src/workflows/schema.ts";
+import { validateWorkflowGraphDocument } from "../src/workflows/validate.ts";
 import {
   resolveWorkflowModel,
   type ResolvedWorkflowModel,
@@ -345,6 +348,7 @@ function contextFor(
     workflowRevision: 1,
     graph: {
       id: document.id,
+      settings: document.settings,
       defaultModel: document.defaultModel,
       limits: document.limits,
       rescue: document.rescue,
@@ -580,10 +584,22 @@ describe("production Kady DAG node executor", () => {
       settings: {
         model: settingsModel,
         reasoningEffort: "xhigh",
+        hyperparameters: { temperature: 1, top_p: 1, sampling: {} },
         conditions: { exists: [] },
+        harness: "pi",
+        databases: [],
+        skills: { mode: "auto", list: [] },
+        subagents: { mode: "auto" },
+        autonomy: "strict",
+        deliberation: {
+          bestOfNPersonalityCount: 2,
+          mimeographs: { mode: "auto", personalityRefs: [] },
+        },
+        billingMode: "inherit",
       },
     };
     const document = graph(node);
+    document.settings = { defaultHarness: "pi", databases: [] };
     delete document.defaultModel;
     const host = new FakeHost([analysis("settings model executed")]);
 
@@ -596,18 +612,152 @@ describe("production Kady DAG node executor", () => {
     });
   });
 
-  it("fails closed on nonempty frozen conditions before receipt, reservation, or provider call", async () => {
+  it.each([
+    {
+      label: "conditions.when",
+      settings: { conditions: { when: "inputs.ready" } },
+      code: "node-conditions-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "conditions.exists",
+      settings: { conditions: { exists: ["inputs/missing.csv"] } },
+      code: "node-conditions-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "harness",
+      settings: { harness: "codex" },
+      code: "node-harness-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "hyperparameters.temperature",
+      settings: { hyperparameters: { temperature: 0.2 } },
+      code: "node-hyperparameters-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "hyperparameters.top_p",
+      settings: { hyperparameters: { top_p: 0.9 } },
+      code: "node-hyperparameters-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "hyperparameters.sampling",
+      settings: { hyperparameters: { sampling: { seed: 7 } } },
+      code: "node-hyperparameters-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "databases",
+      settings: { databases: ["pubmed"] },
+      code: "node-databases-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "skills mode",
+      settings: { skills: { mode: "manual" } },
+      code: "node-skills-mode-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "skills list",
+      settings: { skills: { list: ["database-lookup"] } },
+      code: "node-skills-list-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "subagents mode",
+      settings: { subagents: { mode: "auto-manual" } },
+      code: "node-subagents-mode-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "autonomy",
+      settings: { autonomy: "loose" },
+      code: "node-autonomy-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "deliberation.personalityStoreRef",
+      settings: { deliberation: { personalityStoreRef: "scientific-agents/v1" } },
+      code: "node-deliberation-enforcement-pending",
+      unit: "S5",
+    },
+    {
+      label: "deliberation.bestOfNPersonalityCount",
+      settings: { deliberation: { bestOfNPersonalityCount: 4 } },
+      code: "node-deliberation-enforcement-pending",
+      unit: "S5",
+    },
+    {
+      label: "deliberation.mimeographs.mode",
+      settings: { deliberation: { mimeographs: { mode: "manual" } } },
+      code: "node-deliberation-enforcement-pending",
+      unit: "S5",
+    },
+    {
+      label: "deliberation.mimeographs.personalityRefs",
+      settings: {
+        deliberation: {
+          mimeographs: { personalityRefs: ["skeptical-reviewer"] },
+        },
+      },
+      code: "node-deliberation-enforcement-pending",
+      unit: "S5",
+    },
+    {
+      label: "billing mode",
+      settings: { billingMode: "subscription" },
+      code: "node-billing-mode-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "workflow default harness",
+      workflowSettings: { defaultHarness: "codex" },
+      code: "workflow-default-harness-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "workflow databases",
+      workflowSettings: { databases: ["arxiv"] },
+      code: "workflow-databases-enforcement-pending",
+      unit: "S4",
+    },
+  ] satisfies Array<{
+    label: string;
+    settings?: NodeSpecV1;
+    workflowSettings?: WorkflowSettingsV1;
+    code: string;
+    unit: "S4" | "S5";
+  }>)("fails closed on non-default $label before receipt, reservation, or provider call", async ({
+    settings,
+    workflowSettings,
+    code,
+    unit,
+  }) => {
     const node: WorkflowNode = {
       ...baseNode("agent"),
       kind: "agent",
-      prompt: "Do not execute until the required input exists.",
-      settings: { conditions: { exists: ["inputs/missing.csv"] } },
+      prompt: "Do not execute an unbound NodeSpec field.",
+      ...(settings ? { settings } : {}),
     };
     const document = graph(node);
+    if (workflowSettings) document.settings = workflowSettings;
     const events: string[] = [];
     const host = new FakeHost([analysis("must not run")], events);
     const onReserve = vi.fn();
     const onResolve = vi.fn();
+
+    const validation = validateWorkflowGraphDocument(document);
+    expect(validation).toMatchObject({ ok: false });
+    if (!validation.ok) {
+      expect(validation.issues).toContainEqual(expect.objectContaining({
+        code,
+        message: expect.stringContaining(`(${unit})`),
+      }));
+    }
 
     await expect(
       executorFor(host, document, { onReserve, onResolve })(
@@ -615,9 +765,7 @@ describe("production Kady DAG node executor", () => {
       ),
     ).rejects.toMatchObject({
       code: "WORKFLOW_NODE_INVALID_CONTEXT",
-      message: expect.stringContaining(
-        "frozen in the contract, but enforcement lands in the per-node-control unit (S4)",
-      ),
+      message: expect.stringContaining(`(${unit})`),
     });
 
     expect(events.some((event) => event.startsWith("record:"))).toBe(false);

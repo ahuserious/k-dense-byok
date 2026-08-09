@@ -101,7 +101,7 @@ export interface WorkflowNodeExecutorContext {
   workflowRevision: number;
   graph: Pick<
     WorkflowGraphDocument,
-    "id" | "defaultModel" | "limits" | "rescue" | "evidence" | "artifacts"
+    "id" | "settings" | "defaultModel" | "limits" | "rescue" | "evidence" | "artifacts"
   >;
   node: WorkflowNode;
   runInput: WorkflowRunManifestV1["input"];
@@ -1117,6 +1117,7 @@ async function executeNodeLifecycle(
         workflowRevision: manifest.workflowRevision,
         graph: structuredClone({
           id: manifest.graph.id,
+          settings: manifest.graph.settings,
           defaultModel: manifest.graph.defaultModel,
           limits: manifest.graph.limits,
           rescue: manifest.graph.rescue,

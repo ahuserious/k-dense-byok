@@ -21,6 +21,11 @@ import {
   workflowEvidenceGateEvaluator,
   workflowEvidencePolicyEvaluator,
 } from "./evidence-policy.ts";
+import {
+  pendingNodeSpecEnforcementMessage,
+  pendingNodeSpecEnforcements,
+  pendingWorkflowSettingsEnforcements,
+} from "./node-spec-enforcement.ts";
 
 export interface WorkflowValidationIssue {
   code: string;
@@ -169,6 +174,14 @@ export function validateWorkflowGraphSemantics(
     "duplicate-artifact-id",
     issues,
   );
+
+  for (const finding of pendingWorkflowSettingsEnforcements(document.settings)) {
+    issues.push({
+      code: finding.code,
+      path: `/settings/${finding.pathSuffix}`,
+      message: pendingNodeSpecEnforcementMessage(finding),
+    });
+  }
 
   validateRescuePolicy(
     document.rescue ?? DEFAULT_WORKFLOW_RESCUE_POLICY,
@@ -558,15 +571,11 @@ function validateNode(
   issues: WorkflowValidationIssue[],
 ): void {
   if (node.limits) validateNodeLimits(node.limits, nodePath, document, issues);
-  if (
-    node.settings?.conditions?.when !== undefined ||
-    (node.settings?.conditions?.exists?.length ?? 0) > 0
-  ) {
+  for (const finding of pendingNodeSpecEnforcements(node.settings)) {
     issues.push({
-      code: "node-conditions-enforcement-pending",
-      path: `${nodePath}/settings/conditions`,
-      message:
-        "NodeSpec conditions are frozen in the contract, but enforcement lands in the per-node-control unit (S4); nonempty conditions fail closed until S4 enforcement.",
+      code: finding.code,
+      path: `${nodePath}/settings/${finding.pathSuffix}`,
+      message: pendingNodeSpecEnforcementMessage(finding),
     });
   }
   const resolveModel = (

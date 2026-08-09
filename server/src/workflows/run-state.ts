@@ -344,6 +344,54 @@ export const RunStateV1Schema = Type.Object(
 
 export type RunStateV1 = Static<typeof RunStateV1Schema>;
 
+type RunStateV1RunStatus = RunStateV1["status"];
+type RunStateV1NodeStatus = RunStateV1["nodes"][number]["status"];
+
+const ALL_RUN_STATE_V1_NODE_STATUSES = new Set<RunStateV1NodeStatus>([
+  "pending",
+  "running",
+  "waiting",
+  "blocked",
+  "succeeded",
+  "failed",
+  "skipped",
+  "interrupted",
+  "cancelled",
+]);
+const TERMINAL_RUN_STATE_V1_NODE_STATUSES = new Set<RunStateV1NodeStatus>([
+  "pending",
+  "succeeded",
+  "failed",
+  "skipped",
+  "interrupted",
+  "cancelled",
+]);
+const RUN_STATE_V1_STATUS_COHERENCE: Record<
+  RunStateV1RunStatus,
+  ReadonlySet<RunStateV1NodeStatus>
+> = {
+  queued: new Set(["pending"]),
+  running: ALL_RUN_STATE_V1_NODE_STATUSES,
+  waiting: ALL_RUN_STATE_V1_NODE_STATUSES,
+  blocked: ALL_RUN_STATE_V1_NODE_STATUSES,
+  paused: ALL_RUN_STATE_V1_NODE_STATUSES,
+  interrupted: ALL_RUN_STATE_V1_NODE_STATUSES,
+  succeeded: new Set(["succeeded", "skipped"]),
+  failed: TERMINAL_RUN_STATE_V1_NODE_STATUSES,
+  cancelled: TERMINAL_RUN_STATE_V1_NODE_STATUSES,
+};
+
+function assertRunStateV1StatusCoherence(
+  runStatus: RunStateV1RunStatus,
+  nodeStatus: RunStateV1NodeStatus,
+  nodeLabel: string,
+): void {
+  if (RUN_STATE_V1_STATUS_COHERENCE[runStatus].has(nodeStatus)) return;
+  throw new Error(
+    `Invalid RunState v1 status coherence: run ${runStatus} cannot contain ${nodeLabel} with status ${nodeStatus}.`,
+  );
+}
+
 function assertRunStateV1(value: unknown): asserts value is RunStateV1 {
   const schemaErrors = [...Value.Errors(RunStateV1Schema, value)];
   if (schemaErrors.length > 0) {
@@ -362,6 +410,14 @@ function assertRunStateV1(value: unknown): asserts value is RunStateV1 {
     if (node.progress.completed > node.progress.total) {
       throw new Error(`Invalid RunState v1 progress for node ${node.id}.`);
     }
+    assertRunStateV1StatusCoherence(state.status, node.status, `node ${node.id}`);
+  }
+  if (state.backgroundAgentTrailingNode) {
+    assertRunStateV1StatusCoherence(
+      state.status,
+      state.backgroundAgentTrailingNode.status,
+      `background-agent trailing slot ${state.backgroundAgentTrailingNode.slotId}`,
+    );
   }
   const topologyNodeIds = new Set(state.topology.nodes.map((node) => node.id));
   if (topologyNodeIds.size !== state.topology.nodes.length) {

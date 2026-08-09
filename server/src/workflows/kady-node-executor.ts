@@ -65,6 +65,11 @@ import type {
 import type {
   SupervisedWorkflowBudgetDescriptorV1,
 } from "./supervised-budget.ts";
+import {
+  pendingNodeSpecEnforcementMessage,
+  pendingNodeSpecEnforcements,
+  pendingWorkflowSettingsEnforcements,
+} from "./node-spec-enforcement.ts";
 
 export const KADY_WORKFLOW_READ_ONLY_AGENT =
   "dag-workflow-readonly-executor" as const;
@@ -1425,13 +1430,14 @@ export function createKadyWorkflowNodeExecutor(
   const policy = delegationPolicyWithDefaults(options.delegationPolicy);
 
   return async (context): Promise<WorkflowNodeExecutorResult> => {
-    if (
-      context.node.settings?.conditions?.when !== undefined ||
-      (context.node.settings?.conditions?.exists?.length ?? 0) > 0
-    ) {
+    const pendingEnforcement = [
+      ...pendingWorkflowSettingsEnforcements(context.graph.settings),
+      ...pendingNodeSpecEnforcements(context.node.settings),
+    ][0];
+    if (pendingEnforcement) {
       fail(
         "WORKFLOW_NODE_INVALID_CONTEXT",
-        "NodeSpec conditions are frozen in the contract, but enforcement lands in the per-node-control unit (S4); nonempty conditions fail closed until S4 enforcement.",
+        pendingNodeSpecEnforcementMessage(pendingEnforcement),
       );
     }
     assertReadOnlyWorkspace(context.node);

@@ -48,6 +48,12 @@ function runState(): RunStateV1 {
   };
 }
 
+const TERMINAL_RUN_STATUSES = ["succeeded", "failed", "cancelled"] as const;
+const ACTIVE_NODE_STATUSES = ["running", "waiting", "blocked"] as const;
+const INVALID_TERMINAL_ACTIVE_COMBINATIONS = TERMINAL_RUN_STATUSES.flatMap((runStatus) =>
+  ACTIVE_NODE_STATUSES.map((nodeStatus) => ({ runStatus, nodeStatus }))
+);
+
 describe("RunState v1 contract", () => {
   it("exposes a JSON schema and round-trips through the API surface", () => {
     const state = runState();
@@ -101,6 +107,78 @@ describe("RunState v1 contract", () => {
     state.backgroundAgentTrailingNode!.nodeId = "missing";
     expect(() => serializeRunStateV1(state)).toThrow(
       /background-agent trailing node: node reference is absent from topology/,
+    );
+  });
+
+  it.each(INVALID_TERMINAL_ACTIVE_COMBINATIONS)(
+    "rejects $runStatus runs containing $nodeStatus nodes during serialization and parsing",
+    ({ runStatus, nodeStatus }) => {
+      const state = runState();
+      state.status = runStatus;
+      state.nodes[1].status = nodeStatus;
+      delete state.backgroundAgentTrailingNode;
+
+      expect(() => serializeRunStateV1(state)).toThrow(
+        new RegExp(`status coherence: run ${runStatus}.*status ${nodeStatus}`),
+      );
+      expect(() => parseRunStateV1(JSON.stringify(state))).toThrow(
+        new RegExp(`status coherence: run ${runStatus}.*status ${nodeStatus}`),
+      );
+    },
+  );
+
+  it.each([
+    {
+      runStatus: "queued" as const,
+      nodeStatuses: ["pending", "pending"] as const,
+      trailingStatus: "pending" as const,
+    },
+    {
+      runStatus: "succeeded" as const,
+      nodeStatuses: ["succeeded", "skipped"] as const,
+      trailingStatus: "skipped" as const,
+    },
+    {
+      runStatus: "cancelled" as const,
+      nodeStatuses: ["succeeded", "cancelled"] as const,
+      trailingStatus: "interrupted" as const,
+    },
+  ])("accepts a coherent $runStatus projection", ({
+    runStatus,
+    nodeStatuses,
+    trailingStatus,
+  }) => {
+    const state = runState();
+    state.status = runStatus;
+    state.nodes[0].status = nodeStatuses[0];
+    state.nodes[1].status = nodeStatuses[1];
+    state.backgroundAgentTrailingNode!.status = trailingStatus;
+
+    expect(parseRunStateV1(serializeRunStateV1(state))).toEqual(state);
+  });
+
+  it("accepts a failed run with failed and skipped nodes", () => {
+    const state = runState();
+    state.status = "failed";
+    state.nodes[0].status = "failed";
+    state.nodes[1].status = "skipped";
+    state.backgroundAgentTrailingNode!.status = "cancelled";
+
+    expect(parseRunStateV1(serializeRunStateV1(state))).toEqual(state);
+  });
+
+  it("applies terminal coherence to the background-agent trailing slot", () => {
+    const state = runState();
+    state.status = "failed";
+    state.nodes[0].status = "failed";
+    state.nodes[1].status = "skipped";
+    state.backgroundAgentTrailingNode!.status = "waiting";
+
+    expect(() => serializeRunStateV1(state)).toThrow(
+      /status coherence: run failed.*background-agent trailing slot.*status waiting/,
+    );
+    expect(() => parseRunStateV1(JSON.stringify(state))).toThrow(
+      /status coherence: run failed.*background-agent trailing slot.*status waiting/,
     );
   });
 

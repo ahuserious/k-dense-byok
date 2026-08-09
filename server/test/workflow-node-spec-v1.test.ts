@@ -74,33 +74,33 @@ describe("NodeSpec v1 contract", () => {
     }
   });
 
-  it("accepts the frozen optional field set and resolves workflow defaults", () => {
+  it("accepts bound fields and explicit defaults for every unbound field", () => {
     const document = foundationFixture();
     document.settings = {
       version: NODE_SPEC_V1_VERSION,
-      defaultHarness: "codex",
-      databases: ["arxiv"],
+      defaultHarness: "pi",
+      databases: [],
     };
     document.nodes[0].settings = {
       version: NODE_SPEC_V1_VERSION,
       model: document.defaultModel,
       reasoningEffort: "xhigh",
       hyperparameters: {
-        temperature: 0.2,
-        top_p: 0.9,
-        sampling: { seed: 7, deterministic: true },
+        temperature: 1,
+        top_p: 1,
+        sampling: {},
       },
       conditions: { exists: [] },
-      databases: ["pubmed", "arxiv"],
-      skills: { mode: "auto-manual", list: ["database-lookup"] },
-      subagents: { mode: "auto-manual" },
-      autonomy: "loose",
+      harness: "pi",
+      databases: [],
+      skills: { mode: "auto", list: [] },
+      subagents: { mode: "auto" },
+      autonomy: "strict",
       deliberation: {
-        personalityStoreRef: "scientific-agents/v1",
-        bestOfNPersonalityCount: 4,
-        mimeographs: { mode: "manual", personalityRefs: ["skeptical-reviewer"] },
+        bestOfNPersonalityCount: 2,
+        mimeographs: { mode: "auto", personalityRefs: [] },
       },
-      billingMode: "subscription",
+      billingMode: "inherit",
       budget: { maxTokens: 2_000, maxCostUsd: 0.5 },
     };
 
@@ -113,12 +113,12 @@ describe("NodeSpec v1 contract", () => {
     expect(resolved).toMatchObject({
       version: 1,
       reasoningEffort: "xhigh",
-      harness: "codex",
-      databases: ["arxiv", "pubmed"],
-      skills: { mode: "auto-manual", list: ["database-lookup"] },
-      subagents: { mode: "auto-manual" },
-      autonomy: "loose",
-      billingMode: "subscription",
+      harness: "pi",
+      databases: [],
+      skills: { mode: "auto", list: [] },
+      subagents: { mode: "auto" },
+      autonomy: "strict",
+      billingMode: "inherit",
       budget: { maxTokens: 2_000, maxCostUsd: 0.5 },
     });
     expect(deriveWorkflowNodeDemand(
