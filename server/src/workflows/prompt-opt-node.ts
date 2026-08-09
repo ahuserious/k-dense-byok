@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { Value } from "typebox/value";
 import type { InterviewResponse } from "../agent/interview.ts";
 import { resolvePaths } from "../projects.ts";
@@ -42,6 +43,9 @@ import {
   createPromptOptimizationInterviewContract,
   type PromptOptimizationInterviewContract,
 } from "./prompt-opt-interview-contract.ts";
+import {
+  promptOptimizationOuterModelCallSlotId,
+} from "./prompt-opt-model-slots.ts";
 
 export * from "./prompt-opt-schema.ts";
 
@@ -325,7 +329,8 @@ function validateHostedPromptModel(
 export function validatePromptOptimizationNode(
   node: PromptOptimizationNode,
   nodePath: string,
-  document: Pick<WorkflowGraphDocument, "limits" | "evidence" | "artifacts">,
+  document: Pick<WorkflowGraphDocument, "limits" | "evidence" | "artifacts"> &
+    Partial<Pick<WorkflowGraphDocument, "nodes" | "edges">>,
   issues: WorkflowValidationIssue[],
 ): void {
   if (node.workspace.isolation === "read-only") {
@@ -414,6 +419,22 @@ export function validatePromptOptimizationNode(
       "prompt-optimization-interview-has-no-input",
       `${nodePath}/interviewUser/questions`,
       "INTERVIEW-USER needs at least one answerable structured question.",
+    );
+  }
+  if (
+    node.interviewUser &&
+    document.nodes &&
+    document.edges &&
+    promptOptimizationInterviewHasParallelAncestor(node.id, {
+      nodes: document.nodes,
+      edges: document.edges,
+    })
+  ) {
+    issue(
+      issues,
+      "prompt-optimization-interview-parallel-path-unsupported",
+      `${nodePath}/interviewUser`,
+      "Prompt optimization INTERVIEW-USER currently uses run-level waiting and cannot run downstream of a concurrently selectable fan-out; move it to a structurally linear path.",
     );
   }
   if (node.interviewUser?.questions.some((question) => question.type === "image")) {
@@ -535,6 +556,53 @@ export function validatePromptOptimizationNode(
       "Prompt optimization requires the typed council/fusion delegation runtime but maxSubagents is zero.",
     );
   }
+}
+
+function promptOptimizationInterviewHasParallelAncestor(
+  nodeId: string,
+  document: Pick<WorkflowGraphDocument, "nodes" | "edges">,
+): boolean {
+  const incoming = new Map<string, typeof document.edges>();
+  const outgoing = new Map<string, typeof document.edges>();
+  for (const graphNode of document.nodes) {
+    incoming.set(graphNode.id, []);
+    outgoing.set(graphNode.id, []);
+  }
+  for (const edge of document.edges) {
+    incoming.get(edge.to)?.push(edge);
+    outgoing.get(edge.from)?.push(edge);
+  }
+
+  const ancestors = new Set<string>();
+  const pending = [nodeId];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    for (const edge of incoming.get(current) ?? []) {
+      if (ancestors.has(edge.from)) continue;
+      ancestors.add(edge.from);
+      pending.push(edge.from);
+    }
+  }
+
+  for (const ancestorId of ancestors) {
+    const candidates = outgoing.get(ancestorId) ?? [];
+    const always = candidates.filter((edge) => (edge.condition ?? "always") === "always");
+    const selectableGroups = always.length > 0
+      ? [always]
+      : [...new Set(candidates.map((edge) => edge.condition ?? "always"))].map(
+          (condition) => candidates.filter((edge) => (edge.condition ?? "always") === condition),
+        );
+    for (const group of selectableGroups) {
+      if (
+        group.length > 1 &&
+        new Set(group.map((edge) => edge.to)).size > 1 &&
+        group.some((edge) => edge.to === nodeId || ancestors.has(edge.to))
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function assertPromptOptimizationContract(
@@ -780,8 +848,15 @@ export async function executePromptOptimizationNode(
     const remaining = remainingEnvelope(envelope, now, iterations.length);
     const iterationsRemaining = options.node.iterations - iteration + 1;
     const effectiveNodeLimits = options.node.limits ?? {};
+    const childDeliberationRounds = options.node.fusionDeliberation.enabled
+      ? options.node.fusionDeliberation.fusion?.mode === "kady-panel"
+        ? options.node.fusionDeliberation.fusion.rounds
+        : 1
+      : options.node.fusionDeliberation.council.rounds;
     const iterationLimits: WorkflowLimits = {
-      maxIterations: 1,
+      // This limit belongs to the synthetic child. The outer loop below is
+      // independently capped by node.iterations and the cumulative envelope.
+      maxIterations: childDeliberationRounds,
       maxModelCalls: deliberationCallsPerIteration(options.node),
       maxParallelism: Math.min(
         options.graph.limits.maxParallelism,
@@ -1004,6 +1079,11 @@ function syntheticDeliberationNode(
   };
 }
 
+function configuredChildDeliberationRounds(node: DeliberationNode): number {
+  if (node.kind === "council") return node.rounds;
+  return node.fusion.mode === "kady-panel" ? node.fusion.rounds : 1;
+}
+
 function resultRecord(result: WorkflowNodeExecutorResult): Record<string, unknown> {
   if (!result.output || typeof result.output !== "object" || Array.isArray(result.output)) {
     throw new Error("Typed deliberation returned no structured node output.");
@@ -1022,6 +1102,7 @@ export function createTypedWorkflowPromptDeliberationPort(
   return {
     async deliberate(input) {
       const node = syntheticDeliberationNode(input, sourceContext);
+      const childDeliberationRounds = configuredChildDeliberationRounds(node);
       const slotGraph: WorkflowGraphDocument = {
         schemaVersion: "1.0",
         id: sourceContext.graph.id,
@@ -1033,9 +1114,13 @@ export function createTypedWorkflowPromptDeliberationPort(
         ...(sourceContext.graph.settings
           ? { settings: structuredClone(sourceContext.graph.settings) }
           : {}),
-        // Run-wide limits remain the immutable outer admission ceiling. The
-        // synthetic node carries the strictly smaller remaining iteration share.
-        limits: structuredClone(sourceContext.graph.limits),
+        // maxIterations on this child governs its configured council/panel
+        // rounds. The separate outer loop remains capped by the prompt node's
+        // iterations and cumulative envelope.
+        limits: {
+          ...structuredClone(sourceContext.graph.limits),
+          maxIterations: childDeliberationRounds,
+        },
         ...(sourceContext.graph.rescue
           ? { rescue: structuredClone(sourceContext.graph.rescue) }
           : {}),
@@ -1048,9 +1133,21 @@ export function createTypedWorkflowPromptDeliberationPort(
       };
       const expectedModelCallSlots = workflowModelCallSlotsForNode(slotGraph, node);
       const receiptBySlot = new Map<string, unknown>();
+      const outerSlotIdByChild = new Map<string, string>();
+      for (const slot of expectedModelCallSlots) {
+        const outerSlotId = promptOptimizationOuterModelCallSlotId(input.iteration, slot.id);
+        const outerSlot = sourceContext.declareModelCallSlot(outerSlotId);
+        if (!isDeepStrictEqual(outerSlot.request, slot.request)) {
+          throw new Error(
+            `Prompt optimization outer model-call slot ${outerSlotId} does not match its synthetic deliberation request.`,
+          );
+        }
+        outerSlotIdByChild.set(slot.id, outerSlotId);
+      }
       const derivedExecutionId = `${sourceContext.executionId}:po:${input.iteration}:${input.mode}`;
       const result = await executeNode({
         ...sourceContext,
+        graph: slotGraph,
         node,
         executionId: derivedExecutionId.slice(0, 128),
         expectedModelCallSlots,
@@ -1064,6 +1161,7 @@ export function createTypedWorkflowPromptDeliberationPort(
             throw new Error(`Typed deliberation resolved unknown slot ${slotId}.`);
           }
           receiptBySlot.set(slotId, structuredClone(receipt));
+          sourceContext.recordModelResolution(outerSlotIdByChild.get(slotId)!, receipt);
         },
         signal: input.signal,
       });

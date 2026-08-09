@@ -22,6 +22,8 @@ export interface PromptOptimizationInterviewStateV1 {
   nodeId: string;
   executionId: string;
   attempt: number;
+  /** Monotonic identity for each persisted waiting transition, including recovery. */
+  waitOccurrence: number;
   status: PromptOptimizationInterviewStatus;
   questions: InterviewParamsT;
   questionSetSha256: string;
@@ -51,8 +53,17 @@ function safeKey(value: string, pattern: RegExp, label: string): string {
   return value.replaceAll(":", "_");
 }
 
-function transitionEventId(prefix: string, runId: string, nodeId: string, attempt: number): string {
-  const digest = createHash("sha256").update(`${runId}\0${nodeId}\0${attempt}`).digest("hex").slice(0, 24);
+function transitionEventId(
+  prefix: string,
+  runId: string,
+  nodeId: string,
+  attempt: number,
+  waitOccurrence: number,
+): string {
+  const digest = createHash("sha256")
+    .update(`${runId}\0${nodeId}\0${attempt}\0${waitOccurrence}`)
+    .digest("hex")
+    .slice(0, 24);
   return `prompt_opt_interview_${prefix}_${digest}`;
 }
 
@@ -103,14 +114,24 @@ function assertStoredState(
   // Migrate states written by the first S6 seam without invalidating a paused run.
   record.questionSetSha256 ??= expectedQuestionSetSha256;
   record.attempt ??= 1;
+  record.waitOccurrence ??= 1;
   if (!Number.isSafeInteger(record.attempt) || record.attempt < 1) {
     throw new Error("Prompt optimization interview state has an invalid attempt number.");
+  }
+  if (!Number.isSafeInteger(record.waitOccurrence) || record.waitOccurrence < 1) {
+    throw new Error("Prompt optimization interview state has an invalid wait occurrence.");
   }
 }
 
 function waitingEvent(state: PromptOptimizationInterviewStateV1): WorkflowRunEventInput {
   return {
-    eventId: transitionEventId("waiting", state.runId, state.nodeId, state.attempt),
+    eventId: transitionEventId(
+      "waiting",
+      state.runId,
+      state.nodeId,
+      state.attempt,
+      state.waitOccurrence,
+    ),
     type: "run_waiting",
     data: {
       reason: `Prompt optimization ${state.nodeId} is waiting for durable structured answers.`,
@@ -120,10 +141,16 @@ function waitingEvent(state: PromptOptimizationInterviewStateV1): WorkflowRunEve
 
 function resumedEvent(state: PromptOptimizationInterviewStateV1): WorkflowRunEventInput {
   return {
-    eventId: transitionEventId(`resumed_${state.status}`, state.runId, state.nodeId, state.attempt),
+    eventId: transitionEventId(
+      `resumed_${state.status}`,
+      state.runId,
+      state.nodeId,
+      state.attempt,
+      state.waitOccurrence,
+    ),
     type: "run_resumed",
     data: {
-      resumeNumber: state.attempt,
+      resumeNumber: state.waitOccurrence,
     },
   };
 }
@@ -204,9 +231,21 @@ export class PromptOptimizationInterviewContract {
         existing.executionId === input.executionId &&
         existing.questionSetSha256 === questionSetSha256
       ) {
+        if (existing.status === "pending") {
+          const recovered: PromptOptimizationInterviewStateV1 = {
+            ...existing,
+            attempt: input.attempt,
+            waitOccurrence: existing.waitOccurrence + 1,
+            updatedAt: now,
+            // Recovery may never mint a fresh interview timeout envelope.
+            deadlineAt: Math.min(existing.deadlineAt, Math.floor(input.deadlineAt)),
+          };
+          await this.persist(recovered);
+          return { state: recovered, event: waitingEvent(recovered) };
+        }
         return {
           state: existing,
-          event: existing.status === "pending" ? waitingEvent(existing) : resumedEvent(existing),
+          event: resumedEvent(existing),
         };
       }
       if (existing.status === "answered" && existing.questionSetSha256 === questionSetSha256) {
@@ -228,6 +267,7 @@ export class PromptOptimizationInterviewContract {
       nodeId: input.nodeId,
       executionId: input.executionId,
       attempt: input.attempt,
+      waitOccurrence: (existing?.waitOccurrence ?? 0) + 1,
       status: "pending",
       questions: structuredClone(input.questions),
       questionSetSha256,

@@ -17,13 +17,23 @@ import {
 } from "../src/workflows/prompt-opt-node.ts";
 import { createPromptOptimizationInterviewContract } from "../src/workflows/prompt-opt-interview-contract.ts";
 import { handlePromptOptimizationInterviewAnswer } from "../src/workflows/prompt-opt-interview-api.ts";
-import { NodeSpecV1Schema } from "../src/workflows/schema.ts";
+import {
+  promptOptimizationModelCallSlots,
+} from "../src/workflows/prompt-opt-model-slots.ts";
+import { NodeSpecV1Schema, type WorkflowGraphDocument } from "../src/workflows/schema.ts";
+import type { WorkflowModelResolutionReceipt } from "../src/workflows/run-state.ts";
 import type { WorkflowNodeExecutor } from "../src/workflows/runner.ts";
 import type { WorkflowValidationIssue } from "../src/workflows/validate.ts";
 
 const temporaryDirectories: string[] = [];
 const artifactPath = ".kady/workflows/prompt-optimizations/result.json";
 const discardDurableEvent = async () => {};
+
+type PromptRunStateEvent = {
+  type: "model_call_declared" | "model_resolved";
+  slotId: string;
+  receipt?: WorkflowModelResolutionReceipt;
+};
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) =>
@@ -112,6 +122,43 @@ function graph(overrides: Record<string, unknown> = {}) {
     }],
     ...overrides,
   };
+}
+
+function sourceContextFor(
+  promptNode: PromptOptimizationNode,
+  events: PromptRunStateEvent[] = [],
+): PromptOptimizationNodeExecutorContext {
+  const expectedModelCallSlots = promptOptimizationModelCallSlots(promptNode);
+  return {
+    projectId: "project-a",
+    runId: "run-source",
+    workflowId: "workflow-a",
+    workflowRevision: 1,
+    graph: graph(),
+    node: promptNode,
+    runInput: {},
+    attempt: 1,
+    executionId: "execution-source",
+    writeDurableEvent: discardDurableEvent,
+    branchId: "entry",
+    resumed: false,
+    inbound: [],
+    expectedModelCallSlots,
+    declareModelCallSlot(slotId) {
+      const slot = expectedModelCallSlots.find((candidate) => candidate.id === slotId);
+      if (!slot) throw new Error(`Unknown outer prompt slot ${slotId}.`);
+      events.push({ type: "model_call_declared", slotId });
+      return structuredClone(slot);
+    },
+    recordModelResolution(slotId, receipt) {
+      if (!expectedModelCallSlots.some((slot) => slot.id === slotId)) {
+        throw new Error(`Unknown outer prompt receipt ${slotId}.`);
+      }
+      events.push({ type: "model_resolved", slotId, receipt: structuredClone(receipt) });
+    },
+    recordCompactionCheck() {},
+    signal: new AbortController().signal,
+  } as unknown as PromptOptimizationNodeExecutorContext;
 }
 
 const memoryWriter: PromptOptimizationArtifactWriter = async (artifact, context) => ({
@@ -206,6 +253,58 @@ describe("prompt-optimization node", () => {
       writeArtifact: memoryWriter,
     })).rejects.toThrow(/evidence-policy-unsupported/);
     expect(deliberate).not.toHaveBeenCalled();
+  });
+
+  it("rejects interview placement on a parallel path while accepting a linear path", () => {
+    const interviewNode = node({
+      iterations: 1,
+      interviewUser: {
+        title: "Constraints",
+        questions: [{ id: "scope", type: "text", question: "Scope?" }],
+      },
+    });
+    const root = {
+      id: "root",
+      name: "Root",
+      kind: "agent",
+      terminal: false,
+      workspace: { isolation: "read-only", writePaths: [] },
+      prompt: "Start.",
+    } as const;
+    const sibling = {
+      id: "sibling",
+      name: "Sibling",
+      kind: "agent",
+      terminal: true,
+      workspace: { isolation: "read-only", writePaths: [] },
+      prompt: "Concurrent work.",
+    } as const;
+    const linearDocument = {
+      ...graph(),
+      nodes: [root, interviewNode],
+      edges: [{ id: "root-to-opt", from: "root", to: interviewNode.id }],
+    } as unknown as WorkflowGraphDocument;
+    const linearIssues: WorkflowValidationIssue[] = [];
+    validatePromptOptimizationNode(interviewNode, "/nodes/1", linearDocument, linearIssues);
+    expect(linearIssues).not.toContainEqual(expect.objectContaining({
+      code: "prompt-optimization-interview-parallel-path-unsupported",
+    }));
+
+    const forkedDocument = {
+      ...graph(),
+      nodes: [root, interviewNode, sibling],
+      edges: [
+        { id: "root-to-opt", from: "root", to: interviewNode.id },
+        { id: "root-to-sibling", from: "root", to: sibling.id },
+      ],
+    } as unknown as WorkflowGraphDocument;
+    const forkedIssues: WorkflowValidationIssue[] = [];
+    validatePromptOptimizationNode(interviewNode, "/nodes/1", forkedDocument, forkedIssues);
+    expect(forkedIssues).toContainEqual(expect.objectContaining({
+      code: "prompt-optimization-interview-parallel-path-unsupported",
+      path: "/nodes/1/interviewUser",
+      message: expect.stringContaining("run-level waiting"),
+    }));
   });
 
   it("fails at node start when the runner did not supply a durable event writer", async () => {
@@ -437,28 +536,13 @@ describe("prompt-optimization node", () => {
         budget: { maxTokens: 2_000, maxCostUsd: 2 },
       },
     });
-    const sourceContext = {
-      projectId: "project-a",
-      runId: "run-source",
-      workflowId: "workflow-a",
-      workflowRevision: 1,
-      graph: graph(),
-      node: parent,
-      runInput: {},
-      attempt: 1,
-      executionId: "execution-source",
-      writeDurableEvent: discardDurableEvent,
-      branchId: "entry",
-      resumed: false,
-      inbound: [],
-      expectedModelCallSlots: [],
-      declareModelCallSlot() { throw new Error("No outer direct slots."); },
-      recordModelResolution() { throw new Error("No outer direct slots."); },
-      recordCompactionCheck() {},
-      signal: new AbortController().signal,
-    } as unknown as PromptOptimizationNodeExecutorContext;
-    const deliberation = createTypedWorkflowPromptDeliberationPort(typedExecutor, sourceContext);
     for (const enabled of [false, true]) {
+      const executionNode = node({
+        ...parent,
+        fusionDeliberation: { ...parent.fusionDeliberation, enabled },
+      });
+      const sourceContext = sourceContextFor(executionNode);
+      const deliberation = createTypedWorkflowPromptDeliberationPort(typedExecutor, sourceContext);
       await executePromptOptimizationNode({
         projectId: "project-a",
         sandboxPath: "/unused",
@@ -466,10 +550,7 @@ describe("prompt-optimization node", () => {
         executionId: enabled ? "execution-fusion" : "execution-council",
         attempt: 1,
         graph: graph(),
-        node: node({
-          ...parent,
-          fusionDeliberation: { ...parent.fusionDeliberation, enabled },
-        }),
+        node: executionNode,
         deliberation,
         writeDurableEvent: discardDurableEvent,
         writeArtifact: memoryWriter,
@@ -484,6 +565,145 @@ describe("prompt-optimization node", () => {
       expect(synthetic.settings?.skills).toEqual(parent.settings?.skills);
       expect(synthetic.settings?.budget?.maxTokens).toBeLessThanOrEqual(2_000);
     }
+  });
+
+  it("executes configured council and Kady-panel child rounds while the outer cap stays separate", async () => {
+    const seen: Array<{ kind: string; nodeRounds: number; graphRounds: number; slots: number }> = [];
+    const typedExecutor: WorkflowNodeExecutor = async (context) => {
+      const nodeRounds = context.node.kind === "council"
+        ? context.node.rounds
+        : context.node.kind === "fusion" && context.node.fusion.mode === "kady-panel"
+          ? context.node.fusion.rounds
+          : 1;
+      seen.push({
+        kind: context.node.kind,
+        nodeRounds,
+        graphRounds: context.graph.limits.maxIterations,
+        slots: context.expectedModelCallSlots.length,
+      });
+      for (const slot of context.expectedModelCallSlots) {
+        const requested = slot.request.requested;
+        context.recordModelResolution(slot.id, {
+          request: slot.request,
+          resolved: {
+            provider: requested.source === "fixed" ? requested.provider : "openrouter",
+            model: requested.source === "fixed" ? requested.model : "current",
+            auth: { kind: requested.auth.kind },
+            reasoning: requested.reasoning,
+            runtime: context.node.kind === "fusion" ? "kady-fusion" : "pi",
+          },
+          fallbackUsed: false,
+        });
+      }
+      return context.node.kind === "council"
+        ? { output: { decision: "council rounds prompt", rationale: "two rounds" } }
+        : { output: { answer: "fusion rounds prompt", rationale: "three rounds" } };
+    };
+
+    const councilNode = node({
+      iterations: 1,
+      fusionDeliberation: {
+        ...node().fusionDeliberation,
+        enabled: false,
+        council: { ...node().fusionDeliberation.council, rounds: 2 },
+      },
+    });
+    const fusionNode = node({
+      iterations: 1,
+      fusionDeliberation: {
+        ...node().fusionDeliberation,
+        enabled: true,
+        fusion: { ...node().fusionDeliberation.fusion!, rounds: 3 },
+      },
+    });
+    for (const executionNode of [councilNode, fusionNode]) {
+      const sourceContext = sourceContextFor(executionNode);
+      await executePromptOptimizationNode({
+        projectId: "project-a",
+        sandboxPath: "/unused",
+        runId: `run-rounds-${executionNode.fusionDeliberation.enabled ? "fusion" : "council"}`,
+        executionId: `execution-rounds-${executionNode.fusionDeliberation.enabled ? "fusion" : "council"}`,
+        attempt: 1,
+        graph: graph(),
+        node: executionNode,
+        deliberation: createTypedWorkflowPromptDeliberationPort(typedExecutor, sourceContext),
+        writeDurableEvent: discardDurableEvent,
+        writeArtifact: memoryWriter,
+        now: () => 1_000,
+      });
+    }
+    expect(seen).toEqual([
+      { kind: "council", nodeRounds: 2, graphRounds: 2, slots: 6 },
+      { kind: "fusion", nodeRounds: 3, graphRounds: 3, slots: 7 },
+    ]);
+
+    const capIssues: WorkflowValidationIssue[] = [];
+    validatePromptOptimizationNode(
+      node({
+        iterations: 2,
+        fusionDeliberation: councilNode.fusionDeliberation,
+      }),
+      "/nodes/0",
+      graph({ limits: { ...graph().limits, maxIterations: 1 } }),
+      capIssues,
+    );
+    expect(capIssues).toContainEqual(expect.objectContaining({
+      code: "prompt-optimization-iteration-demand-exceeds-limit",
+    }));
+  });
+
+  it("maps every synthetic call to one declared and resolved outer RunState receipt", async () => {
+    const runStateEvents: PromptRunStateEvent[] = [];
+    const receiptNode = node({
+      iterations: 2,
+      fusionDeliberation: {
+        ...node().fusionDeliberation,
+        council: { ...node().fusionDeliberation.council, rounds: 2 },
+      },
+    });
+    const sourceContext = sourceContextFor(receiptNode, runStateEvents);
+    const typedExecutor: WorkflowNodeExecutor = async (context) => {
+      for (const slot of context.expectedModelCallSlots) {
+        const requested = slot.request.requested;
+        context.recordModelResolution(slot.id, {
+          request: slot.request,
+          resolved: {
+            provider: requested.source === "fixed" ? requested.provider : "openrouter",
+            model: requested.source === "fixed" ? requested.model : "current",
+            auth: { kind: requested.auth.kind },
+            reasoning: requested.reasoning,
+            runtime: "pi",
+          },
+          fallbackUsed: false,
+        });
+      }
+      return { output: { decision: "receipt-backed prompt", rationale: "auditable" } };
+    };
+    const result = await executePromptOptimizationNode({
+      projectId: "project-a",
+      sandboxPath: "/unused",
+      runId: "run-receipts",
+      executionId: "execution-receipts",
+      attempt: 1,
+      graph: graph(),
+      node: receiptNode,
+      deliberation: createTypedWorkflowPromptDeliberationPort(typedExecutor, sourceContext),
+      writeDurableEvent: discardDurableEvent,
+      writeArtifact: memoryWriter,
+      now: () => 1_000,
+    });
+    expect(result.artifact.iterations).toHaveLength(2);
+    const expectedSlotIds = promptOptimizationModelCallSlots(receiptNode).map((slot) => slot.id);
+    expect(runStateEvents.filter((event) => event.type === "model_call_declared").map((event) => event.slotId))
+      .toEqual(expectedSlotIds);
+    expect(runStateEvents.filter((event) => event.type === "model_resolved").map((event) => event.slotId))
+      .toEqual(expectedSlotIds);
+    expect(runStateEvents.filter((event) => event.type === "model_resolved").map((event) => event.receipt))
+      .toEqual(expectedSlotIds.map(() => expect.objectContaining({
+        fallbackUsed: false,
+        request: expect.objectContaining({ requested: expect.objectContaining({ provider: "openrouter" }) }),
+        resolved: expect.objectContaining({ provider: "openrouter", runtime: "pi" }),
+      })));
   });
 
   it("writes the declared artifact with a normalized receipt and RunState event", async () => {

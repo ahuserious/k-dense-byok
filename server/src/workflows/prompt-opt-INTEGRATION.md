@@ -27,17 +27,24 @@ The S6 test imports remain direct and do not depend on these edits.
   - `import { withPromptOptimizationNodeExecutor } from "./prompt-opt-node.ts";`
 - `server/src/workflows/service.ts` — anchor: replace the existing single line `const nodeExecutorFactory = options.nodeExecutorFactory ?? createKadyWorkflowNodeExecutor;`
   - `  const nodeExecutorFactory = options.nodeExecutorFactory ?? ((executorOptions) => withPromptOptimizationNodeExecutor(createKadyWorkflowNodeExecutor(executorOptions)));`
+- `server/src/workflows/run-state.ts` — anchor: with the workflow imports at the top of the file
+  - `import { promptOptimizationAllowsCompoundRuntime, promptOptimizationModelCallSlots, promptOptimizationModelRequests } from "./prompt-opt-model-slots.ts";`
+- `server/src/workflows/run-state.ts` — anchor: inside `modelRequestsForNode(...)`'s `switch (node.kind)`, immediately before `case "best-of-n":`
+  - `    case "prompt-optimization": requests.push(...promptOptimizationModelRequests(node)); break;`
 - `server/src/workflows/run-state.ts` — anchor: inside `workflowModelCallSlotsForNode(...)`'s `switch (node.kind)`, immediately before `case "best-of-n":`
-  - `    case "prompt-optimization": return [];`
+  - `    case "prompt-optimization": return promptOptimizationModelCallSlots(node);`
+- `server/src/workflows/run-state.ts` — anchor: inside `receiptMatchesNode(...)`, replace the `);` that immediately closes `const compoundRuntimeAllowed = node.kind === "fusion" && (`
+  - `    ) || (node.kind === "prompt-optimization" && promptOptimizationAllowsCompoundRuntime(node, receipt.resolved.runtime));`
 - `server/src/workflows/runner.ts` — anchor: inside the object passed to `executeNode(...)`, immediately before the exact line `        signal,`
   - `        ...(node.kind === "prompt-optimization" ? { writeDurableEvent: ({ eventId, ...event }: WorkflowRunEventInput) => { writer.append("prompt-optimization-event", [node.id, attempt, eventId], event); } } : {}),`
 
 The wrapper delegates every synthetic council/fusion iteration to the existing
 `WorkflowNodeExecutor`; it does not implement a second provider runtime. The
-outer prompt node has no direct provider slot: each checksummed iteration runs
-as a normal synthetic council/fusion execution with its own resolved slots. The
-wrapper fails before node work unless the runner injects the durable event writer
-above; waiting/resumed events therefore share the runner lease and event sequence.
+outer prompt node durably declares an iteration-prefixed slot for every
+synthetic provider call and maps each normal council/fusion receipt back to that
+outer RunState tracker. The wrapper fails before node work unless the runner
+injects the durable event writer above; waiting/resumed events therefore share
+the runner lease and event sequence.
 
 ## D. Durable interview API and console surface
 
@@ -53,9 +60,11 @@ above; waiting/resumed events therefore share the runner lease and event sequenc
 ## E. NodeSpec v1 enforcement-table additions
 
 - `docs/contracts/NODESPEC-V1.md` — anchor: enforcement table, immediately after the `reasoningEffort` row
-  - `| Prompt optimization node \`interviewUser\` | BOUND — attempt-aware run+node state hashes the question set, reuses matching answered state across retries, durably writes valid run_waiting/run_resumed transitions, and folds answers into every iteration |`
+  - `| Prompt optimization node \`interviewUser\` | BOUND — occurrence-aware run+node state hashes the question set, reuses matching answered state across retries, durably writes fresh valid run_waiting/run_resumed transitions after recovery, folds answers into every iteration, and rejects placement downstream of concurrent fan-out while waiting remains run-scoped |`
 - `docs/contracts/NODESPEC-V1.md` — anchor: immediately after the preceding S6 row
-  - `| Prompt optimization node \`fusionDeliberation.enabled\` | BOUND — false dispatches typed council deliberation; true requires and dispatches the typed Fusion configuration |`
+  - `| Prompt optimization node \`fusionDeliberation.enabled\` | BOUND — false dispatches typed council deliberation; true requires and dispatches the typed Fusion configuration; configured council/Kady-panel child rounds execute independently inside the outer optimization-iteration cap |`
+- `docs/contracts/NODESPEC-V1.md` — anchor: immediately after the preceding S6 row
+  - `| Prompt optimization model-call receipts | BOUND — every synthetic call has a stable iteration-prefixed outer slot and persisted declared/resolved receipt retaining requested provider, resolved provider, fallback, reasoning, auth, and compound runtime evidence |`
 - `docs/contracts/NODESPEC-V1.md` — anchor: immediately after the preceding S6 row
   - `| Prompt optimization cumulative envelope | BOUND — one deadline, token cap, and cost cap spans interview plus every iteration; each synthetic deliberation receives only its remaining bounded share and inherits resolved NodeSpec/rescue/evidence policy |`
 - `docs/contracts/NODESPEC-V1.md` — anchor: immediately after the preceding S6 row

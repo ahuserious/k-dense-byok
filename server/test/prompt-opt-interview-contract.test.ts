@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { isWorkflowRunEventType } from "../src/workflows/run-state.ts";
 import { resolvePaths } from "../src/projects.ts";
 import { WorkflowStore } from "../src/workflows/store.ts";
+import { workflowNodeExecutionId } from "../src/workflows/runner.ts";
 import type { WorkflowGraphDocument } from "../src/workflows/schema.ts";
 import {
   createPromptOptimizationInterviewContract,
@@ -110,7 +111,7 @@ describe("durable prompt optimization interview contract", () => {
       .toMatchObject({ status: "timed-out" });
   });
 
-  it("persists running -> waiting -> resumed through the authoritative RunState store", async () => {
+  it("persists occurrence-aware interruption -> recovery -> answer -> completion in RunState", async () => {
     const projectId = `poevents${randomUUID().replaceAll("-", "").slice(0, 16)}`;
     const store = new WorkflowStore();
     const workflow: WorkflowGraphDocument = {
@@ -187,8 +188,49 @@ describe("durable prompt optimization interview contract", () => {
       store.appendRunEvent(projectId, manifest.id, launched.event, record.state.lastSeq);
       expect(store.readRun(projectId, manifest.id)?.state.status).toBe("waiting");
 
+      record = store.readRun(projectId, manifest.id)!;
+      store.appendRunEvent(projectId, manifest.id, {
+        eventId: "prompt-opt-interrupted",
+        type: "run_interrupted",
+        data: {
+          previousStatus: "waiting",
+          error: {
+            code: "RUN_INTERRUPTED",
+            message: "Runner process stopped while the interview was pending.",
+            retryable: true,
+          },
+        },
+      }, record.state.lastSeq);
+      expect(store.readRun(projectId, manifest.id)?.state.status).toBe("interrupted");
+
+      record = store.readRun(projectId, manifest.id)!;
+      store.appendRunEvent(projectId, manifest.id, {
+        eventId: "prompt-opt-runner-recovered",
+        type: "run_resumed",
+        data: { resumeNumber: 1 },
+      }, record.state.lastSeq);
+      expect(store.readRun(projectId, manifest.id)?.state.status).toBe("running");
+
+      const restartedContract = createPromptOptimizationInterviewContract({
+        sandboxPath: resolvePaths(projectId).sandbox,
+        now: () => 2_000,
+      });
+      const recovered = await restartedContract.launch({
+        runId: manifest.id,
+        nodeId: "optimize-prompt",
+        executionId: "execution-store",
+        attempt: 1,
+        deadlineAt: 61_000,
+        questions: structuredClone(launched.state.questions),
+      });
+      expect(recovered.state.waitOccurrence).toBe(2);
+      expect(recovered.event.eventId).not.toBe(launched.event.eventId);
+      record = store.readRun(projectId, manifest.id)!;
+      store.appendRunEvent(projectId, manifest.id, recovered.event, record.state.lastSeq);
+      expect(store.readRun(projectId, manifest.id)?.state.status).toBe("waiting");
+
       const answered = await handlePromptOptimizationInterviewAnswer({
-        contract,
+        contract: restartedContract,
         runId: manifest.id,
         nodeId: "optimize-prompt",
         answer: { responses: [{ id: "scope", value: "Methods" }] },
@@ -198,6 +240,86 @@ describe("durable prompt optimization interview contract", () => {
       const resumed = store.readRun(projectId, manifest.id)!;
       expect(resumed.state.status).toBe("running");
       expect(resumed.state.diagnostics).toEqual([]);
+      expect(answered.event).toMatchObject({
+        type: "run_resumed",
+        data: { resumeNumber: 2 },
+      });
+
+      const executionId = workflowNodeExecutionId(manifest.id, "worker", 1);
+      const request = workflow.defaultModel!;
+      const receipt = {
+        request,
+        resolved: {
+          provider: "ollama",
+          model: "fixture",
+          auth: { kind: "local" as const },
+          reasoning: "high" as const,
+          runtime: "local" as const,
+        },
+        fallbackUsed: false,
+      };
+      record = store.readRun(projectId, manifest.id)!;
+      store.appendRunEvent(projectId, manifest.id, {
+        eventId: "prompt-opt-worker-started",
+        type: "node_started",
+        executionId,
+        nodeId: "worker",
+        attempt: 1,
+        branchId: "entry",
+      }, record.state.lastSeq);
+      record = store.readRun(projectId, manifest.id)!;
+      store.appendRunEvent(projectId, manifest.id, {
+        eventId: "prompt-opt-worker-slot",
+        type: "model_call_declared",
+        executionId,
+        nodeId: "worker",
+        attempt: 1,
+        branchId: "entry",
+        data: { modelCallSlot: { id: "agent", request } },
+      }, record.state.lastSeq);
+      record = store.readRun(projectId, manifest.id)!;
+      store.appendRunEvent(projectId, manifest.id, {
+        eventId: "prompt-opt-worker-resolved",
+        type: "model_resolved",
+        executionId,
+        nodeId: "worker",
+        attempt: 1,
+        branchId: "entry",
+        data: { modelCallSlotId: "agent", receipt },
+      }, record.state.lastSeq);
+      record = store.readRun(projectId, manifest.id)!;
+      store.appendRunEvent(projectId, manifest.id, {
+        eventId: "prompt-opt-worker-succeeded",
+        type: "node_succeeded",
+        executionId,
+        nodeId: "worker",
+        attempt: 1,
+        branchId: "entry",
+        data: { routeCondition: "success", output: { complete: true } },
+      }, record.state.lastSeq);
+      record = store.readRun(projectId, manifest.id)!;
+      store.appendRunEvent(projectId, manifest.id, {
+        eventId: "prompt-opt-run-succeeded",
+        type: "run_succeeded",
+      }, record.state.lastSeq);
+      const completed = store.readRun(projectId, manifest.id)!;
+      expect(completed.state.status).toBe("succeeded");
+      expect(completed.state.diagnostics).toEqual([]);
+      expect(store.readRunEvents(projectId, manifest.id, { limit: 100 }).events.map((event) => event.type))
+        .toEqual([
+          "run_queued",
+          "run_started",
+          "run_waiting",
+          "run_interrupted",
+          "run_resumed",
+          "run_waiting",
+          "run_resumed",
+          "node_started",
+          "model_call_declared",
+          "model_resolved",
+          "node_succeeded",
+          "run_succeeded",
+        ]);
     } finally {
       await fs.rm(resolvePaths(projectId).root, { recursive: true, force: true });
     }
