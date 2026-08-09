@@ -7,4 +7,4 @@ export * from "./agent-node-executor.ts";
 export * from "./runner.ts";
 export * from "./controller.ts";
 export * from "./service.ts";
-export * from "./legacy-archon-import.ts";
+export * from "./legacy-pipeline-import.ts";

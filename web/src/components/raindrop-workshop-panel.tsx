@@ -14,13 +14,13 @@
 
 "use client";
 
-import { ArchonIframePanel } from "@/components/archon-iframe-panel";
+import { EngineIframePanel } from "@/components/engine-iframe-panel";
 import { RAINDROP_URL } from "@/lib/embed-config";
 import { raindropHealth } from "@/lib/raindrop-workshop";
 
 export function RaindropWorkshopPanel() {
   return (
-    <ArchonIframePanel
+    <EngineIframePanel
       src={RAINDROP_URL}
       title="Raindrop Workshop"
       healthCheck={raindropHealth}

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { previewEnvironment } from "./preview-environment.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = fs.realpathSync(path.resolve(scriptDirectory, ".."));
@@ -81,40 +82,6 @@ process.exit(result.status ?? 1);
   return { launchRoot, shimDirectory };
 }
 
-function previewEnvironment(stateRoot, launchRoot, shimDirectory, ports) {
-  const environment = { ...process.env };
-  for (const name of Object.keys(environment)) {
-    if (/(?:API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)/i.test(name)) delete environment[name];
-  }
-
-  const piAgentDirectory = path.join(stateRoot, "pi-agent");
-  return {
-    ...environment,
-    PATH: `${shimDirectory}${path.delimiter}${environment.PATH ?? ""}`,
-    KADY_PREVIEW: "1",
-    KADY_PORT: String(ports.backend),
-    KADY_FRONTEND_PORT: String(ports.frontend),
-    KADY_ARCHON_PORT: String(ports.engine),
-    KADY_PROJECTS_ROOT: path.join(stateRoot, "projects"),
-    KADY_PI_AGENT_DIR: piAgentDirectory,
-    PI_CODING_AGENT_DIR: piAgentDirectory,
-    KADY_SKILLS_CACHE_DIR: path.join(stateRoot, "skills-cache"),
-    KADY_SKILLS_REPO: "kady-preview-nonexistent/none",
-    KADY_WORKFLOW_SUPERVISOR_DIR: path.join(stateRoot, "workflow-supervisor"),
-    KADY_WORKFLOW_SUPERVISOR_SOCKET: path.join(stateRoot, "wf.sock"),
-    TELEGRAM_BOT_TOKEN: "",
-    OPENAI_COMPATIBLE_BASE_URL: "",
-    OLLAMA_BASE_URL: "http://127.0.0.1:9",
-    GIT_ALLOW_PROTOCOL: "file",
-    GIT_PROTOCOL_FROM_USER: "0",
-    GIT_TERMINAL_PROMPT: "0",
-    npm_config_offline: "true",
-    npm_config_audit: "false",
-    npm_config_fund: "false",
-    KADY_PREVIEW_LAUNCH_ROOT: launchRoot,
-  };
-}
-
 function runPushBlockProbe(realGit, environment) {
   const remoteUrl = "https://preview.invalid/kady-preview-blocked.git";
   const probe = spawnSync(
@@ -188,8 +155,20 @@ if (fs.existsSync(stateFile)) {
 const ports = {
   backend: portOption("--backend-port", Number(process.env.KADY_PORT || 18000)),
   frontend: portOption("--frontend-port", Number(process.env.KADY_FRONTEND_PORT || 13000)),
-  engine: portOption("--engine-port", Number(process.env.KADY_ARCHON_PORT || 13091)),
+  engine: portOption(
+    "--engine-port",
+    Number(
+      process.env.KADY_PIPELINE_ENGINE_PORT ||
+        process.env.KADY_ARCHON_PORT ||
+        13091,
+    ),
+  ),
 };
+if (!process.env.KADY_PIPELINE_ENGINE_PORT && process.env.KADY_ARCHON_PORT) {
+  console.warn(
+    "[deprecated] KADY_ARCHON_PORT is deprecated; use KADY_PIPELINE_ENGINE_PORT instead.",
+  );
+}
 if (new Set(Object.values(ports)).size !== 3) fail("Preview ports must be distinct.");
 
 const requestedStateRoot = optionValue("--state-root", "");

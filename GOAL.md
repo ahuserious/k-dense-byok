@@ -23,7 +23,7 @@ Unchanged from `RESCUE.md`, restated so nothing drifts:
 
 - No automatic graph-repair rescue. Bounded policy retry and manual rescue only.
 - No `dag-fusion-drive` marketplace publication. The package stays private.
-- No Archon runtime resume. Legacy YAML stays a preview-only, archive-only import.
+- No Pipeline engine runtime resume. Legacy YAML stays a preview-only, archive-only import.
 - No push to `K-Dense-AI`. Push only to authorized `ahuserious` remotes, and only when
   the user explicitly asks.
 - No attempt to make provider work reattachable after supervisor or host death. That

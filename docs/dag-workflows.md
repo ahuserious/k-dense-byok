@@ -337,7 +337,7 @@ and time ceilings are not yet exposed.
 
 ### UI surfaces are projections of durable state
 
-The **DAG Workflows** experience replaces the old Archon/software-development
+The **DAG Workflows** experience replaces the old Pipeline engine/software-development
 framing for these features. It personalizes Kady's Machine Learning & AI and
 Data & Analysis workflows while keeping the underlying graph general.
 

@@ -1226,7 +1226,7 @@ export interface ChatTabProps {
   onOpenFile?: (path: string) => void;
   /**
    * Skills this tab should always use (the DAG Builder chat rail passes
-   * archon + scientific-pipeline-builder). When set, the FIRST message this
+   * scientific-dag-studio + scientific-pipelines). When set, the FIRST message this
    * tab sends is prefixed with a one-time directive naming them, so the agent
    * reliably reaches for them. Omitted for normal tabs (no behavior change).
    */

@@ -1,7 +1,7 @@
 {
   "algorithm": "sha256",
   "files": {
-    "server/vendor/archon-engine/LICENSE": "be39e59fb1d5f09c831ab6d8d38cba6d07812afb27eed300520dc493580cc7f6",
-    "server/vendor/archon-engine/VENDORED-FROM.md": "cf64a90fa2f7c8f71e963aa0b0e6192c65b65bf00bcba7691cb5e02acc2e2388"
+    "server/vendor/pipeline-engine/LICENSE": "be39e59fb1d5f09c831ab6d8d38cba6d07812afb27eed300520dc493580cc7f6",
+    "server/vendor/pipeline-engine/VENDORED-FROM.md": "cf64a90fa2f7c8f71e963aa0b0e6192c65b65bf00bcba7691cb5e02acc2e2388"
   }
 }

@@ -249,7 +249,7 @@ function isMarkerAllowed(
 
 describe("vendored engine egress guard", () => {
   it("contains no unreviewed analytics, update, or remote-asset endpoints", () => {
-    const vendorRoot = path.join(guardRepoRoot(), "server/vendor/archon-engine");
+    const vendorRoot = path.join(guardRepoRoot(), "server/vendor/pipeline-engine");
     const manifest = readManifest();
     const violations: string[] = [];
 
@@ -274,7 +274,7 @@ describe("vendored engine egress guard", () => {
   });
 
   it("requires every first-party network-capable call site to match the manifest", () => {
-    const vendorRoot = path.join(guardRepoRoot(), "server/vendor/archon-engine");
+    const vendorRoot = path.join(guardRepoRoot(), "server/vendor/pipeline-engine");
     const manifest = readManifest();
     expect(networkCoverageFailures(firstPartySourceFiles(vendorRoot), manifest.networkCallSites))
       .toEqual([]);

@@ -4,8 +4,10 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { PROJECTS_ROOT, REPO_ROOT } from "../src/config.ts";
 import { ensureProjectExists, resolvePaths } from "../src/projects.ts";
 import {
+  applyRetiredCommittedSkillMigration,
   disableSkill,
   enableSkill,
+  fingerprintSkillDirectory,
   listDisabledSkills,
   listProjectSkills,
   listSkillsWithProblems,
@@ -109,6 +111,62 @@ describe("skills enable/disable", () => {
       2 + committedSkillNames.length,
     );
     expect(listProjectSkills(paths).map((s) => s.name)).toContain("scanpy");
+  });
+
+  it("retires unchanged removed skills and preserves modified ones disabled during upgrade", async () => {
+    ensureProjectExists("legacy-seeded");
+    const paths = resolvePaths("legacy-seeded");
+    const unchangedName = "archon";
+    const modifiedName = "scientific-pipeline-builder";
+    makeSkill(paths.skillsDir, unchangedName, "previous committed system skill");
+    makeSkill(paths.skillsDir, modifiedName, "previous committed DAG builder");
+
+    const expectedFingerprints = {
+      [unchangedName]: fingerprintSkillDirectory(path.join(paths.skillsDir, unchangedName)),
+      [modifiedName]: fingerprintSkillDirectory(path.join(paths.skillsDir, modifiedName)),
+    };
+    fs.appendFileSync(
+      path.join(paths.skillsDir, modifiedName, "SKILL.md"),
+      "\nUser customization that must survive retirement.\n",
+      "utf-8",
+    );
+
+    applyRetiredCommittedSkillMigration(paths, expectedFingerprints);
+
+    const retiredUnchanged = path.join(
+      paths.sandbox,
+      ".pi",
+      ".retired",
+      "retired-committed-skills-v1",
+      unchangedName,
+    );
+    expect(fs.existsSync(path.join(retiredUnchanged, "SKILL.md"))).toBe(true);
+    expect(fs.existsSync(path.join(paths.skillsDir, unchangedName))).toBe(false);
+
+    const disabledModified = path.join(
+      paths.sandbox,
+      ".pi",
+      "skills-disabled",
+      modifiedName,
+    );
+    expect(fs.readFileSync(path.join(disabledModified, "SKILL.md"), "utf-8")).toContain(
+      "User customization that must survive retirement.",
+    );
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(disabledModified, ".kady-retirement.json"), "utf-8"),
+      ),
+    ).toMatchObject({
+      migration: "retired-committed-skills-v1",
+      status: "disabled",
+    });
+    expect(listProjectSkills(paths).map((skill) => skill.name)).not.toContain(modifiedName);
+    expect(listDisabledSkills(paths).map((skill) => skill.name)).toContain(modifiedName);
+
+    await seedProjectSkills(paths, false);
+    expect(listProjectSkills(paths).map((skill) => skill.name)).toEqual(
+      expect.arrayContaining(["scientific-dag-studio", "scientific-pipelines"]),
+    );
   });
 
   it("round-trips a skill between enabled and disabled, preserving content", () => {

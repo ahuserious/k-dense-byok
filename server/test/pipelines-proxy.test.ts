@@ -4,7 +4,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 /**
  * /pipelines proxy contract: the routes forward to the workflow engine at
- * ARCHON_BASE_URL and degrade to 503 (archon:"down") when it is unreachable.
+ * PIPELINE_ENGINE_BASE_URL and degrade to 503 (engine:"down") when it is unreachable.
  * The engine is stubbed with a plain http server so this file needs no bun and
  * no vendored engine — it tests Kady's proxy, not the engine.
  */
@@ -40,9 +40,9 @@ const stub = http.createServer((req, res) => {
 await new Promise<void>((resolve) => stub.listen(0, "127.0.0.1", resolve));
 const stubPort = (stub.address() as AddressInfo).port;
 
-// ARCHON_BASE_URL is read at config.ts import time, so it must be set before
+// PIPELINE_ENGINE_BASE_URL is read at config.ts import time, so it must be set before
 // the app module graph loads — hence the dynamic import below.
-process.env.ARCHON_BASE_URL = `http://127.0.0.1:${stubPort}`;
+process.env.PIPELINE_ENGINE_BASE_URL = `http://127.0.0.1:${stubPort}`;
 const { buildApp } = await import("../src/index.ts");
 const app = await buildApp({ workflowController: null });
 
@@ -93,11 +93,11 @@ describe("pipelines proxy (engine down)", () => {
     expect(res.json()).toEqual({ healthy: false });
   });
 
-  it("maps an unreachable engine to 503 with archon:'down'", async () => {
+  it("maps an unreachable engine to 503 with engine:'down'", async () => {
     const res = await app.inject({ method: "GET", url: "/pipelines" });
     expect(res.statusCode).toBe(503);
-    const body = res.json() as { archon?: string; detail?: string };
-    expect(body.archon).toBe("down");
+    const body = res.json() as { engine?: string; detail?: string };
+    expect(body.engine).toBe("down");
     expect(body.detail).toContain("unreachable");
   });
 });

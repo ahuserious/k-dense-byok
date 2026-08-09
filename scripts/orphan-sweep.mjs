@@ -10,10 +10,10 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const PROCESS_PATTERNS = [
   { name: "kady-workflow-supervisor", pattern: /kady-workflow-supervisor/i },
   { name: "tsx preflight", pattern: /tsx(?:\/|\\)dist(?:\/|\\)preflight\.cjs/i },
-  { name: "vendored workflow engine", pattern: /vendor(?:\/|\\)archon-engine/i },
+  { name: "vendored workflow engine", pattern: /vendor(?:\/|\\)pipeline-engine/i },
   { name: "Next.js", pattern: /(?:^|\s|\/|\\)next(?:\.js)?\s+(?:dev|start)(?:\s|$)/i },
 ];
-const TMP_DIRECTORY_PATTERN = /^(?:kady|tsx|vite|next|archon|sds)[-_]/i;
+const TMP_DIRECTORY_PATTERN = /^(?:kady|tsx|vite|next|pipeline-engine|sds)[-_]/i;
 
 function isWithinRoot(candidate, root) {
   const relative = path.relative(root, candidate);

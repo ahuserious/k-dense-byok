@@ -1,8 +1,7 @@
 // danbot-byok — web/src/components/pipelines-panel.tsx
 //
-// The "Pipelines" view: a native list of the workflows the Archon engine knows about,
-// an engine-health indicator that degrades gracefully when Archon is down, and a link
-// out to Archon's own visual workflow builder (which Kady surfaces rather than rebuilds).
+// The "Pipelines" view: a native list of workflows, an engine-health indicator
+// that degrades gracefully, and a link to the embedded visual workflow builder.
 // Per-pipeline actions: Run opens a fresh Kady chat and drives the pipeline there; Edit
 // opens the pipeline in the embedded Pipeline Builder canvas. Both are handled by the
 // page shell (page.tsx) so they can touch chat-tab + view state.
@@ -11,12 +10,12 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { listPipelines, pipelineHealth, type PipelineSummary } from "@/lib/pipelines";
-import { ARCHON_URL } from "@/lib/embed-config";
+import { PIPELINE_ENGINE_URL } from "@/lib/embed-config";
 
-// Archon's visual builder lives under its legacy workflows route. Linking at the bare root
-// would land on the redesigned console (Archon redirects "/" → "/console"), NOT the builder,
+// The visual builder lives under the engine's legacy workflows route. Linking at the bare root
+// would land on the redesigned console, not the builder,
 // so we point at the explicit builder path.
-const BUILDER_URL = `${ARCHON_URL}/legacy/workflows/builder`;
+const BUILDER_URL = `${PIPELINE_ENGINE_URL}/legacy/workflows/builder`;
 
 export function PipelinesPanel({
   onRunPipeline,
@@ -33,10 +32,16 @@ export function PipelinesPanel({
 
   const refresh = useCallback(async () => {
     setLoading(true);
-    const ok = await pipelineHealth();
-    setHealthy(ok);
-    setPipelines(ok ? await listPipelines() : []);
-    setLoading(false);
+    try {
+      const ok = await pipelineHealth();
+      setHealthy(ok);
+      setPipelines(ok ? await listPipelines() : []);
+    } catch {
+      setHealthy(false);
+      setPipelines([]);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -78,7 +83,7 @@ export function PipelinesPanel({
 
       {healthy === false && (
         <p className="text-xs text-muted-foreground">
-          The Pipelines engine (Archon) isn&apos;t reachable. Start the Archon sidecar, then Refresh.
+          The Scientific DAG Workflow Designer isn&apos;t reachable. Start the workflow-engine sidecar, then Refresh.
         </p>
       )}
 
@@ -86,7 +91,7 @@ export function PipelinesPanel({
         <p className="text-xs text-muted-foreground">Loading pipelines…</p>
       ) : pipelines.length === 0 && healthy ? (
         <p className="text-xs text-muted-foreground">
-          No pipelines yet. Use “Open builder” to create one in Archon.
+          No pipelines yet. Use “Open builder” to create one.
         </p>
       ) : (
         <ul className="flex flex-col gap-2">

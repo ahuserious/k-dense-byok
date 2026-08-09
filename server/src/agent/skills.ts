@@ -11,6 +11,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import {
   loadSkillsFromDir,
   type ResourceDiagnostic,
@@ -22,9 +23,20 @@ import type { ToggleResult } from "./capability-state.ts";
 import { fetchCatalogue } from "./skills-fetch.ts";
 
 const DEFAULT_DISABLED_MIGRATION = "package-skills-disabled-v1";
+const RETIRED_COMMITTED_SKILLS_MIGRATION = "retired-committed-skills-v1";
+const RETIRED_SKILL_NOTICE = ".kady-retirement.json";
+
+// deprecated-compat: exact fingerprints of committed skill trees removed by
+// the Scientific DAG Studio rename. These values were calculated from the
+// immutable lane base so user edits can never be mistaken for shipped bytes.
+const LEGACY_COMMITTED_SKILL_FINGERPRINTS: Readonly<Record<string, string>> = {
+  archon: "a47542ca754c4fa50369be63c0bd8591cfd74f39bbb249a7682a3148516b2aba",
+  "scientific-pipeline-builder":
+    "564746fb4f3f4c4fdc5d7ace9a30bd5e47163215497b02e3d25c4c56edb8850b",
+};
 
 /**
- * Skills committed in-repo (archon + scientific-pipeline-builder — the DAG
+ * Skills committed in-repo (scientific-dag-studio + scientific-pipelines — the DAG
  * Builder chat rail's preloads). Unlike the fetched catalogue they need no
  * network, and they are topped up on EVERY seed call so existing projects
  * pick up newly-committed skills too (mirrors the reference tree's c60a013).
@@ -208,6 +220,97 @@ function defaultDisabledMigrationMarker(paths: ProjectPaths): string {
   return path.join(paths.kadyDir, "migrations", DEFAULT_DISABLED_MIGRATION);
 }
 
+function retiredCommittedSkillsMigrationMarker(paths: ProjectPaths): string {
+  return path.join(paths.kadyDir, "migrations", RETIRED_COMMITTED_SKILLS_MIGRATION);
+}
+
+function retiredCommittedSkillsDir(paths: ProjectPaths): string {
+  return path.join(
+    paths.sandbox,
+    ".pi",
+    ".retired",
+    RETIRED_COMMITTED_SKILLS_MIGRATION,
+  );
+}
+
+/** Stable content-and-layout fingerprint for one complete skill directory. */
+export function fingerprintSkillDirectory(root: string): string {
+  const hash = crypto.createHash("sha256");
+  hash.update("kady-skill-tree-v1\0");
+
+  const walk = (dir: string, relativeDir: string): void => {
+    const entries = fs
+      .readdirSync(dir, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const relative = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
+      const absolute = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        hash.update(`d\0${relative}\0`);
+        walk(absolute, relative);
+      } else if (entry.isFile()) {
+        hash.update(`f\0${relative}\0`);
+        hash.update(fs.readFileSync(absolute));
+        hash.update("\0");
+      } else if (entry.isSymbolicLink()) {
+        hash.update(`l\0${relative}\0${fs.readlinkSync(absolute)}\0`);
+      }
+    }
+  };
+
+  walk(root, "");
+  return hash.digest("hex");
+}
+
+/**
+ * Retire committed skills removed by the naming sweep exactly once per
+ * project. Shipped bytes are archived; user-edited bytes remain installed but
+ * disabled, with a notice explaining the replacement and safety decision.
+ */
+export function applyRetiredCommittedSkillMigration(
+  paths: ProjectPaths,
+  expectedFingerprints: Readonly<Record<string, string>> =
+    LEGACY_COMMITTED_SKILL_FINGERPRINTS,
+): void {
+  const marker = retiredCommittedSkillsMigrationMarker(paths);
+  if (fs.existsSync(marker)) return;
+
+  const disabledDir = skillsDisabledDir(paths);
+  const retiredDir = retiredCommittedSkillsDir(paths);
+  for (const [name, shippedFingerprint] of Object.entries(expectedFingerprints)) {
+    const enabled = path.join(paths.skillsDir, name);
+    const disabled = path.join(disabledDir, name);
+    const source = fs.existsSync(enabled) ? enabled : fs.existsSync(disabled) ? disabled : null;
+    if (!source) continue;
+
+    if (fingerprintSkillDirectory(source) === shippedFingerprint) {
+      fs.mkdirSync(retiredDir, { recursive: true });
+      fs.renameSync(source, path.join(retiredDir, name));
+      continue;
+    }
+
+    fs.mkdirSync(disabledDir, { recursive: true });
+    if (source !== disabled) fs.renameSync(source, disabled);
+    fs.writeFileSync(
+      path.join(disabled, RETIRED_SKILL_NOTICE),
+      JSON.stringify(
+        {
+          migration: RETIRED_COMMITTED_SKILLS_MIGRATION,
+          status: "disabled",
+          reason: "This removed committed skill contains user modifications and was preserved disabled.",
+          replacements: ["scientific-dag-studio", "scientific-pipelines"],
+        },
+        null,
+        2,
+      ) + "\n",
+      "utf-8",
+    );
+  }
+
+  fs.mkdirSync(path.dirname(marker), { recursive: true });
+  fs.writeFileSync(marker, "", "utf-8");
+}
+
 /**
  * Apply the package-skill default once to an existing project. The marker is
  * written only after skills exist and all moves finish, so a later explicit
@@ -281,6 +384,7 @@ export async function seedProjectSkills(
   copySkillDirs(COMMITTED_SKILLS_DIR, paths);
 
   if (hadSkillsBeforeTopUp) {
+    applyRetiredCommittedSkillMigration(paths);
     applyDefaultSkillStates(paths);
     return countInstalledSkills(paths);
   }
@@ -289,6 +393,7 @@ export async function seedProjectSkills(
   if (sibling) {
     for (const sourceDir of sibling) copySkillDirs(sourceDir, paths);
     if (countInstalledSkills(paths) > 0) {
+      applyRetiredCommittedSkillMigration(paths);
       applyDefaultSkillStates(paths);
       return countInstalledSkills(paths);
     }
@@ -308,6 +413,7 @@ export async function seedProjectSkills(
       // sync and the Settings refresh both retry.
     }
   }
+  applyRetiredCommittedSkillMigration(paths);
   applyDefaultSkillStates(paths);
   return countInstalledSkills(paths);
 }

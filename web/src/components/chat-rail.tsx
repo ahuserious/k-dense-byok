@@ -9,7 +9,7 @@
 //
 // It is "wired the same way as the rest of the agents": it renders a real <ChatTab>
 // (same Pi session, model selector, tools, cost), with `preloadSkills` so the session
-// always reaches for `archon` + `scientific-pipeline-builder`.
+// always reaches for `scientific-dag-studio` + `scientific-pipelines`.
 //
 // Collapsed → a thin vertical strip you click to slide the panel open; open/closed is
 // persisted in localStorage. The ChatTab stays mounted while collapsed so an in-flight
@@ -29,7 +29,7 @@ import { DagComposePopover } from "@/components/dag-compose-popover";
 
 // A dedicated, stable tab id for the rail's session (kept out of the main tab strip).
 const RAIL_TAB_ID = "rail-chat";
-const RAIL_SKILLS = ["archon", "scientific-pipeline-builder"];
+const RAIL_SKILLS = ["scientific-dag-studio", "scientific-pipelines"];
 const STORAGE_KEY = "kady.chatRail.open";
 
 export interface ChatRailProps {
@@ -145,7 +145,7 @@ export function ChatRail({
             </div>
           </div>
           {/* The real KADY chat — preloadSkills makes this session reach for the
-              archon + scientific-pipeline-builder skills. isActiveTab stays false
+              scientific-dag-studio + scientific-pipelines skills. isActiveTab stays false
               so the rail never steals the main tabs' Ask-Kady prefill events. */}
           <ChatTab
             ref={chatTabRef}

@@ -171,9 +171,21 @@ describe("DagWorkflowsPanel", () => {
   });
 
   it.each([
-    { httpStatus: 400, body: { error: "Invalid workflow name." }, detail: "Invalid workflow name." },
-    { httpStatus: 502, body: { detail: "Vendored engine unavailable." }, detail: "Vendored engine unavailable." },
-    { httpStatus: 503, body: { message: "Vendored engine starting." }, detail: "Vendored engine starting." },
+    {
+      httpStatus: 400,
+      body: { error: "Invalid workflow name." },
+      detail: "Pipeline run failed (400): Invalid workflow name.",
+    },
+    {
+      httpStatus: 502,
+      body: { detail: "Vendored engine unavailable." },
+      detail: "Pipeline run failed (502): Vendored engine unavailable.",
+    },
+    {
+      httpStatus: 503,
+      body: { message: "Vendored engine starting." },
+      detail: "Pipeline run failed (503): Vendored engine starting.",
+    },
     { httpStatus: 200, body: { status: "started" }, detail: "Vendored pipeline response did not confirm acceptance." },
   ])("renders HTTP $httpStatus non-success or unknown shapes as failures", async ({ httpStatus, body, detail }) => {
     vi.mocked(pipelinesApi.listPipelines).mockResolvedValue([

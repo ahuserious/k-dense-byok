@@ -68,15 +68,28 @@ export const DEFAULT_MODEL_ID =
 export const OLLAMA_BASE_URL =
   process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
 
+function deprecatedEnvironmentValue(currentName: string, legacyName: string): string | undefined {
+  const currentValue = process.env[currentName];
+  if (currentValue !== undefined) return currentValue;
+  const legacyValue = process.env[legacyName];
+  if (legacyValue !== undefined) {
+    console.warn(`[deprecated] ${legacyName} is deprecated; use ${currentName} instead.`);
+  }
+  return legacyValue;
+}
+
 /**
  * Base URL of the vendored workflow engine (the "Scientific DAG Workflow
- * Designer", served from server/vendor/archon-engine). start.mjs spawns it as
- * an owned child on KADY_ARCHON_PORT (default 3091); the /pipelines routes
+ * Designer", served from server/vendor/pipeline-engine). start.mjs spawns it as
+ * an owned child on KADY_PIPELINE_ENGINE_PORT (default 3091); the /pipelines routes
  * proxy to it and answer 503 while it is down.
  */
-export const ARCHON_BASE_URL =
-  process.env.ARCHON_BASE_URL ??
-  `http://127.0.0.1:${process.env.KADY_ARCHON_PORT ?? "3091"}`;
+export const PIPELINE_ENGINE_BASE_URL =
+  deprecatedEnvironmentValue("PIPELINE_ENGINE_BASE_URL", "ARCHON_BASE_URL") ??
+  `http://127.0.0.1:${deprecatedEnvironmentValue(
+    "KADY_PIPELINE_ENGINE_PORT",
+    "KADY_ARCHON_PORT",
+  ) ?? "3091"}`;
 
 /**
  * Base URL of the optional local Raindrop Workshop UI (the OSS agent-trace

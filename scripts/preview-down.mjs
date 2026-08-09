@@ -12,7 +12,7 @@ const keepState = process.argv.includes("--keep-state");
 const processPatterns = [
   "kady-workflow-supervisor",
   "tsx/dist/preflight.cjs",
-  "vendor/archon-engine",
+  "vendor/pipeline-engine",
 ];
 
 function fail(message) {

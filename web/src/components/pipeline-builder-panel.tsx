@@ -1,26 +1,25 @@
 // danbot-byok — web/src/components/pipeline-builder-panel.tsx
 //
-// The "DAG Builder" view: surfaces Archon's own visual workflow builder inside Kady
-// via a full-bleed iframe (the shared ArchonIframePanel), rather than rebuilding it.
-// danbot owns the chat + cost UI; Archon owns workflow execution and the visual
-// builder. The shared panel health-gates the Archon sidecar and shows a loading
+// The "DAG Builder" view surfaces the Scientific DAG Workflow Designer inside Kady
+// via a full-bleed iframe (the shared EngineIframePanel), rather than rebuilding it.
+// Kady owns the chat + cost UI; the engine owns workflow execution and the visual
+// builder. The shared panel health-gates the workflow-engine sidecar and shows a loading
 // skeleton + retry instead of a blank/broken frame.
 
 "use client";
 
-import { ArchonIframePanel } from "@/components/archon-iframe-panel";
-import { ARCHON_URL } from "@/lib/embed-config";
+import { EngineIframePanel } from "@/components/engine-iframe-panel";
+import { PIPELINE_ENGINE_URL } from "@/lib/embed-config";
 import { pipelineHealth } from "@/lib/pipelines";
 
-// Archon's visual builder canvas / YAML editor — the default landing view (this is where
-// Archon's "+ New pipeline" used to go).
-const BUILDER_URL = `${ARCHON_URL}/legacy/workflows/builder`;
+// The visual builder canvas / YAML editor is the default landing view.
+const BUILDER_URL = `${PIPELINE_ENGINE_URL}/legacy/workflows/builder`;
 
 // Build the iframe src. With no workflowName we open the blank builder canvas. When a
 // workflowName is passed (the Edit affordance from the DAG Pipelines list) we deep-link
-// the canvas with it loaded — Archon's builder reads the workflow to open from the
+// the canvas with it loaded — the builder reads the workflow to open from the
 // `?edit=` query param (WorkflowBuilder.tsx auto-loads it on mount); the name is
-// URL-encoded to mirror Archon's own WorkflowCard deep-link. Changing the src navigates
+// URL-encoded to mirror the engine's WorkflowCard deep-link. Changing the src navigates
 // the iframe to the new ?edit= URL (a real load), so the canvas re-initializes — no
 // component remount / key churn needed.
 function builderSrc(workflowName?: string): string {
@@ -30,11 +29,11 @@ function builderSrc(workflowName?: string): string {
 
 export function PipelineBuilderPanel({ workflowName }: { workflowName?: string } = {}) {
   return (
-    <ArchonIframePanel
+    <EngineIframePanel
       src={builderSrc(workflowName)}
       title="DAG Builder"
       healthCheck={pipelineHealth}
-      engineLabel="Pipelines engine (Archon)"
+      engineLabel="Scientific DAG Workflow Designer"
     />
   );
 }

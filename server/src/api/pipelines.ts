@@ -1,6 +1,6 @@
 /**
  * Kady "Pipelines" routes: a thin proxy in front of the vendored workflow
- * engine (server/vendor/archon-engine, spawned by start.mjs — the "Scientific
+ * engine (server/vendor/pipeline-engine, spawned by start.mjs — the "Scientific
  * DAG Workflow Designer"). The web app talks to Kady same-origin; Kady
  * forwards to the engine over its REST surface. Keeping it a proxy (rather
  * than re-implementing a second DAG engine in-process) is the whole point of
@@ -21,8 +21,8 @@
  * background-watch epic (E5); they are intentionally NOT ported here.
  */
 import type { FastifyInstance, FastifyReply } from "fastify";
-import * as archon from "../agent/archon/client.ts";
-import { ArchonUnavailableError, sumRunCost } from "../agent/archon/client.ts";
+import * as pipelineEngine from "../agent/pipeline-engine/client.ts";
+import { PipelineEngineUnavailableError, sumRunCost } from "../agent/pipeline-engine/client.ts";
 import { recordRun } from "../cost/ledger.ts";
 import { startRun as indexStartRun } from "../agent/runs-index.ts";
 import { currentProjectId } from "../scope.ts";
@@ -30,13 +30,13 @@ import { corsResponseHeaders } from "../cors.ts";
 
 // Map an engine-call failure to the right HTTP status: 503 when the engine is simply
 // down (recoverable — it just needs to start), 502 for any other upstream error.
-function mapError(reply: FastifyReply, err: unknown): { detail: string; archon: "down" | "error" } {
-  if (err instanceof ArchonUnavailableError) {
+function mapError(reply: FastifyReply, err: unknown): { detail: string; engine: "down" | "error" } {
+  if (err instanceof PipelineEngineUnavailableError) {
     reply.code(503);
-    return { detail: err.message, archon: "down" };
+    return { detail: err.message, engine: "down" };
   }
   reply.code(502);
-  return { detail: (err as Error).message, archon: "error" };
+  return { detail: (err as Error).message, engine: "error" };
 }
 
 // --- run-status helpers (used by the SSE relay) ------------------------------
@@ -101,12 +101,12 @@ function eventType(ev: Record<string, unknown>): string {
 
 export async function registerPipelineRoutes(app: FastifyInstance): Promise<void> {
   // Health: lets the UI decide whether to offer Pipelines or show setup help.
-  app.get("/pipelines/health", async () => ({ healthy: await archon.archonHealthy() }));
+  app.get("/pipelines/health", async () => ({ healthy: await pipelineEngine.pipelineEngineHealthy() }));
 
   // --- workflow CRUD (proxied) ---
   app.get("/pipelines", async (_req, reply) => {
     try {
-      return await archon.listWorkflows();
+      return await pipelineEngine.listWorkflows();
     } catch (err) {
       return mapError(reply, err);
     }
@@ -114,7 +114,7 @@ export async function registerPipelineRoutes(app: FastifyInstance): Promise<void
 
   app.get("/pipelines/runs", async (_req, reply) => {
     try {
-      return await archon.listRuns();
+      return await pipelineEngine.listRuns();
     } catch (err) {
       return mapError(reply, err);
     }
@@ -122,7 +122,7 @@ export async function registerPipelineRoutes(app: FastifyInstance): Promise<void
 
   app.get<{ Params: { name: string } }>("/pipelines/:name", async (req, reply) => {
     try {
-      return await archon.getWorkflow(req.params.name);
+      return await pipelineEngine.getWorkflow(req.params.name);
     } catch (err) {
       return mapError(reply, err);
     }
@@ -130,7 +130,7 @@ export async function registerPipelineRoutes(app: FastifyInstance): Promise<void
 
   app.put<{ Params: { name: string } }>("/pipelines/:name", async (req, reply) => {
     try {
-      return await archon.saveWorkflow(req.params.name, req.body);
+      return await pipelineEngine.saveWorkflow(req.params.name, req.body);
     } catch (err) {
       return mapError(reply, err);
     }
@@ -138,7 +138,7 @@ export async function registerPipelineRoutes(app: FastifyInstance): Promise<void
 
   app.delete<{ Params: { name: string } }>("/pipelines/:name", async (req, reply) => {
     try {
-      return await archon.deleteWorkflow(req.params.name);
+      return await pipelineEngine.deleteWorkflow(req.params.name);
     } catch (err) {
       return mapError(reply, err);
     }
@@ -146,7 +146,7 @@ export async function registerPipelineRoutes(app: FastifyInstance): Promise<void
 
   app.post("/pipelines/validate", async (req, reply) => {
     try {
-      return await archon.validateWorkflow(req.body);
+      return await pipelineEngine.validateWorkflow(req.body);
     } catch (err) {
       return mapError(reply, err);
     }
@@ -171,7 +171,7 @@ export async function registerPipelineRoutes(app: FastifyInstance): Promise<void
               },
             }
           : body;
-      return await archon.runWorkflow(req.params.name, runBody);
+      return await pipelineEngine.runWorkflow(req.params.name, runBody);
     } catch (err) {
       return mapError(reply, err);
     }
@@ -179,7 +179,7 @@ export async function registerPipelineRoutes(app: FastifyInstance): Promise<void
 
   app.get<{ Params: { runId: string } }>("/pipelines/runs/:runId", async (req, reply) => {
     try {
-      return await archon.getRun(req.params.runId);
+      return await pipelineEngine.getRun(req.params.runId);
     } catch (err) {
       return mapError(reply, err);
     }
@@ -187,7 +187,7 @@ export async function registerPipelineRoutes(app: FastifyInstance): Promise<void
 
   app.post<{ Params: { runId: string } }>("/pipelines/runs/:runId/resume", async (req, reply) => {
     try {
-      return await archon.resumeRun(req.params.runId, req.body);
+      return await pipelineEngine.resumeRun(req.params.runId, req.body);
     } catch (err) {
       return mapError(reply, err);
     }
@@ -195,7 +195,7 @@ export async function registerPipelineRoutes(app: FastifyInstance): Promise<void
 
   app.post<{ Params: { runId: string } }>("/pipelines/runs/:runId/cancel", async (req, reply) => {
     try {
-      return await archon.cancelRun(req.params.runId);
+      return await pipelineEngine.cancelRun(req.params.runId);
     } catch (err) {
       return mapError(reply, err);
     }
@@ -210,12 +210,12 @@ export async function registerPipelineRoutes(app: FastifyInstance): Promise<void
     "/pipelines/runs/:runId/reconcile-cost",
     async (req, reply) => {
       try {
-        const run = await archon.getRun(req.params.runId);
+        const run = await pipelineEngine.getRun(req.params.runId);
         const totals = sumRunCost(run);
         const sessionId = `pipeline-${req.params.runId}`.replace(/[^A-Za-z0-9._-]/g, "-");
         const entry = recordRun({
           sessionId,
-          model: "archon-pipeline",
+          model: "pipeline-engine",
           role: "workflow",
           before: { costUsd: 0, input: 0, output: 0, cacheRead: 0, total: 0 },
           after: {
@@ -249,7 +249,7 @@ export async function registerPipelineRoutes(app: FastifyInstance): Promise<void
             task: workflowName,
             role: "workflow",
             status: "completed",
-            model: "archon-pipeline",
+            model: "pipeline-engine",
             costUsd: totals.costUsd,
             tokensIn: totals.tokensIn,
             tokensOut: totals.tokensOut,
@@ -322,16 +322,16 @@ export async function registerPipelineRoutes(app: FastifyInstance): Promise<void
         for (let poll = 0; poll < MAX_POLLS && !closed; poll++) {
           let snapshot: unknown;
           try {
-            snapshot = await archon.getRun(runId);
+            snapshot = await pipelineEngine.getRun(runId);
           } catch (err) {
             // Engine down or a flaky read. Surface it as an `error` frame; if the
             // engine is simply unavailable we close (no point polling a dead
             // engine), otherwise we keep polling through a transient blip.
-            if (err instanceof ArchonUnavailableError) {
-              write({ type: "error", archon: "down", message: err.message });
+            if (err instanceof PipelineEngineUnavailableError) {
+              write({ type: "error", engine: "down", message: err.message });
               break;
             }
-            write({ type: "error", archon: "error", message: (err as Error).message });
+            write({ type: "error", engine: "error", message: (err as Error).message });
             // transient: wait one period and retry.
             await delay(pollMs, () => closed);
             continue;

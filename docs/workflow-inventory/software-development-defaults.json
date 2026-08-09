@@ -1,0 +1,167 @@
+{
+  "inventoryVersion": 1,
+  "discoveredWorkflowCount": 20,
+  "coverageTarget": "Replacement scientific workflow library must explicitly replace, reject, or supersede every row.",
+  "workflows": [
+    {
+      "name": "adversarial-dev",
+      "purpose": "Build a new application through adversarial planner, generator, and evaluator roles.",
+      "inputs": ["Natural-language application request"],
+      "outputs": ["Product specification", "Sprint contracts and evaluations", "Generated application", "Run report"],
+      "nodeShape": { "nodeCount": 4, "types": ["prompt", "bash", "loop"], "topology": "Linear plan -> workspace initialization -> state-machine sprint loop -> report." },
+      "description": "Turns an application idea into a sprint-based build whose implementation is repeatedly challenged against explicit quality thresholds."
+    },
+    {
+      "name": "architect",
+      "purpose": "Find and implement targeted codebase architecture simplifications.",
+      "inputs": ["Codebase", "Optional architecture focus"],
+      "outputs": ["Architecture analysis", "Simplification plan", "Code changes", "Validation result", "Pull request"],
+      "nodeShape": { "nodeCount": 8, "types": ["bash", "prompt"], "topology": "Linear metrics scan -> analysis -> plan -> changes -> validation/fix -> pull request verification." },
+      "description": "Measures codebase hotspots, plans high-value simplifications, applies them with review hooks, validates the result, and prepares a pull request."
+    },
+    {
+      "name": "assist",
+      "purpose": "Provide a general fallback when no specialized workflow matches.",
+      "inputs": ["Natural-language request"],
+      "outputs": ["Agent response and any requested workspace changes"],
+      "nodeShape": { "nodeCount": 1, "types": ["command"], "topology": "Single delegated general-assistance node." },
+      "description": "Handles questions, debugging, exploration, explanations, and one-off work through a general-purpose agent."
+    },
+    {
+      "name": "comprehensive-pr-review",
+      "purpose": "Run a broad pull-request review and automatically address severe findings.",
+      "inputs": ["Pull-request reference", "Repository state"],
+      "outputs": ["Parallel review findings", "Synthesized review", "Critical and high-severity fixes"],
+      "nodeShape": { "nodeCount": 9, "types": ["command"], "topology": "Scope/sync prefix -> five-way review fan-out -> synthesis -> fix implementation." },
+      "description": "Synchronizes a pull request, runs five specialized reviews in parallel, consolidates their findings, and fixes the highest-severity issues."
+    },
+    {
+      "name": "create-issue",
+      "purpose": "Reproduce a reported bug before creating a well-evidenced issue.",
+      "inputs": ["Bug report", "Repository and issue-template context"],
+      "outputs": ["Reproduction evidence", "Failure report or drafted and created issue"],
+      "nodeShape": { "nodeCount": 12, "types": ["prompt", "bash"], "topology": "Classification -> parallel context gathering/server setup -> reproduction -> cleanup/gate -> failure report or issue draft/create branch." },
+      "description": "Investigates and attempts to reproduce a bug, creating an issue only when the reproduction gate succeeds."
+    },
+    {
+      "name": "feature-development",
+      "purpose": "Implement an already-written feature plan.",
+      "inputs": ["Implementation plan path or planned issue"],
+      "outputs": ["Implemented feature", "Pull request", "Base-branch verification"],
+      "nodeShape": { "nodeCount": 3, "types": ["command", "bash"], "topology": "Linear implementation -> pull request -> base verification." },
+      "description": "Executes an existing feature plan, validates the implementation, and prepares a correctly based pull request."
+    },
+    {
+      "name": "fix-github-issue",
+      "purpose": "Investigate, implement, validate, review, and report a fix for an issue.",
+      "inputs": ["Issue number or URL", "Repository state"],
+      "outputs": ["Research and plan artifacts", "Code fix", "Validated pull request", "Review fixes", "Issue report"],
+      "nodeShape": { "nodeCount": 22, "types": ["prompt", "bash", "command"], "topology": "Issue extraction/classification -> research plus investigate/plan branches -> implementation/validation -> pull request -> five-way review fan-out -> synthesize/fix/simplify/report." },
+      "description": "Carries a tracked issue from classification and research through implementation, validation, adaptive review, remediation, and final reporting."
+    },
+    {
+      "name": "idea-to-pr",
+      "purpose": "Take a feature idea through planning, implementation, validation, and comprehensive review.",
+      "inputs": ["Feature description or product-requirements document"],
+      "outputs": ["Implementation plan", "Implemented and validated feature", "Pull request", "Review and summary"],
+      "nodeShape": { "nodeCount": 17, "types": ["command", "bash"], "topology": "Linear plan/setup/implement/validate/PR prefix -> five-way review fan-out -> synthesis/fixes -> summary." },
+      "description": "Converts a feature idea into an implementation plan, code, validation evidence, a pull request, and a consolidated post-review result."
+    },
+    {
+      "name": "interactive-prd",
+      "purpose": "Create product requirements through staged human-guided discovery.",
+      "inputs": ["Product idea", "Human answers and approvals"],
+      "outputs": ["Research-backed product-requirements document", "Validation result"],
+      "nodeShape": { "nodeCount": 8, "types": ["prompt", "approval"], "topology": "Linear discovery/research/technical stages separated by three human approval gates, followed by generation and validation." },
+      "description": "Guides a user from problem framing through research, technical scope, approval gates, and a validated requirements document."
+    },
+    {
+      "name": "issue-review-full",
+      "purpose": "Fix an issue and subject the resulting change to a full multi-specialist review.",
+      "inputs": ["Issue reference", "Repository state"],
+      "outputs": ["Issue fix", "Pull request", "Parallel review findings", "Review fixes", "Final summary"],
+      "nodeShape": { "nodeCount": 13, "types": ["command", "bash"], "topology": "Investigate/implement prefix -> pull-request verification/sync -> five-way review fan-out -> synthesis/fixes/summary." },
+      "description": "Combines issue investigation and implementation with a comprehensive parallel review, remediation pass, and final decision summary."
+    },
+    {
+      "name": "piv-loop",
+      "purpose": "Run human-guided plan, implement, and validate cycles for one bounded change.",
+      "inputs": ["Feature or bug description, plan path, or issue number", "Iterative human feedback"],
+      "outputs": ["Refined plan", "Implemented change", "Review fixes", "Pull request"],
+      "nodeShape": { "nodeCount": 9, "types": ["loop", "prompt", "bash"], "topology": "Linear explore loop -> plan/refinement loop -> setup/implementation loop -> review/fix-feedback loop -> finalize/verify." },
+      "description": "Uses iterative human feedback to explore, plan, implement, review, repair, and finalize one granular feature or bug fix."
+    },
+    {
+      "name": "plan-to-pr",
+      "purpose": "Execute an existing implementation plan through a reviewed pull request.",
+      "inputs": ["Implementation plan path"],
+      "outputs": ["Implemented and validated changes", "Pull request", "Parallel review", "Review fixes", "Final summary"],
+      "nodeShape": { "nodeCount": 16, "types": ["command", "bash"], "topology": "Plan setup/confirmation -> implementation/validation/PR -> five-way review fan-out -> synthesis/fixes -> summary." },
+      "description": "Checks an existing plan, implements and validates it, prepares a pull request, and resolves findings from a comprehensive review."
+    },
+    {
+      "name": "ralph-dag",
+      "purpose": "Implement product stories iteratively from an idea or requirements files.",
+      "inputs": ["Idea, requirements Markdown, or requirements JSON"],
+      "outputs": ["Normalized requirements artifacts", "Implemented stories", "Pull request", "Completion report"],
+      "nodeShape": { "nodeCount": 6, "types": ["prompt", "command", "bash", "loop"], "topology": "Input detection -> conditional requirements generation -> validation -> story implementation loop -> pull-request verification -> report." },
+      "description": "Normalizes an idea into story-oriented requirements when needed, iterates through story implementation, and reports the resulting pull request."
+    },
+    {
+      "name": "refactor-safely",
+      "purpose": "Refactor while continuously checking type safety and behavioral preservation.",
+      "inputs": ["Refactoring request", "Codebase"],
+      "outputs": ["Impact analysis", "Ordered refactor plan", "Code changes", "Validation and behavior evidence", "Pull request"],
+      "nodeShape": { "nodeCount": 9, "types": ["bash", "prompt"], "topology": "Linear scope scan -> read-only impact analysis -> plan -> hooked edits -> validation/fix -> behavior verification -> PR verification." },
+      "description": "Scopes and plans a refactor, applies it with checks after edits, verifies behavior, and prepares a pull request with before-and-after evidence."
+    },
+    {
+      "name": "remotion-generate",
+      "purpose": "Generate or modify a Remotion composition and render its media.",
+      "inputs": ["Video request", "Existing Remotion project"],
+      "outputs": ["Composition source changes", "Preview stills", "Rendered video", "Summary"],
+      "nodeShape": { "nodeCount": 5, "types": ["bash", "prompt"], "topology": "Linear project check -> composition generation -> preview render -> video render -> summary." },
+      "description": "Writes a requested Remotion composition, renders preview frames and the final video, then summarizes the generated output."
+    },
+    {
+      "name": "resolve-conflicts",
+      "purpose": "Resolve pull-request merge conflicts with escalation for ambiguous cases.",
+      "inputs": ["Conflicted pull request", "Base and feature branch state"],
+      "outputs": ["Resolved conflict commit or human decision request", "Updated pull request"],
+      "nodeShape": { "nodeCount": 1, "types": ["command"], "topology": "Single delegated conflict-resolution node." },
+      "description": "Analyzes merge conflicts, automatically resolves clear cases, and presents choices when intent is ambiguous."
+    },
+    {
+      "name": "smart-pr-review",
+      "purpose": "Adapt pull-request review depth to the change's scope and complexity.",
+      "inputs": ["Pull-request reference", "Repository state"],
+      "outputs": ["Classified review scope", "Selected specialist findings", "Synthesized review", "Severe-issue fixes", "Optional notification"],
+      "nodeShape": { "nodeCount": 12, "types": ["command", "prompt", "bash"], "topology": "Scope/sync/classify prefix -> conditional five-way review fan-out -> synthesis/fixes -> optional notification branch." },
+      "description": "Classifies a pull request, invokes only relevant review specialists, consolidates the findings, and fixes critical or high-severity issues."
+    },
+    {
+      "name": "test-loop-dag",
+      "purpose": "Demonstrate and test loop-node completion behavior.",
+      "inputs": ["Explicit test-loop invocation"],
+      "outputs": ["Counter state", "Completion report"],
+      "nodeShape": { "nodeCount": 3, "types": ["bash", "loop", "prompt"], "topology": "Linear setup -> bounded counter loop -> report." },
+      "description": "Initializes a counter, iterates it to a fixed completion threshold, and reports successful loop execution."
+    },
+    {
+      "name": "validate-pr",
+      "purpose": "Compare main and feature behavior to validate that a pull request fixes the target problem.",
+      "inputs": ["Pull-request number or URL", "Main and feature branch states"],
+      "outputs": ["Branch-specific code reviews", "Branch-specific end-to-end evidence", "Cleanup result", "Final verdict"],
+      "nodeShape": { "nodeCount": 10, "types": ["bash", "command", "prompt"], "topology": "Parallel PR fetch/port allocation -> path resolution and sequential branch reviews -> testability gate -> main/feature E2E chain -> cleanup -> final report." },
+      "description": "Reviews and tests both sides of a pull request, checking that the baseline exhibits the problem and the feature branch resolves it before issuing a verdict."
+    },
+    {
+      "name": "workflow-builder",
+      "purpose": "Generate and validate a custom workflow definition from a user request.",
+      "inputs": ["Workflow intent", "Existing project commands, workflows, and package context"],
+      "outputs": ["Structured workflow intent", "Generated workflow YAML", "Validation result", "Installed workflow or error report"],
+      "nodeShape": { "nodeCount": 5, "types": ["bash", "prompt"], "topology": "Linear codebase scan -> intent extraction -> YAML generation -> structural validation -> save/report." },
+      "description": "Examines project context, translates a request into a workflow graph, validates the generated definition, and saves it for project use."
+    }
+  ]
+}

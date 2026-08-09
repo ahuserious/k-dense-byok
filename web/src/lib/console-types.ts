@@ -26,7 +26,7 @@ export type LoopMode = "orchestrated" | "ralph";
 
 // Kady records more than just loop orchestrator/worker rows. 'agent' is a single
 // agent turn, 'subagent' a Pi-spawned child, 'council' a multi-agent deliberation,
-// and 'workflow' an Archon workflow node. 'orchestrator'/'worker' remain for the
+// and 'workflow' an Pipeline engine workflow node. 'orchestrator'/'worker' remain for the
 // ACP-style loop views.
 export type RunRole =
   | "agent"
@@ -69,7 +69,7 @@ export interface Run {
   session_id: string | null;
   // Set on chat/council rows so the row can link back to its conversation.
   conversation_id?: string | null;
-  // Set on workflow rows so the row can link back to its Archon workflow run.
+  // Set on workflow rows so the row can link back to its Pipeline engine workflow run.
   workflow_id?: string | null;
   started_at: string;
   completed_at: string | null;

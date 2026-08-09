@@ -61,7 +61,7 @@ Base: PR 1.
 - [ ] Add the bounded runner/controller, control API, project-delete quiescence,
   run-wide token/cost/model-call ceilings, and shared DAG/Modal cap admission.
 - [ ] Add the preview-only legacy YAML compatibility route. It must never scan
-  `.archon`, overwrite a definition, or expose legacy run rows as resumable.
+  legacy engine storage, overwrite a definition, or expose legacy run rows as resumable.
 - [ ] Fail closed on corrupt accounting or complete durable rows; repair only a
   provably torn final event row and record that repair.
 - [ ] Keep real model execution and UI out of this PR by using test executors.
@@ -80,7 +80,7 @@ npx vitest run \
   test/workflow-budget.test.ts \
   test/workflow-service.test.ts \
   test/dag-workflows-api.test.ts \
-  test/legacy-archon-import.test.ts \
+  test/legacy-pipeline-import.test.ts \
   test/project-workflow-delete.test.ts \
   test/cost-ledger-hardening.test.ts
 npm run typecheck
