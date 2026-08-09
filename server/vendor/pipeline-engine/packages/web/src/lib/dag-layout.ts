@@ -85,6 +85,7 @@ export function dagNodesToReactFlow(dagNodes: readonly DagNode[]): {
     data: {
       ...dn,
       ...resolveNodeDisplay(dn),
+      settings: dn.settings,
     },
   }));
 

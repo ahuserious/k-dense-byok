@@ -140,6 +140,9 @@ function serializeDagNode(node: DagNode, baseIndent: number): string {
       lines.push(`${pad}    on_error: ${node.retry.on_error}`);
     }
   }
+  if (node.settings) {
+    lines.push(`${pad}  settings: ${serializeValue(node.settings, baseIndent + 2)}`);
+  }
 
   return lines.join('\n');
 }

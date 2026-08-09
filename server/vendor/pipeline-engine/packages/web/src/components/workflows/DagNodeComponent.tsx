@@ -1,9 +1,32 @@
 import { memo, useState } from 'react';
 import { Handle, Position } from '@xyflow/react';
 import type { NodeProps, Node } from '@xyflow/react';
-import type { DagNode } from '@/lib/api';
+import type {
+  DagNode,
+  NodeHarness,
+  NodeModelRequest,
+  NodeReasoningLevel,
+  NodeSamplingValue,
+  NodeSkillsMode,
+  NodeSpecV1,
+  NodeSubagentMode,
+} from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { Liquid } from '@/components/canvasui/Liquid';
+
+export type {
+  FixedNodeRequestedModel,
+  KadyCurrentNodeRequestedModel,
+  NodeAuthKind,
+  NodeHarness,
+  NodeModelRequest,
+  NodeReasoningLevel,
+  NodeRequestedModel,
+  NodeSamplingValue,
+  NodeSkillsMode,
+  NodeSpecV1,
+  NodeSubagentMode,
+} from '@/lib/api';
 
 export const NODE_REASONING_LEVELS = [
   'off',
@@ -19,66 +42,6 @@ export const NODE_AUTH_KINDS = ['api-key', 'oauth', 'local', 'custom'] as const;
 export const NODE_HARNESSES = ['pi', 'claude-code', 'codex', 'opencode', 'copilot'] as const;
 export const NODE_SKILLS_MODES = ['auto', 'auto-manual', 'manual'] as const;
 export const NODE_SUBAGENT_MODES = ['auto', 'auto-manual'] as const;
-
-export type NodeReasoningLevel = (typeof NODE_REASONING_LEVELS)[number];
-export type NodeAuthKind = (typeof NODE_AUTH_KINDS)[number];
-export type NodeHarness = (typeof NODE_HARNESSES)[number];
-export type NodeSkillsMode = (typeof NODE_SKILLS_MODES)[number];
-export type NodeSubagentMode = (typeof NODE_SUBAGENT_MODES)[number];
-
-export interface FixedNodeRequestedModel {
-  source: 'fixed';
-  provider: string;
-  model: string;
-  auth: { kind: NodeAuthKind; profile?: string };
-  reasoning: NodeReasoningLevel;
-}
-
-export interface KadyCurrentNodeRequestedModel {
-  source: 'kady-current';
-  auth: { kind: 'kady-current' };
-  reasoning: NodeReasoningLevel;
-}
-
-export type NodeRequestedModel = FixedNodeRequestedModel | KadyCurrentNodeRequestedModel;
-
-export interface NodeModelRequest {
-  requested: NodeRequestedModel;
-  resolution:
-    | { mode: 'exact' }
-    | {
-        mode: 'explicit-fallback';
-        alternatives: NodeRequestedModel[];
-        reason: string;
-      };
-}
-
-export type NodeSamplingValue = number | string | boolean;
-
-/** Local UI projection of the frozen server-side NodeSpec v1 contract. */
-export interface NodeSpecV1 {
-  version?: 1;
-  model?: NodeModelRequest;
-  reasoningEffort?: NodeReasoningLevel;
-  hyperparameters?: {
-    temperature?: number;
-    top_p?: number;
-    sampling?: Record<string, NodeSamplingValue>;
-  };
-  conditions?: { when?: string; exists?: string[] };
-  harness?: NodeHarness;
-  databases?: string[];
-  skills?: { mode?: NodeSkillsMode; list?: string[] };
-  subagents?: { mode?: NodeSubagentMode };
-  autonomy?: 'strict' | 'loose';
-  deliberation?: {
-    personalityStoreRef?: string;
-    bestOfNPersonalityCount?: number;
-    mimeographs?: { mode?: 'auto' | 'manual'; personalityRefs?: string[] };
-  };
-  billingMode?: 'inherit' | 'api' | 'subscription';
-  budget?: { maxTokens?: number; maxCostUsd?: number };
-}
 
 export interface ResolvedNodeSpecV1 {
   version: 1;

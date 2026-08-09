@@ -6,8 +6,81 @@
 import type { WorkflowRunStatus } from '@/lib/types';
 import type { components } from '@/lib/api.generated';
 
-export type WorkflowDefinition = components['schemas']['WorkflowDefinition'];
-export type DagNode = components['schemas']['DagNode'];
+export type NodeReasoningLevel =
+  | 'off'
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max';
+
+export type NodeAuthKind = 'api-key' | 'oauth' | 'local' | 'custom';
+export type NodeHarness = 'pi' | 'claude-code' | 'codex' | 'opencode' | 'copilot';
+export type NodeSkillsMode = 'auto' | 'auto-manual' | 'manual';
+export type NodeSubagentMode = 'auto' | 'auto-manual';
+
+export interface FixedNodeRequestedModel {
+  source: 'fixed';
+  provider: string;
+  model: string;
+  auth: { kind: NodeAuthKind; profile?: string };
+  reasoning: NodeReasoningLevel;
+}
+
+export interface KadyCurrentNodeRequestedModel {
+  source: 'kady-current';
+  auth: { kind: 'kady-current' };
+  reasoning: NodeReasoningLevel;
+}
+
+export type NodeRequestedModel = FixedNodeRequestedModel | KadyCurrentNodeRequestedModel;
+
+export interface NodeModelRequest {
+  requested: NodeRequestedModel;
+  resolution:
+    | { mode: 'exact' }
+    | {
+        mode: 'explicit-fallback';
+        alternatives: NodeRequestedModel[];
+        reason: string;
+      };
+}
+
+export type NodeSamplingValue = number | string | boolean;
+
+/** Frozen NodeSpec v1 payload persisted on every DAG node. */
+export interface NodeSpecV1 {
+  version?: 1;
+  model?: NodeModelRequest;
+  reasoningEffort?: NodeReasoningLevel;
+  hyperparameters?: {
+    temperature?: number;
+    top_p?: number;
+    sampling?: Record<string, NodeSamplingValue>;
+  };
+  conditions?: { when?: string; exists?: string[] };
+  harness?: NodeHarness;
+  databases?: string[];
+  skills?: { mode?: NodeSkillsMode; list?: string[] };
+  subagents?: { mode?: NodeSubagentMode };
+  autonomy?: 'strict' | 'loose';
+  deliberation?: {
+    personalityStoreRef?: string;
+    bestOfNPersonalityCount?: number;
+    mimeographs?: { mode?: 'auto' | 'manual'; personalityRefs?: string[] };
+  };
+  billingMode?: 'inherit' | 'api' | 'subscription';
+  budget?: { maxTokens?: number; maxCostUsd?: number };
+}
+
+type GeneratedDagNode = components['schemas']['DagNode'];
+type GeneratedWorkflowDefinition = components['schemas']['WorkflowDefinition'];
+
+export type DagNode = GeneratedDagNode & { settings?: NodeSpecV1 };
+export type WorkflowDefinition = Omit<GeneratedWorkflowDefinition, 'nodes'> & {
+  nodes: DagNode[];
+};
 
 /**
  * Base URL for SSE streams. In dev, bypasses Vite proxy by connecting directly
@@ -225,7 +298,10 @@ export async function deleteCodebase(id: string): Promise<{ success: boolean }> 
 export type WorkflowRunResponse = components['schemas']['WorkflowRun'];
 export type WorkflowEventResponse = components['schemas']['WorkflowEvent'];
 
-export type WorkflowListEntry = components['schemas']['WorkflowListEntry'];
+type GeneratedWorkflowListEntry = components['schemas']['WorkflowListEntry'];
+export type WorkflowListEntry = Omit<GeneratedWorkflowListEntry, 'workflow'> & {
+  workflow: WorkflowDefinition;
+};
 
 export interface WorkflowListResult {
   workflows: WorkflowListEntry[];

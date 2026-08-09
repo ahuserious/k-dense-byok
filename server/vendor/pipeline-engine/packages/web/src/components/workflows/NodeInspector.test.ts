@@ -31,8 +31,11 @@ const {
   NODE_SPEC_EDITOR_DROPDOWNS,
   NODE_SPEC_V1_BINDING_FIELDS,
   NodeSpecTab,
+  createExplicitFallbackModelRequest,
+  defaultFallbackFor,
   mergeNodeSpecV1,
   nodeSpecV1InlineErrors,
+  nodeRequestedModelIdentity,
   parseRequestedModelAlternatives,
 } = await import('./NodeInspector');
 
@@ -50,8 +53,10 @@ const fullNodeSpec: NodeSpecV1 = {
       mode: 'explicit-fallback',
       alternatives: [
         {
-          source: 'kady-current',
-          auth: { kind: 'kady-current' },
+          source: 'fixed',
+          provider: 'openrouter',
+          model: 'openai/gpt-5',
+          auth: { kind: 'api-key' },
           reasoning: 'high',
         },
       ],
@@ -169,7 +174,104 @@ describe('NodeSpec v1 editor contract', () => {
     expect(valid.error).toBeUndefined();
     expect(valid.value).toHaveLength(1);
     expect(parseRequestedModelAlternatives('[{"source":"fixed"}]').error).toContain(
-      'valid requested-model objects'
+      'valid fixed requested-model objects'
     );
+    expect(
+      parseRequestedModelAlternatives(
+        '[{"source":"kady-current","auth":{"kind":"kady-current"},"reasoning":"high"}]'
+      ).error
+    ).toContain('Kady Current is not allowed');
+  });
+
+  test('fallback creation always produces distinct fixed model identities', () => {
+    const fromKadyCurrent = createExplicitFallbackModelRequest({
+      source: 'kady-current',
+      auth: { kind: 'kady-current' },
+      reasoning: 'high',
+    });
+    expect(fromKadyCurrent.requested.source).toBe('fixed');
+    expect(fromKadyCurrent.resolution.mode).toBe('explicit-fallback');
+    if (fromKadyCurrent.resolution.mode !== 'explicit-fallback') {
+      throw new Error('expected explicit fallback');
+    }
+    expect(fromKadyCurrent.resolution.alternatives.every(model => model.source === 'fixed')).toBe(
+      true
+    );
+    expect(
+      nodeRequestedModelIdentity(fromKadyCurrent.resolution.alternatives[0])
+    ).not.toBe(nodeRequestedModelIdentity(fromKadyCurrent.requested));
+    expect(nodeSpecV1InlineErrors({ model: fromKadyCurrent })).toEqual([]);
+
+    const primary = fullNodeSpec.model?.requested;
+    if (!primary) throw new Error('expected primary model');
+    expect(defaultFallbackFor(primary).source).toBe('fixed');
+    expect(nodeRequestedModelIdentity(defaultFallbackFor(primary))).not.toBe(
+      nodeRequestedModelIdentity(primary)
+    );
+  });
+
+  test('mirrors canonical ambiguity and duplicate-identity validation', () => {
+    const fixedPrimary = {
+      source: 'fixed' as const,
+      provider: 'openrouter',
+      model: 'anthropic/claude-sonnet-4',
+      auth: { kind: 'api-key' as const },
+      reasoning: 'high' as const,
+    };
+    const fixedAlternative = {
+      source: 'fixed' as const,
+      provider: 'openrouter',
+      model: 'openai/gpt-5',
+      auth: { kind: 'api-key' as const },
+      reasoning: 'high' as const,
+    };
+    const kadyCurrent = {
+      source: 'kady-current' as const,
+      auth: { kind: 'kady-current' as const },
+      reasoning: 'high' as const,
+    };
+
+    const primaryAmbiguity = nodeSpecV1InlineErrors({
+      model: {
+        requested: kadyCurrent,
+        resolution: {
+          mode: 'explicit-fallback',
+          alternatives: [fixedAlternative],
+          reason: 'fallback',
+        },
+      },
+    });
+    expect(primaryAmbiguity).toContain(
+      'Kady Current is an exact runtime selection and cannot appear in an explicit fallback list.'
+    );
+
+    const alternativeAmbiguity = nodeSpecV1InlineErrors({
+      model: {
+        requested: fixedPrimary,
+        resolution: {
+          mode: 'explicit-fallback',
+          alternatives: [kadyCurrent],
+          reason: 'fallback',
+        },
+      },
+    });
+    expect(alternativeAmbiguity).toContain(
+      'Kady Current is an exact runtime selection and cannot appear in an explicit fallback list.'
+    );
+
+    const repeatedAndDuplicate = nodeSpecV1InlineErrors({
+      model: {
+        requested: fixedPrimary,
+        resolution: {
+          mode: 'explicit-fallback',
+          alternatives: [fixedPrimary, fixedAlternative, fixedAlternative],
+          reason: 'fallback',
+        },
+      },
+    });
+    expect(repeatedAndDuplicate).toContain(
+      'An explicit fallback must differ from the requested model and auth.'
+    );
+    expect(repeatedAndDuplicate).toContain('Explicit model fallbacks must be unique.');
   });
 });

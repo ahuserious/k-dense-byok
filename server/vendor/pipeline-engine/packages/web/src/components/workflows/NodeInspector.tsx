@@ -117,6 +117,20 @@ function validateRequestedModel(model: NodeRequestedModel, path: string, errors:
   }
 }
 
+export function nodeRequestedModelIdentity(model: NodeRequestedModel): string {
+  if (model.source === 'kady-current') {
+    return [model.source, model.auth.kind, model.reasoning].join('\u0000');
+  }
+  return [
+    model.source,
+    model.provider.toLowerCase(),
+    model.model,
+    model.auth.kind,
+    model.auth.profile ?? '',
+    model.reasoning,
+  ].join('\u0000');
+}
+
 function validateReferences(values: string[] | undefined, path: string, errors: string[]): void {
   for (const value of values ?? []) {
     if (!isValidReference(value)) {
@@ -142,6 +156,30 @@ export function nodeSpecV1InlineErrors(settings: NodeSpecV1 | undefined): string
       if (!settings.model.resolution.reason.trim()) {
         errors.push('model.resolution.reason is required for explicit fallback.');
       }
+
+      if (
+        settings.model.requested.source === 'kady-current' ||
+        settings.model.resolution.alternatives.some(
+          alternative => alternative.source === 'kady-current'
+        )
+      ) {
+        errors.push(
+          'Kady Current is an exact runtime selection and cannot appear in an explicit fallback list.'
+        );
+      }
+
+      const requestedIdentity = nodeRequestedModelIdentity(settings.model.requested);
+      const fallbackIdentities = new Set<string>();
+      settings.model.resolution.alternatives.forEach(alternative => {
+        const identity = nodeRequestedModelIdentity(alternative);
+        if (identity === requestedIdentity) {
+          errors.push('An explicit fallback must differ from the requested model and auth.');
+        }
+        if (fallbackIdentities.has(identity)) {
+          errors.push('Explicit model fallbacks must be unique.');
+        }
+        fallbackIdentities.add(identity);
+      });
     }
   }
 
@@ -867,14 +905,10 @@ function JsonTextareaField({
   );
 }
 
-function isRequestedModel(value: unknown): value is NodeRequestedModel {
+function isFixedRequestedModel(value: unknown): value is FixedNodeRequestedModel {
   if (value === null || typeof value !== 'object') return false;
   const candidate = value as Record<string, unknown>;
   if (!NODE_REASONING_LEVELS.includes(candidate.reasoning as NodeReasoningLevel)) return false;
-  if (candidate.source === 'kady-current') {
-    const auth = candidate.auth as Record<string, unknown> | undefined;
-    return auth?.kind === 'kady-current';
-  }
   if (candidate.source !== 'fixed') return false;
   const auth = candidate.auth as Record<string, unknown> | undefined;
   return (
@@ -886,12 +920,15 @@ function isRequestedModel(value: unknown): value is NodeRequestedModel {
 
 export function parseRequestedModelAlternatives(
   raw: string
-): { value?: NodeRequestedModel[]; error?: string } {
+): { value?: FixedNodeRequestedModel[]; error?: string } {
   if (!raw.trim()) return { value: [] };
   try {
     const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed) || !parsed.every(isRequestedModel)) {
-      return { error: 'Expected a JSON array of valid requested-model objects.' };
+    if (!Array.isArray(parsed) || !parsed.every(isFixedRequestedModel)) {
+      return {
+        error:
+          'Expected a JSON array of valid fixed requested-model objects; Kady Current is not allowed in explicit fallbacks.',
+      };
     }
     if (parsed.length > 8) return { error: 'At most eight fallback alternatives are allowed.' };
     return { value: parsed };
@@ -1010,15 +1047,43 @@ function defaultFixedRequestedModel(): FixedNodeRequestedModel {
   };
 }
 
-function defaultFallbackFor(requested: NodeRequestedModel): NodeRequestedModel {
-  if (requested.source === 'fixed') {
-    return {
-      source: 'kady-current',
-      auth: { kind: 'kady-current' },
+export function defaultFallbackFor(requested: NodeRequestedModel): FixedNodeRequestedModel {
+  const candidates: FixedNodeRequestedModel[] = [
+    {
+      source: 'fixed',
+      provider: 'openrouter',
+      model: 'openai/gpt-5',
+      auth: { kind: 'api-key' },
       reasoning: requested.reasoning,
-    };
-  }
-  return defaultFixedRequestedModel();
+    },
+    {
+      source: 'fixed',
+      provider: 'openrouter',
+      model: 'anthropic/claude-sonnet-4',
+      auth: { kind: 'api-key' },
+      reasoning: requested.reasoning,
+    },
+  ];
+  const requestedIdentity = nodeRequestedModelIdentity(requested);
+  return (
+    candidates.find(candidate => nodeRequestedModelIdentity(candidate) !== requestedIdentity) ??
+    candidates[0]
+  );
+}
+
+export function createExplicitFallbackModelRequest(
+  requested: NodeRequestedModel
+): NodeModelRequest {
+  const fixedRequested =
+    requested.source === 'fixed' ? requested : defaultFixedRequestedModel();
+  return {
+    requested: fixedRequested,
+    resolution: {
+      mode: 'explicit-fallback',
+      alternatives: [defaultFallbackFor(fixedRequested)],
+      reason: 'Use the declared fallback if the primary model is unavailable.',
+    },
+  };
 }
 
 export function NodeSpecTab({
@@ -1191,19 +1256,17 @@ export function NodeSpecTab({
                 if (event.target.value === 'exact') {
                   commitModel({ requested: model.requested, resolution: { mode: 'exact' } });
                 } else {
-                  commitModel({
-                    requested: model.requested,
-                    resolution: {
-                      mode: 'explicit-fallback',
-                      alternatives: [defaultFallbackFor(model.requested)],
-                      reason: 'Use the declared fallback if the primary model is unavailable.',
-                    },
-                  });
+                  commitModel(createExplicitFallbackModelRequest(model.requested));
                 }
               }}
             >
               <option value="exact">Exact</option>
-              <option value="explicit-fallback">Explicit fallback</option>
+              <option
+                value="explicit-fallback"
+                disabled={model.requested.source === 'kady-current'}
+              >
+                Explicit fallback (fixed models only)
+              </option>
             </select>
           </Field>
           {model.resolution.mode === 'explicit-fallback' && (
