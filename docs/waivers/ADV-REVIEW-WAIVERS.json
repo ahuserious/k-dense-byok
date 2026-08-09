@@ -8,6 +8,14 @@
       "rationalePattern": "set-state-in-effect|setArchonVisited|synchronously within an effect",
       "reason": "cross-lane: S1's rewrite of dag-builder-surface.tsx removes this line; verified at merge by the orchestrator's merge-gate lint run",
       "approvedBy": "orchestrator"
+    },
+    {
+      "id": "S2b-20260808-forge-marker-dual-accept",
+      "file": "server/vendor/pipeline-engine/packages/adapters/src/forge/github/adapter.ts",
+      "severity": "medium",
+      "rationalePattern": "bot-response marker|archon-bot-response|redelivered old response",
+      "reason": "adversarial-review round 5 (review-msl1lmd3-wztnt3) recommended accepting both legacy and renamed bot-response markers across GitHub/GitLab/Gitea adapters to guard webhook redelivery in per-user-token mode. Waived: this vendored distribution is local-only and unpublished — no forge App/webhook installation has ever existed for it, so no previously-emitted legacy-marked comments exist to be redelivered. Re-evaluate before any Phase-4 publication (task #6) or first forge-adapter deployment.",
+      "approvedBy": "orchestrator"
     }
   ]
 }
