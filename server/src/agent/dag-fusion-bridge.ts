@@ -20,6 +20,19 @@ export function dagFusionPackageDir(): string {
   return path.resolve(import.meta.dirname, "..", "..", "pi-packages", "dag-fusion-drive");
 }
 
+/** Canonical committed skill used by the dedicated Workflow Rescue session. */
+export function scientificDagStudioSkillPath(): string {
+  return path.resolve(
+    import.meta.dirname,
+    "..",
+    "..",
+    "seed",
+    "skills",
+    "scientific-dag-studio",
+    "SKILL.md",
+  );
+}
+
 /** Direct extension entry for a dedicated loader that does not use settings. */
 export function dagFusionExtensionPath(): string {
   return path.join(dagFusionPackageDir(), "index.ts");

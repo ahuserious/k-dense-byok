@@ -302,9 +302,25 @@ describe("dedicated helper Pi sessions", () => {
     const sameFirst = await create(firstRunId);
     const second = await create(secondRunId);
     expect(first.statusCode).toBe(200);
-    expect(first.json().readOnlyTools).toEqual([]);
+    expect(first.json().readOnlyTools).toEqual(["read"]);
     expect(sameFirst.json().id).toBe(first.json().id);
     expect(second.json().id).not.toBe(first.json().id);
+
+    const rescueSession = await getSession(
+      "default",
+      ensureProjectExists("default"),
+      first.json().id as string,
+    );
+    expect(rescueSession?.getActiveToolNames()).toEqual(["read"]);
+    expect(rescueSession?.resourceLoader.getExtensions().extensions).toEqual([]);
+    expect(rescueSession?.resourceLoader.getSkills().skills).toEqual([]);
+    disposeProjectSessions("default");
+    const reopenedRescueSession = await getSession(
+      "default",
+      ensureProjectExists("default"),
+      first.json().id as string,
+    );
+    expect(reopenedRescueSession?.getActiveToolNames()).toEqual(["read"]);
 
     const queuedRunId = workflowStore.createRun("default", {
       workflowId: "helper-workflow",

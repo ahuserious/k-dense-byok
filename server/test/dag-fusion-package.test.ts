@@ -11,6 +11,7 @@ import { PROJECTS_ROOT } from "../src/config.ts";
 import { ensureProjectExists } from "../src/projects.ts";
 import {
   dagFusionPackageDir,
+  scientificDagStudioSkillPath,
   seedDagFusionPackage,
 } from "../src/agent/dag-fusion-bridge.ts";
 
@@ -110,6 +111,18 @@ beforeEach(reset);
 afterAll(reset);
 
 describe("dag-fusion-drive package", () => {
+  it("exposes the committed Scientific DAG Studio skill to the rescue session", () => {
+    const skillPath = scientificDagStudioSkillPath();
+    expect(skillPath).toBe(path.join(
+      path.resolve(import.meta.dirname, ".."),
+      "seed",
+      "skills",
+      "scientific-dag-studio",
+      "SKILL.md",
+    ));
+    expect(fs.readFileSync(skillPath, "utf8")).toContain("# Scientific DAG Studio");
+  });
+
   it("loads the byom-dag-fusion skill without diagnostics", () => {
     const result = loadSkillsFromDir({
       dir: path.join(dagFusionPackageDir(), "skills"),

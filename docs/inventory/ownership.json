@@ -99,6 +99,7 @@
     ],
     "S7": [
       "server/src/agent/dag-fusion-bridge.ts",
+      "server/src/agent/session-registry.ts",
       "web/src/components/context-usage-indicator.tsx",
       "server/src/workflows/context-watcher*.ts",
       "server/src/workflows/compaction-watcher*.ts",
