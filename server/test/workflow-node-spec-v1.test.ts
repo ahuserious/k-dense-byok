@@ -90,7 +90,7 @@ describe("NodeSpec v1 contract", () => {
         top_p: 0.9,
         sampling: { seed: 7, deterministic: true },
       },
-      conditions: { when: "inputs.ready", exists: ["inputs/data.csv"] },
+      conditions: { exists: [] },
       databases: ["pubmed", "arxiv"],
       skills: { mode: "auto-manual", list: ["database-lookup"] },
       subagents: { mode: "auto-manual" },
@@ -135,6 +135,41 @@ describe("NodeSpec v1 contract", () => {
     expect(resolved).toMatchObject(DEFAULT_NODE_SPEC_V1);
     expect(resolved.budget).toEqual({ maxTokens: 100_000, maxCostUsd: 10 });
     expect(document).toEqual(before);
+  });
+
+  it("keeps absent and empty frozen conditions backward compatible", () => {
+    const absent = foundationFixture();
+    absent.nodes[0].settings = {};
+    expect(validateWorkflowGraphDocument(absent)).toMatchObject({ ok: true });
+
+    const empty = foundationFixture();
+    empty.nodes[0].settings = { conditions: {} };
+    expect(validateWorkflowGraphDocument(empty)).toMatchObject({ ok: true });
+
+    const emptyExists = foundationFixture();
+    emptyExists.nodes[0].settings = { conditions: { exists: [] } };
+    expect(validateWorkflowGraphDocument(emptyExists)).toMatchObject({ ok: true });
+  });
+
+  it("rejects every nonempty frozen conditions field at semantic validation", () => {
+    for (const conditions of [
+      { when: "inputs.ready" },
+      { exists: ["inputs/data.csv"] },
+    ]) {
+      const document = foundationFixture();
+      document.nodes[0].settings = { conditions };
+      expect(Value.Check(NodeSpecV1Schema, document.nodes[0].settings)).toBe(true);
+      const validation = validateWorkflowGraphDocument(document);
+      expect(validation).toMatchObject({ ok: false });
+      if (validation.ok) continue;
+      expect(validation.issues).toContainEqual(expect.objectContaining({
+        code: "node-conditions-enforcement-pending",
+        path: "/nodes/0/settings/conditions",
+        message: expect.stringContaining(
+          "frozen in the contract, but enforcement lands in the per-node-control unit (S4)",
+        ),
+      }));
+    }
   });
 
   it("rejects NodeSpec caps above the workflow admission envelope", () => {

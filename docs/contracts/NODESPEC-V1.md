@@ -19,8 +19,8 @@ without mutating stored documents.
 | `hyperparameters.temperature` | Sampling temperature from `0` through `2`; defaults to `1`. |
 | `hyperparameters.top_p` | Nucleus-sampling probability from `0` through `1`; defaults to `1`. |
 | `hyperparameters.sampling` | Extensible map of up to 16 scalar sampling parameters for later harness adapters; defaults to empty. |
-| `conditions.when` | Optional harness condition expression; absence means no expression gate. |
-| `conditions.exists` | Paths or named inputs that must exist before execution; defaults to an empty list. |
+| `conditions.when` | Frozen shape for an optional harness condition expression; validation fails closed when populated pending per-node-control enforcement in S4. |
+| `conditions.exists` | Frozen shape for paths or named inputs that must exist before execution; validation fails closed when nonempty pending per-node-control enforcement in S4. |
 | `harness` | Per-node CLI choice: `pi`, `claude-code`, `codex`, `opencode`, or `copilot`; defaults from the workflow, then `pi`. |
 | `databases` | Database catalogue IDs added to the workflow-wide database references; defaults to empty. |
 | `skills.mode` | Skill-selection policy: `auto`, `auto-manual`, or `manual`; defaults to `auto`. |

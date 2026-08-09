@@ -558,6 +558,17 @@ function validateNode(
   issues: WorkflowValidationIssue[],
 ): void {
   if (node.limits) validateNodeLimits(node.limits, nodePath, document, issues);
+  if (
+    node.settings?.conditions?.when !== undefined ||
+    (node.settings?.conditions?.exists?.length ?? 0) > 0
+  ) {
+    issues.push({
+      code: "node-conditions-enforcement-pending",
+      path: `${nodePath}/settings/conditions`,
+      message:
+        "NodeSpec conditions are frozen in the contract, but enforcement lands in the per-node-control unit (S4); nonempty conditions fail closed until S4 enforcement.",
+    });
+  }
   const resolveModel = (
     legacyModel?: ModelRequest,
     inheritNodeModel = true,
@@ -764,13 +775,20 @@ function validateNode(
         }
       }
       const needsModelEvaluator = node.checks.some((check) => check !== "artifact-exists");
-      const evaluator = needsModelEvaluator
-        ? validateResolvedModel(
-            workflowEvidenceGateEvaluator(document, node),
-            `${nodePath}/evaluator`,
-            false,
-          )
-        : undefined;
+      let evaluator: ModelRequest | undefined;
+      if (node.evaluator) {
+        evaluator = validateResolvedModel(
+          node.evaluator,
+          `${nodePath}/evaluator`,
+          false,
+        );
+      } else if (needsModelEvaluator) {
+        evaluator = validateResolvedModel(
+          workflowEvidenceGateEvaluator(document, node),
+          `${nodePath}/evaluator`,
+          false,
+        );
+      }
       if (needsModelEvaluator && !evaluator) {
         issues.push({
           code: "missing-evidence-evaluator",

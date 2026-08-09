@@ -1425,6 +1425,15 @@ export function createKadyWorkflowNodeExecutor(
   const policy = delegationPolicyWithDefaults(options.delegationPolicy);
 
   return async (context): Promise<WorkflowNodeExecutorResult> => {
+    if (
+      context.node.settings?.conditions?.when !== undefined ||
+      (context.node.settings?.conditions?.exists?.length ?? 0) > 0
+    ) {
+      fail(
+        "WORKFLOW_NODE_INVALID_CONTEXT",
+        "NodeSpec conditions are frozen in the contract, but enforcement lands in the per-node-control unit (S4); nonempty conditions fail closed until S4 enforcement.",
+      );
+    }
     assertReadOnlyWorkspace(context.node);
     const limits = effectiveNodeLimits(context);
     const callCeiling = maximumModelCalls(context, limits);

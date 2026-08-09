@@ -687,6 +687,71 @@ describe("workflow graph contract", () => {
     );
   });
 
+  it("rejects an invalid explicit evaluator on an artifact-only gate", () => {
+    const document = validWorkflow();
+    const gate = nodeOfKind(document, "evidence-gate");
+    const requested = exactModel().requested;
+    gate.checks = ["artifact-exists"];
+    gate.evaluator = {
+      requested,
+      resolution: {
+        mode: "explicit-fallback",
+        alternatives: [structuredClone(requested)],
+        reason: "Use only the approved evaluator.",
+      },
+    };
+
+    expect(issueCodes(validateWorkflowGraphDocument(document))).toContain(
+      "fallback-repeats-request",
+    );
+  });
+
+  it("accepts a valid explicit evaluator on an artifact-only gate", () => {
+    const document = validWorkflow();
+    const gate = nodeOfKind(document, "evidence-gate");
+    gate.checks = ["artifact-exists"];
+    gate.evaluator = exactModel();
+
+    expect(validateWorkflowGraphDocument(document)).toMatchObject({ ok: true });
+  });
+
+  it("does not require an inherited evaluator for an artifact-only gate", () => {
+    const document = validWorkflow();
+    const gate = structuredClone(nodeOfKind(document, "evidence-gate"));
+    const terminal = structuredClone(nodeOfKind(document, "lean4"));
+    gate.terminal = false;
+    gate.checks = ["artifact-exists"];
+    gate.artifactIds = [];
+    gate.onUnsupportedOutput = "route";
+    delete gate.evaluator;
+    terminal.terminal = true;
+    terminal.evidence = {
+      ...document.evidence,
+      enabled: false,
+      onUnsupportedOutput: "fail",
+    };
+    delete document.defaultModel;
+    document.entryNodeId = gate.id;
+    document.nodes = [gate, terminal];
+    document.edges = [
+      {
+        id: "gate-supported",
+        from: gate.id,
+        to: terminal.id,
+        condition: "evidence-supported",
+      },
+      {
+        id: "gate-unsupported",
+        from: gate.id,
+        to: terminal.id,
+        condition: "evidence-unsupported",
+      },
+    ];
+    document.artifacts = [];
+
+    expect(validateWorkflowGraphDocument(document)).toMatchObject({ ok: true });
+  });
+
   it("requires explicit supported and routed-unsupported gate paths", () => {
     const document = validWorkflow();
     const gate = nodeOfKind(document, "evidence-gate");

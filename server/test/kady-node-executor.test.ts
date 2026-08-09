@@ -577,7 +577,11 @@ describe("production Kady DAG node executor", () => {
       ...baseNode("agent"),
       kind: "agent",
       prompt: "Use the authoritative NodeSpec model.",
-      settings: { model: settingsModel, reasoningEffort: "xhigh" },
+      settings: {
+        model: settingsModel,
+        reasoningEffort: "xhigh",
+        conditions: { exists: [] },
+      },
     };
     const document = graph(node);
     delete document.defaultModel;
@@ -590,6 +594,36 @@ describe("production Kady DAG node executor", () => {
       model: "openrouter/settings-only-model",
       thinking: "xhigh",
     });
+  });
+
+  it("fails closed on nonempty frozen conditions before receipt, reservation, or provider call", async () => {
+    const node: WorkflowNode = {
+      ...baseNode("agent"),
+      kind: "agent",
+      prompt: "Do not execute until the required input exists.",
+      settings: { conditions: { exists: ["inputs/missing.csv"] } },
+    };
+    const document = graph(node);
+    const events: string[] = [];
+    const host = new FakeHost([analysis("must not run")], events);
+    const onReserve = vi.fn();
+    const onResolve = vi.fn();
+
+    await expect(
+      executorFor(host, document, { onReserve, onResolve })(
+        contextFor(document, events),
+      ),
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_NODE_INVALID_CONTEXT",
+      message: expect.stringContaining(
+        "frozen in the contract, but enforcement lands in the per-node-control unit (S4)",
+      ),
+    });
+
+    expect(events.some((event) => event.startsWith("record:"))).toBe(false);
+    expect(onReserve).not.toHaveBeenCalled();
+    expect(onResolve).not.toHaveBeenCalled();
+    expect(host.calls).toHaveLength(0);
   });
 
   it.each([
