@@ -1,6 +1,7 @@
 import type { TrustedDagFusionCompactionAudit } from
   "../../pi-packages/dag-fusion-drive/compaction-audit.ts";
 import {
+  CompactionWatcherAdmissionError,
   createCompactionWatcher,
   type CompactionSemanticModelRequest,
   type CompactionWatcher,
@@ -84,11 +85,18 @@ export function registerContextEngineering(
     },
     restartWorkflow: (request) => dependencies.runner.restartWorkflow(request),
     repairAndRedeploy: async (request) => {
-      await dependencies.budget.admit({
-        kind: "fix-redeploy",
-        model: request.model,
-        runId: request.runId,
-      });
+      try {
+        await dependencies.budget.admit({
+          kind: "fix-redeploy",
+          model: request.model,
+          runId: request.runId,
+        });
+      } catch (error) {
+        throw new CompactionWatcherAdmissionError(
+          error instanceof Error ? error.message : "Budget admission was rejected.",
+          { cause: error },
+        );
+      }
       return dependencies.runner.repairAndRedeploy(request);
     },
     proposeRescue: (request) => dependencies.runner.proposeRescue(request),

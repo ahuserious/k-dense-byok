@@ -1,37 +1,33 @@
-# S7 post-Wave-B integration seams
+# S7 production integration and deferred seams
 
 S7 owns and registers `restart-workflow`, `escalate-fix-redeploy`, and
-`lateral-pass` behavior implementations. Two consumers remain deliberately
-deferred so this lane does not cross active ownership boundaries:
+`lateral-pass` behavior implementations.
 
-## Merge-time bootstrap and hooks
+## Production bootstrap and hooks
 
-Import `registerContextEngineering` from
-`server/src/workflows/context-watcher.ts`, then install S7 exactly once during
-server bootstrap:
+The granted server composition point installs one production coordinator:
 
 ```ts
-const contextEngineering = registerContextEngineering({ registry: workflowBehaviorRegistry, runner: contextEngineeringRunnerDeps, sessions: contextEngineeringSessionDeps, models: contextEngineeringModelDeps, budget: contextEngineeringBudgetDeps });
+const contextEngineering = new ContextEngineeringProduction(workflowController, options.contextEngineering);
 ```
 
-Feed each runner-owned, exact pre/post compaction record through this hook after
-the deterministic audit sidecar is durable:
+The DAG Fusion bridge terminal hook feeds the durable fingerprint and semantic
+records into the coordinator:
 
 ```ts
-await contextEngineering.watcher.watch(compactionRecord);
+this.removeCompactionSink = installDagFusionCompactionEventSink((event) => this.handleDagFusionCompaction(event).catch(this.onError));
 ```
 
-Dispatch the session-owned clean-window request through the frozen registry:
+The session route dispatches lateral pass through the registered behavior:
 
 ```ts
-await workflowBehaviorRegistry.dispatch(LATERAL_PASS_BEHAVIOR, lateralPassDispatch);
+return await contextEngineering.dispatchLateralPass(projectId, lateralPassRequest);
 ```
 
-`contextEngineeringRunnerDeps.operationStore` must be a
-`FileCompactionWatcherOperationStore` rooted in the selected project's canonical
-sandbox. Its operation identity is `(runId, nodeId, auditIdentity)`; it persists
-the deployed revision and verified restart proof before restart, and serializes
-same-operation calls.
+Each project gets its own registry and `FileCompactionWatcherOperationStore`
+rooted in the canonical sandbox. The durable stopped-run poll feeds interrupted
+and failed states into watcher-owned restart/proposal handling. Operation
+identity remains `(runId, nodeId, auditIdentity)`.
 
 ## Deferred cross-lane seams
 
@@ -53,12 +49,9 @@ same-operation calls.
   an unapplied rescue proposal instead of calling restart. The vendored route
   must not advertise or consume watcher authority until its owner integrates the
   behavior registry after Wave B.
-- The S7 watcher consumes the trusted child-run fingerprint sidecar first and
-  accepts the exact pre-compaction record and installed summary as bounded
-  in-memory semantic-model input. The S4 node-executor owner must supply those
-  two values from the child session record when it wires the registered watcher;
-  S7 does not weaken `compaction-audit.ts` by persisting transcript or summary
-  contents in its deterministic sidecar.
+- The deterministic fingerprint JSONL remains the cheap first pass. A separate,
+  bounded semantic record is durable beside it and is consumed only after the
+  DAG Fusion terminal event identifies the exact child run.
 - The S8 helper-context projection currently contains a generic statement that
   helpers have no tools. The dedicated rescue session's system prompt and live
   tool registry are authoritative for its assigned `workflow_rescue_read`

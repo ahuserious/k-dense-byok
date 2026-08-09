@@ -8,12 +8,59 @@ import {
   getAgentDir,
   ProjectTrustStore,
 } from "@earendil-works/pi-coding-agent";
+import { SUBAGENT_DELEGATION_RESPONSE_EVENT } from "pi-subagents/delegation";
 import type { ProjectPaths } from "../projects.ts";
 import {
   createDagFusionDelegationHost,
   type DagFusionDelegationHost,
   type DagFusionDelegationHostOptions,
 } from "../../pi-packages/dag-fusion-drive/index.ts";
+
+export interface DagFusionCompactionEvent {
+  ownerRunId: string;
+  nodeId: string;
+  childRunId: string;
+}
+
+export type DagFusionCompactionEventSink = (
+  event: DagFusionCompactionEvent,
+) => void | Promise<void>;
+
+const compactionEventSinks = new Set<DagFusionCompactionEventSink>();
+
+/** Install the process-level durable-compaction consumer used by server bootstrap. */
+export function installDagFusionCompactionEventSink(
+  sink: DagFusionCompactionEventSink,
+): () => void {
+  compactionEventSinks.add(sink);
+  return () => compactionEventSinks.delete(sink);
+}
+
+function terminalCompactionEvent(value: unknown): DagFusionCompactionEvent | undefined {
+  const response = value as Record<string, unknown> | undefined;
+  if (
+    !response || typeof response !== "object" ||
+    typeof response.ownerRunId !== "string" || !response.ownerRunId ||
+    typeof response.nodeId !== "string" || !response.nodeId ||
+    typeof response.runId !== "string" || !response.runId
+  ) return undefined;
+  return {
+    ownerRunId: response.ownerRunId,
+    nodeId: response.nodeId,
+    childRunId: response.runId,
+  };
+}
+
+function emitCompactionEvent(value: unknown): void {
+  const event = terminalCompactionEvent(value);
+  if (!event) return;
+  for (const sink of compactionEventSinks) {
+    void Promise.resolve(sink(event)).catch(() => {
+      // The child terminal response remains authoritative. Bootstrap-owned
+      // monitoring reports sink failures without corrupting delegation.
+    });
+  }
+}
 
 /** Vendored package root; this becomes an external Pi package at release. */
 export function dagFusionPackageDir(): string {
@@ -70,7 +117,12 @@ export function createDagFusionWorkflowSessionBridge(
         events: pi.events,
       });
       host = boundHost;
+      const unsubscribeCompaction = pi.events.on(
+        SUBAGENT_DELEGATION_RESPONSE_EVENT,
+        emitCompactionEvent,
+      );
       pi.on("session_shutdown", async () => {
+        unsubscribeCompaction?.();
         await boundHost.dispose();
         if (host === boundHost) host = undefined;
       });

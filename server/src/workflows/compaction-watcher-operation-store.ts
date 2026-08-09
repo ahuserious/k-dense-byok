@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type {
   WatcherOperationPhase,
   WatcherOperationRecord,
@@ -11,8 +11,11 @@ import type {
 const STATE_SEGMENTS = [".kady", "workflows", "context-watcher"] as const;
 const OPERATION_KEY_PATTERN = /^[a-f0-9]{64}$/;
 const MAX_STATE_BYTES = 64 * 1024;
+const MAX_LOCK_BYTES = 4 * 1024;
 const LOCK_WAIT_MS = 5_000;
 const LOCK_POLL_MS = 10;
+const LOCK_LEASE_MS = 60 * 60 * 1_000;
+const PROCESS_START_IDENTITY = `${Date.now()}-${randomBytes(24).toString("hex")}`;
 const PHASES = new Set<WatcherOperationPhase>([
   "repairing",
   "repair-failed",
@@ -251,23 +254,271 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function acquireLock(lockFile: string): Promise<number> {
+interface ProcessIdentityRecord {
+  version: 1;
+  pid: number;
+  processStartIdentity: string;
+}
+
+interface LockOwnerRecord extends ProcessIdentityRecord {
+  ownerNonce: string;
+  acquiredAt: number;
+  leaseExpiresAt: number;
+}
+
+interface ObservedLock {
+  owner?: LockOwnerRecord;
+  legacyPid?: number;
+  dev: number;
+  ino: number;
+  mtimeMs: number;
+}
+
+interface AcquiredLock {
+  descriptor: number;
+  owner: LockOwnerRecord;
+}
+
+function processIdentityFile(stateDirectory: string, pid: number): string {
+  return path.join(stateDirectory, `.process-${pid}.json`);
+}
+
+function publishProcessIdentity(stateDirectory: string): void {
+  const identity: ProcessIdentityRecord = {
+    version: 1,
+    pid: process.pid,
+    processStartIdentity: PROCESS_START_IDENTITY,
+  };
+  const target = processIdentityFile(stateDirectory, process.pid);
+  const temporary = path.join(
+    stateDirectory,
+    `.process-${process.pid}.${randomBytes(12).toString("hex")}.tmp`,
+  );
+  let descriptor: number | undefined;
+  try {
+    descriptor = fs.openSync(
+      temporary,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollowFlag(),
+      0o600,
+    );
+    fs.writeFileSync(descriptor, `${JSON.stringify(identity)}\n`, "utf8");
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    fs.renameSync(temporary, target);
+    fsyncDirectory(stateDirectory);
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+    fs.rmSync(temporary, { force: true });
+  }
+}
+
+function parseProcessIdentity(value: unknown): ProcessIdentityRecord | undefined {
+  if (
+    !plainRecord(value) ||
+    value.version !== 1 ||
+    !Number.isSafeInteger(value.pid) ||
+    (value.pid as number) < 1 ||
+    typeof value.processStartIdentity !== "string" ||
+    value.processStartIdentity.length < 16
+  ) return undefined;
+  return value as unknown as ProcessIdentityRecord;
+}
+
+function parseLockOwner(value: unknown): LockOwnerRecord | undefined {
+  const identity = parseProcessIdentity(value);
+  if (
+    !identity ||
+    !plainRecord(value) ||
+    typeof value.ownerNonce !== "string" ||
+    value.ownerNonce.length < 16 ||
+    !Number.isSafeInteger(value.acquiredAt) ||
+    (value.acquiredAt as number) < 0 ||
+    !Number.isSafeInteger(value.leaseExpiresAt) ||
+    (value.leaseExpiresAt as number) <= (value.acquiredAt as number)
+  ) return undefined;
+  return value as unknown as LockOwnerRecord;
+}
+
+function readSmallFile(file: string): { serialized: string; stats: fs.Stats } | undefined {
+  let descriptor: number | undefined;
+  try {
+    descriptor = fs.openSync(file, fs.constants.O_RDONLY | noFollowFlag());
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    return fail("UNSAFE_PATH", "Compaction watcher lock metadata is unsafe.", error);
+  }
+  try {
+    const before = fs.fstatSync(descriptor);
+    if (!before.isFile() || before.nlink !== 1 || before.size > MAX_LOCK_BYTES) {
+      return fail("UNSAFE_PATH", "Compaction watcher lock metadata is unsafe or oversized.");
+    }
+    const serialized = fs.readFileSync(descriptor, "utf8");
+    const after = fs.fstatSync(descriptor);
+    if (
+      after.dev !== before.dev ||
+      after.ino !== before.ino ||
+      after.size !== before.size ||
+      Buffer.byteLength(serialized, "utf8") !== before.size
+    ) {
+      return fail("UNSAFE_PATH", "Compaction watcher lock metadata changed while read.");
+    }
+    return { serialized, stats: after };
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function readObservedLock(lockFile: string): ObservedLock | undefined {
+  const read = readSmallFile(lockFile);
+  if (!read) return undefined;
+  let owner: LockOwnerRecord | undefined;
+  let legacyPid: number | undefined;
+  try {
+    owner = parseLockOwner(JSON.parse(read.serialized));
+  } catch {
+    const parsedPid = Number(read.serialized.trim());
+    if (Number.isSafeInteger(parsedPid) && parsedPid > 0) legacyPid = parsedPid;
+  }
+  return {
+    ...(owner ? { owner } : {}),
+    ...(legacyPid ? { legacyPid } : {}),
+    dev: read.stats.dev,
+    ino: read.stats.ino,
+    mtimeMs: read.stats.mtimeMs,
+  };
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+function processIdentityMatches(stateDirectory: string, owner: LockOwnerRecord): boolean {
+  const read = readSmallFile(processIdentityFile(stateDirectory, owner.pid));
+  if (!read) return false;
+  try {
+    const identity = parseProcessIdentity(JSON.parse(read.serialized));
+    return identity?.pid === owner.pid &&
+      identity.processStartIdentity === owner.processStartIdentity;
+  } catch {
+    return false;
+  }
+}
+
+function lockIsStale(stateDirectory: string, observed: ObservedLock): boolean {
+  if (observed.owner) {
+    if (Date.now() >= observed.owner.leaseExpiresAt) return true;
+    return !processIsAlive(observed.owner.pid) ||
+      !processIdentityMatches(stateDirectory, observed.owner);
+  }
+  if (observed.legacyPid && !processIsAlive(observed.legacyPid)) return true;
+  return Date.now() >= observed.mtimeMs + LOCK_LEASE_MS;
+}
+
+function sameObservedLock(left: ObservedLock, right: ObservedLock): boolean {
+  return left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.owner?.ownerNonce === right.owner?.ownerNonce &&
+    left.owner?.processStartIdentity === right.owner?.processStartIdentity &&
+    left.owner?.leaseExpiresAt === right.owner?.leaseExpiresAt &&
+    left.legacyPid === right.legacyPid;
+}
+
+function tryReclaimStaleLock(stateDirectory: string, lockFile: string): boolean {
+  const reclaimFile = `${lockFile}.reclaim`;
+  const reclaimCandidate = createLockCandidate(stateDirectory);
+  let reclaimLock: AcquiredLock | undefined;
+  try {
+    try {
+      fs.linkSync(reclaimCandidate.temporary, reclaimFile);
+      fs.unlinkSync(reclaimCandidate.temporary);
+      reclaimLock = {
+        descriptor: reclaimCandidate.descriptor,
+        owner: reclaimCandidate.owner,
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        fs.closeSync(reclaimCandidate.descriptor);
+        fs.rmSync(reclaimCandidate.temporary, { force: true });
+        const prior = readObservedLock(reclaimFile);
+        if (!prior || !lockIsStale(stateDirectory, prior)) return false;
+        const verifiedPrior = readObservedLock(reclaimFile);
+        if (!verifiedPrior || !sameObservedLock(prior, verifiedPrior)) return false;
+        try {
+          fs.unlinkSync(reclaimFile);
+        } catch (unlinkError) {
+          if ((unlinkError as NodeJS.ErrnoException).code !== "ENOENT") throw unlinkError;
+        }
+        return false;
+      }
+      fs.closeSync(reclaimCandidate.descriptor);
+      fs.rmSync(reclaimCandidate.temporary, { force: true });
+      return fail("UNSAFE_PATH", "Compaction watcher reclaim lock is unsafe.", error);
+    }
+    const observed = readObservedLock(lockFile);
+    if (!observed || !lockIsStale(stateDirectory, observed)) return false;
+    const verified = readObservedLock(lockFile);
+    if (!verified || !sameObservedLock(observed, verified)) return false;
+    fs.unlinkSync(lockFile);
+    fsyncDirectory(stateDirectory);
+    return true;
+  } finally {
+    if (reclaimLock) releaseLock(reclaimFile, reclaimLock);
+  }
+}
+
+function createLockCandidate(stateDirectory: string): {
+  descriptor: number;
+  temporary: string;
+  owner: LockOwnerRecord;
+} {
+  const acquiredAt = Date.now();
+  const owner: LockOwnerRecord = {
+    version: 1,
+    pid: process.pid,
+    ownerNonce: randomBytes(24).toString("hex"),
+    processStartIdentity: PROCESS_START_IDENTITY,
+    acquiredAt,
+    leaseExpiresAt: acquiredAt + LOCK_LEASE_MS,
+  };
+  const temporary = path.join(
+    stateDirectory,
+    `.lock-${process.pid}-${owner.ownerNonce}.tmp`,
+  );
+  const descriptor = fs.openSync(
+    temporary,
+    fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollowFlag(),
+    0o600,
+  );
+  fs.writeFileSync(descriptor, `${JSON.stringify(owner)}\n`, "utf8");
+  fs.fsyncSync(descriptor);
+  return { descriptor, temporary, owner };
+}
+
+async function acquireLock(stateDirectory: string, lockFile: string): Promise<AcquiredLock> {
   const deadline = Date.now() + LOCK_WAIT_MS;
+  const candidate = createLockCandidate(stateDirectory);
   while (true) {
     try {
-      const descriptor = fs.openSync(
-        lockFile,
-        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollowFlag(),
-        0o600,
-      );
-      fs.writeFileSync(descriptor, `${process.pid}\n`, "utf8");
-      fs.fsyncSync(descriptor);
-      return descriptor;
+      fs.linkSync(candidate.temporary, lockFile);
+      fs.unlinkSync(candidate.temporary);
+      fsyncDirectory(stateDirectory);
+      return { descriptor: candidate.descriptor, owner: candidate.owner };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        fs.closeSync(candidate.descriptor);
+        fs.rmSync(candidate.temporary, { force: true });
         return fail("UNSAFE_PATH", "Compaction watcher operation lock is unsafe.", error);
       }
+      tryReclaimStaleLock(stateDirectory, lockFile);
       if (Date.now() >= deadline) {
+        fs.closeSync(candidate.descriptor);
+        fs.rmSync(candidate.temporary, { force: true });
         return fail("LOCKED", "Compaction watcher operation is still active.");
       }
       await delay(LOCK_POLL_MS);
@@ -275,17 +526,21 @@ async function acquireLock(lockFile: string): Promise<number> {
   }
 }
 
-function releaseLock(lockFile: string, descriptor: number): void {
+function releaseLock(lockFile: string, lock: AcquiredLock): void {
   try {
-    const opened = fs.fstatSync(descriptor);
+    const opened = fs.fstatSync(lock.descriptor);
     const current = fs.lstatSync(lockFile);
     if (opened.dev !== current.dev || opened.ino !== current.ino) {
       fail("UNSAFE_PATH", "Compaction watcher operation lock changed identity.");
     }
+    const observed = readObservedLock(lockFile);
+    if (observed?.owner?.ownerNonce !== lock.owner.ownerNonce) {
+      fail("UNSAFE_PATH", "Compaction watcher operation lock changed owner.");
+    }
     fs.unlinkSync(lockFile);
     fsyncDirectory(path.dirname(lockFile));
   } finally {
-    fs.closeSync(descriptor);
+    fs.closeSync(lock.descriptor);
   }
 }
 
@@ -295,6 +550,7 @@ export class FileCompactionWatcherOperationStore implements WatcherOperationStor
 
   constructor(sandboxRoot: string) {
     this.#stateDirectory = ensureStateDirectory(sandboxRoot);
+    publishProcessIdentity(this.#stateDirectory);
   }
 
   async runExclusive<T>(
@@ -304,7 +560,7 @@ export class FileCompactionWatcherOperationStore implements WatcherOperationStor
     assertOperationKey(operationKey);
     const stateFile = path.join(this.#stateDirectory, `${operationKey}.json`);
     const lockFile = path.join(this.#stateDirectory, `.${operationKey}.lock`);
-    const lock = await acquireLock(lockFile);
+    const lock = await acquireLock(this.#stateDirectory, lockFile);
     try {
       const stateDirectory = this.#stateDirectory;
       let current = readRecord(stateFile, operationKey);

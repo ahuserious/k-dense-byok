@@ -165,6 +165,42 @@ describe("registerContextEngineering production entrypoint", () => {
     }));
   });
 
+  it("retries a pre-runner budget rejection without treating deployment as ambiguous", async () => {
+    const harness = setup({
+      occurred: true,
+      checks: [
+        { attempt: 1, phase: "pre", passed: true },
+        { attempt: 1, phase: "post", passed: false, errorCode: "POST_MISMATCH" },
+      ],
+    });
+    harness.admit.mockRejectedValueOnce(new Error("repair budget exhausted"));
+    const request = semanticWatchRequest(harness.sandboxRoot);
+
+    await expect(harness.registration.watcher.watch(request)).rejects.toMatchObject({
+      code: "REDEPLOY_REJECTED",
+    });
+    expect(harness.repairAndRedeploy).not.toHaveBeenCalled();
+    const operationDirectory = path.join(
+      harness.sandboxRoot,
+      ".kady",
+      "workflows",
+      "context-watcher",
+    );
+    const persisted = fs.readdirSync(operationDirectory)
+      .filter((name) => /^[a-f0-9]{64}\.json$/.test(name))
+      .map((name) => JSON.parse(fs.readFileSync(path.join(operationDirectory, name), "utf8")))[0];
+    expect(persisted).toMatchObject({
+      phase: "repair-failed",
+      detail: expect.stringContaining("repair budget exhausted"),
+    });
+
+    harness.admit.mockResolvedValue(undefined);
+    await expect(harness.registration.watcher.watch(request)).resolves.toMatchObject({
+      status: "repaired-and-restarted",
+    });
+    expect(harness.repairAndRedeploy).toHaveBeenCalledOnce();
+  });
+
   it("makes no provider, budget, runner, or session call when no compaction occurred", async () => {
     const harness = setup({ occurred: false, checks: [] });
 
@@ -180,10 +216,20 @@ describe("registerContextEngineering production entrypoint", () => {
   });
 });
 
-describe.skip("POST-INTEGRATION(S7)", () => {
+describe("POST-INTEGRATION(S7)", () => {
   it("boots the real server and dispatches lateral-pass through the session route", async () => {
     const { buildApp } = await import("../src/index.ts");
-    const app = await buildApp({ workflowController: null });
+    const completeJson = vi.fn().mockResolvedValue({
+      summary: "Carry all verified work into the clean window.",
+      goal: "Preserve all open work.",
+      openTodos: ["Verify merge wiring"],
+      decisions: ["Use the registered lateral-pass behavior"],
+      constraints: ["Do not compact the source session"],
+    });
+    const app = await buildApp({
+      workflowController: null,
+      contextEngineering: { completeJson },
+    });
     try {
       const created = await app.inject({ method: "POST", url: "/sessions" });
       const sessionId = created.json().id as string;
@@ -196,8 +242,13 @@ describe.skip("POST-INTEGRATION(S7)", () => {
           openTodos: ["Verify merge wiring"],
         },
       });
-      expect(response.statusCode).toBe(200);
-      expect(response.json()).toMatchObject({ compacted: false });
+      expect(response.statusCode, response.body).toBe(200);
+      expect(response.json()).toMatchObject({
+        sourceSessionId: sessionId,
+        compacted: false,
+      });
+      expect(response.json().targetSessionId).not.toBe(sessionId);
+      expect(completeJson).toHaveBeenCalledOnce();
     } finally {
       await app.close();
     }

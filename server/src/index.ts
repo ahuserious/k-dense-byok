@@ -18,6 +18,7 @@ import { ensureProjectExists, getProject, listProjects } from "./projects.ts";
 import { withActiveProject } from "./scope.ts";
 import { registerProjectRoutes } from "./api/projects.ts";
 import { registerSessionRoutes } from "./api/sessions.ts";
+import { registerContextEngineeringRoutes } from "./api/context-engineering.ts";
 import { registerSandboxRoutes } from "./api/sandbox.ts";
 import { registerSkillRoutes } from "./api/skills.ts";
 import { registerSystemRoutes } from "./api/system.ts";
@@ -33,6 +34,10 @@ import { registerConsoleRoutes } from "./api/console.ts";
 import { registerRaindropRoutes } from "./api/raindrop.ts";
 import { disposeAllWorkflowDelegationSessions } from "./agent/workflow-delegation-session.ts";
 import type { WorkflowRunController } from "./workflows/controller.ts";
+import {
+  ContextEngineeringProduction,
+  type ContextEngineeringProductionOptions,
+} from "./workflows/context-watcher-production.ts";
 import { reconcileStaleWorkflowBudgetReservations } from "./workflows/budget.ts";
 import {
   createProductionWorkflowController,
@@ -100,6 +105,8 @@ export interface BuildAppOptions {
   > | null;
   /** Records remote ownership state for safe shutdown diagnostics. */
   onWorkflowSupervisorSnapshot?(snapshot: WorkflowSupervisorSnapshot): void;
+  /** Test harnesses may replace only provider completion; production uses real dependencies. */
+  contextEngineering?: ContextEngineeringProductionOptions;
 }
 
 export async function buildApp(options: BuildAppOptions = {}) {
@@ -123,6 +130,16 @@ export async function buildApp(options: BuildAppOptions = {}) {
       },
     })
     : options.workflowController;
+  const contextEngineering = new ContextEngineeringProduction(
+    workflowController,
+    {
+      ...options.contextEngineering,
+      onError: (error) => {
+        options.contextEngineering?.onError?.(error);
+        app.log.error({ err: error }, "context engineering background feed failed");
+      },
+    },
+  );
 
   await app.register(fastifyCors, {
     origin: (origin, cb) => {
@@ -167,6 +184,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
       projectId = DEFAULT_PROJECT_ID;
       ensureProjectExists(projectId);
     }
+    contextEngineering.forProject(projectId);
     withActiveProject(projectId, () => done());
   });
 
@@ -178,6 +196,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
     workflowSupervisor: options.workflowSupervisor ?? undefined,
   });
   await registerSessionRoutes(app);
+  await registerContextEngineeringRoutes(app, contextEngineering);
   await registerSandboxRoutes(app);
   await registerSkillRoutes(app);
   await registerSystemRoutes(app);
@@ -259,6 +278,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
       logRecovery({ projectId: project.id, enqueued: [], ...recovery });
     }
   }
+  contextEngineering.startStoppedRunFeed();
 
   // Reattach durable jobs after routes are available. Recovery schedules
   // active jobs in the background and immediately reconciles any terminal job
@@ -266,6 +286,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await modalJobManager.recoverAllProjects();
 
   app.addHook("onClose", async () => {
+    contextEngineering.close();
     await workflowController?.close({
       // Give every hosted leaf its complete acknowledgement window plus a
       // scheduling margin before deciding whether shutdown owns quarantine.

@@ -59,6 +59,18 @@ export class CompactionWatcherPartialSuccessError extends CompactionWatcherError
   }
 }
 
+/**
+ * Marks a failure that happened before the repair runner was invoked. The
+ * watcher may safely persist this as retryable because no deployment side
+ * effect can have occurred.
+ */
+export class CompactionWatcherAdmissionError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "CompactionWatcherAdmissionError";
+  }
+}
+
 export interface CompactionSemanticRecord {
   /** Exact bounded record visible immediately before Pi compacted the session. */
   preCompactionRecord: string;
@@ -655,6 +667,19 @@ export function createCompactionWatcher(
               ...(semanticVerdict ? { semanticVerdict } : {}),
             });
           } catch (error) {
+            if (error instanceof CompactionWatcherAdmissionError) {
+              const detail = `Repair admission rejected before runner execution: ${error.message}`;
+              transaction.compareAndSwap("repairing", {
+                runId: dispatch.runId,
+                ...(nodeId ? { nodeId } : {}),
+                auditIdentity,
+                phase: "repair-failed",
+                detail,
+              });
+              throw new CompactionWatcherError("REDEPLOY_REJECTED", detail, {
+                cause: error,
+              });
+            }
             operation = transaction.compareAndSwap("repairing", {
               runId: dispatch.runId,
               ...(nodeId ? { nodeId } : {}),

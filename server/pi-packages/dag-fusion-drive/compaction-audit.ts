@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import type {
+import {
+  convertToLlm,
+  serializeConversation,
   ExtensionAPI,
   SessionBeforeCompactEvent,
   SessionCompactEvent,
@@ -19,6 +21,8 @@ const MAX_MESSAGE_COUNT = 50_000;
 const MAX_BRANCH_ENTRY_COUNT = 100_000;
 const MAX_FILE_OPERATION_COUNT = 50_000;
 const MAX_TOKEN_COUNT = 1_000_000_000;
+const MAX_SEMANTIC_FIELD_BYTES = 2 * 1024 * 1024;
+const MAX_SEMANTIC_RECORD_BYTES = 4 * 1024 * 1024 + 64 * 1024;
 const AUDIT_DIRECTORY_SEGMENTS = [".kady", "workflows", "compaction-audit"] as const;
 const COMPACTION_REASONS = new Set(["manual", "threshold", "overflow"]);
 
@@ -123,6 +127,23 @@ interface PendingPreAudit {
   reason: "manual" | "threshold" | "overflow";
   willRetry: boolean;
   metadata: PreMetadata;
+  semantic?: {
+    preCompactionRecord: string;
+    userPrompt: string;
+    goal: string;
+    openTodos: string[];
+  };
+}
+
+export interface TrustedDagFusionCompactionRecord {
+  version: 1;
+  runId: string;
+  attempt: number;
+  preCompactionRecord: string;
+  compactedSummary: string;
+  userPrompt: string;
+  goal: string;
+  openTodos: string[];
 }
 
 interface AuditController {
@@ -279,6 +300,18 @@ function validateRunId(runId: string): TextFingerprint {
   return value;
 }
 
+function semanticRecordPath(sandboxRoot: string, runId: string, attempt: number): string {
+  const runIdFingerprint = validateRunId(runId);
+  if (!Number.isSafeInteger(attempt) || attempt < 1 || attempt > DAG_FUSION_COMPACTION_AUDIT_MAX_ATTEMPTS) {
+    return readError("The compaction record attempt is invalid.", "AUDIT_MALFORMED");
+  }
+  return path.join(
+    path.resolve(sandboxRoot),
+    ...AUDIT_DIRECTORY_SEGMENTS,
+    `${runIdFingerprint.sha256}.${attempt}.semantic.json`,
+  );
+}
+
 export function dagFusionCompactionAuditPath(sandboxRoot: string, runId: string): string {
   const runIdFingerprint = validateRunId(runId);
   return path.join(
@@ -399,6 +432,86 @@ function appendAuditRecord(auditPath: string, record: AuditPhaseRecord): void {
   }
 }
 
+function textFromUserMessage(message: unknown): string | undefined {
+  if (!isPlainRecord(message) || message.role !== "user") return undefined;
+  if (typeof message.content === "string") return message.content.trim() || undefined;
+  if (!Array.isArray(message.content)) return undefined;
+  const text = message.content
+    .flatMap((part) => isPlainRecord(part) && part.type === "text" && typeof part.text === "string"
+      ? [part.text]
+      : [])
+    .join("\n")
+    .trim();
+  return text || undefined;
+}
+
+function semanticPreRecord(event: SessionBeforeCompactEvent): PendingPreAudit["semantic"] {
+  try {
+    const messages = [
+      ...event.preparation.turnPrefixMessages,
+      ...event.preparation.messagesToSummarize,
+    ];
+    let preCompactionRecord: string;
+    try {
+      preCompactionRecord = serializeConversation(convertToLlm(messages));
+    } catch {
+      // Preserve the exact bounded Pi event payload even if an unfamiliar
+      // message subtype cannot yet be rendered by Pi's display serializer.
+      preCompactionRecord = JSON.stringify({
+        turnPrefixMessages: event.preparation.turnPrefixMessages,
+        messagesToSummarize: event.preparation.messagesToSummarize,
+        previousSummary: event.preparation.previousSummary,
+      });
+    }
+    if (
+      !preCompactionRecord ||
+      utf8Bytes(preCompactionRecord) > MAX_SEMANTIC_FIELD_BYTES
+    ) return undefined;
+    const lastUser = [...messages]
+      .reverse()
+      .map((message) => textFromUserMessage(message))
+      .find((value): value is string => value !== undefined);
+    const userPrompt = lastUser ?? event.customInstructions?.trim() ?? preCompactionRecord;
+    if (!userPrompt || utf8Bytes(userPrompt) > MAX_SEMANTIC_FIELD_BYTES) return undefined;
+    return {
+      preCompactionRecord,
+      userPrompt,
+      goal: userPrompt,
+      openTodos: [],
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function writeSemanticRecord(
+  auditPath: string,
+  record: TrustedDagFusionCompactionRecord,
+): void {
+  const target = auditPath.replace(/\.jsonl$/, `.${record.attempt}.semantic.json`);
+  const encoded = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
+  if (encoded.byteLength > MAX_SEMANTIC_RECORD_BYTES) return;
+  const temporary = `${target}.${process.pid}.tmp`;
+  let descriptor: number | undefined;
+  try {
+    descriptor = fs.openSync(
+      temporary,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollowFlag(),
+      0o600,
+    );
+    if (fs.writeSync(descriptor, encoded) !== encoded.byteLength) {
+      readError("The compaction semantic record was only partly written.", "AUDIT_MALFORMED");
+    }
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    fs.renameSync(temporary, target);
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+    fs.rmSync(temporary, { force: true });
+  }
+}
+
 function preMetadata(
   event: SessionBeforeCompactEvent,
 ): { ok: true; value: PreMetadata } | { ok: false; code: DagFusionCompactionAuditFailureCode } {
@@ -505,7 +618,7 @@ function sameFingerprint(left: TextFingerprint, right: TextFingerprint): boolean
   return left.sha256 === right.sha256 && left.utf8Bytes === right.utf8Bytes;
 }
 
-function createAuditController(auditPath: string): AuditController {
+function createAuditController(auditPath: string, runId: string): AuditController {
   let sequence = 0;
   let nextAttempt = 1;
   let pending: PendingPreAudit | undefined;
@@ -554,11 +667,13 @@ function createAuditController(auditPath: string): AuditController {
         });
         return { cancel: true };
       }
+      const semantic = semanticPreRecord(event);
       pending = {
         attempt,
         reason: event.reason,
         willRetry: event.willRetry,
         metadata: metadata.value,
+        ...(semantic ? { semantic } : {}),
       };
       appendAuditRecord(auditPath, {
         version: DAG_FUSION_COMPACTION_AUDIT_VERSION,
@@ -603,9 +718,64 @@ function createAuditController(auditPath: string): AuditController {
         ...(metadata.ok ? { metadata: metadata.value } : {}),
         ...(errorCode ? { errorCode } : {}),
       });
+      if (active?.semantic && metadata.ok) {
+        writeSemanticRecord(auditPath, {
+          version: 1,
+          runId,
+          attempt,
+          ...active.semantic,
+          compactedSummary: event.compactionEntry.summary,
+        });
+      }
       pending = undefined;
     },
   };
+}
+
+export function readTrustedDagFusionCompactionRecords(
+  sandboxRoot: string,
+  runId: string,
+): TrustedDagFusionCompactionRecord[] {
+  ensureSafeAuditDirectory(sandboxRoot, false);
+  const records: TrustedDagFusionCompactionRecord[] = [];
+  for (let attempt = 1; attempt <= DAG_FUSION_COMPACTION_AUDIT_MAX_ATTEMPTS; attempt += 1) {
+    const file = semanticRecordPath(sandboxRoot, runId, attempt);
+    let read: string;
+    try {
+      const descriptor = fs.openSync(file, fs.constants.O_RDONLY | noFollowFlag());
+      try {
+        const stats = fs.fstatSync(descriptor);
+        assertSafeOpenedFile(stats, "post");
+        if (stats.size > MAX_SEMANTIC_RECORD_BYTES) {
+          readError("The compaction semantic record is too large.", "AUDIT_TOO_LARGE", "post");
+        }
+        read = fs.readFileSync(descriptor, "utf8");
+      } finally {
+        fs.closeSync(descriptor);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      if (error instanceof DagFusionCompactionAuditReadError) throw error;
+      return readError("The compaction semantic record is unsafe.", "AUDIT_PATH_UNSAFE", "post", error);
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(read);
+    } catch (error) {
+      return readError("The compaction semantic record is malformed.", "AUDIT_MALFORMED", "post", error);
+    }
+    if (
+      !isPlainRecord(value) || value.version !== 1 || value.runId !== runId ||
+      value.attempt !== attempt || typeof value.preCompactionRecord !== "string" ||
+      typeof value.compactedSummary !== "string" || typeof value.userPrompt !== "string" ||
+      typeof value.goal !== "string" || !Array.isArray(value.openTodos) ||
+      !value.openTodos.every((todo) => typeof todo === "string")
+    ) {
+      return readError("The compaction semantic record has an invalid shape.", "AUDIT_MALFORMED", "post");
+    }
+    records.push(value as unknown as TrustedDagFusionCompactionRecord);
+  }
+  return records;
 }
 
 /** Register bounded compaction hooks only in an owned pi-subagents child. */
@@ -623,7 +793,7 @@ export function installDagFusionCompactionAudit(
     );
   }
   const auditPath = createAuditSidecar(options.sandboxRoot ?? process.cwd(), runId);
-  const controller = createAuditController(auditPath);
+  const controller = createAuditController(auditPath, runId);
   pi.on("session_before_compact", (event) => controller.before(event));
   pi.on("session_compact", (event) => controller.after(event));
   return true;
