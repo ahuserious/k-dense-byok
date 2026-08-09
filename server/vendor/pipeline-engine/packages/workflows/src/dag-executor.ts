@@ -91,6 +91,11 @@ import {
   type ModelAliasPreset,
   type ResolvedAiProfile,
 } from './model-validation';
+import {
+  applyVendoredNodeAuthSelection,
+  assertVendoredNodeSpecSemantics,
+  resolveVendoredNodeSpecRuntimeBinding,
+} from './node-spec-enforcement';
 
 /**
  * Closed-set node type for telemetry — mirrors the DagNode discriminators.
@@ -278,18 +283,21 @@ export interface WorkflowLevelOptions {
 /**
  * Build the provider-facing raw node configuration.
  *
- * `settings` is intentionally forwarded byte-for-byte as validated NodeSpec v1
- * plumbing. Field-level runtime enforcement belongs to the host executor lanes;
- * the vendored Pipeline Engine must not claim those bindings by interpreting it.
+ * The canonical settings payload is still forwarded for adapter observability,
+ * while the explicitly supported fields are projected onto the adapter's
+ * existing provider options. Semantic validation rejects every other field.
  */
 export function buildNodeAdapterConfig(
   node: DagNode,
-  workflowLevelOptions: WorkflowLevelOptions
+  workflowLevelOptions: WorkflowLevelOptions,
+  runtimeBinding = resolveVendoredNodeSpecRuntimeBinding(node, undefined)
 ): NodeConfig {
-  const fallbackModel = node.fallbackModel ?? workflowLevelOptions.fallbackModel;
+  const fallbackModel =
+    runtimeBinding.fallbackModel ?? node.fallbackModel ?? workflowLevelOptions.fallbackModel;
   return {
     nodeId: node.id,
     ...(node.settings !== undefined ? { settings: node.settings } : {}),
+    ...(runtimeBinding.auth !== undefined ? { auth: runtimeBinding.auth } : {}),
     mcp: node.mcp,
     hooks: node.hooks,
     skills: node.skills,
@@ -301,7 +309,7 @@ export function buildNodeAdapterConfig(
     sandbox: node.sandbox ?? workflowLevelOptions.sandbox,
     betas: node.betas ?? workflowLevelOptions.betas,
     output_format: node.output_format,
-    maxBudgetUsd: node.maxBudgetUsd,
+    maxBudgetUsd: runtimeBinding.maxBudgetUsd,
     systemPrompt: node.systemPrompt,
     fallbackModel,
   };
@@ -504,12 +512,13 @@ async function resolveNodeProviderAndModel(
   model: string | undefined;
   options: SendQueryOptions | undefined;
 }> {
-  const configuredProvider: string = node.provider ?? workflowProvider;
+  const runtimeBinding = resolveVendoredNodeSpecRuntimeBinding(node, workflowProvider);
+  const configuredProvider: string = runtimeBinding.provider ?? node.provider ?? workflowProvider;
   let provider: string = configuredProvider;
   let preset: ModelAliasPreset | undefined;
-  let model: string | undefined;
+  let model: string | undefined = runtimeBinding.model;
 
-  if (node.model) {
+  if (runtimeBinding.model === undefined && node.model) {
     if (aiProfile) {
       const modelSpec = resolveModelSpec(aiProfile, node.model);
       if (isLiteralSpec(modelSpec)) {
@@ -562,7 +571,10 @@ async function resolveNodeProviderAndModel(
       ? workflowModel
       : (providerAssistantConfig?.model as string | undefined);
   const effectivePreset =
-    preset ?? (!node.model && provider === workflowProvider ? workflowPreset : undefined);
+    preset ??
+    (runtimeBinding.model === undefined && !node.model && provider === workflowProvider
+      ? workflowPreset
+      : undefined);
 
   // Get provider capabilities for capability warnings (static lookup, no instantiation)
   const caps = getProviderCapabilities(provider);
@@ -578,13 +590,19 @@ async function resolveNodeProviderAndModel(
     ['mcp', 'mcp', node.mcp !== undefined],
     ['skills', 'skills', node.skills !== undefined && node.skills.length > 0],
     ['agents', 'agents', node.agents !== undefined],
-    ['effort', 'effortControl', (node.effort ?? workflowLevelOptions.effort) !== undefined],
+    [
+      'effort',
+      'effortControl',
+      runtimeBinding.reasoning !== undefined ||
+        (node.effort ?? workflowLevelOptions.effort) !== undefined,
+    ],
     ['thinking', 'thinkingControl', (node.thinking ?? workflowLevelOptions.thinking) !== undefined],
-    ['maxBudgetUsd', 'costControl', node.maxBudgetUsd !== undefined],
+    ['maxBudgetUsd', 'costControl', runtimeBinding.maxBudgetUsd !== undefined],
     [
       'fallbackModel',
       'fallbackModel',
-      (node.fallbackModel ?? workflowLevelOptions.fallbackModel) !== undefined,
+      (runtimeBinding.fallbackModel ?? node.fallbackModel ?? workflowLevelOptions.fallbackModel) !==
+        undefined,
     ],
     ['sandbox', 'sandbox', (node.sandbox ?? workflowLevelOptions.sandbox) !== undefined],
     ['env', 'envInjection', (config.envVars && Object.keys(config.envVars).length > 0) === true],
@@ -630,19 +648,27 @@ async function resolveNodeProviderAndModel(
   // Build universal base options
   const baseOptions: SendQueryOptions = {};
   if (model) baseOptions.model = model;
-  if (config.envVars && Object.keys(config.envVars).length > 0) {
-    baseOptions.env = config.envVars;
+  const selectedAuthEnv = applyVendoredNodeAuthSelection(
+    config.envVars,
+    provider,
+    runtimeBinding.auth
+  );
+  if (selectedAuthEnv && Object.keys(selectedAuthEnv).length > 0) {
+    baseOptions.env = selectedAuthEnv;
   }
   if (node.systemPrompt !== undefined) baseOptions.systemPrompt = node.systemPrompt;
-  if (node.maxBudgetUsd !== undefined) baseOptions.maxBudgetUsd = node.maxBudgetUsd;
-  const fb = node.fallbackModel ?? workflowLevelOptions.fallbackModel;
+  if (runtimeBinding.maxBudgetUsd !== undefined) {
+    baseOptions.maxBudgetUsd = runtimeBinding.maxBudgetUsd;
+  }
+  const fb =
+    runtimeBinding.fallbackModel ?? node.fallbackModel ?? workflowLevelOptions.fallbackModel;
   if (fb) baseOptions.fallbackModel = fb;
   if (node.output_format) {
     baseOptions.outputFormat = { type: 'json_schema', schema: node.output_format };
   }
 
   // Build raw nodeConfig — provider translates internally
-  const nodeConfig = buildNodeAdapterConfig(node, workflowLevelOptions);
+  const nodeConfig = buildNodeAdapterConfig(node, workflowLevelOptions, runtimeBinding);
 
   // Pass assistantConfig from config — provider parses internally
   const assistantConfig: Record<string, unknown> = { ...(config.assistants[provider] ?? {}) };
@@ -654,12 +680,33 @@ async function resolveNodeProviderAndModel(
     nodeConfig,
     assistantConfig
   );
+  if (runtimeBinding.reasoning !== undefined) {
+    const routedReasoning = routePresetEffort(provider, runtimeBinding.reasoning);
+    if (!routedReasoning) {
+      throw new Error(
+        `Node '${node.id}': reasoning '${runtimeBinding.reasoning}' is not supported by provider '${provider}'.`
+      );
+    }
+    if (routedReasoning.field === 'effort') {
+      nodeConfig.effort = routedReasoning.value;
+    } else {
+      assistantConfig.modelReasoningEffort = routedReasoning.value;
+    }
+  }
 
   const options: SendQueryOptions = {
     ...baseOptions,
     nodeConfig,
     assistantConfig,
   };
+
+  if (options.maxBudgetUsd === 0) {
+    // Kady performs a separate outer admission check before a hosted run starts.
+    // This vendored guard is the inner layer: a zero node ceiling must stop
+    // before getAgentProvider/sendQuery can initiate billable work. Positive
+    // ceilings continue through the provider's existing maxBudgetUsd control.
+    throw new Error(`Node '${node.id}': maxBudgetUsd ceiling is $0; execution blocked before spend.`);
+  }
 
   return { provider, model, options };
 }
@@ -2905,6 +2952,10 @@ export async function executeDagWorkflow(
   aiProfile?: ResolvedAiProfile,
   workflowPreset?: ModelAliasPreset
 ): Promise<string | undefined> {
+  // executeDagWorkflow is exported and can be called without parseWorkflow.
+  // Re-run the authoritative semantic gate here so programmatic run paths fail
+  // before any provider resolution or spend.
+  assertVendoredNodeSpecSemantics({ nodes: workflow.nodes, provider: workflowProvider });
   const dagStartTime = Date.now();
   const workflowLevelOptions = {
     effort: workflow.effort,

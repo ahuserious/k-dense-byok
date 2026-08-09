@@ -27,6 +27,10 @@ import {
 } from './schemas/dag-node';
 import { modelReasoningEffortSchema, webSearchModeSchema } from './schemas/workflow';
 import { workflowNodeHooksSchema } from './schemas/hooks';
+import {
+  formatVendoredNodeSpecIssue,
+  validateVendoredNodeSpecSemantics,
+} from './node-spec-enforcement';
 import { z } from '@hono/zod-openapi';
 
 /** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
@@ -360,6 +364,26 @@ export function parseWorkflow(content: string, filename: string): ParseResult {
           },
         };
       }
+    }
+
+    // parseWorkflow is the shared validate/save/load boundary. Semantic
+    // NodeSpec checks live here so an API save cannot persist a configuration
+    // that a later load or run would interpret differently.
+    const nodeSpecIssues = validateVendoredNodeSpecSemantics({
+      nodes: dagNodes,
+      ...(provider !== undefined ? { provider } : {}),
+    });
+    if (nodeSpecIssues.length > 0) {
+      return {
+        workflow: null,
+        error: {
+          filename,
+          error: `Vendored NodeSpec validation failed: ${nodeSpecIssues
+            .map(formatVendoredNodeSpecIssue)
+            .join('; ')}`,
+          errorType: 'validation_error',
+        },
+      };
     }
 
     // persist_session capability gating: when the effective provider is known at

@@ -4,6 +4,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { OpenAPIHono } from '@hono/zod-openapi';
 import type { ConversationLockManager } from '@archon/core';
+import { registerBuiltinProviders } from '@archon/providers';
 import type { WebAdapter } from '../adapters/web';
 import { validationErrorHook } from './openapi-defaults';
 
@@ -49,66 +50,69 @@ import { registerApiRoutes } from './api';
 import { parseWorkflow } from '@archon/workflows/loader';
 import { buildNodeAdapterConfig } from '../../../workflows/src/dag-executor';
 
+registerBuiltinProviders();
+
 const settings = {
   version: 1 as const,
   model: {
     requested: {
       source: 'fixed' as const,
-      provider: 'openrouter',
-      model: 'anthropic/claude-sonnet-4',
-      auth: { kind: 'oauth' as const, profile: 'research-subscription' },
-      reasoning: 'xhigh' as const,
+      provider: 'claude',
+      model: 'claude-sonnet-4',
+      auth: { kind: 'oauth' as const },
+      reasoning: 'high' as const,
     },
-    resolution: {
-      mode: 'explicit-fallback' as const,
-      alternatives: [
-        {
-          source: 'fixed' as const,
-          provider: 'openrouter',
-          model: 'openai/gpt-5',
-          auth: { kind: 'api-key' as const },
-          reasoning: 'high' as const,
-        },
-      ],
-      reason: 'Use a fixed backup when the primary provider is unavailable.',
-    },
+    resolution: { mode: 'exact' as const },
   },
   reasoningEffort: 'max' as const,
-  hyperparameters: {
-    temperature: 0.4,
-    top_p: 0.8,
-    sampling: { seed: 17, response_format: 'json', deterministic: true },
-  },
-  conditions: { when: 'inputs.ready == true', exists: ['inputs/dataset.parquet'] },
-  harness: 'codex' as const,
-  databases: ['database/literature'],
-  skills: { mode: 'manual' as const, list: ['literature-review', 'citation-management'] },
-  subagents: { mode: 'auto-manual' as const },
-  autonomy: 'loose' as const,
-  deliberation: {
-    personalityStoreRef: 'personalities/science-v1',
-    bestOfNPersonalityCount: 4,
-    mimeographs: {
-      mode: 'manual' as const,
-      personalityRefs: ['personality/skeptic', 'personality/synthesist'],
-    },
-  },
-  billingMode: 'subscription' as const,
-  budget: { maxTokens: 120_000, maxCostUsd: 24.5 },
+  budget: { maxCostUsd: 24.5 },
 };
 
 function settingsBytes(value: unknown): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(value));
 }
 
+function createApp(): OpenAPIHono {
+  const app = new OpenAPIHono({ defaultHook: validationErrorHook });
+  registerApiRoutes(app, {} as WebAdapter, {} as ConversationLockManager);
+  return app;
+}
+
+function fixedModel(model: string) {
+  return {
+    source: 'fixed' as const,
+    provider: 'claude',
+    model,
+    auth: { kind: 'oauth' as const },
+    reasoning: 'high' as const,
+  };
+}
+
+async function validateSettings(settingsValue: unknown): Promise<string> {
+  const response = await createApp().request('/api/workflows/validate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      definition: {
+        name: 'nodespec-negative',
+        description: 'Exercise authoritative vendored validation.',
+        nodes: [{ id: 'research', prompt: 'Analyze.', settings: settingsValue }],
+      },
+    }),
+  });
+  expect(response.status).toBe(200);
+  const body = (await response.json()) as { valid: boolean; errors?: string[] };
+  expect(body.valid).toBe(false);
+  return body.errors?.join('\n') ?? '';
+}
+
 describe('NodeSpec v1 vendored persistence contract', () => {
-  test('validate -> PUT -> GET -> parseWorkflow -> adapter args preserves every settings byte', async () => {
+  test('validate -> PUT -> GET -> parseWorkflow -> adapter args preserves every bound settings byte', async () => {
     registeredCwd = join(tmpdir(), `nodespec-persistence-${crypto.randomUUID()}`);
     await mkdir(registeredCwd, { recursive: true });
 
     try {
-      const app = new OpenAPIHono({ defaultHook: validationErrorHook });
-      registerApiRoutes(app, {} as WebAdapter, {} as ConversationLockManager);
+      const app = createApp();
       const openApiResponse = await app.request('/api/openapi.json');
       const openApi = (await openApiResponse.json()) as {
         components: {
@@ -161,6 +165,92 @@ describe('NodeSpec v1 vendored persistence contract', () => {
       if (!parsedNode) throw new Error('expected parsed node');
       const adapterArgs = buildNodeAdapterConfig(parsedNode, {});
       expect(settingsBytes(adapterArgs.settings)).toEqual(settingsBytes(settings));
+      expect(adapterArgs.maxBudgetUsd).toBe(24.5);
+      expect(adapterArgs.auth).toEqual({ kind: 'oauth' });
+    } finally {
+      await rm(registeredCwd, { recursive: true, force: true });
+    }
+  });
+
+  test('validate rejects Kady Current anywhere in explicit fallbacks', async () => {
+    const errors = await validateSettings({
+      version: 1,
+      model: {
+        requested: fixedModel('claude-sonnet-4'),
+        resolution: {
+          mode: 'explicit-fallback',
+          alternatives: [
+            {
+              source: 'kady-current',
+              auth: { kind: 'kady-current' },
+              reasoning: 'high',
+            },
+          ],
+          reason: 'Try the current Kady selection.',
+        },
+      },
+    });
+    expect(errors).toContain('ambiguous-kady-current-fallback');
+  });
+
+  test('validate rejects a fallback identical to the requested model identity', async () => {
+    const requested = fixedModel('claude-sonnet-4');
+    const errors = await validateSettings({
+      version: 1,
+      model: {
+        requested,
+        resolution: {
+          mode: 'explicit-fallback',
+          alternatives: [requested],
+          reason: 'Retry the same model.',
+        },
+      },
+    });
+    expect(errors).toContain('fallback-repeats-request');
+  });
+
+  test('validate rejects duplicate explicit fallback identities', async () => {
+    const duplicate = fixedModel('claude-haiku-4');
+    const errors = await validateSettings({
+      version: 1,
+      model: {
+        requested: fixedModel('claude-sonnet-4'),
+        resolution: {
+          mode: 'explicit-fallback',
+          alternatives: [duplicate, duplicate],
+          reason: 'Try the backup list in order.',
+        },
+      },
+    });
+    expect(errors).toContain('duplicate-model-fallback');
+  });
+
+  test('save rejects populated fields pending their named enforcement unit', async () => {
+    registeredCwd = join(tmpdir(), `nodespec-rejected-save-${crypto.randomUUID()}`);
+    await mkdir(registeredCwd, { recursive: true });
+    try {
+      const response = await createApp().request(
+        `/api/workflows/nodespec-rejected?cwd=${encodeURIComponent(registeredCwd)}`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            definition: {
+              name: 'nodespec-rejected',
+              description: 'Must fail before persistence.',
+              nodes: [
+                {
+                  id: 'research',
+                  prompt: 'Analyze.',
+                  settings: { version: 1, hyperparameters: { temperature: 1 } },
+                },
+              ],
+            },
+          }),
+        }
+      );
+      expect(response.status).toBe(400);
+      expect(await response.text()).toContain('Pending unit S4');
     } finally {
       await rm(registeredCwd, { recursive: true, force: true });
     }

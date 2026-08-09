@@ -215,9 +215,9 @@ const nodeSamplingMapSchema = z
  * Canonical vendored projection of the frozen NodeSpec v1 contract.
  *
  * This schema preserves and structurally validates node settings at the
- * Pipeline Engine boundary. Runtime binding/enforcement of individual fields
- * belongs to the host executor lanes; this package only carries the validated
- * payload through persistence and into provider adapter arguments.
+ * Pipeline Engine boundary. `node-spec-enforcement.ts` is the authoritative
+ * vendored semantic gate: supported fields bind to existing provider options,
+ * and every other populated field fails closed with its pending unit.
  */
 export const nodeSpecV1Schema = z
   .object({
