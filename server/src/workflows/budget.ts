@@ -33,6 +33,7 @@ const RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const PIPELINE_ADMISSION_ID_RE = /^kadypipe_[a-f0-9]{32}$/;
 const ENGINE_RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const SHA256_RE = /^[a-f0-9]{64}$/;
+const INSTANCE_ID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const TERMINAL_STATUSES = [
   "completed",
   "failed",
@@ -101,6 +102,20 @@ export interface WorkflowBudgetSettlementV1 {
   reason?: string;
 }
 
+export interface PipelineReservationIntentV1 {
+  admissionId: string;
+  workflowName: string;
+  engineAdmissionKey: string;
+  correlationLabel: string;
+  projectLabel: string;
+  requestSha256: string;
+  workflowRevisionSha256: string;
+  workflowNodeCount: number;
+  nodeIds: string[];
+  capCountedNodeIds: string[];
+  ownerInstanceId: string;
+}
+
 export interface WorkflowBudgetReservationV1 {
   version: typeof WORKFLOW_BUDGET_RESERVATION_VERSION;
   id: string;
@@ -121,6 +136,7 @@ export interface WorkflowBudgetReservationV1 {
   createdAt: number;
   updatedAt: number;
   expiresAt: number;
+  pipelineAdmissionIntent?: PipelineReservationIntentV1;
   settlement?: WorkflowBudgetSettlementV1;
 }
 
@@ -136,6 +152,7 @@ export interface ReserveWorkflowBudgetInput {
   maxTokens: number;
   initialUsage?: WorkflowBudgetUsageInput;
   leaseDurationMs?: number;
+  pipelineAdmissionIntent?: PipelineReservationIntentV1;
 }
 
 export interface SettleWorkflowBudgetInput {
@@ -181,8 +198,22 @@ export interface PipelineBudgetAdmission {
   handle: WorkflowBudgetReservationHandle;
 }
 
+export type PipelineAdmissionStatus =
+  | "intent"
+  | "dispatching"
+  | "indeterminate"
+  | "dispatched"
+  | "settling"
+  | "settled";
+
+export interface PipelineSettlementIntentV1 extends SettleWorkflowBudgetInput {
+  engineRunId?: string;
+}
+
 export const PIPELINE_ADMISSION_VERSION = 1 as const;
 export const PIPELINE_ADMISSION_LABEL_PREFIX = "KADY_PIPELINE_ADMISSION:" as const;
+export const PIPELINE_PROJECT_LABEL_PREFIX = "KADY_PIPELINE_PROJECT:" as const;
+export const PIPELINE_ADMISSION_OWNER_INSTANCE_ID = crypto.randomUUID();
 
 export interface PipelineAdmissionRecordV1 {
   version: typeof PIPELINE_ADMISSION_VERSION;
@@ -192,12 +223,17 @@ export interface PipelineAdmissionRecordV1 {
   reservationId: string;
   budgetRunId: string;
   correlationLabel: string;
+  projectLabel: string;
+  engineAdmissionKey: string;
   requestSha256: string;
+  workflowRevisionSha256: string;
   workflowNodeCount: number;
   nodeIds: string[];
   capCountedNodeIds: string[];
   engineRunId?: string;
-  status: "reserved" | "dispatched" | "indeterminate" | "settled";
+  ownerInstanceId: string;
+  status: PipelineAdmissionStatus;
+  settlementIntent?: PipelineSettlementIntentV1;
   createdAt: number;
   updatedAt: number;
 }
@@ -382,6 +418,44 @@ function usageEquals(
     left.cacheRead === right.cacheRead && left.cacheWrite === right.cacheWrite;
 }
 
+function isPipelineReservationIntent(
+  value: unknown,
+  projectId: string,
+): value is PipelineReservationIntentV1 {
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    "admissionId",
+    "workflowName",
+    "engineAdmissionKey",
+    "correlationLabel",
+    "projectLabel",
+    "requestSha256",
+    "workflowRevisionSha256",
+    "workflowNodeCount",
+    "nodeIds",
+    "capCountedNodeIds",
+    "ownerInstanceId",
+  ])) return false;
+  return typeof value.admissionId === "string" && PIPELINE_ADMISSION_ID_RE.test(value.admissionId) &&
+    typeof value.workflowName === "string" && value.workflowName.length > 0 && value.workflowName.length <= 256 &&
+    !/[\u0000-\u001f\u007f]/.test(value.workflowName) &&
+    typeof value.engineAdmissionKey === "string" && PIPELINE_ADMISSION_ID_RE.test(value.engineAdmissionKey) &&
+    value.engineAdmissionKey === pipelineEngineAdmissionKey(projectId, value.admissionId) &&
+    value.correlationLabel === `${PIPELINE_ADMISSION_LABEL_PREFIX}${value.engineAdmissionKey}` &&
+    value.projectLabel === `${PIPELINE_PROJECT_LABEL_PREFIX}${projectId}` &&
+    typeof value.requestSha256 === "string" && SHA256_RE.test(value.requestSha256) &&
+    typeof value.workflowRevisionSha256 === "string" && SHA256_RE.test(value.workflowRevisionSha256) &&
+    Number.isSafeInteger(value.workflowNodeCount) && (value.workflowNodeCount as number) > 0 &&
+    Array.isArray(value.nodeIds) && value.nodeIds.length > 0 &&
+    value.nodeIds.every((nodeId) => typeof nodeId === "string" && nodeId.length > 0) &&
+    new Set(value.nodeIds).size === value.nodeIds.length &&
+    Array.isArray(value.capCountedNodeIds) &&
+    value.capCountedNodeIds.every((nodeId) =>
+      typeof nodeId === "string" && (value.nodeIds as unknown[]).includes(nodeId)
+    ) &&
+    new Set(value.capCountedNodeIds).size === value.capCountedNodeIds.length &&
+    typeof value.ownerInstanceId === "string" && INSTANCE_ID_RE.test(value.ownerInstanceId);
+}
+
 function reservationIntent(input: {
   projectId: string;
   reservationId: string;
@@ -394,6 +468,7 @@ function reservationIntent(input: {
   maxTokens: number;
   initialUsage: StoredWorkflowBudgetUsageV1;
   leaseDurationMs: number;
+  pipelineAdmissionIntent?: PipelineReservationIntentV1;
 }): Record<string, unknown> {
   return {
     projectId: input.projectId,
@@ -407,6 +482,9 @@ function reservationIntent(input: {
     maxTokens: input.maxTokens,
     initialUsage: input.initialUsage,
     leaseDurationMs: input.leaseDurationMs,
+    ...(input.pipelineAdmissionIntent
+      ? { pipelineAdmissionIntent: input.pipelineAdmissionIntent }
+      : {}),
   };
 }
 
@@ -482,6 +560,7 @@ function parseReservation(value: unknown, projectId: string, reservationId: stri
     "createdAt",
     "updatedAt",
     "expiresAt",
+    "pipelineAdmissionIntent",
     "settlement",
   ])) {
     budgetError("CORRUPT", `Workflow budget reservation ${reservationId} has an invalid shape.`);
@@ -517,6 +596,8 @@ function parseReservation(value: unknown, projectId: string, reservationId: stri
     !Number.isSafeInteger(value.createdAt) || (value.createdAt as number) < 0 ||
     !Number.isSafeInteger(value.updatedAt) || (value.updatedAt as number) < (value.createdAt as number) ||
     !Number.isSafeInteger(value.expiresAt) || (value.expiresAt as number) < (value.createdAt as number) ||
+    (value.pipelineAdmissionIntent !== undefined &&
+      !isPipelineReservationIntent(value.pipelineAdmissionIntent, projectId)) ||
     (status === "active" ? value.settlement !== undefined : !isSettlement(value.settlement))
   ) {
     budgetError("CORRUPT", `Workflow budget reservation ${reservationId} has invalid fields.`);
@@ -533,6 +614,9 @@ function parseReservation(value: unknown, projectId: string, reservationId: stri
     maxTokens: value.maxTokens as number,
     initialUsage: value.initialUsage,
     leaseDurationMs: value.leaseDurationMs as number,
+    ...(value.pipelineAdmissionIntent
+      ? { pipelineAdmissionIntent: value.pipelineAdmissionIntent as PipelineReservationIntentV1 }
+      : {}),
   });
   if (digest(intent) !== value.requestSha256) {
     budgetError("CORRUPT", `Workflow budget reservation ${reservationId} failed its request digest.`);
@@ -755,6 +839,29 @@ function pipelineAdmissionPath(paths: ProjectPaths, admissionId: string): string
   return file;
 }
 
+function isPipelineSettlementIntent(value: unknown): value is PipelineSettlementIntentV1 {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["status", "usage", "reason", "engineRunId"])) {
+    return false;
+  }
+  if (!(value.status === "completed" || value.status === "failed" ||
+    value.status === "aborted" || value.status === "timed-out")) return false;
+  if (value.reason !== undefined && (
+    typeof value.reason !== "string" || value.reason.length < 1 || value.reason.length > 1_024 ||
+    /[\u0000-\u001f\u007f]/.test(value.reason)
+  )) return false;
+  if (value.engineRunId !== undefined && (
+    typeof value.engineRunId !== "string" || !ENGINE_RUN_ID_RE.test(value.engineRunId)
+  )) return false;
+  if (value.usage !== undefined) {
+    try {
+      normalizeUsage(value.usage as WorkflowBudgetUsageInput, "pipeline settlement intent usage");
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
 function parsePipelineAdmission(
   value: unknown,
   projectId: string,
@@ -768,18 +875,23 @@ function parsePipelineAdmission(
     "reservationId",
     "budgetRunId",
     "correlationLabel",
+    "projectLabel",
+    "engineAdmissionKey",
     "requestSha256",
+    "workflowRevisionSha256",
     "workflowNodeCount",
     "nodeIds",
     "capCountedNodeIds",
     "engineRunId",
+    "ownerInstanceId",
     "status",
+    "settlementIntent",
     "createdAt",
     "updatedAt",
   ])) {
     budgetError("CORRUPT", `Pipeline admission ${admissionId} has an invalid shape.`);
   }
-  const expectedLabel = `${PIPELINE_ADMISSION_LABEL_PREFIX}${admissionId}`;
+  const expectedProjectLabel = `${PIPELINE_PROJECT_LABEL_PREFIX}${projectId}`;
   if (
     value.version !== PIPELINE_ADMISSION_VERSION ||
     value.admissionId !== admissionId ||
@@ -788,8 +900,11 @@ function parsePipelineAdmission(
     value.workflowName.length > 256 || /[\u0000-\u001f\u007f]/.test(value.workflowName) ||
     typeof value.reservationId !== "string" || !RESERVATION_ID_RE.test(value.reservationId) ||
     typeof value.budgetRunId !== "string" || !RUN_ID_RE.test(value.budgetRunId) ||
-    value.correlationLabel !== expectedLabel ||
+    typeof value.engineAdmissionKey !== "string" || !PIPELINE_ADMISSION_ID_RE.test(value.engineAdmissionKey) ||
+    value.correlationLabel !== `${PIPELINE_ADMISSION_LABEL_PREFIX}${value.engineAdmissionKey}` ||
+    value.projectLabel !== expectedProjectLabel ||
     typeof value.requestSha256 !== "string" || !SHA256_RE.test(value.requestSha256) ||
+    typeof value.workflowRevisionSha256 !== "string" || !SHA256_RE.test(value.workflowRevisionSha256) ||
     !Number.isSafeInteger(value.workflowNodeCount) || (value.workflowNodeCount as number) < 1 ||
     !Array.isArray(value.nodeIds) ||
     value.nodeIds.some((nodeId) => typeof nodeId !== "string" || nodeId.length < 1) ||
@@ -801,8 +916,12 @@ function parsePipelineAdmission(
     (value.engineRunId !== undefined && (
       typeof value.engineRunId !== "string" || !ENGINE_RUN_ID_RE.test(value.engineRunId)
     )) ||
-    !(value.status === "reserved" || value.status === "dispatched" ||
-      value.status === "indeterminate" || value.status === "settled") ||
+    typeof value.ownerInstanceId !== "string" || !INSTANCE_ID_RE.test(value.ownerInstanceId) ||
+    !(value.status === "intent" || value.status === "dispatching" ||
+      value.status === "indeterminate" || value.status === "dispatched" ||
+      value.status === "settling" || value.status === "settled") ||
+    (value.status === "settling" ? !isPipelineSettlementIntent(value.settlementIntent) :
+      value.settlementIntent !== undefined && !isPipelineSettlementIntent(value.settlementIntent)) ||
     !Number.isSafeInteger(value.createdAt) || (value.createdAt as number) < 0 ||
     !Number.isSafeInteger(value.updatedAt) || (value.updatedAt as number) < (value.createdAt as number)
   ) {
@@ -1324,6 +1443,13 @@ export class WorkflowBudgetStore {
     const leaseDurationMs = safeLeaseDuration(
       input.leaseDurationMs ?? DEFAULT_WORKFLOW_BUDGET_LEASE_MS,
     );
+    if (input.pipelineAdmissionIntent !== undefined &&
+      !isPipelineReservationIntent(input.pipelineAdmissionIntent, input.projectId)) {
+      budgetError("INVALID_ARGUMENT", "Invalid durable pipeline admission intent.");
+    }
+    const pipelineAdmissionIntent = input.pipelineAdmissionIntent === undefined
+      ? undefined
+      : structuredClone(input.pipelineAdmissionIntent);
     const intent = reservationIntent({
       projectId: input.projectId,
       reservationId: input.reservationId,
@@ -1336,6 +1462,7 @@ export class WorkflowBudgetStore {
       maxTokens,
       initialUsage,
       leaseDurationMs,
+      ...(pipelineAdmissionIntent ? { pipelineAdmissionIntent } : {}),
     });
     const requestSha256 = digest(intent);
 
@@ -1419,6 +1546,7 @@ export class WorkflowBudgetStore {
         createdAt: now,
         updatedAt: now,
         expiresAt: now + leaseDurationMs,
+        ...(pipelineAdmissionIntent ? { pipelineAdmissionIntent } : {}),
       };
       atomicWriteReservation(paths, created);
       return created;
@@ -1661,11 +1789,28 @@ export function pipelineAdmissionId(value: string): string {
   return `kadypipe_${crypto.createHash("sha256").update(value).digest("hex").slice(0, 32)}`;
 }
 
+export function pipelineEngineAdmissionKey(projectId: string, admissionId: string): string {
+  assertProjectId(projectId);
+  if (!PIPELINE_ADMISSION_ID_RE.test(admissionId)) {
+    budgetError("INVALID_ARGUMENT", `Invalid pipeline admission id: ${admissionId}`);
+  }
+  return `kadypipe_${crypto.createHash("sha256")
+    .update(`${projectId}\0${admissionId}`)
+    .digest("hex")
+    .slice(0, 32)}`;
+}
+
+export function pipelineAdmissionProjectLabel(projectId: string): string {
+  assertProjectId(projectId);
+  return `${PIPELINE_PROJECT_LABEL_PREFIX}${projectId}`;
+}
+
 export function pipelineAdmissionIdFromEngineSnapshot(snapshot: unknown): string | undefined {
   const root = isRecord(snapshot) ? snapshot : undefined;
   const run = isRecord(root?.run) ? root.run : root;
   const metadata = isRecord(run?.metadata) ? run.metadata : undefined;
-  const metadataId = metadata?.kadyAdmissionId ?? metadata?.kady_admission_id;
+  const metadataId = metadata?.kadyEngineAdmissionKey ?? metadata?.kady_engine_admission_key ??
+    metadata?.kadyAdmissionId ?? metadata?.kady_admission_id;
   const validMetadataId = typeof metadataId === "string" && PIPELINE_ADMISSION_ID_RE.test(metadataId)
     ? metadataId
     : undefined;
@@ -1683,17 +1828,73 @@ export function pipelineAdmissionIdFromEngineSnapshot(snapshot: unknown): string
   return matches[0][1];
 }
 
+export function pipelineProjectIdFromEngineSnapshot(snapshot: unknown): string | undefined {
+  const root = isRecord(snapshot) ? snapshot : undefined;
+  const run = isRecord(root?.run) ? root.run : root;
+  const metadata = isRecord(run?.metadata) ? run.metadata : undefined;
+  const metadataProjectId = metadata?.kadyProjectId ?? metadata?.kady_project_id;
+  const validMetadataProjectId = typeof metadataProjectId === "string" && PROJECT_ID_RE.test(metadataProjectId)
+    ? metadataProjectId
+    : undefined;
+  const userMessage = run && typeof run.user_message === "string"
+    ? run.user_message
+    : run && typeof run.userMessage === "string"
+      ? run.userMessage
+      : undefined;
+  if (!userMessage) return validMetadataProjectId;
+  const matches = [...userMessage.matchAll(
+    /(?:^|\s)KADY_PIPELINE_PROJECT:([a-z0-9][a-z0-9_-]{0,63})(?=\s|$)/g,
+  )];
+  if (matches.length === 0) return validMetadataProjectId;
+  if (matches.length !== 1 || (validMetadataProjectId && validMetadataProjectId !== matches[0][1])) {
+    return undefined;
+  }
+  return matches[0][1];
+}
+
+function pipelineAdmissionRecordFromReservation(
+  reservation: WorkflowBudgetReservationV1,
+): PipelineAdmissionRecordV1 {
+  const intent = reservation.pipelineAdmissionIntent;
+  if (!intent) {
+    budgetError("CORRUPT", `Workflow reservation ${reservation.id} has no pipeline admission intent.`);
+  }
+  return {
+    version: PIPELINE_ADMISSION_VERSION,
+    admissionId: intent.admissionId,
+    projectId: reservation.projectId,
+    workflowName: intent.workflowName,
+    reservationId: reservation.id,
+    budgetRunId: reservation.runId,
+    correlationLabel: intent.correlationLabel,
+    projectLabel: intent.projectLabel,
+    engineAdmissionKey: intent.engineAdmissionKey,
+    requestSha256: intent.requestSha256,
+    workflowRevisionSha256: intent.workflowRevisionSha256,
+    workflowNodeCount: intent.workflowNodeCount,
+    nodeIds: structuredClone(intent.nodeIds),
+    capCountedNodeIds: structuredClone(intent.capCountedNodeIds),
+    ownerInstanceId: intent.ownerInstanceId,
+    status: reservation.status === "active" ? "intent" : "settled",
+    createdAt: reservation.createdAt,
+    updatedAt: reservation.updatedAt,
+  };
+}
+
 export function persistPipelineAdmission(
   admission: PipelineBudgetAdmission,
   workflowName: string,
   requestSha256: string,
+  workflowRevisionSha256: string,
 ): PipelineAdmissionRecordV1 {
-  if (!SHA256_RE.test(requestSha256)) {
-    budgetError("INVALID_ARGUMENT", "Pipeline admission request digest must be SHA-256.");
+  if (!SHA256_RE.test(requestSha256) || !SHA256_RE.test(workflowRevisionSha256)) {
+    budgetError("INVALID_ARGUMENT", "Pipeline admission request and workflow revision digests must be SHA-256.");
   }
   const projectId = admission.handle.record.projectId;
   const admissionId = admission.admissionId;
-  const correlationLabel = pipelineAdmissionCorrelationLabel(admissionId);
+  const engineAdmissionKey = pipelineEngineAdmissionKey(projectId, admissionId);
+  const correlationLabel = pipelineAdmissionCorrelationLabel(engineAdmissionKey);
+  const projectLabel = pipelineAdmissionProjectLabel(projectId);
   const nodeIds = admission.hooks.map((hook) => hook.nodeId);
   const capCountedNodeIds = admission.hooks
     .filter((hook) => billingCountsTowardBudget(hook.billing))
@@ -1708,7 +1909,10 @@ export function persistPipelineAdmission(
         existing.reservationId === admission.handle.record.id &&
         existing.budgetRunId === admission.runId &&
         existing.correlationLabel === correlationLabel &&
+        existing.projectLabel === projectLabel &&
+        existing.engineAdmissionKey === engineAdmissionKey &&
         existing.requestSha256 === requestSha256 &&
+        existing.workflowRevisionSha256 === workflowRevisionSha256 &&
         existing.workflowNodeCount === admission.workflowNodeCount &&
         isDeepStrictEqual(existing.nodeIds, nodeIds) &&
         isDeepStrictEqual(existing.capCountedNodeIds, capCountedNodeIds)
@@ -1719,6 +1923,19 @@ export function persistPipelineAdmission(
     if (!reservation || reservation.status !== "active" || reservation.runId !== admission.runId) {
       budgetError("CONFLICT", `Pipeline admission ${admissionId} has no active durable reservation.`);
     }
+    if (reservation.pipelineAdmissionIntent) {
+      const expected = pipelineAdmissionRecordFromReservation(reservation);
+      if (
+        expected.workflowName !== workflowName ||
+        expected.requestSha256 !== requestSha256 ||
+        expected.workflowRevisionSha256 !== workflowRevisionSha256 ||
+        expected.workflowNodeCount !== admission.workflowNodeCount ||
+        !isDeepStrictEqual(expected.nodeIds, nodeIds) ||
+        !isDeepStrictEqual(expected.capCountedNodeIds, capCountedNodeIds)
+      ) {
+        budgetError("CONFLICT", `Pipeline admission ${admissionId} contradicts its atomic reservation intent.`);
+      }
+    }
     const record: PipelineAdmissionRecordV1 = {
       version: PIPELINE_ADMISSION_VERSION,
       admissionId,
@@ -1727,11 +1944,15 @@ export function persistPipelineAdmission(
       reservationId: reservation.id,
       budgetRunId: reservation.runId,
       correlationLabel,
+      projectLabel,
+      engineAdmissionKey,
       requestSha256,
+      workflowRevisionSha256,
       workflowNodeCount: admission.workflowNodeCount,
       nodeIds,
       capCountedNodeIds,
-      status: "reserved",
+      ownerInstanceId: PIPELINE_ADMISSION_OWNER_INSTANCE_ID,
+      status: "intent",
       createdAt: now,
       updatedAt: now,
     };
@@ -1743,7 +1964,7 @@ export function persistPipelineAdmission(
 export function updatePipelineAdmission(
   projectId: string,
   admissionId: string,
-  update: { status: "dispatched" | "indeterminate" | "settled"; engineRunId?: string },
+  update: { status: "dispatching" | "indeterminate" | "dispatched" | "settled"; engineRunId?: string },
 ): PipelineAdmissionRecordV1 {
   if (update.engineRunId !== undefined && !ENGINE_RUN_ID_RE.test(update.engineRunId)) {
     budgetError("INVALID_ARGUMENT", `Invalid pipeline engine run id: ${update.engineRunId}`);
@@ -1758,8 +1979,16 @@ export function updatePipelineAdmission(
     ) {
       budgetError("CONFLICT", `Pipeline admission ${admissionId} is owned by another engine run.`);
     }
-    if (existing.status === "settled" && update.status !== "settled") {
-      budgetError("CONFLICT", `Pipeline admission ${admissionId} is already settled.`);
+    const transitionAllowed = existing.status === update.status ||
+      (existing.status === "intent" && update.status === "dispatching") ||
+      ((existing.status === "dispatching" || existing.status === "indeterminate") &&
+        update.status === "dispatched") ||
+      (existing.status === "settling" && update.status === "settled");
+    if (!transitionAllowed) {
+      budgetError(
+        "CONFLICT",
+        `Pipeline admission ${admissionId} cannot transition from ${existing.status} to ${update.status}.`,
+      );
     }
     const next: PipelineAdmissionRecordV1 = {
       ...existing,
@@ -1770,6 +1999,78 @@ export function updatePipelineAdmission(
     atomicWritePipelineAdmission(paths, next);
     return structuredClone(next);
   });
+}
+
+export function beginPipelineAdmissionSettlement(
+  projectId: string,
+  admissionId: string,
+  input: SettleWorkflowBudgetInput,
+  engineRunId?: string,
+): PipelineAdmissionRecordV1 {
+  const settlementIntent: PipelineSettlementIntentV1 = {
+    status: input.status,
+    ...(input.usage === undefined ? {} : { usage: structuredClone(input.usage) }),
+    ...(input.reason === undefined ? {} : { reason: input.reason }),
+    ...(engineRunId === undefined ? {} : { engineRunId }),
+  };
+  if (!isPipelineSettlementIntent(settlementIntent)) {
+    budgetError("INVALID_ARGUMENT", "Invalid pipeline settlement intent.");
+  }
+  return workflowBudgetStore.withProjectCostAdmissionLock(projectId, () => {
+    const paths = resolvePaths(projectId);
+    const existing = readPipelineAdmissionRecord(paths, admissionId);
+    if (!existing) budgetError("NOT_FOUND", `No such pipeline admission: ${admissionId}`);
+    if (existing.status === "settled") return structuredClone(existing);
+    if (existing.status === "settling") {
+      if (isDeepStrictEqual(existing.settlementIntent, settlementIntent)) {
+        return structuredClone(existing);
+      }
+      budgetError("CONFLICT", `Pipeline admission ${admissionId} already has another settlement intent.`);
+    }
+    if (existing.engineRunId !== undefined && engineRunId !== undefined &&
+      existing.engineRunId !== engineRunId) {
+      budgetError("CONFLICT", `Pipeline admission ${admissionId} is owned by another engine run.`);
+    }
+    const next: PipelineAdmissionRecordV1 = {
+      ...existing,
+      ...(engineRunId === undefined ? {} : { engineRunId }),
+      status: "settling",
+      settlementIntent,
+      updatedAt: Math.max(existing.updatedAt, Date.now()),
+    };
+    atomicWritePipelineAdmission(paths, next);
+    return structuredClone(next);
+  });
+}
+
+export async function completePipelineAdmissionSettlement(
+  projectId: string,
+  admissionId: string,
+): Promise<WorkflowBudgetReservationV1> {
+  const recovered = recoverPipelineAdmission(projectId, admissionId);
+  if (recovered.record.status === "settled") return recovered.admission.handle.record;
+  if (recovered.record.status !== "settling" || !recovered.record.settlementIntent) {
+    budgetError("CONFLICT", `Pipeline admission ${admissionId} has no durable settlement intent.`);
+  }
+  const { engineRunId: _engineRunId, ...settlement } = recovered.record.settlementIntent;
+  const entry = await recovered.admission.handle.settle(settlement);
+  updatePipelineAdmission(projectId, admissionId, {
+    status: "settled",
+    ...(recovered.record.engineRunId === undefined
+      ? {}
+      : { engineRunId: recovered.record.engineRunId }),
+  });
+  return entry;
+}
+
+export async function settlePipelineAdmission(
+  projectId: string,
+  admissionId: string,
+  input: SettleWorkflowBudgetInput,
+  engineRunId?: string,
+): Promise<WorkflowBudgetReservationV1> {
+  beginPipelineAdmissionSettlement(projectId, admissionId, input, engineRunId);
+  return completePipelineAdmissionSettlement(projectId, admissionId);
 }
 
 export function recoverPipelineAdmission(
@@ -1808,6 +2109,49 @@ export function findPipelineAdmission(
   return record ? recoverPipelineAdmission(projectId, admissionId) : undefined;
 }
 
+export function findPipelineAdmissionByEngineKey(
+  projectId: string,
+  engineAdmissionKey: string,
+): ReturnType<typeof recoverPipelineAdmission> | undefined {
+  if (!PIPELINE_ADMISSION_ID_RE.test(engineAdmissionKey)) {
+    budgetError("INVALID_ARGUMENT", `Invalid pipeline engine admission key: ${engineAdmissionKey}`);
+  }
+  const record = listPipelineAdmissions(projectId).find(
+    (candidate) => candidate.engineAdmissionKey === engineAdmissionKey,
+  );
+  return record ? recoverPipelineAdmission(projectId, record.admissionId) : undefined;
+}
+
+export function recoverPipelineAdmissionIntents(projectId: string): PipelineAdmissionRecordV1[] {
+  return workflowBudgetStore.withProjectCostAdmissionLock(projectId, () => {
+    const paths = resolvePaths(projectId);
+    const recovered: PipelineAdmissionRecordV1[] = [];
+    for (const reservation of listReservations(paths)) {
+      if (!reservation.pipelineAdmissionIntent) continue;
+      const expected = pipelineAdmissionRecordFromReservation(reservation);
+      const existing = readPipelineAdmissionRecord(paths, expected.admissionId);
+      if (existing) {
+        if (
+          existing.reservationId !== expected.reservationId ||
+          existing.engineAdmissionKey !== expected.engineAdmissionKey ||
+          existing.requestSha256 !== expected.requestSha256 ||
+          existing.workflowRevisionSha256 !== expected.workflowRevisionSha256
+        ) {
+          budgetError(
+            "CORRUPT",
+            `Pipeline admission ${expected.admissionId} contradicts its reservation intent.`,
+          );
+        }
+        recovered.push(structuredClone(existing));
+        continue;
+      }
+      atomicWritePipelineAdmission(paths, expected);
+      recovered.push(structuredClone(expected));
+    }
+    return recovered;
+  });
+}
+
 export function listPipelineAdmissions(projectId: string): PipelineAdmissionRecordV1[] {
   const paths = resolvePaths(projectId);
   const directory = pipelineAdmissionsDirectory(paths);
@@ -1839,6 +2183,11 @@ export async function reservePipelineNodeBudgets(input: {
   workflowNodeCount: number;
   hooks: PipelineNodeBudgetHook[];
   leaseDurationMs?: number;
+  durableIntent?: {
+    workflowName: string;
+    requestSha256: string;
+    workflowRevisionSha256: string;
+  };
 }): Promise<PipelineBudgetAdmission> {
   if (input.hooks.length === 0) {
     budgetError("INVALID_ARGUMENT", "An executable pipeline must have at least one resolved budget hook.");
@@ -1877,6 +2226,25 @@ export async function reservePipelineNodeBudgets(input: {
   }
   const identity = admissionId.slice("kadypipe_".length);
   const runId = `pipeline:${identity}`;
+  const pipelineAdmissionIntent = input.durableIntent === undefined
+    ? undefined
+    : {
+        admissionId,
+        workflowName: input.durableIntent.workflowName,
+        engineAdmissionKey: pipelineEngineAdmissionKey(input.projectId, admissionId),
+        correlationLabel: pipelineAdmissionCorrelationLabel(
+          pipelineEngineAdmissionKey(input.projectId, admissionId),
+        ),
+        projectLabel: pipelineAdmissionProjectLabel(input.projectId),
+        requestSha256: input.durableIntent.requestSha256,
+        workflowRevisionSha256: input.durableIntent.workflowRevisionSha256,
+        workflowNodeCount: input.workflowNodeCount,
+        nodeIds: input.hooks.map((hook) => hook.nodeId),
+        capCountedNodeIds: input.hooks
+          .filter((hook) => billingCountsTowardBudget(hook.billing))
+          .map((hook) => hook.nodeId),
+        ownerInstanceId: PIPELINE_ADMISSION_OWNER_INSTANCE_ID,
+      } satisfies PipelineReservationIntentV1;
   const handle = await reserveWorkflowBudget({
     projectId: input.projectId,
     reservationId: workflowBudgetReservationId("pipeline", identity),
@@ -1887,6 +2255,7 @@ export async function reservePipelineNodeBudgets(input: {
     modelCallCount: input.hooks.length,
     maxCostUsd,
     maxTokens,
+    ...(pipelineAdmissionIntent ? { pipelineAdmissionIntent } : {}),
     ...(input.leaseDurationMs === undefined
       ? {}
       : { leaseDurationMs: input.leaseDurationMs }),

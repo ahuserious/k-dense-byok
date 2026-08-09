@@ -143,26 +143,40 @@ The vendored engine is outside S4 ownership, so the merge commit must make the
 fields already sent by `POST /pipelines/:name/run` authoritative:
 
 1. At the run-request schema/handler anchor that currently accepts
-   `conversationId` and `message`, accept `idempotencyKey`,
-   `kadyAdmissionId`, and `metadata`. Require the two ids to be identical and
-   unique in durable run storage. In the same transaction that creates a run,
-   insert that key; on a duplicate key return the existing run's accepted
-   result without starting another executor.
-2. Persist and echo `metadata.kadyAdmissionId` on both list and detail run
-   responses. Extend `GET /api/workflows/runs` with an exact `admissionId`
-   filter. Its response must include
-   `admissionQuery: { admissionId, authoritative: true }` after the durable
-   lookup, including when `runs` is empty. Without that watermark Kady treats
-   absence as unknown and retains the reservation.
-3. At the terminal run transaction, persist
+   `conversationId` and `message`, accept `kadyProjectId`,
+   `kadyAdmissionId`, `kadyEngineAdmissionKey`, `idempotencyKey`,
+   `workflowRevisionSha256`, and `metadata`. Require
+   `idempotencyKey === kadyEngineAdmissionKey`, and validate the scoped key as
+   `kadypipe_ + first32hex(sha256(kadyProjectId + "\0" + kadyAdmissionId))`.
+   Make `(kadyProjectId, kadyEngineAdmissionKey)` unique in durable run
+   storage. In the same transaction that creates a run, insert that key; on a
+   duplicate return the existing run's accepted result without starting
+   another executor.
+2. Before creating the run or invoking a provider, hash the exact normalized
+   workflow revision the engine is about to execute: SHA-256 of canonical JSON
+   over the workflow object only (object keys recursively sorted; array order
+   preserved; exclude the API wrapper's `filename` and `source`). Reject when
+   it differs from `workflowRevisionSha256`. Persist that revision on the run.
+   This closes the remaining race after Kady's own immediately-pre-dispatch
+   revision recheck.
+3. Persist and echo `metadata.kadyProjectId`,
+   `metadata.kadyAdmissionId`, `metadata.kadyEngineAdmissionKey`, and
+   `metadata.kadyWorkflowRevisionSha256` on both list and detail run
+   responses. Extend `GET /api/workflows/runs` with exact `projectId` plus
+   `admissionId` filters. Its response must include
+   `admissionQuery: { projectId, admissionId, authoritative: true }` after the
+   durable composite-key lookup, including when `runs` is empty. Kady never
+   trusts an unscoped or non-authoritative negative result.
+4. At the terminal run transaction, persist
    `metadata.kady_completion_watermark` only after all node results and usage
    are durable. Its exact shape is:
 
    ```ts
-   {
-     version: 1,
-     admissionId: string,
-     nodeIds: string[],
+     {
+       version: 1,
+       projectId: string,
+       engineAdmissionKey: string,
+       nodeIds: string[],
      usageByNode: Record<string, {
        costUsd: number,
        tokensIn: number,
@@ -178,5 +192,17 @@ fields already sent by `POST /pipelines/:name/run` authoritative:
 
 These engine changes are required for safe negative admission lookup and
 observed-cost settlement. Kady already passes the idempotency key, persists
-the project/run/reservation correlation before dispatch, recovers it on
-restart, and runs reconciliation independently of clients.
+the workflow revision and project/run/reservation correlation before dispatch,
+and runs write-ahead recovery independently of clients. Against the current
+non-echoing engine, Kady can prove presence only by finding both reserved
+project/admission labels in the real `user_message` list shape; absence remains
+`unknown`, so the reservation is retained. The enabled Tier A
+`degrades safely against the current non-echoing engine run-list shape` test
+locks this fallback contract until the engine half lands.
+
+No merge edit is needed for Kady crash recovery. The reservation file embeds
+the complete admission intent in the same atomic write as the cost hold; a
+restarted worker materializes a missing correlation sidecar from it. The
+sidecar then advances write-ahead through `intent`, `dispatching`, `dispatched`,
+`settling`, and `settled`. `settling` includes the exact durable usage payload,
+so a crash before or after ledger settlement replays idempotently.
