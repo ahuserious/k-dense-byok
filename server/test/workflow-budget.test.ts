@@ -173,12 +173,19 @@ describe("durable workflow budget reservations", () => {
         projectId: "pipeline-budget",
         admissionId: "request-one",
         hooks: [
-          { nodeId: "api-node", maxTokens: 1_000, maxCostUsd: 3, billingMode: "api" },
+          {
+            nodeId: "api-node",
+            maxTokens: 1_000,
+            maxCostUsd: 3,
+            declaredBillingMode: "api",
+            billing: { provider: "openrouter", authType: "api_key", billingMode: "payg" },
+          },
           {
             nodeId: "subscription-node",
             maxTokens: 2_000,
             maxCostUsd: 9,
-            billingMode: "subscription",
+            declaredBillingMode: "subscription",
+            billing: { provider: "openai-codex", authType: "oauth", billingMode: "subscription" },
           },
         ],
       });
@@ -200,7 +207,13 @@ describe("durable workflow budget reservations", () => {
           projectId: "pipeline-reject",
           admissionId: "request-rejected",
           hooks: [
-            { nodeId: "expensive", maxTokens: 1_000, maxCostUsd: 3, billingMode: "api" },
+            {
+              nodeId: "expensive",
+              maxTokens: 1_000,
+              maxCostUsd: 3,
+              declaredBillingMode: "api",
+              billing: { provider: "openrouter", authType: "api_key", billingMode: "payg" },
+            },
           ],
         });
         providerCalls.push("provider");
@@ -208,6 +221,22 @@ describe("durable workflow budget reservations", () => {
       await expect(admitThenCallProvider()).rejects.toMatchObject({ code: "LIMIT_EXCEEDED" });
       expect(providerCalls).toEqual([]);
       expect(projectCostSummary("pipeline-reject").workflowReservedUsd).toBe(0);
+    });
+
+    it("rejects a zero envelope for a centrally cap-counted provider", async () => {
+      createProject({ name: "Pipeline zero", projectId: "pipeline-zero", spendLimitUsd: 10 });
+      await expect(reservePipelineNodeBudgets({
+        projectId: "pipeline-zero",
+        admissionId: "request-zero",
+        hooks: [{
+          nodeId: "unfunded",
+          maxTokens: 1_000,
+          maxCostUsd: 0,
+          declaredBillingMode: "inherit",
+          billing: { provider: "anthropic", authType: "oauth", billingMode: "metered_oauth" },
+        }],
+      })).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+      expect(projectCostSummary("pipeline-zero").workflowReservedUsd).toBe(0);
     });
   });
 

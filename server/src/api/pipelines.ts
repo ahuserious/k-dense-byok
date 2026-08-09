@@ -11,9 +11,9 @@
  *   - graceful degradation: if the engine is down, answer 503 (not a 500) so
  *     the UI can show "the workflow engine is not running" instead of a broken
  *     page;
- *   - cost reconciliation: pull a finished run's reported spend and write a
- *     `role:'workflow'` ledger row so project budgets stay honest even though
- *     the spend happened out-of-process.
+ *   - cost reconciliation: durably reserve before dispatch, correlate the
+ *     async engine run by an echoed admission label, and settle actual
+ *     cap-counted usage after a terminal snapshot.
  *
  * PORT NOTE (E1): the reference tree additionally wired a background rescue
  * watchdog and a /verify-node adversarial-verification hook into these routes.
@@ -24,18 +24,27 @@ import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import * as pipelineEngine from "../agent/pipeline-engine/client.ts";
 import { PipelineEngineUnavailableError, sumRunCost } from "../agent/pipeline-engine/client.ts";
-import { recordRun } from "../cost/ledger.ts";
-import { startRun as indexStartRun } from "../agent/runs-index.ts";
+import {
+  billingForWorkflowResolution,
+  declaredBillingModeMatches,
+} from "../cost/billing.ts";
 import { currentProjectId } from "../scope.ts";
 import { corsResponseHeaders } from "../cors.ts";
+import { resolvePaths } from "../projects.ts";
+import { resolveWorkflowModel } from "../agent/workflow-model-resolution.ts";
+import type { ModelRequest } from "../workflows/schema.ts";
 import {
+  persistPipelineAdmission,
+  pipelineAdmissionCorrelationLabel,
+  pipelineAdmissionIdFromEngineSnapshot,
+  PIPELINE_ADMISSION_LABEL_PREFIX,
+  recoverPipelineAdmission,
   reservePipelineNodeBudgets,
+  updatePipelineAdmission,
   WorkflowBudgetError,
   type PipelineBudgetAdmission,
   type PipelineNodeBudgetHook,
 } from "../workflows/budget.ts";
-
-const livePipelineAdmissions = new Map<string, PipelineBudgetAdmission>();
 
 function recordOf(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -60,22 +69,48 @@ function strictest(values: Array<number | undefined>): number | undefined {
   return present.length === 0 ? undefined : Math.min(...present);
 }
 
-/** Extract effective per-node NodeSpec billing hooks from the engine's loose response. */
-export function pipelineNodeBudgetHooks(definition: unknown): PipelineNodeBudgetHook[] {
+interface UnresolvedPipelineNodeBudgetHook {
+  nodeId: string;
+  maxTokens: number;
+  maxCostUsd: number;
+  declaredBillingMode: "inherit" | "api" | "subscription";
+  modelRequest: ModelRequest;
+}
+
+function executablePipelineNode(node: Record<string, unknown>): boolean {
+  return typeof node.command === "string" || typeof node.prompt === "string" ||
+    recordOf(node.loop) !== undefined;
+}
+
+/** Extract complete settings-bearing hooks from the engine's real `{workflow}` response. */
+export function unresolvedPipelineNodeBudgetHooks(
+  definition: unknown,
+): UnresolvedPipelineNodeBudgetHook[] {
   let root = recordOf(definition);
   for (const key of ["workflow", "definition", "data"] as const) {
     const nested = recordOf(root?.[key]);
     if (nested && Array.isArray(nested.nodes)) root = nested;
   }
   const nodes = root?.nodes;
-  if (!Array.isArray(nodes)) return [];
+  if (!Array.isArray(nodes)) {
+    throw new WorkflowBudgetError(
+      "INVALID_ARGUMENT",
+      "Pipeline engine workflow response has no executable nodes array.",
+    );
+  }
   const workflowLimits = recordOf(root?.limits);
-  const hooks: PipelineNodeBudgetHook[] = [];
+  const hooks: UnresolvedPipelineNodeBudgetHook[] = [];
   for (const [index, candidate] of nodes.entries()) {
     const node = recordOf(candidate);
+    if (!node || !executablePipelineNode(node)) continue;
     const settings = recordOf(node?.settings);
     const budget = recordOf(settings?.budget);
-    if (!budget) continue;
+    if (!settings || !budget) {
+      throw new WorkflowBudgetError(
+        "INVALID_ARGUMENT",
+        `Executable pipeline node ${String(node?.id ?? index)} has no settings.budget NodeSpec hook.`,
+      );
+    }
     if (positiveInteger(budget.maxTokens) === undefined) {
       throw new WorkflowBudgetError(
         "INVALID_ARGUMENT",
@@ -116,21 +151,65 @@ export function pipelineNodeBudgetHooks(definition: unknown): PipelineNodeBudget
       );
     }
     const billingMode = configuredBillingMode ?? "inherit";
+    const modelRequest = recordOf(settings.model);
+    if (!modelRequest) {
+      throw new WorkflowBudgetError(
+        "INVALID_ARGUMENT",
+        `Executable pipeline node ${String(node?.id ?? index)} has no settings.model resolution request.`,
+      );
+    }
     hooks.push({
       nodeId: String(node?.id ?? `node-${index}`),
       maxTokens,
       maxCostUsd,
-      billingMode,
+      declaredBillingMode: billingMode,
+      modelRequest: modelRequest as ModelRequest,
     });
+  }
+  if (hooks.length === 0) {
+    throw new WorkflowBudgetError(
+      "INVALID_ARGUMENT",
+      "Executable pipeline workflow produced no resolved NodeSpec budget hooks.",
+    );
   }
   return hooks;
 }
 
-function engineRunId(value: unknown): string | undefined {
-  const root = recordOf(value);
-  const run = recordOf(root?.run);
-  const candidate = root?.runId ?? root?.run_id ?? root?.id ?? run?.id ?? run?.runId;
-  return typeof candidate === "string" && candidate.length > 0 ? candidate : undefined;
+export async function pipelineNodeBudgetHooks(
+  definition: unknown,
+  context: { projectId: string; sessionId: string },
+  resolveModel: typeof resolveWorkflowModel = resolveWorkflowModel,
+): Promise<PipelineNodeBudgetHook[]> {
+  const paths = resolvePaths(context.projectId);
+  const unresolved = unresolvedPipelineNodeBudgetHooks(definition);
+  return Promise.all(unresolved.map(async (hook) => {
+    let resolution: Awaited<ReturnType<typeof resolveWorkflowModel>>;
+    try {
+      resolution = await resolveModel(hook.modelRequest, {
+        manifest: { projectId: context.projectId, sessionId: context.sessionId },
+        paths,
+      });
+    } catch (error) {
+      throw new WorkflowBudgetError(
+        "INVALID_ARGUMENT",
+        `Pipeline node ${hook.nodeId} model could not be resolved before admission: ${(error as Error).message}`,
+      );
+    }
+    const billing = billingForWorkflowResolution(resolution.receipt.resolved);
+    if (!declaredBillingModeMatches(hook.declaredBillingMode, billing)) {
+      throw new WorkflowBudgetError(
+        "INVALID_ARGUMENT",
+        `Pipeline node ${hook.nodeId} declares billingMode ${hook.declaredBillingMode}, but resolved ${billing.provider}/${billing.authType} is ${billing.billingMode}.`,
+      );
+    }
+    return {
+      nodeId: hook.nodeId,
+      maxTokens: hook.maxTokens,
+      maxCostUsd: hook.maxCostUsd,
+      declaredBillingMode: hook.declaredBillingMode,
+      billing,
+    };
+  }));
 }
 
 function mapPipelineRunError(reply: FastifyReply, error: unknown): unknown {
@@ -158,12 +237,8 @@ function mapError(reply: FastifyReply, err: unknown): { detail: string; engine: 
 // case and across versions; we read both and lowercase.
 const TERMINAL_RUN_STATUSES = new Set([
   "completed",
-  "succeeded",
-  "success",
   "failed",
   "cancelled",
-  "canceled",
-  "abandoned",
 ]);
 
 /** The engine's run JSON is `{ run, events }`; pull the top-level run status string. */
@@ -175,6 +250,47 @@ function runStatusOf(snapshot: unknown): string {
 
 function isTerminalRunStatus(snapshot: unknown): boolean {
   return TERMINAL_RUN_STATUSES.has(runStatusOf(snapshot));
+}
+
+function engineSnapshotRun(snapshot: unknown): Record<string, unknown> | undefined {
+  const root = recordOf(snapshot);
+  return recordOf(root?.run) ?? root;
+}
+
+function pipelineRunCostForNodes(
+  snapshot: unknown,
+  includedNodeIds: readonly string[],
+): ReturnType<typeof sumRunCost> {
+  const includedNodes = new Set(includedNodeIds);
+  const totals = { costUsd: 0, tokensIn: 0, tokensOut: 0 };
+  for (const event of eventsOf(snapshot)) {
+    const nodeId = event.step_name ?? event.stepName ?? event.node_id ?? event.nodeId;
+    if (typeof nodeId !== "string" || !includedNodes.has(nodeId)) continue;
+    const eventType = String(event.event_type ?? event.type ?? "").toLowerCase();
+    if (eventType !== "node_completed") continue;
+    const eventTotals = sumRunCost(recordOf(event.data) ?? event);
+    totals.costUsd += eventTotals.costUsd;
+    totals.tokensIn += eventTotals.tokensIn;
+    totals.tokensOut += eventTotals.tokensOut;
+  }
+  return totals;
+}
+
+function pipelineUsageCompleteForStartedNodes(
+  snapshot: unknown,
+  admittedNodeIds: readonly string[],
+): boolean {
+  const admitted = new Set(admittedNodeIds);
+  const started = new Set<string>();
+  const completed = new Set<string>();
+  for (const event of eventsOf(snapshot)) {
+    const nodeId = event.step_name ?? event.stepName ?? event.node_id ?? event.nodeId;
+    if (typeof nodeId !== "string" || !admitted.has(nodeId)) continue;
+    const type = String(event.event_type ?? event.type ?? "").toLowerCase();
+    if (type === "node_started") started.add(nodeId);
+    if (type === "node_completed") completed.add(nodeId);
+  }
+  return [...started].every((nodeId) => completed.has(nodeId));
 }
 
 // Read a run snapshot's events array defensively (the engine returns `{ run, events }`;
@@ -212,7 +328,15 @@ function eventType(ev: Record<string, unknown>): string {
   return String(ev.type ?? ev.event_type ?? "").toLowerCase();
 }
 
-export async function registerPipelineRoutes(app: FastifyInstance): Promise<void> {
+export interface PipelineRouteOverrides {
+  resolveBudgetHooks?: typeof pipelineNodeBudgetHooks;
+}
+
+export async function registerPipelineRoutes(
+  app: FastifyInstance,
+  overrides: PipelineRouteOverrides = {},
+): Promise<void> {
+  const resolveBudgetHooks = overrides.resolveBudgetHooks ?? pipelineNodeBudgetHooks;
   // Health: lets the UI decide whether to offer Pipelines or show setup help.
   app.get("/pipelines/health", async () => ({ healthy: await pipelineEngine.pipelineEngineHealthy() }));
 
@@ -267,22 +391,45 @@ export async function registerPipelineRoutes(app: FastifyInstance): Promise<void
 
   // --- run lifecycle (proxied) ---
   app.post<{ Params: { name: string } }>("/pipelines/:name/run", async (req, reply) => {
-    let admission: PipelineBudgetAdmission | null = null;
+    let admission: PipelineBudgetAdmission | undefined;
+    let ownershipPersisted = false;
+    let dispatchAccepted = false;
     try {
+      const body = recordOf(req.body) ?? {};
+      const conversationId = body.conversationId;
+      const message = body.message;
+      if (typeof conversationId !== "string" || conversationId.length < 1) {
+        throw new WorkflowBudgetError("INVALID_ARGUMENT", "Pipeline run requires conversationId.");
+      }
+      if (typeof message !== "string" || message.length < 1) {
+        throw new WorkflowBudgetError("INVALID_ARGUMENT", "Pipeline run requires a non-empty message.");
+      }
+      if (message.includes(PIPELINE_ADMISSION_LABEL_PREFIX)) {
+        throw new WorkflowBudgetError(
+          "INVALID_ARGUMENT",
+          "Pipeline run message contains a reserved Kady admission label.",
+        );
+      }
+      const projectId = currentProjectId();
       const definition = await pipelineEngine.getWorkflow(req.params.name);
-      const hooks = pipelineNodeBudgetHooks(definition);
+      const hooks = await resolveBudgetHooks(definition, {
+        projectId,
+        sessionId: typeof body.sessionId === "string" ? body.sessionId : conversationId,
+      });
       admission = await reservePipelineNodeBudgets({
-        projectId: currentProjectId(),
+        projectId,
         admissionId: crypto.randomUUID(),
         hooks,
       });
+      persistPipelineAdmission(admission, req.params.name);
+      ownershipPersisted = true;
+      const correlationLabel = pipelineAdmissionCorrelationLabel(admission.admissionId);
       // If the client picked a Kady model (the chat-merged catalogue, an "openrouter/..."
       // ref), thread it into the engine's run options as `requestOptions.model` so its Pi
       // resolves the SAME model chat would. The body shape is otherwise loose/unknown, so
       // we pass it through untouched aside from lifting `model` into requestOptions.
-      const body = (req.body ?? {}) as Record<string, unknown>;
       const { model, ...rest } = body;
-      const runBody =
+      const baseRunBody =
         typeof model === "string" && model.length > 0
           ? {
               ...rest,
@@ -292,16 +439,51 @@ export async function registerPipelineRoutes(app: FastifyInstance): Promise<void
               },
             }
           : body;
+      const runBody = {
+        ...baseRunBody,
+        message: `${message}\n\n${correlationLabel}`,
+        kadyAdmissionId: admission.admissionId,
+      };
       const result = await pipelineEngine.runWorkflow(req.params.name, runBody);
-      const runId = engineRunId(result);
-      if (admission && runId) livePipelineAdmissions.set(runId, admission);
-      return result;
+      const resultRecord = recordOf(result);
+      if (resultRecord?.accepted !== true || typeof resultRecord.status !== "string") {
+        throw new WorkflowBudgetError(
+          "CONFLICT",
+          "Pipeline engine did not durably accept the correlated workflow invocation.",
+        );
+      }
+      dispatchAccepted = true;
+      try {
+        updatePipelineAdmission(projectId, admission.admissionId, { status: "dispatched" });
+      } catch (error) {
+        // The already-fsynced `reserved` mapping proves ownership just as well.
+        // Never release its reservation after the engine has accepted work.
+        req.log.error({ error, admissionId: admission.admissionId }, "pipeline admission status update failed");
+      }
+      return { ...resultRecord, kadyAdmissionId: admission.admissionId };
     } catch (err) {
-      if (admission) {
-        await admission.handle.settle({
-          status: "failed",
-          reason: "pipeline engine did not return terminal usage ownership",
-        }).catch(() => undefined);
+      if (admission && !dispatchAccepted) {
+        try {
+          await admission.handle.settle({
+            status: "failed",
+            reason: ownershipPersisted
+              ? "pipeline engine did not accept the durable correlated invocation"
+              : "pipeline admission ownership could not be persisted before dispatch",
+          });
+          if (ownershipPersisted) {
+            updatePipelineAdmission(
+              admission.handle.record.projectId,
+              admission.admissionId,
+              { status: "settled" },
+            );
+          }
+        } catch (settlementError) {
+          req.log.error(
+            { settlementError, admissionId: admission.admissionId },
+            "pipeline admission settlement failed closed",
+          );
+          return mapPipelineRunError(reply, settlementError);
+        }
       }
       return mapPipelineRunError(reply, err);
     }
@@ -332,87 +514,82 @@ export async function registerPipelineRoutes(app: FastifyInstance): Promise<void
   });
 
   // --- cost bridge ---
-  // Fetch a finished run, sum the spend the engine reported, and record it against the
-  // active project as a `role:'workflow'` row. Called when a run finishes; sessionId is
-  // derived from the runId so re-calling overwrites the same logical run rather than
-  // double-billing a fresh session each time.
+  // Only a durable Kady admission label may own reconciliation. Legacy runs
+  // without that proof are rejected instead of taking a second ledger path.
   app.post<{ Params: { runId: string } }>(
     "/pipelines/runs/:runId/reconcile-cost",
     async (req, reply) => {
       try {
-        const run = await pipelineEngine.getRun(req.params.runId);
-        const totals = sumRunCost(run);
-        const admission = livePipelineAdmissions.get(req.params.runId);
-        if (admission) {
-          const entry = await admission.handle.settle({
-            status: "completed",
-            usage: {
-              input: totals.tokensIn,
-              output: totals.tokensOut,
-              total: totals.tokensIn + totals.tokensOut,
-              cost: Math.min(totals.costUsd, admission.handle.record.maxCostUsd),
-              cacheRead: 0,
-              cacheWrite: 0,
-            },
-          });
-          livePipelineAdmissions.delete(req.params.runId);
-          return {
-            reconciled: totals,
-            entry,
-            budgetAdmission: {
-              runId: admission.runId,
-              nodeIds: admission.hooks.map((hook) => hook.nodeId),
-            },
-          };
+        const snapshot = await pipelineEngine.getRun(req.params.runId);
+        if (!isTerminalRunStatus(snapshot)) {
+          throw new WorkflowBudgetError(
+            "CONFLICT",
+            `Pipeline run ${req.params.runId} is ${runStatusOf(snapshot) || "nonterminal"}; cost reconciliation requires completed, failed, or cancelled.`,
+          );
         }
-        const sessionId = `pipeline-${req.params.runId}`.replace(/[^A-Za-z0-9._-]/g, "-");
-        const entry = recordRun({
-          sessionId,
-          model: "pipeline-engine",
-          role: "workflow",
-          before: { costUsd: 0, input: 0, output: 0, cacheRead: 0, total: 0 },
-          after: {
-            costUsd: totals.costUsd,
-            input: totals.tokensIn,
-            output: totals.tokensOut,
-            cacheRead: 0,
-            total: totals.tokensIn + totals.tokensOut,
-          },
+        const run = engineSnapshotRun(snapshot);
+        if (run?.id !== req.params.runId) {
+          throw new WorkflowBudgetError("CONFLICT", "Pipeline snapshot does not own the requested engine run id.");
+        }
+        const admissionId = pipelineAdmissionIdFromEngineSnapshot(snapshot);
+        if (!admissionId) {
+          throw new WorkflowBudgetError(
+            "NOT_FOUND",
+            "Pipeline run has no durable Kady admission label; legacy ledger fallback is disabled.",
+          );
+        }
+        const projectId = currentProjectId();
+        let recovered = recoverPipelineAdmission(projectId, admissionId);
+        if ((run.workflow_name ?? run.workflowName) !== recovered.record.workflowName) {
+          throw new WorkflowBudgetError("CONFLICT", "Pipeline run workflow does not match its admission owner.");
+        }
+        updatePipelineAdmission(projectId, admissionId, {
+          status: recovered.record.status === "settled" ? "settled" : "dispatched",
+          engineRunId: req.params.runId,
         });
-
-        // Backfill a runs-index row alongside the ledger row so the console shows
-        // workflow runs too. role 'workflow', loopId null; task is the workflow
-        // name when the engine's run object exposes one, else the runId. The run
-        // object is typed `unknown` (the client doesn't trust a fixed field name
-        // across engine versions), so we probe a couple of likely keys defensively.
-        // Single terminal 'completed' row: reconcile-cost runs after the workflow
-        // finishes. Best-effort — never fail the reconcile on an index write.
-        try {
-          const runObj = (run ?? {}) as Record<string, unknown>;
-          const workflowName =
-            typeof runObj.workflowName === "string"
-              ? runObj.workflowName
-              : typeof runObj.name === "string"
-                ? runObj.name
-                : req.params.runId;
-          indexStartRun(currentProjectId(), {
-            sessionId,
-            loopId: null,
-            iteration: 0,
-            task: workflowName,
-            role: "workflow",
-            status: "completed",
-            model: "pipeline-engine",
-            costUsd: totals.costUsd,
-            tokensIn: totals.tokensIn,
-            tokensOut: totals.tokensOut,
-          });
-        } catch (err) {
-          req.log.warn({ err }, "failed to write runs-index workflow row");
-        }
-        return { reconciled: totals, entry };
+        recovered = recoverPipelineAdmission(projectId, admissionId);
+        const tokenTotals = pipelineRunCostForNodes(snapshot, recovered.record.nodeIds);
+        const capTotals = pipelineRunCostForNodes(snapshot, recovered.record.capCountedNodeIds);
+        const status = runStatusOf(snapshot);
+        const usageComplete = pipelineUsageCompleteForStartedNodes(
+          snapshot,
+          recovered.record.nodeIds,
+        );
+        const entry = await recovered.admission.handle.settle({
+          status: status === "completed" ? "completed" : status === "cancelled" ? "aborted" : "failed",
+          ...(usageComplete
+            ? {
+                usage: {
+                  input: tokenTotals.tokensIn,
+                  output: tokenTotals.tokensOut,
+                  total: tokenTotals.tokensIn + tokenTotals.tokensOut,
+                  cost: capTotals.costUsd,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                },
+              }
+            : { reason: "pipeline engine terminal snapshot has incomplete started-node usage" }),
+        });
+        updatePipelineAdmission(projectId, admissionId, {
+          status: "settled",
+          engineRunId: req.params.runId,
+        });
+        return {
+          reconciled: {
+            costUsd: capTotals.costUsd,
+            tokensIn: tokenTotals.tokensIn,
+            tokensOut: tokenTotals.tokensOut,
+          },
+          entry,
+          budgetAdmission: {
+            admissionId,
+            runId: recovered.admission.runId,
+            nodeIds: recovered.record.nodeIds,
+            capCountedNodeIds: recovered.record.capCountedNodeIds,
+          },
+        };
       } catch (err) {
-        return mapError(reply, err);
+        return mapPipelineRunError(reply, err);
       }
     },
   );

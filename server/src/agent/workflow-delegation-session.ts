@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import {
   DefaultResourceLoader,
   SessionManager,
@@ -7,6 +8,7 @@ import {
   createAgentSession,
   getAgentDir,
   type AgentSession,
+  type ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
 import type { ProjectPaths } from "../projects.ts";
 import { lookPath } from "../binaries.ts";
@@ -29,6 +31,10 @@ import {
 } from "./session-registry.ts";
 import { subagentsExtensionPath } from "./subagent-bridge.ts";
 import { ensureWebAccess } from "./web-access-bridge.ts";
+import {
+  makeFusionRequestExtension,
+  type FusionConfig,
+} from "./fusion-bridge.ts";
 
 export interface WorkflowDelegationSession {
   readonly projectId: string;
@@ -147,6 +153,78 @@ export function applyS4ProviderRequestBindings(
     if (!S4_RESERVED_SAMPLING_KEYS.has(key)) bound[key] = value;
   }
   return bound;
+}
+
+export interface S4HostedFusionSessionInput {
+  projectId: string;
+  paths: ProjectPaths;
+  fusionConfig: FusionConfig;
+  model: Model<Api>;
+}
+
+/**
+ * Hosted Fusion session factory owned by S4. The S4 provider binder follows
+ * the Fusion extension so sampling controls modify the final router payload.
+ */
+export async function createS4HostedFusionSession(
+  input: S4HostedFusionSessionInput,
+  providerRequest: {
+    temperature: number;
+    top_p: number;
+    sampling: Record<string, string | number | boolean>;
+  },
+): Promise<AgentSession> {
+  const holder: { session?: AgentSession } = {};
+  const settingsManager = SettingsManager.inMemory({
+    compaction: { enabled: false },
+    retry: { enabled: false },
+  });
+  const providerBindingExtension: ExtensionFactory = (pi) => {
+    pi.on("before_provider_request", (event) => {
+      if (!event.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) {
+        return event.payload;
+      }
+      return applyS4ProviderRequestBindings(
+        event.payload as Record<string, unknown>,
+        providerRequest,
+      );
+    });
+  };
+  const resourceLoader = new DefaultResourceLoader({
+    cwd: input.paths.sandbox,
+    agentDir: getAgentDir(),
+    settingsManager,
+    noExtensions: true,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+    systemPrompt:
+      "Answer the user's single request directly. Do not call local tools or assume access to local files.",
+    appendSystemPromptOverride: () => [],
+    extensionFactories: [
+      makeFusionRequestExtension(
+        input.projectId,
+        () => holder.session?.sessionId ?? "",
+        { allowJudgeFallback: false },
+      ),
+      providerBindingExtension,
+    ],
+  });
+  await resourceLoader.reload();
+  const { session } = await createAgentSession({
+    cwd: input.paths.sandbox,
+    agentDir: getAgentDir(),
+    model: input.model,
+    modelRuntime: getModelRuntime(),
+    resourceLoader,
+    sessionManager: SessionManager.inMemory(input.paths.sandbox),
+    settingsManager,
+    noTools: "all",
+    tools: [],
+  });
+  holder.session = session;
+  return session;
 }
 
 /** Pure merge-time validation hook for controls that would be unsafe to defer. */

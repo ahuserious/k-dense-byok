@@ -10,7 +10,12 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { projectCostSummary } from "../cost/ledger.ts";
+import {
+  billingCountsTowardBudget,
+  type BillingContext,
+} from "../cost/billing.ts";
 import { resolvePaths, type ProjectPaths } from "../projects.ts";
 import { apiRelative, isWithin } from "../sandbox-fs.ts";
 
@@ -25,6 +30,8 @@ const DEFAULT_LOCK_STALE_MS = 30_000;
 const PROJECT_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const RESERVATION_ID_RE = /^wbres_[a-f0-9]{32}$/;
 const RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const PIPELINE_ADMISSION_ID_RE = /^kadypipe_[a-f0-9]{32}$/;
+const ENGINE_RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const TERMINAL_STATUSES = [
   "completed",
@@ -162,13 +169,34 @@ export interface PipelineNodeBudgetHook {
   nodeId: string;
   maxTokens: number;
   maxCostUsd: number;
-  billingMode: "inherit" | "api" | "subscription";
+  declaredBillingMode: "inherit" | "api" | "subscription";
+  billing: BillingContext;
 }
 
 export interface PipelineBudgetAdmission {
+  admissionId: string;
   runId: string;
   hooks: PipelineNodeBudgetHook[];
   handle: WorkflowBudgetReservationHandle;
+}
+
+export const PIPELINE_ADMISSION_VERSION = 1 as const;
+export const PIPELINE_ADMISSION_LABEL_PREFIX = "KADY_PIPELINE_ADMISSION:" as const;
+
+export interface PipelineAdmissionRecordV1 {
+  version: typeof PIPELINE_ADMISSION_VERSION;
+  admissionId: string;
+  projectId: string;
+  workflowName: string;
+  reservationId: string;
+  budgetRunId: string;
+  correlationLabel: string;
+  nodeIds: string[];
+  capCountedNodeIds: string[];
+  engineRunId?: string;
+  status: "reserved" | "dispatched" | "settled";
+  createdAt: number;
+  updatedAt: number;
 }
 
 /**
@@ -706,6 +734,140 @@ function readReservation(paths: ProjectPaths, reservationId: string): WorkflowBu
     budgetError("CORRUPT", `Workflow budget reservation ${reservationId} is malformed JSON.`);
   }
   return parseReservation(parsed, paths.id, reservationId);
+}
+
+function pipelineAdmissionsDirectory(paths: ProjectPaths): string {
+  return path.join(paths.workflowBudgetDir, "pipeline-admissions");
+}
+
+function pipelineAdmissionPath(paths: ProjectPaths, admissionId: string): string {
+  if (!PIPELINE_ADMISSION_ID_RE.test(admissionId)) {
+    budgetError("INVALID_ARGUMENT", `Invalid pipeline admission id: ${admissionId}`);
+  }
+  const directory = pipelineAdmissionsDirectory(paths);
+  const file = path.join(directory, `${admissionId}.json`);
+  if (!isWithin(path.resolve(directory), path.resolve(file))) {
+    budgetError("INVALID_ARGUMENT", "Pipeline admission path escaped its directory.");
+  }
+  return file;
+}
+
+function parsePipelineAdmission(
+  value: unknown,
+  projectId: string,
+  admissionId: string,
+): PipelineAdmissionRecordV1 {
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    "version",
+    "admissionId",
+    "projectId",
+    "workflowName",
+    "reservationId",
+    "budgetRunId",
+    "correlationLabel",
+    "nodeIds",
+    "capCountedNodeIds",
+    "engineRunId",
+    "status",
+    "createdAt",
+    "updatedAt",
+  ])) {
+    budgetError("CORRUPT", `Pipeline admission ${admissionId} has an invalid shape.`);
+  }
+  const expectedLabel = `${PIPELINE_ADMISSION_LABEL_PREFIX}${admissionId}`;
+  if (
+    value.version !== PIPELINE_ADMISSION_VERSION ||
+    value.admissionId !== admissionId ||
+    value.projectId !== projectId ||
+    typeof value.workflowName !== "string" || value.workflowName.length < 1 ||
+    value.workflowName.length > 256 || /[\u0000-\u001f\u007f]/.test(value.workflowName) ||
+    typeof value.reservationId !== "string" || !RESERVATION_ID_RE.test(value.reservationId) ||
+    typeof value.budgetRunId !== "string" || !RUN_ID_RE.test(value.budgetRunId) ||
+    value.correlationLabel !== expectedLabel ||
+    !Array.isArray(value.nodeIds) ||
+    value.nodeIds.some((nodeId) => typeof nodeId !== "string" || nodeId.length < 1) ||
+    new Set(value.nodeIds).size !== value.nodeIds.length ||
+    !Array.isArray(value.capCountedNodeIds) ||
+    value.capCountedNodeIds.some((nodeId) => typeof nodeId !== "string" || nodeId.length < 1) ||
+    new Set(value.capCountedNodeIds).size !== value.capCountedNodeIds.length ||
+    value.capCountedNodeIds.some((nodeId) => !(value.nodeIds as unknown[]).includes(nodeId)) ||
+    (value.engineRunId !== undefined && (
+      typeof value.engineRunId !== "string" || !ENGINE_RUN_ID_RE.test(value.engineRunId)
+    )) ||
+    !(value.status === "reserved" || value.status === "dispatched" || value.status === "settled") ||
+    !Number.isSafeInteger(value.createdAt) || (value.createdAt as number) < 0 ||
+    !Number.isSafeInteger(value.updatedAt) || (value.updatedAt as number) < (value.createdAt as number)
+  ) {
+    budgetError("CORRUPT", `Pipeline admission ${admissionId} has invalid fields.`);
+  }
+  return value as unknown as PipelineAdmissionRecordV1;
+}
+
+function readPipelineAdmissionRecord(
+  paths: ProjectPaths,
+  admissionId: string,
+): PipelineAdmissionRecordV1 | null {
+  const bytes = readSafeRegularFile(
+    paths,
+    pipelineAdmissionPath(paths, admissionId),
+    MAX_WORKFLOW_BUDGET_RECORD_BYTES,
+    `Pipeline admission ${admissionId}`,
+  );
+  if (!bytes) return null;
+  try {
+    return parsePipelineAdmission(JSON.parse(bytes.toString("utf-8")), paths.id, admissionId);
+  } catch (error) {
+    if (error instanceof WorkflowBudgetError) throw error;
+    budgetError("CORRUPT", `Pipeline admission ${admissionId} is malformed JSON.`);
+  }
+}
+
+function atomicWritePipelineAdmission(
+  paths: ProjectPaths,
+  record: PipelineAdmissionRecordV1,
+): void {
+  const directory = pipelineAdmissionsDirectory(paths);
+  assertSafeDirectoryChain(paths, directory, true);
+  const temporaryDirectory = path.join(paths.workflowBudgetDir, ".pipeline-admission-write-tmp");
+  assertSafeDirectoryChain(paths, temporaryDirectory, true);
+  const file = pipelineAdmissionPath(paths, record.admissionId);
+  const bytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`, "utf-8");
+  if (bytes.length > MAX_WORKFLOW_BUDGET_RECORD_BYTES) {
+    budgetError("CORRUPT", `Pipeline admission ${record.admissionId} is too large.`);
+  }
+  const temporary = path.join(
+    temporaryDirectory,
+    `${record.admissionId}.${process.pid}.${crypto.randomUUID()}.tmp`,
+  );
+  const noFollow = (fs.constants as typeof fs.constants & { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(
+      temporary,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollow,
+      0o600,
+    );
+    fs.writeFileSync(fd, bytes);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.renameSync(temporary, file);
+    const written = readSafeRegularFile(
+      paths,
+      file,
+      MAX_WORKFLOW_BUDGET_RECORD_BYTES,
+      `Pipeline admission ${record.admissionId}`,
+    );
+    if (!written || !written.equals(bytes)) {
+      budgetError("CORRUPT", `Pipeline admission ${record.admissionId} was not durably replaced.`);
+    }
+    fsyncDirectory(directory);
+    fsyncDirectory(temporaryDirectory);
+  } catch (error) {
+    if (fd !== undefined) fs.closeSync(fd);
+    fs.rmSync(temporary, { force: true });
+    throw error;
+  }
 }
 
 function listReservations(paths: ProjectPaths): WorkflowBudgetReservationV1[] {
@@ -1479,10 +1641,141 @@ export function reserveWorkflowBudget(
   return workflowBudgetStore.reserve(input);
 }
 
+export function pipelineAdmissionCorrelationLabel(admissionId: string): string {
+  if (!PIPELINE_ADMISSION_ID_RE.test(admissionId)) {
+    budgetError("INVALID_ARGUMENT", `Invalid pipeline admission id: ${admissionId}`);
+  }
+  return `${PIPELINE_ADMISSION_LABEL_PREFIX}${admissionId}`;
+}
+
+export function pipelineAdmissionIdFromEngineSnapshot(snapshot: unknown): string | undefined {
+  const root = isRecord(snapshot) ? snapshot : undefined;
+  const run = isRecord(root?.run) ? root.run : root;
+  const userMessage = run && typeof run.user_message === "string"
+    ? run.user_message
+    : run && typeof run.userMessage === "string"
+      ? run.userMessage
+      : undefined;
+  if (!userMessage) return undefined;
+  const matches = [...userMessage.matchAll(
+    /(?:^|\s)KADY_PIPELINE_ADMISSION:(kadypipe_[a-f0-9]{32})(?=\s|$)/g,
+  )];
+  return matches.length === 1 ? matches[0][1] : undefined;
+}
+
+export function persistPipelineAdmission(
+  admission: PipelineBudgetAdmission,
+  workflowName: string,
+): PipelineAdmissionRecordV1 {
+  const projectId = admission.handle.record.projectId;
+  const admissionId = admission.admissionId;
+  const correlationLabel = pipelineAdmissionCorrelationLabel(admissionId);
+  const nodeIds = admission.hooks.map((hook) => hook.nodeId);
+  const capCountedNodeIds = admission.hooks
+    .filter((hook) => billingCountsTowardBudget(hook.billing))
+    .map((hook) => hook.nodeId);
+  const now = Date.now();
+  return workflowBudgetStore.withProjectCostAdmissionLock(projectId, () => {
+    const paths = resolvePaths(projectId);
+    const existing = readPipelineAdmissionRecord(paths, admissionId);
+    if (existing) {
+      if (
+        existing.workflowName === workflowName &&
+        existing.reservationId === admission.handle.record.id &&
+        existing.budgetRunId === admission.runId &&
+        existing.correlationLabel === correlationLabel &&
+        isDeepStrictEqual(existing.nodeIds, nodeIds) &&
+        isDeepStrictEqual(existing.capCountedNodeIds, capCountedNodeIds)
+      ) return structuredClone(existing);
+      budgetError("CONFLICT", `Pipeline admission ${admissionId} already has a different owner.`);
+    }
+    const reservation = readReservation(paths, admission.handle.record.id);
+    if (!reservation || reservation.status !== "active" || reservation.runId !== admission.runId) {
+      budgetError("CONFLICT", `Pipeline admission ${admissionId} has no active durable reservation.`);
+    }
+    const record: PipelineAdmissionRecordV1 = {
+      version: PIPELINE_ADMISSION_VERSION,
+      admissionId,
+      projectId,
+      workflowName,
+      reservationId: reservation.id,
+      budgetRunId: reservation.runId,
+      correlationLabel,
+      nodeIds,
+      capCountedNodeIds,
+      status: "reserved",
+      createdAt: now,
+      updatedAt: now,
+    };
+    atomicWritePipelineAdmission(paths, record);
+    return structuredClone(record);
+  });
+}
+
+export function updatePipelineAdmission(
+  projectId: string,
+  admissionId: string,
+  update: { status: "dispatched" | "settled"; engineRunId?: string },
+): PipelineAdmissionRecordV1 {
+  if (update.engineRunId !== undefined && !ENGINE_RUN_ID_RE.test(update.engineRunId)) {
+    budgetError("INVALID_ARGUMENT", `Invalid pipeline engine run id: ${update.engineRunId}`);
+  }
+  return workflowBudgetStore.withProjectCostAdmissionLock(projectId, () => {
+    const paths = resolvePaths(projectId);
+    const existing = readPipelineAdmissionRecord(paths, admissionId);
+    if (!existing) budgetError("NOT_FOUND", `No such pipeline admission: ${admissionId}`);
+    if (
+      existing.engineRunId !== undefined && update.engineRunId !== undefined &&
+      existing.engineRunId !== update.engineRunId
+    ) {
+      budgetError("CONFLICT", `Pipeline admission ${admissionId} is owned by another engine run.`);
+    }
+    if (existing.status === "settled" && update.status !== "settled") {
+      budgetError("CONFLICT", `Pipeline admission ${admissionId} is already settled.`);
+    }
+    const next: PipelineAdmissionRecordV1 = {
+      ...existing,
+      ...(update.engineRunId === undefined ? {} : { engineRunId: update.engineRunId }),
+      status: update.status,
+      updatedAt: Math.max(existing.updatedAt, Date.now()),
+    };
+    atomicWritePipelineAdmission(paths, next);
+    return structuredClone(next);
+  });
+}
+
+export function recoverPipelineAdmission(
+  projectId: string,
+  admissionId: string,
+): { record: PipelineAdmissionRecordV1; admission: PipelineBudgetAdmission } {
+  const paths = resolvePaths(projectId);
+  const record = readPipelineAdmissionRecord(paths, admissionId);
+  if (!record) budgetError("NOT_FOUND", `No such pipeline admission: ${admissionId}`);
+  const reservation = readReservation(paths, record.reservationId);
+  if (!reservation || reservation.runId !== record.budgetRunId) {
+    budgetError("CORRUPT", `Pipeline admission ${admissionId} lost its durable reservation owner.`);
+  }
+  return {
+    record: structuredClone(record),
+    admission: {
+      admissionId,
+      runId: record.budgetRunId,
+      hooks: [],
+      handle: {
+        record: cloneRecord(reservation),
+        settle: (input) => workflowBudgetStore.settle(projectId, reservation.id, input),
+        renew: (leaseDurationMs) =>
+          workflowBudgetStore.renew(projectId, reservation.id, leaseDurationMs),
+      },
+    },
+  };
+}
+
 /**
  * Atomically reserve a legacy pipeline's complete NodeSpec budget envelope.
- * Subscription-selected nodes retain token ceilings and audit metadata but do
- * not consume the project's USD cap. One reservation prevents partial per-node
+ * Nodes classified as non-cap-counted by the central billing policy retain
+ * token ceilings and audit metadata but do not consume the project's USD cap.
+ * One reservation prevents partial per-node
  * admission if the aggregate cannot fit.
  */
 export async function reservePipelineNodeBudgets(input: {
@@ -1490,8 +1783,14 @@ export async function reservePipelineNodeBudgets(input: {
   admissionId: string;
   hooks: PipelineNodeBudgetHook[];
   leaseDurationMs?: number;
-}): Promise<PipelineBudgetAdmission | null> {
-  if (input.hooks.length === 0) return null;
+}): Promise<PipelineBudgetAdmission> {
+  if (input.hooks.length === 0) {
+    budgetError("INVALID_ARGUMENT", "An executable pipeline must have at least one resolved budget hook.");
+  }
+  const admissionId = `kadypipe_${crypto.createHash("sha256")
+    .update(input.admissionId)
+    .digest("hex")
+    .slice(0, 32)}`;
   const seen = new Set<string>();
   let maxTokens = 0;
   let maxCostUsd = 0;
@@ -1505,18 +1804,22 @@ export async function reservePipelineNodeBudgets(input: {
       `Node ${hook.nodeId} budget.maxTokens`,
     ), "pipeline aggregate maxTokens");
     const nodeCost = safeMoney(hook.maxCostUsd, `Node ${hook.nodeId} budget.maxCostUsd`);
+    const capCounted = billingCountsTowardBudget(hook.billing);
+    if (capCounted && nodeCost <= 0) {
+      budgetError(
+        "INVALID_ARGUMENT",
+        `Cap-counted pipeline node ${hook.nodeId} requires a positive maxCostUsd envelope.`,
+      );
+    }
     maxCostUsd = safeMoney(
-      maxCostUsd + (hook.billingMode === "subscription" ? 0 : nodeCost),
+      maxCostUsd + (capCounted ? nodeCost : 0),
       "pipeline aggregate maxCostUsd",
     );
   }
   if (maxTokens < 1) {
     budgetError("INVALID_ARGUMENT", "Pipeline NodeSpec budgets must admit at least one token.");
   }
-  const identity = crypto.createHash("sha256")
-    .update(input.admissionId)
-    .digest("hex")
-    .slice(0, 32);
+  const identity = admissionId.slice("kadypipe_".length);
   const runId = `pipeline:${identity}`;
   const handle = await reserveWorkflowBudget({
     projectId: input.projectId,
@@ -1533,6 +1836,7 @@ export async function reservePipelineNodeBudgets(input: {
       : { leaseDurationMs: input.leaseDurationMs }),
   });
   return {
+    admissionId,
     runId,
     hooks: structuredClone(input.hooks),
     handle,

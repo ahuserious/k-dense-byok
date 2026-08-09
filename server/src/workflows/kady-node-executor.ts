@@ -27,6 +27,7 @@ import { workflowStore } from "./store.ts";
 import { resolvePaths, type ProjectPaths } from "../projects.ts";
 import {
   assertWorkflowNodeControlPackageSeeded,
+  createS4HostedFusionSession,
   dispatchWorkflowHarness,
   evaluateS4NodeConditions,
   WORKFLOW_NODE_CONTROL_ENVELOPE_PREFIX,
@@ -46,8 +47,15 @@ import {
 } from "../agent/workflow-model-resolution.ts";
 import { modelReference } from "../agent/models.ts";
 import {
+  billingCountsTowardBudget,
+  billingForWorkflowResolution,
+  declaredBillingModeMatches,
+  type BillingContext,
+} from "../cost/billing.ts";
+import {
   buildHostedFusionConfig,
   runHostedOpenRouterFusion,
+  type HostedFusionDependencies,
   type HostedFusionResolvedModels,
   type HostedOpenRouterFusionRequest,
   type HostedOpenRouterFusionResult,
@@ -112,9 +120,30 @@ export interface KadyDelegationHostPort {
 }
 
 export interface KadyHostedFusionTransportOptions {
-  /** Trusted local transport metadata; the embedded hosted runner ignores it. */
+  /** Trusted local transport metadata consumed by the S4 hosted session seam. */
   supervisedBudget?: SupervisedWorkflowBudgetDescriptorV1;
   nodeControl?: S4NodeExecutionBindings;
+}
+
+export function runS4HostedFusionWithNodeControl(
+  request: HostedOpenRouterFusionRequest,
+  transport: KadyHostedFusionTransportOptions | undefined,
+  runner: (
+    request: HostedOpenRouterFusionRequest,
+    overrides?: Partial<HostedFusionDependencies>,
+  ) => Promise<HostedOpenRouterFusionResult> = runHostedOpenRouterFusion,
+  sessionFactory: typeof createS4HostedFusionSession = createS4HostedFusionSession,
+): Promise<HostedOpenRouterFusionResult> {
+  if (!transport?.nodeControl) {
+    return fail(
+      "WORKFLOW_NODE_CONTROL_INVALID",
+      "Hosted Fusion received no trusted S4 provider-request controls.",
+    );
+  }
+  const providerRequest = structuredClone(transport.nodeControl.providerRequest);
+  return runner(request, {
+    createSession: (input) => sessionFactory(input, providerRequest),
+  });
 }
 
 type DelegationHost = KadyDelegationHostPort;
@@ -311,18 +340,22 @@ export function resolveS4NodeExecutionBindings(
 export function assertS4BillingMode(
   billingMode: ResolvedNodeSpecV1["billingMode"],
   receipt: WorkflowModelResolutionReceipt,
-): void {
-  if (billingMode === "inherit") return;
-  const authKind = receipt.resolved.auth.kind;
-  const admitted = billingMode === "api"
-    ? authKind === "api-key" || authKind === "custom"
-    : authKind === "oauth" || receipt.resolved.provider === "nvidia";
-  if (!admitted) {
+  maxCostUsd: number,
+): BillingContext {
+  const billing = billingForWorkflowResolution(receipt.resolved);
+  if (!declaredBillingModeMatches(billingMode, billing)) {
     throw new KadyWorkflowNodeError(
       "WORKFLOW_NODE_CONTROL_INVALID",
-      `Node billingMode ${billingMode} does not admit resolved ${receipt.resolved.provider} auth ${authKind}.`,
+      `Node billingMode ${billingMode} contradicts resolved ${billing.provider}/${billing.authType} billing ${billing.billingMode}.`,
     );
   }
+  if (billingCountsTowardBudget(billing) && (!Number.isFinite(maxCostUsd) || maxCostUsd <= 0)) {
+    throw new KadyWorkflowNodeError(
+      "WORKFLOW_DELEGATION_LIMIT_INVALID",
+      `Cap-counted ${billing.provider}/${billing.authType} call requires a positive pre-dispatch cost envelope.`,
+    );
+  }
+  return billing;
 }
 
 /** Prepend a child-only envelope; the trusted extension strips it before prompting. */
@@ -799,9 +832,7 @@ function dependenciesWithDefaults(
     getDelegationSession: (projectId, paths, harness) =>
       dispatchWorkflowHarness(harness, projectId, paths),
     resolveModel: resolveWorkflowModel,
-    // The embedded runner has its own dependency-injection second argument;
-    // never let trusted transport metadata reach that testing seam.
-    runHostedFusion: (request) => runHostedOpenRouterFusion(request),
+    runHostedFusion: runS4HostedFusionWithNodeControl,
     assertChildRuntimeReady: (paths) => {
       assertDagFusionPackageSeeded(paths);
       assertWorkflowNodeControlPackageSeeded(paths);
@@ -1793,7 +1824,7 @@ export function createKadyWorkflowNodeExecutor(
           paths,
         });
       assertResolutionIntegrity(slot, resolution);
-      assertS4BillingMode(nodeControl.billingMode, resolution.receipt);
+      assertS4BillingMode(nodeControl.billingMode, resolution.receipt, perCallMaxCostUsd);
       if (!input.preResolved) {
         // This durable receipt must precede the provider call. The host then
         // verifies the actual child launch against this exact model/thinking pair.
@@ -2354,7 +2385,7 @@ export function createKadyWorkflowNodeExecutor(
           paths,
         });
         assertResolutionIntegrity(slot, resolution);
-        assertS4BillingMode(nodeControl.billingMode, resolution.receipt);
+        assertS4BillingMode(nodeControl.billingMode, resolution.receipt, perCallMaxCostUsd);
         const hostedReceipt: WorkflowModelResolutionReceipt = {
           ...structuredClone(resolution.receipt),
           resolved: {

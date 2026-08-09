@@ -16,6 +16,31 @@ export interface BillingContext {
   billingMode: BillingMode;
 }
 
+/** Convert a durable workflow resolution receipt into the central billing policy. */
+export function billingForWorkflowResolution(
+  resolved: { provider: string; auth: { kind: string } },
+): BillingContext {
+  const authType: LedgerAuthType = resolved.auth.kind === "api-key"
+    ? "api_key"
+    : resolved.auth.kind === "oauth"
+      ? "oauth"
+      : resolved.auth.kind === "local"
+        ? "local"
+        : "none";
+  return billingForProvider(resolved.provider, authType);
+}
+
+/** A NodeSpec selector is an assertion about resolved billing, never its source. */
+export function declaredBillingModeMatches(
+  declared: "inherit" | "api" | "subscription",
+  billing: BillingContext,
+): boolean {
+  if (declared === "inherit") return true;
+  return declared === "api"
+    ? billingCountsTowardBudget(billing)
+    : !billingCountsTowardBudget(billing);
+}
+
 export function billingCountsTowardBudget(
   billing: Pick<BillingContext, "billingMode">,
 ): boolean {

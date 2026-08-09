@@ -77,43 +77,15 @@ tracker declares expected model slots, before a receipt can be recorded, before
 budget reservation, and before either Pi or hosted-Fusion dispatch. The
 executor repeats the same gate at its trust boundary as defense in depth.
 
-## 4. Apply sampling to hosted Fusion
+## 4. Hosted Fusion sampling is already lane-local
 
-Pi delegation already applies `temperature`, `top_p`, and the sampling map via
-the seeded `kady-workflow-node-control` extension. Hosted Fusion uses an
-in-process Pi session, so merge the same pure binder into its extension chain:
-
-1. In `HostedOpenRouterFusionRequest` and `CreateHostedFusionSessionInput` in
-   `server/src/workflows/hosted-fusion.ts`, add an optional
-   `providerRequest` field with the structural shape
-   `{ temperature: number; top_p: number; sampling: Record<string, string | number | boolean> }`.
-2. Pass `request.providerRequest` through the `dependencies.createSession({...})`
-   call.
-3. Import `applyS4ProviderRequestBindings` from
-   `../agent/workflow-delegation-session.ts` and,
-   immediately after `makeFusionRequestExtension(...)` in
-   `createDefaultHostedFusionSession()`'s `extensionFactories`, add:
-
-```ts
-(pi) => pi.on("before_provider_request", ({ payload }) => input.providerRequest ? applyS4ProviderRequestBindings(payload as Record<string, unknown>, input.providerRequest) : payload),
-```
-
-Finally, replace the default dependency in
-`dependenciesWithDefaults()` in `kady-node-executor.ts`:
-
-```ts
-runHostedFusion: (request) => runHostedOpenRouterFusion(request),
-```
-
-with:
-
-```ts
-runHostedFusion: (request, transport) => runHostedOpenRouterFusion({ ...request, ...(transport?.nodeControl ? { providerRequest: transport.nodeControl.providerRequest } : {}) }),
-```
-
-The ordering above intentionally runs the S4 binder after the Fusion bridge so
-the final provider payload retains the Fusion plugin body and receives the
-node's sampling controls.
+No merge-time edit to `hosted-fusion.ts` is required. The default wrapper in
+`kady-node-executor.ts` is now `runS4HostedFusionWithNodeControl()`. It forwards
+`nodeControl.providerRequest` into `createS4HostedFusionSession()` in
+`workflow-delegation-session.ts`. That S4-owned session factory installs
+`makeFusionRequestExtension(...)` first and the S4 provider-request binder
+second, so temperature, top-p, and sampling keys apply to the final Fusion
+router payload without modifying S5-owned code.
 
 ## 5. Contract table flips
 
@@ -142,7 +114,9 @@ semantics rather than the former pending-S4 rejection.
 
 ## 6. Post-integration tests
 
-In `server/test/kady-node-executor.test.ts`, change only:
+The `POST-INTEGRATION(S4)` suite remains skipped in this lane because the
+contract-freeze validator still rejects S4 fields before the owned executor can
+run. In `server/test/kady-node-executor.test.ts`, change only:
 
 ```ts
 describe.skip("POST-INTEGRATION(S4) validation, persistence, and runner path", ...)

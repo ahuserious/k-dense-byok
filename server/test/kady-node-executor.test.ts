@@ -19,6 +19,7 @@ import {
   evaluateS4NodeConditions,
   KADY_WORKFLOW_READ_ONLY_AGENT,
   resolveS4NodeExecutionBindings,
+  runS4HostedFusionWithNodeControl,
   s4ControlledDelegationTask,
   type KadyHostedFusionTransportOptions,
   type KadySupervisedDelegateOptions,
@@ -55,6 +56,7 @@ import {
 } from "../src/workflows/runner.ts";
 import { WorkflowStore } from "../src/workflows/store.ts";
 import type {
+  HostedFusionDependencies,
   HostedOpenRouterFusionRequest,
   HostedOpenRouterFusionResult,
 } from "../src/workflows/hosted-fusion.ts";
@@ -667,10 +669,11 @@ describe("production Kady DAG node executor", () => {
 
     it("enforces explicit API versus subscription billing selections", () => {
       const apiReceipt = resolvedReceipt(openRouterModel()).receipt;
-      expect(() => assertS4BillingMode("api", apiReceipt)).not.toThrow();
-      expect(() => assertS4BillingMode("subscription", apiReceipt)).toThrow(
-        /does not admit/,
+      expect(() => assertS4BillingMode("api", apiReceipt, 1)).not.toThrow();
+      expect(() => assertS4BillingMode("subscription", apiReceipt, 1)).toThrow(
+        /contradicts/,
       );
+      expect(() => assertS4BillingMode("api", apiReceipt, 0)).toThrow(/positive pre-dispatch/);
     });
 
     it("serializes a stable child-only control envelope", () => {
@@ -2677,6 +2680,51 @@ describe("production Kady DAG node executor", () => {
       { id: "fusion-judge-deliberation", request: judge },
       { id: "fusion-judge-final", request: judge },
     ]);
+  });
+
+  it("forwards hosted Fusion provider controls into the post-Fusion session factory", async () => {
+    const providerRequest = { temperature: 0.22, top_p: 0.77, sampling: { seed: 42 } };
+    const sessionFactory = vi.fn(async () => ({} as never));
+    const runner = vi.fn(async (
+      _request: HostedOpenRouterFusionRequest,
+      overrides?: Partial<HostedFusionDependencies>,
+    ) => {
+      await overrides!.createSession!({} as never);
+      return {
+        text: "fused",
+        textTruncated: false,
+        usage: {
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          cost: 0.1,
+          turns: 1,
+          toolCalls: 0,
+          durationMs: 1,
+        },
+      };
+    });
+    await runS4HostedFusionWithNodeControl(
+      {} as HostedOpenRouterFusionRequest,
+      {
+        nodeControl: {
+          version: 1,
+          harness: "pi",
+          providerRequest,
+          databases: [],
+          skills: { mode: "auto", configured: [], delegated: [] },
+          subagents: { mode: "auto", permitted: false },
+          autonomy: "strict",
+          toolPolicy: { allowedTools: ["read", "grep", "find", "ls"] },
+          billingMode: "inherit",
+        },
+      },
+      runner,
+      sessionFactory,
+    );
+    expect(sessionFactory).toHaveBeenCalledOnce();
+    expect(sessionFactory.mock.calls[0]?.[1]).toEqual(providerRequest);
   });
 
   it("runs hosted OpenRouter Fusion as one compound reservation without a Pi-subagent slot", async () => {
