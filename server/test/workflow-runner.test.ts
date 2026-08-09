@@ -200,6 +200,73 @@ describe("durable workflow DAG runner", () => {
     );
   });
 
+  it("persists the verified personality commit and digest in the durable run stream", async () => {
+    const store = new WorkflowStore();
+    const node: WorkflowNode = {
+      id: "deliberate",
+      name: "Deliberate",
+      kind: "council",
+      terminal: true,
+      workspace: { isolation: "read-only", writePaths: [] },
+      goal: "Audit genome evidence.",
+      members: [
+        { id: "reviewer", role: "Reviewer", model: exactModel() },
+        { id: "auditor", role: "Evidence auditor", model: exactModel() },
+      ],
+      chair: exactModel(),
+      rounds: 1,
+      preserveMinorityReports: true,
+      settings: {
+        deliberation: {
+          personalityStoreRef: "scientific-agents/v1",
+          bestOfNPersonalityCount: 1,
+          mimeographs: { mode: "auto", personalityRefs: [] },
+        },
+      },
+    };
+    const document = workflow([node], []);
+    const manifest = createRun(store, document, "durable-deliberation-staffing");
+    const storeDigest = "d".repeat(64);
+    const revision = "a".repeat(40);
+
+    const result = await runWorkflowDag({
+      projectId: PROJECT_ID,
+      runId: manifest.id,
+      store,
+      executeNode: (context) => {
+        context.recordDeliberationStaffingReceipt?.({
+          storeRef: "scientific-agents/v1",
+          source: "ahuserious/scientific-agents",
+          revision,
+          storeDigest,
+          selectedPersonalityRefs: ["genomics"],
+          effectivePromptSha256: "e".repeat(64),
+        });
+        for (const slot of context.expectedModelCallSlots) {
+          context.recordModelResolution(slot.id, {
+            ...modelReceipt(),
+            request: structuredClone(slot.request),
+          });
+        }
+        return { output: "done" };
+      },
+    });
+
+    const staffingEvent = store.readRunEvents(PROJECT_ID, manifest.id, { limit: 100 }).events.find(
+      (event) => event.type === "deliberation_staffing_bound",
+    );
+    expect(result.state.status).toBe("succeeded");
+    expect(staffingEvent?.data?.deliberationStaffingReceipt).toMatchObject({
+      revision,
+      storeDigest,
+      selectedPersonalityRefs: ["genomics"],
+    });
+    expect(Object.values(result.state.executions)[0]?.deliberationStaffingReceipt).toMatchObject({
+      revision,
+      storeDigest,
+    });
+  });
+
   it("honours explicit fan-out and graph maxParallelism", async () => {
     const store = new WorkflowStore();
     const document = workflow(

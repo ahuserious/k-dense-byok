@@ -60,8 +60,11 @@ export const KADY_SKILLS_CACHE_DIR = path.resolve(
  */
 export const PERSONALITY_STORE_REPO =
   process.env.KADY_PERSONALITY_STORE_REPO ?? "ahuserious/scientific-agents";
-export const PERSONALITY_STORE_BRANCH =
-  process.env.KADY_PERSONALITY_STORE_BRANCH ?? "main";
+/** Administrative source lock. Deliberation remains unavailable until both are pinned. */
+export const PERSONALITY_STORE_COMMIT =
+  process.env.KADY_PERSONALITY_STORE_COMMIT?.trim().toLowerCase() ?? "";
+export const PERSONALITY_STORE_MANIFEST_SHA256 =
+  process.env.KADY_PERSONALITY_STORE_MANIFEST_SHA256?.trim().toLowerCase() ?? "";
 export const KADY_PERSONALITY_STORE_DIR = path.resolve(
   process.env.KADY_PERSONALITY_STORE_DIR?.trim() ||
     path.join(os.homedir(), ".kady", "personality-store"),

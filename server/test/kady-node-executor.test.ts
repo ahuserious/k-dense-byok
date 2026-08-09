@@ -53,7 +53,10 @@ import type {
   SupervisedWorkflowBudgetDescriptorV1,
 } from "../src/workflows/supervised-budget.ts";
 import { withDeliberationBindings } from "../src/workflows/deliberation-runtime.ts";
-import { DEFAULT_PERSONALITY_STORE_REF } from "../src/personality-store/store.ts";
+import {
+  DEFAULT_PERSONALITY_STORE_REF,
+  personalityContentManifestDigest,
+} from "../src/personality-store/store.ts";
 
 const TEST_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "kady-node-executor-"));
 
@@ -381,6 +384,9 @@ function contextFor(
     },
     recordCompactionCheck(check) {
       events.push(`compaction:${check.phase}:${check.passed}`);
+    },
+    recordDeliberationStaffingReceipt(receipt) {
+      events.push(`staffing:${receipt.storeDigest}`);
     },
     signal,
   };
@@ -963,16 +969,17 @@ describe("production Kady DAG node executor", () => {
       { position: "uncertainty", rationale: "uncertainty rationale", evidence: ["uncertainty"], concerns: [] },
       { decision: "qualified", rationale: "chair rationale", consensus: true, minorityReports: [] },
     ], events);
+    const personalities = [
+      { ref: "genomics", title: "Genomics Scientist", instructions: "Inspect genome variants." },
+      { ref: "statistician", title: "Statistician", instructions: "Audit estimands and uncertainty." },
+    ];
     const loadStore = vi.fn(async () => ({
       schemaVersion: 1 as const,
       storeRef: DEFAULT_PERSONALITY_STORE_REF,
       source: "ahuserious/scientific-agents",
-      revision: "fixture",
-      digest: "0".repeat(64),
-      personalities: [
-        { ref: "genomics", title: "Genomics Scientist", instructions: "Inspect genome variants." },
-        { ref: "statistician", title: "Statistician", instructions: "Audit estimands and uncertainty." },
-      ],
+      revision: "a".repeat(40),
+      digest: personalityContentManifestDigest(personalities),
+      personalities,
     }));
 
     expect(validateWorkflowGraphDocument(document)).toMatchObject({ ok: true });

@@ -32,7 +32,7 @@ values until that Wave B unit binds the field.
 | `skills.list` | FAIL-CLOSED(S4) — no per-node list binding exists in this runtime |
 | `subagents.mode` | FAIL-CLOSED(S4) |
 | `autonomy` | FAIL-CLOSED(S4) |
-| `deliberation.personalityStoreRef` | BOUND — selects the server-only, Pi-invisible scientific-agents store |
+| `deliberation.personalityStoreRef` | BOUND — selects a server-only, Pi-invisible scientific-agents snapshot verified against an administratively pinned commit and content-manifest SHA-256; the run receipts that exact snapshot before provider dispatch |
 | `deliberation.bestOfNPersonalityCount` | BOUND — deterministic task matching selects exactly this many personality profiles |
 | `deliberation.mimeographs.mode` | BOUND — auto selects across the store; manual uses the authored roster in order |
 | `deliberation.mimeographs.personalityRefs` | BOUND — exact unique manual staffing roster, matched against the installed store before execution |
@@ -61,7 +61,7 @@ values until that Wave B unit binds the field.
 | `skills.list` | Frozen explicit skill-reference shape; only an empty list is accepted pending S4 binding. |
 | `subagents.mode` | Frozen subagent-policy shape; only the default `auto` is accepted pending S4 binding. |
 | `autonomy` | Frozen execution-authority shape; only the default `strict` is accepted pending S4 binding. |
-| `deliberation.personalityStoreRef` | Selects an installed server-only personality store. The default is `scientific-agents/v1`; store installation fails if its path is under a project/Pi-visible root. |
+| `deliberation.personalityStoreRef` | Selects an installed server-only personality store. The default is `scientific-agents/v1`; store installation fails if its path is under a project/Pi-visible root or its content differs from the administratively configured immutable commit and content-manifest SHA-256. First execution persists the source, commit, store digest, selected refs, and effective prompt hash; retries load that content-addressed snapshot and fail closed when it is unavailable. |
 | `deliberation.bestOfNPersonalityCount` | Selects exactly this many best-matching personalities for the node goal, independently of best-of-N model candidate count. |
 | `deliberation.mimeographs.mode` | `auto` ranks the full store; `manual` uses the exact authored roster in order. Staffing is supported only by best-of-N, Council, and Fusion nodes. |
 | `deliberation.mimeographs.personalityRefs` | Unique manual personality refs. Manual mode requires exactly `bestOfNPersonalityCount` refs; auto mode requires none. The selected mimeograph instructions and identities are materialized into the bounded provider-visible node task. |

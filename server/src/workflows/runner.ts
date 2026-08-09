@@ -14,6 +14,7 @@ import {
   workflowModelCallSlotForNode,
   workflowModelCallSlotsForNode,
   type WorkflowArtifactReference,
+  type WorkflowDeliberationStaffingReceipt,
   type WorkflowGateArtifactReceipt,
   type WorkflowModelCallSlot,
   type WorkflowModelResolutionReceipt,
@@ -120,6 +121,12 @@ export interface WorkflowNodeExecutorContext {
   recordModelResolution: (
     slotId: string,
     receipt: WorkflowModelResolutionReceipt,
+  ) => void;
+  /** Immutable run/node staffing receipt restored before retries or resumes. */
+  deliberationStaffingReceipt?: WorkflowDeliberationStaffingReceipt;
+  /** Persist staffing provenance before any deliberation provider call. */
+  recordDeliberationStaffingReceipt?: (
+    receipt: WorkflowDeliberationStaffingReceipt,
   ) => void;
   /** Persist a trusted child-session compaction check while this node is running. */
   recordCompactionCheck: (check: WorkflowCompactionCheckResult) => void;
@@ -765,6 +772,57 @@ class EventWriter {
   forExecution(executionId: string): WorkflowRunEventV1[] {
     return this.events.filter((event) => event.executionId === executionId);
   }
+
+  forNode(nodeId: string): WorkflowRunEventV1[] {
+    return this.events.filter((event) => event.nodeId === nodeId);
+  }
+}
+
+class DeliberationStaffingTracker {
+  readonly receipt: WorkflowDeliberationStaffingReceipt | undefined;
+
+  constructor(
+    private readonly node: WorkflowNode,
+    private readonly executionId: string,
+    private readonly attempt: number,
+    private readonly parentExecutionId: string | undefined,
+    private readonly branchId: string,
+    private readonly writer: EventWriter,
+  ) {
+    const receipts = writer.forNode(node.id)
+      .filter((event) => event.type === "deliberation_staffing_bound")
+      .map((event) => event.data?.deliberationStaffingReceipt)
+      .filter((receipt): receipt is WorkflowDeliberationStaffingReceipt => receipt !== undefined);
+    if (receipts.length > 1) {
+      throw new WorkflowDagNodeError(
+        `Node ${node.id} has multiple durable deliberation staffing receipts.`,
+        "DELIBERATION_RECEIPT_CONFLICT",
+      );
+    }
+    this.receipt = receipts[0] ? structuredClone(receipts[0]) : undefined;
+  }
+
+  record(receipt: WorkflowDeliberationStaffingReceipt): void {
+    const normalized = structuredClone(receipt);
+    if (this.receipt) {
+      if (!isDeepStrictEqual(this.receipt, normalized)) {
+        throw new WorkflowDagNodeError(
+          `Node ${this.node.id} attempted to change its durable deliberation staffing receipt.`,
+          "DELIBERATION_RECEIPT_CONFLICT",
+        );
+      }
+      return;
+    }
+    this.writer.append("deliberation-staffing-bound", [this.node.id], {
+      type: "deliberation_staffing_bound",
+      executionId: this.executionId,
+      nodeId: this.node.id,
+      attempt: this.attempt,
+      ...(this.parentExecutionId ? { parentExecutionId: this.parentExecutionId } : {}),
+      branchId: this.branchId,
+      data: { deliberationStaffingReceipt: normalized },
+    });
+  }
 }
 
 class ModelCallTracker {
@@ -1104,6 +1162,14 @@ async function executeNodeLifecycle(
         branchId,
         writer,
       );
+      const deliberationStaffing = new DeliberationStaffingTracker(
+        node,
+        executionId,
+        attempt,
+        parentExecutionId,
+        branchId,
+        writer,
+      );
       const inbound = (activations.get(node.id) ?? []).map((item) => ({
         ...item,
         artifacts: item.artifacts.map((artifact) => ({ ...artifact })),
@@ -1138,6 +1204,10 @@ async function executeNodeLifecycle(
         ),
         declareModelCallSlot: (slotId) => modelCalls.declare(slotId),
         recordModelResolution: (slotId, receipt) => modelCalls.record(slotId, receipt),
+        ...(deliberationStaffing.receipt
+          ? { deliberationStaffingReceipt: structuredClone(deliberationStaffing.receipt) }
+          : {}),
+        recordDeliberationStaffingReceipt: (receipt) => deliberationStaffing.record(receipt),
         recordCompactionCheck: (check) => {
           if (
             (check.phase !== "pre" && check.phase !== "post") ||

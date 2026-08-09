@@ -6,7 +6,8 @@ import path from "node:path";
 import {
   KADY_PERSONALITY_STORE_DIR,
   KADY_PI_AGENT_DIR,
-  PERSONALITY_STORE_BRANCH,
+  PERSONALITY_STORE_COMMIT,
+  PERSONALITY_STORE_MANIFEST_SHA256,
   PERSONALITY_STORE_REPO,
   PROJECTS_ROOT,
 } from "../config.ts";
@@ -32,6 +33,12 @@ export interface PersonalityStoreSnapshot {
   revision: string;
   digest: string;
   personalities: ScientificPersonality[];
+}
+
+export interface PersonalitySourcePin {
+  source: string;
+  commit: string;
+  manifestSha256: string;
 }
 
 interface PersonalityStorePointer {
@@ -150,14 +157,33 @@ export function readScientificPersonalities(sourceDir: string): ScientificPerson
   return personalities;
 }
 
-function digestPersonalities(personalities: readonly ScientificPersonality[]): string {
-  const hash = crypto.createHash("sha256");
-  for (const personality of personalities) {
-    hash.update(personality.ref).update("\0");
-    hash.update(personality.title).update("\0");
-    hash.update(personality.instructions).update("\0");
+export function personalityContentManifestDigest(
+  personalities: readonly ScientificPersonality[],
+): string {
+  const manifest = personalities.map((personality) => ({
+    ref: personality.ref,
+    title: personality.title,
+    instructions: personality.instructions,
+  }));
+  return crypto.createHash("sha256").update(JSON.stringify(manifest)).digest("hex");
+}
+
+export function configuredPersonalitySourcePin(): PersonalitySourcePin {
+  const pin = {
+    source: PERSONALITY_STORE_REPO.trim(),
+    commit: PERSONALITY_STORE_COMMIT,
+    manifestSha256: PERSONALITY_STORE_MANIFEST_SHA256,
+  };
+  if (
+    !pin.source ||
+    !/^[a-f0-9]{40}$/.test(pin.commit) ||
+    !/^[a-f0-9]{64}$/.test(pin.manifestSha256)
+  ) {
+    throw new Error(
+      "Personality source is not pinned: configure an immutable 40-hex commit and 64-hex content-manifest SHA-256.",
+    );
   }
-  return hash.digest("hex");
+  return pin;
 }
 
 function writeJsonAtomic(filePath: string, value: unknown): void {
@@ -172,33 +198,51 @@ function writeJsonAtomic(filePath: string, value: unknown): void {
 
 export function installPersonalityStoreFromDirectory(options: {
   sourceDir: string;
-  source?: string;
-  revision?: string;
+  pin?: PersonalitySourcePin;
   storeDir?: string;
   storeRef?: string;
 }): PersonalityStoreSnapshot {
   const storeDir = path.resolve(options.storeDir ?? KADY_PERSONALITY_STORE_DIR);
   assertPersonalityStoreIsPiInvisible(storeDir);
   const storeRef = options.storeRef ?? DEFAULT_PERSONALITY_STORE_REF;
-  const source = options.source ?? PERSONALITY_STORE_REPO;
-  const revision = options.revision ?? PERSONALITY_STORE_BRANCH;
+  const pin = options.pin ?? configuredPersonalitySourcePin();
+  if (
+    !pin.source.trim() ||
+    !/^[a-f0-9]{40}$/.test(pin.commit) ||
+    !/^[a-f0-9]{64}$/.test(pin.manifestSha256)
+  ) {
+    throw new Error("Personality source pin is malformed.");
+  }
   const personalities = readScientificPersonalities(options.sourceDir);
-  const digest = digestPersonalities(personalities);
+  const digest = personalityContentManifestDigest(personalities);
+  if (digest !== pin.manifestSha256) {
+    throw new Error(
+      `Personality content-manifest digest mismatch: expected ${pin.manifestSha256}, received ${digest}.`,
+    );
+  }
   const snapshot: PersonalityStoreSnapshot = {
     schemaVersion: STORE_SCHEMA_VERSION,
     storeRef,
-    source,
-    revision,
+    source: pin.source,
+    revision: pin.commit,
     digest,
     personalities,
   };
-  const snapshotPath = path.join(storeDir, "snapshots", `${digest}.json`);
-  if (!fs.existsSync(snapshotPath)) writeJsonAtomic(snapshotPath, snapshot);
+  const snapshotPath = path.join(storeDir, "snapshots", `${digest}-${pin.commit}.json`);
+  if (fs.existsSync(snapshotPath)) {
+    loadPersonalityStoreSnapshot(storeRef, digest, storeDir, {
+      source: pin.source,
+      revision: pin.commit,
+      refs: personalities.map((personality) => personality.ref),
+    });
+  } else {
+    writeJsonAtomic(snapshotPath, snapshot);
+  }
   const pointer: PersonalityStorePointer = {
     schemaVersion: STORE_SCHEMA_VERSION,
     storeRef,
-    source,
-    revision,
+    source: pin.source,
+    revision: pin.commit,
     digest,
     refs: personalities.map((personality) => personality.ref),
   };
@@ -211,7 +255,7 @@ function parsePointer(value: unknown): PersonalityStorePointer {
   if (
     !pointer || pointer.schemaVersion !== STORE_SCHEMA_VERSION ||
     typeof pointer.storeRef !== "string" || typeof pointer.source !== "string" ||
-    typeof pointer.revision !== "string" ||
+    typeof pointer.revision !== "string" || !/^[a-f0-9]{40}$/.test(pointer.revision) ||
     typeof pointer.digest !== "string" || !/^[a-f0-9]{64}$/.test(pointer.digest) ||
     !Array.isArray(pointer.refs) || pointer.refs.some((ref) => typeof ref !== "string")
   ) {
@@ -223,6 +267,7 @@ function parsePointer(value: unknown): PersonalityStorePointer {
 export function loadPersonalityStore(
   storeRef = DEFAULT_PERSONALITY_STORE_REF,
   storeDir = KADY_PERSONALITY_STORE_DIR,
+  pin: PersonalitySourcePin = configuredPersonalitySourcePin(),
 ): PersonalityStoreSnapshot {
   assertPersonalityStoreIsPiInvisible(storeDir);
   const pointer = parsePointer(JSON.parse(
@@ -233,53 +278,114 @@ export function loadPersonalityStore(
       `Personality store ref ${storeRef} is unavailable; installed ref is ${pointer.storeRef}.`,
     );
   }
+  if (
+    pointer.source !== pin.source ||
+    pointer.revision !== pin.commit ||
+    pointer.digest !== pin.manifestSha256
+  ) {
+    throw new Error("Installed personality store does not match the configured immutable source pin.");
+  }
+  return loadPersonalityStoreSnapshot(storeRef, pointer.digest, storeDir, {
+    source: pointer.source,
+    revision: pointer.revision,
+    refs: pointer.refs,
+  });
+}
+
+export function loadPersonalityStoreSnapshot(
+  storeRef: string,
+  digest: string,
+  storeDir = KADY_PERSONALITY_STORE_DIR,
+  expected?: { source?: string; revision?: string; refs?: readonly string[] },
+): PersonalityStoreSnapshot {
+  assertPersonalityStoreIsPiInvisible(storeDir);
+  if (!/^[a-f0-9]{64}$/.test(digest)) {
+    throw new Error(`Personality snapshot digest is malformed: ${digest}.`);
+  }
+  if (!expected?.revision || !/^[a-f0-9]{40}$/.test(expected.revision)) {
+    throw new Error("Personality snapshot lookup requires its immutable 40-hex revision.");
+  }
+  const snapshotPath = path.join(
+    storeDir,
+    "snapshots",
+    `${digest}-${expected.revision}.json`,
+  );
+  if (!fs.existsSync(snapshotPath)) {
+    throw new Error(`Personality snapshot ${digest} is unavailable.`);
+  }
   const snapshot = JSON.parse(fs.readFileSync(
-    path.join(storeDir, "snapshots", `${pointer.digest}.json`),
+    snapshotPath,
     "utf8",
   )) as PersonalityStoreSnapshot;
+  const personalitiesAreValid = Array.isArray(snapshot.personalities) &&
+    snapshot.personalities.every((personality) =>
+      personality && typeof personality === "object" &&
+      typeof personality.ref === "string" &&
+      typeof personality.title === "string" &&
+      typeof personality.instructions === "string"
+    );
   if (
     snapshot.schemaVersion !== STORE_SCHEMA_VERSION ||
-    snapshot.storeRef !== pointer.storeRef || snapshot.source !== pointer.source ||
-    snapshot.revision !== pointer.revision || snapshot.digest !== pointer.digest ||
-    !Array.isArray(snapshot.personalities) ||
-    digestPersonalities(snapshot.personalities) !== pointer.digest ||
-    snapshot.personalities.map((personality) => personality.ref).join("\0") !==
-      pointer.refs.join("\0")
+    snapshot.storeRef !== storeRef || snapshot.digest !== digest ||
+    typeof snapshot.source !== "string" || !snapshot.source.trim() ||
+    !/^[a-f0-9]{40}$/.test(snapshot.revision) ||
+    (expected?.source !== undefined && snapshot.source !== expected.source) ||
+    (expected?.revision !== undefined && snapshot.revision !== expected.revision) ||
+    !personalitiesAreValid ||
+    personalityContentManifestDigest(snapshot.personalities) !== digest ||
+    (expected?.refs !== undefined &&
+      snapshot.personalities.map((personality) => personality.ref).join("\0") !==
+        expected.refs.join("\0"))
   ) {
-    throw new Error("Personality store snapshot does not match its atomic pointer.");
+    throw new Error("Personality store snapshot failed its content-addressed verification.");
   }
   return structuredClone(snapshot);
 }
 
-function cloneRemoteSource(target: string): Promise<void> {
-  const source = PERSONALITY_STORE_REPO.includes("://")
-    ? PERSONALITY_STORE_REPO
-    : `https://github.com/${PERSONALITY_STORE_REPO}.git`;
+function runGit(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(
-      "git",
-      ["clone", "--depth", "1", "--branch", PERSONALITY_STORE_BRANCH, source, target],
-      { stdio: ["ignore", "ignore", "pipe"], timeout: GIT_TIMEOUT_MS },
-    );
+    const child = spawn("git", args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: GIT_TIMEOUT_MS,
+    });
+    let output = "";
     let errorText = "";
+    child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      if (output.length < 4_096) output += chunk;
+    });
     child.stderr.on("data", (chunk: string) => {
       if (errorText.length < 4_096) errorText += chunk;
     });
     child.once("error", reject);
     child.once("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(errorText.trim() || `git clone exited with status ${code}`));
+      if (code === 0) resolve(output.trim());
+      else reject(new Error(errorText.trim() || `git exited with status ${code}`));
     });
   });
+}
+
+async function cloneRemoteSource(target: string, pin: PersonalitySourcePin): Promise<void> {
+  const source = pin.source.includes("://")
+    ? pin.source
+    : `https://github.com/${pin.source}.git`;
+  await runGit(["init", "--quiet", target]);
+  await runGit(["-C", target, "fetch", "--quiet", "--depth", "1", source, pin.commit]);
+  await runGit(["-C", target, "checkout", "--quiet", "--detach", pin.commit]);
+  const checkedOutCommit = await runGit(["-C", target, "rev-parse", "HEAD"]);
+  if (checkedOutCommit !== pin.commit) {
+    throw new Error("Personality checkout did not resolve to the configured immutable commit.");
+  }
 }
 
 let installationPromise: Promise<PersonalityStoreSnapshot> | undefined;
 
 /** Install the server-only profile store on first deliberation use. */
 export async function ensurePersonalityStoreInstalled(): Promise<PersonalityStoreSnapshot> {
+  const pin = configuredPersonalitySourcePin();
   try {
-    return loadPersonalityStore();
+    return loadPersonalityStore(DEFAULT_PERSONALITY_STORE_REF, KADY_PERSONALITY_STORE_DIR, pin);
   } catch (error) {
     if (error instanceof Error && /overlaps Pi-visible root|\.pi directory/.test(error.message)) {
       throw error;
@@ -289,8 +395,8 @@ export async function ensurePersonalityStoreInstalled(): Promise<PersonalityStor
     const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-personalities-"));
     const checkout = path.join(temporaryRoot, "source");
     try {
-      await cloneRemoteSource(checkout);
-      return installPersonalityStoreFromDirectory({ sourceDir: checkout });
+      await cloneRemoteSource(checkout, pin);
+      return installPersonalityStoreFromDirectory({ sourceDir: checkout, pin });
     } finally {
       fs.rmSync(temporaryRoot, { recursive: true, force: true });
     }

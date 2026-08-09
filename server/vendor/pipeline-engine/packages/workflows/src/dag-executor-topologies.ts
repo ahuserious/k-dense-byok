@@ -116,8 +116,37 @@ function boundedOutput(output: string, invocation: FusionTopologyInvocation): st
   return output.trim();
 }
 
-function validationPassed(output: string): boolean {
-  return /^VALID(?:\s|:|$)/i.test(output.trim());
+interface FusionTopologyValidationVerdict {
+  passed: boolean;
+  findings: string[];
+}
+
+function parseValidationVerdict(output: string): FusionTopologyValidationVerdict {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    return { passed: false, findings: ['validator returned malformed JSON'] };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { passed: false, findings: ['validator verdict must be an object'] };
+  }
+  const record = parsed as Record<string, unknown>;
+  if (
+    Object.keys(record).sort().join('\0') !== 'findings\0passed' ||
+    typeof record.passed !== 'boolean' ||
+    !Array.isArray(record.findings) ||
+    record.findings.length > 64 ||
+    record.findings.some(finding =>
+      typeof finding !== 'string' || !finding.trim() || finding.length > 4_096
+    )
+  ) {
+    return { passed: false, findings: ['validator verdict failed its strict schema'] };
+  }
+  return {
+    passed: record.passed,
+    findings: record.findings.map(finding => (finding as string).trim()),
+  };
 }
 
 /** Execute one topology with deterministic agent ordering and bounded rounds. */
@@ -203,7 +232,8 @@ export async function executeFusionTopology(
       let draft = await invoke('auto-validate-draft', lead);
       for (let round = 1; round <= maxRounds; round += 1) {
         const check = await invoke('auto-validate-check', validator, [draft], round);
-        if (validationPassed(check.output)) {
+        const verdict = parseValidationVerdict(check.output);
+        if (verdict.passed) {
           return {
             kind: node.kind,
             output: draft.output,

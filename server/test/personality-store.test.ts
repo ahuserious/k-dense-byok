@@ -7,11 +7,15 @@ import {
   assertPersonalityStoreIsPiInvisible,
   installPersonalityStoreFromDirectory,
   loadPersonalityStore,
+  loadPersonalityStoreSnapshot,
+  personalityContentManifestDigest,
+  readScientificPersonalities,
   selectBestPersonalities,
 } from "../src/personality-store/store.ts";
 import { PERSONALITY_STORE_REPO } from "../src/config.ts";
 
 const temporaryRoots: string[] = [];
+const FIXTURE_COMMIT = "a".repeat(40);
 
 function temporaryRoot(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "kady-personality-test-"));
@@ -44,11 +48,15 @@ describe("Pi-invisible personality store", () => {
     fs.writeFileSync(path.join(source, "AGENTS.md"), "# Repository instructions\n");
     writeProfile(source, "bioinformatician", "Bioinformatician", "Audit sequence alignment and genomics data.");
     writeProfile(source, "statistician", "Statistician", "Check estimands, uncertainty, and statistical power.");
+    const pin = {
+      source: "ahuserious/scientific-agents",
+      commit: FIXTURE_COMMIT,
+      manifestSha256: personalityContentManifestDigest(readScientificPersonalities(source)),
+    };
 
     const installed = installPersonalityStoreFromDirectory({
       sourceDir: source,
-      source: "ahuserious/scientific-agents",
-      revision: "fixture",
+      pin,
       storeDir: store,
     });
 
@@ -58,9 +66,53 @@ describe("Pi-invisible personality store", () => {
       "bioinformatician",
       "statistician",
     ]);
-    expect(loadPersonalityStore(DEFAULT_PERSONALITY_STORE_REF, store)).toEqual(installed);
+    expect(loadPersonalityStore(DEFAULT_PERSONALITY_STORE_REF, store, pin)).toEqual(installed);
     expect(fs.existsSync(path.join(store, ".pi"))).toBe(false);
     expect(fs.readdirSync(store).sort()).toEqual(["current.json", "snapshots"]);
+  });
+
+  it("fails closed when installed content does not match the pinned manifest digest", () => {
+    const root = temporaryRoot();
+    const source = path.join(root, "source");
+    fs.mkdirSync(source, { recursive: true });
+    writeProfile(source, "genomics", "Genomics Scientist", "Audit genome evidence.");
+
+    expect(() => installPersonalityStoreFromDirectory({
+      sourceDir: source,
+      storeDir: path.join(root, "server-only-store"),
+      pin: {
+        source: "ahuserious/scientific-agents",
+        commit: FIXTURE_COMMIT,
+        manifestSha256: "0".repeat(64),
+      },
+    })).toThrow(/content-manifest digest mismatch/);
+  });
+
+  it("retains historical commit provenance when an explicit pin update has identical content", () => {
+    const root = temporaryRoot();
+    const source = path.join(root, "source");
+    const store = path.join(root, "server-only-store");
+    fs.mkdirSync(source, { recursive: true });
+    writeProfile(source, "genomics", "Genomics Scientist", "Audit genome evidence.");
+    const manifestSha256 = personalityContentManifestDigest(readScientificPersonalities(source));
+    const firstPin = {
+      source: "ahuserious/scientific-agents",
+      commit: "a".repeat(40),
+      manifestSha256,
+    };
+    const secondPin = { ...firstPin, commit: "b".repeat(40) };
+
+    installPersonalityStoreFromDirectory({ sourceDir: source, storeDir: store, pin: firstPin });
+    installPersonalityStoreFromDirectory({ sourceDir: source, storeDir: store, pin: secondPin });
+
+    expect(loadPersonalityStore(DEFAULT_PERSONALITY_STORE_REF, store, secondPin).revision)
+      .toBe(secondPin.commit);
+    expect(loadPersonalityStoreSnapshot(
+      DEFAULT_PERSONALITY_STORE_REF,
+      manifestSha256,
+      store,
+      { source: firstPin.source, revision: firstPin.commit, refs: ["genomics"] },
+    ).revision).toBe(firstPin.commit);
   });
 
   it("fails closed for every store location under a Pi/global or project-visible root", () => {
@@ -90,7 +142,7 @@ describe("Pi-invisible personality store", () => {
       schemaVersion: 1 as const,
       storeRef: DEFAULT_PERSONALITY_STORE_REF,
       source: "ahuserious/scientific-agents",
-      revision: "fixture",
+      revision: FIXTURE_COMMIT,
       digest: "0".repeat(64),
       personalities: [
         { ref: "genomics", title: "Genomics Scientist", instructions: "genome sequencing variants alignment" },

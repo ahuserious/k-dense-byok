@@ -36,6 +36,7 @@ import type {
   PromptNode,
   LoopNode,
   ScriptNode,
+  FusionTopologyDagNode,
   NodeOutput,
   TriggerRule,
   WorkflowRun,
@@ -50,8 +51,14 @@ import {
   isApprovalNode,
   isCancelNode,
   isScriptNode,
+  isFusionTopologyNode,
   isApprovalContext,
 } from './schemas';
+import {
+  executeFusionTopology,
+  type FusionTopologyInvocation,
+  type FusionTopologyProvider,
+} from './dag-executor-topologies';
 import { formatToolCall } from './utils/tool-formatter';
 import { createLogger, captureWorkflowCompleted } from '@archon/paths';
 import type { WorkflowErrorClass, WorkflowNodeType } from '@archon/paths';
@@ -102,6 +109,113 @@ export {
   type FusionTopologyProvider,
   type FusionTopologyResult,
 } from './dag-executor-topologies';
+
+function fusionTopologyPrompt(invocation: FusionTopologyInvocation): string {
+  const validatorContract = invocation.phase === 'auto-validate-check'
+    ? '\nReturn only strict JSON with exactly this schema: {"passed": boolean, "findings": string[]}. Do not use prose, markdown, or a VALID/INVALID prefix.'
+    : '';
+  return [
+    `Topology: ${invocation.topology}`,
+    `Phase: ${invocation.phase}`,
+    `Round: ${String(invocation.round)}`,
+    `Agent role: ${invocation.agent.role}`,
+    invocation.agent.prompt ? `Agent instructions: ${invocation.agent.prompt}` : undefined,
+    `Task: ${invocation.task}`,
+    invocation.inputs.length > 0
+      ? `Inputs:\n${JSON.stringify(invocation.inputs)}`
+      : 'Inputs: none',
+    validatorContract,
+  ].filter((line): line is string => line !== undefined).join('\n\n');
+}
+
+async function executeFusionTopologyDagNode(
+  deps: WorkflowDeps,
+  platform: IWorkflowPlatform,
+  conversationId: string,
+  cwd: string,
+  workflowRun: WorkflowRun,
+  node: FusionTopologyDagNode,
+  provider: string,
+  nodeOptions: SendQueryOptions | undefined,
+  artifactsDir: string,
+  logDir: string,
+  baseBranch: string,
+  docsDir: string,
+  nodeOutputs: Map<string, NodeOutput>,
+  configuredCommandFolder?: string,
+  issueContext?: string
+): Promise<NodeExecutionResult> {
+  let costUsd = 0;
+  let tokenInput = 0;
+  let tokenOutput = 0;
+  const topologyProvider: FusionTopologyProvider = {
+    async run(invocation) {
+      const { kind: _kind, task: _task, topology_agents: _agents, max_rounds: _rounds, ...base } = node;
+      const promptNode: PromptNode = {
+        ...base,
+        id: `${node.id}-${invocation.phase}-${invocation.agent.id}-${String(invocation.round)}`,
+        prompt: fusionTopologyPrompt(invocation),
+        context: 'fresh',
+        persist_session: false,
+      };
+      const output = await executeNodeInternal(
+        deps,
+        platform,
+        conversationId,
+        cwd,
+        workflowRun,
+        promptNode,
+        provider,
+        nodeOptions,
+        artifactsDir,
+        logDir,
+        baseBranch,
+        docsDir,
+        nodeOutputs,
+        undefined,
+        configuredCommandFolder,
+        issueContext
+      );
+      if (output.state !== 'completed') {
+        throw new Error(
+          ('error' in output ? output.error : undefined) ??
+            `Topology invocation ${invocation.phase} failed.`
+        );
+      }
+      costUsd += output.costUsd ?? 0;
+      tokenInput += output.tokens?.input ?? 0;
+      tokenOutput += output.tokens?.output ?? 0;
+      return output.output;
+    },
+  };
+  try {
+    const result = await executeFusionTopology({
+      id: node.id,
+      kind: node.kind,
+      task: node.task,
+      agents: node.topology_agents,
+      ...(node.max_rounds !== undefined ? { maxRounds: node.max_rounds } : {}),
+    }, topologyProvider);
+    return {
+      state: 'completed',
+      output: result.output,
+      ...(costUsd > 0 ? { costUsd } : {}),
+      ...(tokenInput > 0 || tokenOutput > 0
+        ? { tokens: { input: tokenInput, output: tokenOutput, total: tokenInput + tokenOutput } }
+        : {}),
+    };
+  } catch (error) {
+    return {
+      state: 'failed',
+      output: '',
+      error: error instanceof Error ? error.message : String(error),
+      ...(costUsd > 0 ? { costUsd } : {}),
+      ...(tokenInput > 0 || tokenOutput > 0
+        ? { tokens: { input: tokenInput, output: tokenOutput, total: tokenInput + tokenOutput } }
+        : {}),
+    };
+  }
+}
 
 /**
  * Closed-set node type for telemetry — mirrors the DagNode discriminators.
@@ -3284,6 +3398,41 @@ export async function executeDagWorkflow(
               nodeOutputs,
               issueContext,
               config.envVars
+            );
+            return { nodeId: node.id, output };
+          }
+
+          // 3f. Provider-backed deliberation topology node.
+          if (isFusionTopologyNode(node)) {
+            const { provider, options: nodeOptions } = await resolveNodeProviderAndModel(
+              node,
+              workflowProvider,
+              workflowModel,
+              config,
+              platform,
+              conversationId,
+              workflowRun.id,
+              cwd,
+              workflowLevelOptions,
+              aiProfile,
+              workflowPreset
+            );
+            const output = await executeFusionTopologyDagNode(
+              deps,
+              platform,
+              conversationId,
+              cwd,
+              workflowRun,
+              node,
+              provider,
+              nodeOptions,
+              artifactsDir,
+              logDir,
+              baseBranch,
+              docsDir,
+              nodeOutputs,
+              configuredCommandFolder,
+              issueContext
             );
             return { nodeId: node.id, output };
           }

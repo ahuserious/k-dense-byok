@@ -78,7 +78,9 @@ describe('fusion topology executor semantics', () => {
       run: mock(async (invocation: FusionTopologyInvocation) => {
         if (invocation.phase === 'auto-validate-check') {
           checks += 1;
-          return checks === 1 ? 'INVALID: missing evidence' : 'VALID: evidence present';
+          return checks === 1
+            ? JSON.stringify({ passed: false, findings: ['missing evidence'] })
+            : JSON.stringify({ passed: true, findings: [] });
         }
         return invocation.phase === 'auto-validate-repair' ? 'repaired draft' : 'initial draft';
       }),
@@ -105,7 +107,39 @@ describe('fusion topology executor semantics', () => {
 
     await expect(executeFusionTopology(
       { ...topology('auto-validate'), maxRounds: 1 },
-      { run: async invocation => invocation.phase === 'auto-validate-check' ? 'INVALID' : 'draft' }
+      {
+        run: async invocation => invocation.phase === 'auto-validate-check'
+          ? JSON.stringify({ passed: false, findings: ['still invalid'] })
+          : 'draft',
+      }
     )).rejects.toThrow('Auto-validation failed after 1 rounds');
+  });
+
+  it.each([
+    'VALID: false — missing evidence',
+    'not invalid; no problems found',
+    '{"passed":"true","findings":[]}',
+    '{"passed":true}',
+    '',
+  ])('never accepts an ambiguous validator verdict: %s', async verdict => {
+    await expect(executeFusionTopology(
+      { ...topology('auto-validate'), maxRounds: 1 },
+      {
+        run: async invocation => invocation.phase === 'auto-validate-check' ? verdict : 'draft',
+      }
+    )).rejects.toThrow();
+  });
+
+  it('accepts only a strict JSON verdict whose boolean passed field is true', async () => {
+    const result = await executeFusionTopology(
+      { ...topology('auto-validate'), maxRounds: 1 },
+      {
+        run: async invocation => invocation.phase === 'auto-validate-check'
+          ? JSON.stringify({ passed: true, findings: [] })
+          : 'verified draft',
+      }
+    );
+    expect(result.validation).toEqual({ passed: true, rounds: 1 });
+    expect(result.output).toBe('verified draft');
   });
 });

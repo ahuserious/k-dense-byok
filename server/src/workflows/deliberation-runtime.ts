@@ -1,7 +1,10 @@
+import crypto from "node:crypto";
 import { mimeographSubagentForPersonality } from "../agent/subagents.ts";
 import {
   DEFAULT_PERSONALITY_STORE_REF,
   ensurePersonalityStoreInstalled,
+  loadPersonalityStoreSnapshot,
+  personalityContentManifestDigest,
   selectBestPersonalities,
   type PersonalityStoreSnapshot,
   type ScientificPersonality,
@@ -10,6 +13,7 @@ import type {
   WorkflowNodeExecutor,
   WorkflowNodeExecutorContext,
 } from "./runner.ts";
+import type { WorkflowDeliberationStaffingReceipt } from "./run-state.ts";
 import type { WorkflowNode } from "./schema.ts";
 import {
   materializeEffectiveHostedFusionNode,
@@ -98,6 +102,7 @@ function withoutDeliberationSettings(node: DeliberationNode): DeliberationNode {
 export function bindDeliberationStaffing(
   node: DeliberationNode,
   snapshot: PersonalityStoreSnapshot,
+  receiptedPersonalityRefs?: readonly string[],
 ): BoundDeliberationStaffing {
   const deliberation = node.settings?.deliberation;
   if (!deliberation) {
@@ -123,7 +128,18 @@ export function bindDeliberationStaffing(
       `Node ${node.id} requires exactly ${count} manual mimeograph personality refs.`,
     );
   }
-  const personalities = mode === "manual"
+  if (receiptedPersonalityRefs && receiptedPersonalityRefs.length !== count) {
+    throw new Error(
+      `Node ${node.id} receipted ${receiptedPersonalityRefs.length} personalities, expected ${count}.`,
+    );
+  }
+  const personalities = receiptedPersonalityRefs
+    ? receiptedPersonalityRefs.map((ref) => {
+        const personality = snapshot.personalities.find((candidate) => candidate.ref === ref);
+        if (!personality) throw new Error(`Receipted personality ref is unavailable: ${ref}.`);
+        return structuredClone(personality);
+      })
+    : mode === "manual"
     ? manualRefs.map((ref) => {
         const personality = snapshot.personalities.find((candidate) => candidate.ref === ref);
         if (!personality) throw new Error(`Unknown personality ref: ${ref}.`);
@@ -165,6 +181,30 @@ export function bindDeliberationStaffing(
   return { storeRef, mode, personalities, node: bound };
 }
 
+export function effectiveDeliberationPromptSha256(node: DeliberationNode): string {
+  const roles = node.kind === "council"
+    ? node.members.map((member) => ({ id: member.id, role: member.role }))
+    : node.kind === "fusion"
+    ? node.fusion.members.map((member) => ({ id: member.id, role: member.role }))
+    : [];
+  return crypto.createHash("sha256").update(JSON.stringify({
+    kind: node.kind,
+    goal: node.goal,
+    roles,
+  })).digest("hex");
+}
+
+function assertVerifiedPersonalitySnapshot(snapshot: PersonalityStoreSnapshot): void {
+  if (
+    !snapshot.source.trim() ||
+    !/^[a-f0-9]{40}$/.test(snapshot.revision) ||
+    !/^[a-f0-9]{64}$/.test(snapshot.digest) ||
+    personalityContentManifestDigest(snapshot.personalities) !== snapshot.digest
+  ) {
+    throw new Error("Deliberation personality snapshot failed commit/content verification.");
+  }
+}
+
 function isDeliberationNode(node: WorkflowNode): node is DeliberationNode {
   return node.kind === "best-of-n" || node.kind === "council" || node.kind === "fusion";
 }
@@ -175,6 +215,11 @@ function isHostedFusionNode(node: WorkflowNode): node is HostedOpenRouterFusionN
 
 export interface DeliberationExecutorDependencies {
   loadStore(storeRef: string): Promise<PersonalityStoreSnapshot>;
+  loadStoreSnapshot?(
+    storeRef: string,
+    digest: string,
+    revision: string,
+  ): Promise<PersonalityStoreSnapshot>;
 }
 
 export function withDeliberationBindings(
@@ -188,6 +233,9 @@ export function withDeliberationBindings(
         );
       }
       return snapshot;
+    },
+    async loadStoreSnapshot(storeRef, digest, revision) {
+      return loadPersonalityStoreSnapshot(storeRef, digest, undefined, { revision });
     },
   },
 ): WorkflowNodeExecutor {
@@ -205,8 +253,79 @@ export function withDeliberationBindings(
     }
     const storeRef = effectiveNode.settings.deliberation.personalityStoreRef ??
       DEFAULT_PERSONALITY_STORE_REF;
-    const snapshot = await dependencies.loadStore(storeRef);
-    const staffing = bindDeliberationStaffing(effectiveNode, snapshot);
+    const durableReceipt = context.deliberationStaffingReceipt;
+    let snapshot: PersonalityStoreSnapshot;
+    if (durableReceipt) {
+      if (storeRef !== durableReceipt.storeRef) {
+        throw new Error(
+          `Deliberation store ref for run ${context.runId} changed from its receipt.`,
+        );
+      }
+      if (!dependencies.loadStoreSnapshot) {
+        throw new Error(
+          `Deliberation snapshot ${durableReceipt.storeDigest} required by run ${context.runId} cannot be loaded; refusing to restaff.`,
+        );
+      }
+      try {
+        snapshot = await dependencies.loadStoreSnapshot(
+          durableReceipt.storeRef,
+          durableReceipt.storeDigest,
+          durableReceipt.revision,
+        );
+      } catch (error) {
+        throw new Error(
+          `Deliberation snapshot ${durableReceipt.storeDigest} required by run ${context.runId} is unavailable; refusing to restaff.`,
+          { cause: error },
+        );
+      }
+      assertVerifiedPersonalitySnapshot(snapshot);
+      if (
+        snapshot.storeRef !== durableReceipt.storeRef ||
+        snapshot.source !== durableReceipt.source ||
+        snapshot.revision !== durableReceipt.revision ||
+        snapshot.digest !== durableReceipt.storeDigest
+      ) {
+        throw new Error(`Deliberation snapshot for run ${context.runId} does not match its receipt.`);
+      }
+    } else {
+      snapshot = await dependencies.loadStore(storeRef);
+      assertVerifiedPersonalitySnapshot(snapshot);
+      if (snapshot.storeRef !== storeRef) {
+        throw new Error(
+          `Requested personality store ${storeRef} is not installed (${snapshot.storeRef}).`,
+        );
+      }
+    }
+    const staffing = bindDeliberationStaffing(
+      effectiveNode,
+      snapshot,
+      durableReceipt?.selectedPersonalityRefs,
+    );
+    const effectivePromptSha256 = effectiveDeliberationPromptSha256(staffing.node);
+    if (durableReceipt) {
+      if (
+        staffing.personalities.map((personality) => personality.ref).join("\0") !==
+          durableReceipt.selectedPersonalityRefs.join("\0") ||
+        effectivePromptSha256 !== durableReceipt.effectivePromptSha256
+      ) {
+        throw new Error(`Deliberation staffing for run ${context.runId} changed from its receipt.`);
+      }
+    } else {
+      if (!context.recordDeliberationStaffingReceipt) {
+        throw new Error(
+          `Run ${context.runId} cannot persist deliberation staffing; refusing ephemeral execution.`,
+        );
+      }
+      const receipt: WorkflowDeliberationStaffingReceipt = {
+        storeRef,
+        source: snapshot.source,
+        revision: snapshot.revision,
+        storeDigest: snapshot.digest,
+        selectedPersonalityRefs: staffing.personalities.map((personality) => personality.ref),
+        effectivePromptSha256,
+      };
+      context.recordDeliberationStaffingReceipt(receipt);
+    }
     return executeNode({
       ...context,
       node: staffing.node,

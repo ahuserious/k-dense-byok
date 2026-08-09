@@ -3,11 +3,15 @@ import {
   bindDeliberationStaffing,
   withDeliberationBindings,
 } from "../src/workflows/deliberation-runtime.ts";
-import { DEFAULT_PERSONALITY_STORE_REF } from "../src/personality-store/store.ts";
+import {
+  DEFAULT_PERSONALITY_STORE_REF,
+  personalityContentManifestDigest,
+} from "../src/personality-store/store.ts";
 import type {
   WorkflowNodeExecutorContext,
   WorkflowNodeExecutorResult,
 } from "../src/workflows/runner.ts";
+import type { WorkflowDeliberationStaffingReceipt } from "../src/workflows/run-state.ts";
 import type { ModelRequest, WorkflowNode } from "../src/workflows/schema.ts";
 
 const model = (name: string): ModelRequest => ({
@@ -21,17 +25,19 @@ const model = (name: string): ModelRequest => ({
   resolution: { mode: "exact" },
 });
 
+const snapshotPersonalities = [
+  { ref: "genomics", title: "Genomics Scientist", instructions: "Inspect genome variants and alignments." },
+  { ref: "statistician", title: "Statistician", instructions: "Audit estimands and uncertainty." },
+  { ref: "chemist", title: "Chemist", instructions: "Check molecules and assays." },
+];
+
 const snapshot = {
   schemaVersion: 1 as const,
   storeRef: DEFAULT_PERSONALITY_STORE_REF,
   source: "ahuserious/scientific-agents",
-  revision: "fixture",
-  digest: "0".repeat(64),
-  personalities: [
-    { ref: "genomics", title: "Genomics Scientist", instructions: "Inspect genome variants and alignments." },
-    { ref: "statistician", title: "Statistician", instructions: "Audit estimands and uncertainty." },
-    { ref: "chemist", title: "Chemist", instructions: "Check molecules and assays." },
-  ],
+  revision: "a".repeat(40),
+  digest: personalityContentManifestDigest(snapshotPersonalities),
+  personalities: snapshotPersonalities,
 };
 
 function commonNode(id: string) {
@@ -132,11 +138,23 @@ describe("deliberation personality binding", () => {
       },
       preserveMinorityReports: true,
     };
-    const downstream = vi.fn(async (): Promise<WorkflowNodeExecutorResult> => ({ output: null }));
+    const bindingOrder: string[] = [];
+    const downstream = vi.fn(async (): Promise<WorkflowNodeExecutorResult> => {
+      bindingOrder.push("provider-dispatch");
+      return { output: null };
+    });
     const execute = withDeliberationBindings(downstream, {
       loadStore: vi.fn(async () => snapshot),
     });
-    await execute({ node } as WorkflowNodeExecutorContext);
+    let receipt: WorkflowDeliberationStaffingReceipt | undefined;
+    await execute({
+      node,
+      runId: "wfrun-hosted",
+      recordDeliberationStaffingReceipt(value) {
+        bindingOrder.push("receipt-persisted");
+        receipt = structuredClone(value);
+      },
+    } as WorkflowNodeExecutorContext);
 
     const received = downstream.mock.calls[0][0].node;
     expect(received.settings?.reasoningEffort).toBeUndefined();
@@ -149,5 +167,116 @@ describe("deliberation personality binding", () => {
     )).toBe(true);
     expect(received.fusion.judge.requested.reasoning).toBe("xhigh");
     expect(received.goal).toContain("mimeograph-genomics");
+    expect(receipt).toMatchObject({
+      revision: snapshot.revision,
+      storeDigest: snapshot.digest,
+      selectedPersonalityRefs: ["genomics"],
+    });
+    expect(bindingOrder).toEqual(["receipt-persisted", "provider-dispatch"]);
+  });
+
+  it("retries from the receipted snapshot after the current store is replaced", async () => {
+    const node: Extract<WorkflowNode, { kind: "best-of-n" }> = {
+      ...commonNode("durable"),
+      kind: "best-of-n",
+      goal: "Audit genome variant evidence",
+      candidateModels: [model("candidate")],
+      candidateCount: 1,
+      evaluator: model("evaluator"),
+      settings: {
+        deliberation: {
+          bestOfNPersonalityCount: 1,
+          mimeographs: { mode: "auto", personalityRefs: [] },
+        },
+      },
+    };
+    const replacementPersonalities = [
+      { ref: "chemist", title: "Chemist", instructions: "Audit molecules and assays." },
+    ];
+    const replacement = {
+      ...snapshot,
+      revision: "b".repeat(40),
+      digest: personalityContentManifestDigest(replacementPersonalities),
+      personalities: replacementPersonalities,
+    };
+    let currentStore = snapshot;
+    let receipt: WorkflowDeliberationStaffingReceipt | undefined;
+    const downstream = vi.fn(async (): Promise<WorkflowNodeExecutorResult> => ({ output: null }));
+    const loadStore = vi.fn(async () => currentStore);
+    const loadStoreSnapshot = vi.fn(async (_storeRef: string, digest: string) => {
+      if (digest !== snapshot.digest) throw new Error("missing snapshot");
+      return snapshot;
+    });
+    const execute = withDeliberationBindings(downstream, { loadStore, loadStoreSnapshot });
+
+    await execute({
+      node,
+      runId: "wfrun-durable",
+      recordDeliberationStaffingReceipt(value) {
+        receipt = structuredClone(value);
+      },
+    } as WorkflowNodeExecutorContext);
+    expect(receipt).toBeDefined();
+    currentStore = replacement;
+    await execute({
+      node,
+      runId: "wfrun-durable",
+      resumed: true,
+      deliberationStaffingReceipt: receipt,
+    } as WorkflowNodeExecutorContext);
+
+    expect(loadStore).toHaveBeenCalledTimes(1);
+    expect(loadStoreSnapshot).toHaveBeenCalledWith(
+      DEFAULT_PERSONALITY_STORE_REF,
+      snapshot.digest,
+      snapshot.revision,
+    );
+    const retried = downstream.mock.calls[1][0].node;
+    expect(retried.goal).toContain("mimeograph-genomics");
+    expect(retried.goal).not.toContain("mimeograph-chemist");
+  });
+
+  it("fails closed on retry when the receipted snapshot is missing", async () => {
+    const node: Extract<WorkflowNode, { kind: "best-of-n" }> = {
+      ...commonNode("missing"),
+      kind: "best-of-n",
+      goal: "Audit genome variant evidence",
+      candidateModels: [model("candidate")],
+      candidateCount: 1,
+      evaluator: model("evaluator"),
+      settings: {
+        deliberation: {
+          bestOfNPersonalityCount: 1,
+          mimeographs: { mode: "auto", personalityRefs: [] },
+        },
+      },
+    };
+    const receipt: WorkflowDeliberationStaffingReceipt = {
+      storeRef: DEFAULT_PERSONALITY_STORE_REF,
+      source: snapshot.source,
+      revision: snapshot.revision,
+      storeDigest: snapshot.digest,
+      selectedPersonalityRefs: ["genomics"],
+      effectivePromptSha256: "f".repeat(64),
+    };
+    const downstream = vi.fn(async (): Promise<WorkflowNodeExecutorResult> => ({ output: null }));
+    const loadStore = vi.fn(async () => snapshot);
+    const execute = withDeliberationBindings(downstream, {
+      loadStore,
+      loadStoreSnapshot: vi.fn(async () => {
+        throw new Error("snapshot deleted");
+      }),
+    });
+
+    await expect(execute({
+      node,
+      runId: "wfrun-missing",
+      resumed: true,
+      deliberationStaffingReceipt: receipt,
+    } as WorkflowNodeExecutorContext)).rejects.toThrow(
+      /required by run wfrun-missing is unavailable; refusing to restaff/,
+    );
+    expect(loadStore).not.toHaveBeenCalled();
+    expect(downstream).not.toHaveBeenCalled();
   });
 });
