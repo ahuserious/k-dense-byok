@@ -15,22 +15,22 @@ event-reducer `WorkflowRunState` used for storage and replay.
 | `workflowId` | Typed workflow definition identifier. |
 | `workflowRevision` | Positive definition revision represented by this projection. |
 | `status` | Current workflow status: queued, active/waiting states, or a terminal result. |
-| `nodes[].id` | Stable graph-node identifier. |
+| `nodes[].id` | Stable graph-node identifier; IDs are unique and every state node must exist in `topology.nodes`. |
 | `nodes[].status` | Current per-node execution status, including waiting, blocked, interrupted, and cancelled states. |
 | `nodes[].progress.completed` | Completed progress units; must not exceed `total`. |
 | `nodes[].progress.total` | Positive total progress units. |
 | `nodes[].progress.message` | Optional bounded human-readable progress label. |
 | `nodes[].executionId` | Optional current durable execution identifier. |
 | `topology.nodes[]` | Current graph node IDs in the live projection. |
-| `topology.edges[]` | Current directed edges; both endpoints must exist in `topology.nodes`. |
-| `backgroundAgentTrailingNode` | Optional reserved trailing slot for the background/rescue agent, with agent, node, and status identity. |
+| `topology.edges[]` | Current directed edges with unique IDs; both endpoints must exist in `topology.nodes`. |
+| `backgroundAgentTrailingNode` | Optional reserved trailing slot for the background/rescue agent; its optional `nodeId` must resolve in `topology.nodes`. |
 | `errorRouting.source` | Literal `chat-stream`, identifying the originating error channel. |
 | `errorRouting.surface` | Literal `true`, instructing S8 to surface the Scientific DAG graph when the signal exists. |
-| `errorRouting.nodeId` | Optional node associated with the chat-stream error. |
+| `errorRouting.nodeId` | Optional node associated with the chat-stream error; when present it must resolve in `topology.nodes`. |
 | `errorRouting.error` | Bounded code/message/retryability payload for the surfaced error. |
 | `updatedAt` | Non-negative epoch-millisecond projection timestamp. |
 
 `serializeRunStateV1()` validates before JSON serialization;
-`parseRunStateV1()` validates structure, progress bounds, unique topology nodes,
-and edge endpoints before returning a detached value.
-
+`parseRunStateV1()` validates structure, progress bounds, unique state and topology
+node IDs, unique edge IDs, state/topology membership, edge endpoints, and optional
+node references before returning a detached value.

@@ -1923,6 +1923,7 @@ export function createKadyWorkflowNodeExecutor(
         };
         const dynamicNode = {
           ...node,
+          model: structuredClone(slot.request),
           limits: { ...dynamicCallLimits },
         };
         const dynamicResult = await executeAgentNode({

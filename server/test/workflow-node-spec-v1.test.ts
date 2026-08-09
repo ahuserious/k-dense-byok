@@ -9,6 +9,8 @@ import {
   deriveWorkflowNodeDemand,
   resolveNodeSpecV1,
   validateWorkflowGraphDocument,
+  workflowModelCallSlotsForNode,
+  type ModelRequest,
   type WorkflowGraphDocument,
 } from "../src/workflows/index.ts";
 
@@ -42,6 +44,19 @@ function foundationFixture(): WorkflowGraphDocument {
       "utf8",
     ),
   ) as WorkflowGraphDocument;
+}
+
+function fixedModel(model: string, reasoning: "low" | "high" = "high"): ModelRequest {
+  return {
+    requested: {
+      source: "fixed",
+      provider: "openrouter",
+      model,
+      auth: { kind: "api-key" },
+      reasoning,
+    },
+    resolution: { mode: "exact" },
+  };
 }
 
 describe("NodeSpec v1 contract", () => {
@@ -133,5 +148,64 @@ describe("NodeSpec v1 contract", () => {
       code: "node-budget-exceeds-workflow-limit",
       path: "/nodes/0/settings/budget/maxTokens",
     }));
+  });
+
+  it("uses a conflicting NodeSpec model and reasoning in the executable slot", () => {
+    const document = foundationFixture();
+    const settingsModel = fixedModel("settings-only-model", "low");
+    document.nodes[0].settings = {
+      model: settingsModel,
+      reasoningEffort: "xhigh",
+    };
+
+    const validation = validateWorkflowGraphDocument(document);
+    expect(validation).toMatchObject({ ok: true });
+    if (!validation.ok) return;
+    const node = validation.document.nodes[0];
+    const resolved = resolveNodeSpecV1(validation.document, node);
+    const slots = workflowModelCallSlotsForNode(validation.document, node);
+
+    expect(resolved.model?.requested).toMatchObject({
+      model: "settings-only-model",
+      reasoning: "xhigh",
+    });
+    expect(slots).toHaveLength(1);
+    expect(slots[0].request).toEqual(resolved.model);
+  });
+
+  it("validates and constructs a slot from settings only", () => {
+    const document = foundationFixture();
+    delete document.defaultModel;
+    document.nodes[0].settings = {
+      model: fixedModel("settings-without-legacy", "low"),
+      reasoningEffort: "xhigh",
+    };
+
+    const validation = validateWorkflowGraphDocument(document);
+    expect(validation).toMatchObject({ ok: true });
+    if (!validation.ok) return;
+    const slots = workflowModelCallSlotsForNode(
+      validation.document,
+      validation.document.nodes[0],
+    );
+
+    expect(slots).toHaveLength(1);
+    expect(slots[0].request.requested).toMatchObject({
+      model: "settings-without-legacy",
+      reasoning: "xhigh",
+    });
+  });
+
+  it("keeps legacy-only executable model behavior unchanged", () => {
+    const document = foundationFixture();
+    const legacyModel = structuredClone(document.defaultModel!);
+    const validation = validateWorkflowGraphDocument(document);
+    expect(validation).toMatchObject({ ok: true });
+    if (!validation.ok) return;
+
+    expect(workflowModelCallSlotsForNode(
+      validation.document,
+      validation.document.nodes[0],
+    )).toEqual([{ id: "agent", request: legacyModel }]);
   });
 });

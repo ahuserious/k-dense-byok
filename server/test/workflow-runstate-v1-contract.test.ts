@@ -70,6 +70,40 @@ describe("RunState v1 contract", () => {
     expect(() => serializeRunStateV1(state)).toThrow(/unknown node/);
   });
 
+  it("rejects duplicate state-node ids", () => {
+    const state = runState();
+    state.nodes.push(structuredClone(state.nodes[0]));
+    expect(() => serializeRunStateV1(state)).toThrow(/nodes: duplicate node id research/);
+  });
+
+  it("rejects duplicate topology-edge ids", () => {
+    const state = runState();
+    state.topology.edges.push(structuredClone(state.topology.edges[0]));
+    expect(() => serializeRunStateV1(state)).toThrow(/topology: duplicate edge id/);
+  });
+
+  it("rejects state nodes absent from topology", () => {
+    const state = runState();
+    state.topology.nodes = state.topology.nodes.filter((node) => node.id !== "synthesis");
+    expect(() => serializeRunStateV1(state)).toThrow(/state node is absent from topology/);
+  });
+
+  it("rejects a dangling error-routing node reference", () => {
+    const state = runState();
+    state.errorRouting!.nodeId = "missing";
+    expect(() => serializeRunStateV1(state)).toThrow(
+      /error routing: node reference is absent from topology/,
+    );
+  });
+
+  it("rejects a dangling background-agent trailing-node reference", () => {
+    const state = runState();
+    state.backgroundAgentTrailingNode!.nodeId = "missing";
+    expect(() => serializeRunStateV1(state)).toThrow(
+      /background-agent trailing node: node reference is absent from topology/,
+    );
+  });
+
   it("rejects malformed serialized input", () => {
     expect(() => parseRunStateV1("not json")).toThrow("Invalid RunState v1 JSON.");
     expect(() => parseRunStateV1('{"schemaVersion":2}')).toThrow(/Invalid RunState v1/);

@@ -14,8 +14,8 @@ without mutating stored documents.
 | Field | Semantics |
 | --- | --- |
 | `version` | Contract discriminator; omitted means NodeSpec version `1`. |
-| `model` | Optional requested-model contract, including the existing `auth.kind` values `api-key`, `oauth`, `local`, and `custom`. |
-| `reasoningEffort` | Per-node reasoning override: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; defaults from the selected model, then `high`. |
+| `model` | Authoritative per-node requested-model contract; it overrides legacy node/default requests for validation and executable model slots, while absence preserves legacy fallback behavior and the existing `auth.kind` values `api-key`, `oauth`, `local`, and `custom`. |
+| `reasoningEffort` | Authoritative per-node reasoning override applied to the executable request and its fallback alternatives: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; absence preserves the selected model reasoning, then defaults to `high` when no model exists. |
 | `hyperparameters.temperature` | Sampling temperature from `0` through `2`; defaults to `1`. |
 | `hyperparameters.top_p` | Nucleus-sampling probability from `0` through `1`; defaults to `1`. |
 | `hyperparameters.sampling` | Extensible map of up to 16 scalar sampling parameters for later harness adapters; defaults to empty. |
@@ -44,4 +44,3 @@ The optional root `settings` object uses `WorkflowSettingsV1Schema`.
 | `version` | Workflow-settings discriminator; omitted means version `1`. |
 | `defaultHarness` | Default CLI/harness inherited by nodes without an override; defaults to `pi`. |
 | `databases` | Database catalogue IDs available to every node; defaults to empty and is unioned with per-node references. |
-

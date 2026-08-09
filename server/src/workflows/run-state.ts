@@ -18,6 +18,7 @@ import {
   WORKFLOW_EVIDENCE_POLICY_SLOT_ID,
 } from "./evidence-policy.ts";
 import { trustedLeanArtifactPaths } from "./lean4-artifacts.ts";
+import { resolveNodeSpecV1 } from "./validate.ts";
 
 export const WORKFLOW_RUN_STORAGE_VERSION = 1 as const;
 export const WORKFLOW_RUN_EVENT_SCHEMA_VERSION = 1 as const;
@@ -352,7 +353,12 @@ function assertRunStateV1(value: unknown): asserts value is RunStateV1 {
     );
   }
   const state = value as RunStateV1;
+  const stateNodeIds = new Set<string>();
   for (const node of state.nodes) {
+    if (stateNodeIds.has(node.id)) {
+      throw new Error(`Invalid RunState v1 nodes: duplicate node id ${node.id}.`);
+    }
+    stateNodeIds.add(node.id);
     if (node.progress.completed > node.progress.total) {
       throw new Error(`Invalid RunState v1 progress for node ${node.id}.`);
     }
@@ -361,10 +367,31 @@ function assertRunStateV1(value: unknown): asserts value is RunStateV1 {
   if (topologyNodeIds.size !== state.topology.nodes.length) {
     throw new Error("Invalid RunState v1 topology: duplicate node id.");
   }
+  if ([...stateNodeIds].some((nodeId) => !topologyNodeIds.has(nodeId))) {
+    throw new Error("Invalid RunState v1 nodes: state node is absent from topology.");
+  }
+  const topologyEdgeIds = new Set(state.topology.edges.map((edge) => edge.id));
+  if (topologyEdgeIds.size !== state.topology.edges.length) {
+    throw new Error("Invalid RunState v1 topology: duplicate edge id.");
+  }
   if (state.topology.edges.some((edge) =>
     !topologyNodeIds.has(edge.from) || !topologyNodeIds.has(edge.to)
   )) {
     throw new Error("Invalid RunState v1 topology: edge references an unknown node.");
+  }
+  if (
+    state.errorRouting?.nodeId !== undefined &&
+    !topologyNodeIds.has(state.errorRouting.nodeId)
+  ) {
+    throw new Error("Invalid RunState v1 error routing: node reference is absent from topology.");
+  }
+  if (
+    state.backgroundAgentTrailingNode?.nodeId !== undefined &&
+    !topologyNodeIds.has(state.backgroundAgentTrailingNode.nodeId)
+  ) {
+    throw new Error(
+      "Invalid RunState v1 background-agent trailing node: node reference is absent from topology.",
+    );
   }
 }
 
@@ -630,38 +657,44 @@ function modelRequestsForNode(
   graph: WorkflowGraphDocument,
   node: WorkflowNode,
 ): ModelRequest[] {
-  const requests: Array<ModelRequest | undefined> = [];
+  const requests: ModelRequest[] = [];
+  const add = (legacyModel: ModelRequest | undefined): void => {
+    const request = resolvedNodeSlotModel(graph, node, legacyModel);
+    if (request) requests.push(request);
+  };
   switch (node.kind) {
     case "agent":
     case "research-until-goal":
-      requests.push(node.model ?? graph.defaultModel);
+      add(node.model ?? graph.defaultModel);
       break;
     case "council":
-      requests.push(...node.members.map((member) => member.model), node.chair);
+      node.members.forEach((member) => add(member.model));
+      add(node.chair);
       break;
     case "fusion":
-      requests.push(...node.fusion.members.map((member) => member.model));
+      node.fusion.members.forEach((member) => add(member.model));
       if (node.fusion.mode === "openrouter-router") {
-        requests.push(node.fusion.router, node.fusion.judge);
+        add(node.fusion.router);
+        add(node.fusion.judge);
       } else {
-        requests.push(node.fusion.synthesizer);
+        add(node.fusion.synthesizer);
       }
       break;
     case "best-of-n":
-      requests.push(...(node.candidateModels ?? [node.model ?? graph.defaultModel]));
-      requests.push(node.evaluator ?? graph.defaultModel);
+      (node.candidateModels ?? [node.model ?? graph.defaultModel]).forEach(add);
+      add(node.evaluator ?? graph.defaultModel);
       break;
     case "evidence-gate":
-      requests.push(workflowEvidenceGateEvaluator(graph, node));
+      add(workflowEvidenceGateEvaluator(graph, node));
       break;
     case "lean4":
-      requests.push(node.solverModel ?? graph.defaultModel);
+      add(node.solverModel ?? graph.defaultModel);
       break;
   }
   if (requiresWorkflowEvidencePolicyEvaluation(graph, node)) {
-    requests.push(workflowEvidencePolicyEvaluator(graph, node));
+    add(workflowEvidencePolicyEvaluator(graph, node));
   }
-  return requests.filter((request): request is ModelRequest => request !== undefined);
+  return requests;
 }
 
 const MODEL_CALL_SLOT_ID_RE = /^[a-z0-9][a-z0-9._:-]{0,127}$/;
@@ -674,13 +707,26 @@ function modelCallSlot(id: string, request: ModelRequest | undefined): WorkflowM
   return request ? [{ id, request: structuredClone(request) }] : [];
 }
 
+function resolvedNodeSlotModel(
+  graph: WorkflowGraphDocument,
+  node: WorkflowNode,
+  legacyModel: ModelRequest | undefined,
+): ModelRequest | undefined {
+  if (!legacyModel && !node.settings?.model) return undefined;
+  return resolveNodeSpecV1(graph, node, legacyModel).model;
+}
+
 function withEvidencePolicySlot(
   graph: WorkflowGraphDocument,
   node: WorkflowNode,
   slots: WorkflowModelCallSlot[],
 ): WorkflowModelCallSlot[] {
   if (!requiresWorkflowEvidencePolicyEvaluation(graph, node)) return slots;
-  const evaluator = workflowEvidencePolicyEvaluator(graph, node);
+  const evaluator = resolvedNodeSlotModel(
+    graph,
+    node,
+    workflowEvidencePolicyEvaluator(graph, node),
+  );
   return evaluator
     ? [
         ...slots,
@@ -706,13 +752,19 @@ export function workflowModelCallSlotsForNode(
       return withEvidencePolicySlot(
         graph,
         node,
-        modelCallSlot("agent", node.model ?? graph.defaultModel),
+        modelCallSlot(
+          "agent",
+          resolvedNodeSlotModel(graph, node, node.model ?? graph.defaultModel),
+        ),
       );
     case "research-until-goal":
       return withEvidencePolicySlot(
         graph,
         node,
-        modelCallSlot("research-iteration-1", node.model ?? graph.defaultModel),
+        modelCallSlot(
+          "research-iteration-1",
+          resolvedNodeSlotModel(graph, node, node.model ?? graph.defaultModel),
+        ),
       );
     case "council": {
       const slots: WorkflowModelCallSlot[] = [];
@@ -720,12 +772,12 @@ export function workflowModelCallSlotsForNode(
         for (const member of node.members) {
           slots.push({
             id: `council-round-${round}-member-${member.id}`,
-            request: structuredClone(member.model),
+            request: resolvedNodeSlotModel(graph, node, member.model)!,
           });
         }
         slots.push({
           id: `council-round-${round}-chair`,
-          request: structuredClone(node.chair),
+          request: resolvedNodeSlotModel(graph, node, node.chair)!,
         });
       }
       return withEvidencePolicySlot(graph, node, slots);
@@ -735,10 +787,16 @@ export function workflowModelCallSlotsForNode(
         return withEvidencePolicySlot(graph, node, [
           ...node.fusion.members.map((member) => ({
             id: `fusion-panel-${member.id}`,
-            request: structuredClone(member.model),
+            request: resolvedNodeSlotModel(graph, node, member.model)!,
           })),
-          { id: "fusion-judge-deliberation", request: structuredClone(node.fusion.judge) },
-          { id: "fusion-judge-final", request: structuredClone(node.fusion.judge) },
+          {
+            id: "fusion-judge-deliberation",
+            request: resolvedNodeSlotModel(graph, node, node.fusion.judge)!,
+          },
+          {
+            id: "fusion-judge-final",
+            request: resolvedNodeSlotModel(graph, node, node.fusion.judge)!,
+          },
         ]);
       }
       const slots: WorkflowModelCallSlot[] = [];
@@ -746,22 +804,28 @@ export function workflowModelCallSlotsForNode(
         for (const member of node.fusion.members) {
           slots.push({
             id: `fusion-round-${round}-member-${member.id}`,
-            request: structuredClone(member.model),
+            request: resolvedNodeSlotModel(graph, node, member.model)!,
           });
         }
       }
       slots.push({
         id: "fusion-synthesizer",
-        request: structuredClone(node.fusion.synthesizer),
+        request: resolvedNodeSlotModel(graph, node, node.fusion.synthesizer)!,
       });
       return withEvidencePolicySlot(graph, node, slots);
     }
     case "best-of-n": {
       const candidateCount = node.candidateCount ?? node.candidateModels?.length ?? 2;
-      const repeatedRequest = node.model ?? graph.defaultModel;
+      const repeatedRequest = resolvedNodeSlotModel(
+        graph,
+        node,
+        node.model ?? graph.defaultModel,
+      );
       const slots: WorkflowModelCallSlot[] = [];
       for (let index = 0; index < candidateCount; index += 1) {
-        const request = node.candidateModels?.[index] ?? repeatedRequest;
+        const request = node.candidateModels?.[index]
+          ? resolvedNodeSlotModel(graph, node, node.candidateModels[index])
+          : repeatedRequest;
         if (request) {
           slots.push({
             id: `candidate-${index + 1}`,
@@ -769,7 +833,11 @@ export function workflowModelCallSlotsForNode(
           });
         }
       }
-      const evaluator = node.evaluator ?? graph.defaultModel;
+      const evaluator = resolvedNodeSlotModel(
+        graph,
+        node,
+        node.evaluator ?? graph.defaultModel,
+      );
       if (evaluator) {
         slots.push({ id: "candidate-evaluator", request: structuredClone(evaluator) });
       }
@@ -779,7 +847,14 @@ export function workflowModelCallSlotsForNode(
       const usesModel = node.evaluator !== undefined ||
         node.checks.some((check) => check !== "artifact-exists");
       return usesModel
-        ? modelCallSlot("evidence-evaluator", workflowEvidenceGateEvaluator(graph, node))
+        ? modelCallSlot(
+            "evidence-evaluator",
+            resolvedNodeSlotModel(
+              graph,
+              node,
+              workflowEvidenceGateEvaluator(graph, node),
+            ),
+          )
         : [];
     }
     case "lean4":
@@ -787,7 +862,14 @@ export function workflowModelCallSlotsForNode(
         graph,
         node,
         node.mode === "solve"
-          ? modelCallSlot("lean-solver", node.solverModel ?? graph.defaultModel)
+          ? modelCallSlot(
+              "lean-solver",
+              resolvedNodeSlotModel(
+                graph,
+                node,
+                node.solverModel ?? graph.defaultModel,
+              ),
+            )
           : [],
       );
   }
@@ -805,7 +887,11 @@ export function workflowModelCallSlotForNode(
     if (match) {
       const iteration = Number(match[1]);
       const maximumIterations = node.limits?.maxIterations ?? graph.limits.maxIterations;
-      const request = node.model ?? graph.defaultModel;
+      const request = resolvedNodeSlotModel(
+        graph,
+        node,
+        node.model ?? graph.defaultModel,
+      );
       return request && iteration >= 1 && iteration <= maximumIterations
         ? { id: slotId, request: structuredClone(request) }
         : undefined;

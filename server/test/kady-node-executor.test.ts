@@ -571,6 +571,27 @@ describe("production Kady DAG node executor", () => {
     });
   });
 
+  it("executes with a settings-only model and reasoning override", async () => {
+    const settingsModel = openRouterModel("settings-only-model");
+    const node: WorkflowNode = {
+      ...baseNode("agent"),
+      kind: "agent",
+      prompt: "Use the authoritative NodeSpec model.",
+      settings: { model: settingsModel, reasoningEffort: "xhigh" },
+    };
+    const document = graph(node);
+    delete document.defaultModel;
+    const host = new FakeHost([analysis("settings model executed")]);
+
+    await executorFor(host, document)(contextFor(document));
+
+    expect(host.calls).toHaveLength(1);
+    expect(host.calls[0].request).toMatchObject({
+      model: "openrouter/settings-only-model",
+      thinking: "xhigh",
+    });
+  });
+
   it.each([
     ["ollama", "qwen3:32b"],
     ["openai-compatible", "lab/model"],
