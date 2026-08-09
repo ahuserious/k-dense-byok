@@ -49,38 +49,14 @@ export interface NodeModelRequest {
 
 export type NodeSamplingValue = number | string | boolean;
 
-/** Frozen NodeSpec v1 payload persisted on every DAG node. */
-export interface NodeSpecV1 {
-  version?: 1;
-  model?: NodeModelRequest;
-  reasoningEffort?: NodeReasoningLevel;
-  hyperparameters?: {
-    temperature?: number;
-    top_p?: number;
-    sampling?: Record<string, NodeSamplingValue>;
-  };
-  conditions?: { when?: string; exists?: string[] };
-  harness?: NodeHarness;
-  databases?: string[];
-  skills?: { mode?: NodeSkillsMode; list?: string[] };
-  subagents?: { mode?: NodeSubagentMode };
-  autonomy?: 'strict' | 'loose';
-  deliberation?: {
-    personalityStoreRef?: string;
-    bestOfNPersonalityCount?: number;
-    mimeographs?: { mode?: 'auto' | 'manual'; personalityRefs?: string[] };
-  };
-  billingMode?: 'inherit' | 'api' | 'subscription';
-  budget?: { maxTokens?: number; maxCostUsd?: number };
-}
+/** Frozen NodeSpec v1 payload generated from the vendored server contract. */
+export type NodeSpecV1 = components['schemas']['NodeSpecV1'];
 
 type GeneratedDagNode = components['schemas']['DagNode'];
 type GeneratedWorkflowDefinition = components['schemas']['WorkflowDefinition'];
 
-export type DagNode = GeneratedDagNode & { settings?: NodeSpecV1 };
-export type WorkflowDefinition = Omit<GeneratedWorkflowDefinition, 'nodes'> & {
-  nodes: DagNode[];
-};
+export type DagNode = GeneratedDagNode;
+export type WorkflowDefinition = GeneratedWorkflowDefinition;
 
 /**
  * Base URL for SSE streams. In dev, bypasses Vite proxy by connecting directly

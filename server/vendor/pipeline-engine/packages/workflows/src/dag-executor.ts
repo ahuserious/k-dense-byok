@@ -267,12 +267,44 @@ export async function loadConfiguredMcpServerNames(
 }
 
 /** Workflow-level Claude SDK options — per-node overrides take precedence via ?? */
-interface WorkflowLevelOptions {
+export interface WorkflowLevelOptions {
   effort?: EffortLevel;
   thinking?: ThinkingConfig;
   fallbackModel?: string;
   betas?: string[];
   sandbox?: SandboxSettings;
+}
+
+/**
+ * Build the provider-facing raw node configuration.
+ *
+ * `settings` is intentionally forwarded byte-for-byte as validated NodeSpec v1
+ * plumbing. Field-level runtime enforcement belongs to the host executor lanes;
+ * the vendored Pipeline Engine must not claim those bindings by interpreting it.
+ */
+export function buildNodeAdapterConfig(
+  node: DagNode,
+  workflowLevelOptions: WorkflowLevelOptions
+): NodeConfig {
+  const fallbackModel = node.fallbackModel ?? workflowLevelOptions.fallbackModel;
+  return {
+    nodeId: node.id,
+    ...(node.settings !== undefined ? { settings: node.settings } : {}),
+    mcp: node.mcp,
+    hooks: node.hooks,
+    skills: node.skills,
+    agents: node.agents,
+    allowed_tools: node.allowed_tools,
+    denied_tools: node.denied_tools,
+    effort: node.effort ?? workflowLevelOptions.effort,
+    thinking: node.thinking ?? workflowLevelOptions.thinking,
+    sandbox: node.sandbox ?? workflowLevelOptions.sandbox,
+    betas: node.betas ?? workflowLevelOptions.betas,
+    output_format: node.output_format,
+    maxBudgetUsd: node.maxBudgetUsd,
+    systemPrompt: node.systemPrompt,
+    fallbackModel,
+  };
 }
 
 /** Internal node execution result — extends NodeOutput with cost data for aggregation. */
@@ -610,23 +642,7 @@ async function resolveNodeProviderAndModel(
   }
 
   // Build raw nodeConfig — provider translates internally
-  const nodeConfig: NodeConfig = {
-    nodeId: node.id,
-    mcp: node.mcp,
-    hooks: node.hooks,
-    skills: node.skills,
-    agents: node.agents,
-    allowed_tools: node.allowed_tools,
-    denied_tools: node.denied_tools,
-    effort: node.effort ?? workflowLevelOptions.effort,
-    thinking: node.thinking ?? workflowLevelOptions.thinking,
-    sandbox: node.sandbox ?? workflowLevelOptions.sandbox,
-    betas: node.betas ?? workflowLevelOptions.betas,
-    output_format: node.output_format,
-    maxBudgetUsd: node.maxBudgetUsd,
-    systemPrompt: node.systemPrompt,
-    fallbackModel: fb,
-  };
+  const nodeConfig = buildNodeAdapterConfig(node, workflowLevelOptions);
 
   // Pass assistantConfig from config — provider parses internally
   const assistantConfig: Record<string, unknown> = { ...(config.assistants[provider] ?? {}) };

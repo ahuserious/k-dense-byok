@@ -134,11 +134,162 @@ export type AgentDefinition = z.infer<typeof agentDefinitionSchema>;
 const AGENT_ID_REGEX = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
 // ---------------------------------------------------------------------------
+// NodeSpec v1 — frozen per-node execution settings
+// ---------------------------------------------------------------------------
+
+const nodeReasoningLevelSchema = z.enum([
+  'off',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+]);
+
+const nodeReferenceSchema = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/);
+
+const fixedRequestedModelSchema = z
+  .object({
+    source: z.literal('fixed'),
+    provider: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+    model: z.string().min(1).max(256),
+    auth: z
+      .object({
+        kind: z.enum(['api-key', 'oauth', 'local', 'custom']),
+        profile: z.string().min(1).max(128).optional(),
+      })
+      .strict(),
+    reasoning: nodeReasoningLevelSchema,
+  })
+  .strict();
+
+const kadyCurrentRequestedModelSchema = z
+  .object({
+    source: z.literal('kady-current'),
+    auth: z.object({ kind: z.literal('kady-current') }).strict(),
+    reasoning: nodeReasoningLevelSchema,
+  })
+  .strict();
+
+export const nodeRequestedModelSchema = z.discriminatedUnion('source', [
+  fixedRequestedModelSchema,
+  kadyCurrentRequestedModelSchema,
+]);
+
+export const nodeModelRequestSchema = z
+  .object({
+    requested: nodeRequestedModelSchema,
+    resolution: z.discriminatedUnion('mode', [
+      z.object({ mode: z.literal('exact') }).strict(),
+      z
+        .object({
+          mode: z.literal('explicit-fallback'),
+          alternatives: z.array(nodeRequestedModelSchema).min(1).max(8),
+          reason: z.string().min(1).max(256),
+        })
+        .strict(),
+    ]),
+  })
+  .strict();
+
+const nodeSamplingMapSchema = z
+  .record(
+    z.string().regex(/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/),
+    z.union([z.number(), z.string().max(256), z.boolean()])
+  )
+  .openapi({ maxProperties: 16 })
+  .refine(values => Object.keys(values).length <= 16, {
+    message: 'sampling may contain at most 16 properties',
+  });
+
+/**
+ * Canonical vendored projection of the frozen NodeSpec v1 contract.
+ *
+ * This schema preserves and structurally validates node settings at the
+ * Pipeline Engine boundary. Runtime binding/enforcement of individual fields
+ * belongs to the host executor lanes; this package only carries the validated
+ * payload through persistence and into provider adapter arguments.
+ */
+export const nodeSpecV1Schema = z
+  .object({
+    version: z.literal(1).optional(),
+    model: nodeModelRequestSchema.optional(),
+    reasoningEffort: nodeReasoningLevelSchema.optional(),
+    hyperparameters: z
+      .object({
+        temperature: z.number().min(0).max(2).optional(),
+        top_p: z.number().min(0).max(1).optional(),
+        sampling: nodeSamplingMapSchema.optional(),
+      })
+      .strict()
+      .optional(),
+    conditions: z
+      .object({
+        when: z.string().min(1).max(32_768).optional(),
+        exists: z.array(z.string().min(1).max(1_024)).max(64).optional(),
+      })
+      .strict()
+      .optional(),
+    harness: z.enum(['pi', 'claude-code', 'codex', 'opencode', 'copilot']).optional(),
+    databases: z.array(nodeReferenceSchema).max(64).optional(),
+    skills: z
+      .object({
+        mode: z.enum(['auto', 'auto-manual', 'manual']).optional(),
+        list: z.array(nodeReferenceSchema).max(64).optional(),
+      })
+      .strict()
+      .optional(),
+    subagents: z
+      .object({ mode: z.enum(['auto', 'auto-manual']).optional() })
+      .strict()
+      .optional(),
+    autonomy: z.enum(['strict', 'loose']).optional(),
+    deliberation: z
+      .object({
+        personalityStoreRef: nodeReferenceSchema.optional(),
+        bestOfNPersonalityCount: z.number().int().min(1).max(32).optional(),
+        mimeographs: z
+          .object({
+            mode: z.enum(['auto', 'manual']).optional(),
+            personalityRefs: z.array(nodeReferenceSchema).max(32).optional(),
+          })
+          .strict()
+          .optional(),
+      })
+      .strict()
+      .optional(),
+    billingMode: z.enum(['inherit', 'api', 'subscription']).optional(),
+    budget: z
+      .object({
+        maxTokens: z.number().int().min(1).max(100_000_000).optional(),
+        maxCostUsd: z.number().min(0).max(1_000_000).optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .openapi('NodeSpecV1');
+
+export type NodeRequestedModel = z.infer<typeof nodeRequestedModelSchema>;
+export type NodeModelRequest = z.infer<typeof nodeModelRequestSchema>;
+export type NodeSpecV1 = z.infer<typeof nodeSpecV1Schema>;
+
+// ---------------------------------------------------------------------------
 // DagNodeBase — common fields shared by all node types
 // ---------------------------------------------------------------------------
 
 export const dagNodeBaseSchema = z.object({
   id: z.string(),
+  settings: nodeSpecV1Schema.optional(),
   depends_on: z.array(z.string()).optional(),
   when: z.string().optional(),
   trigger_rule: triggerRuleSchema.optional(),
@@ -571,6 +722,7 @@ export const dagNodeSchema = dagNodeBaseSchema
     // Common base fields (sparse — only include defined values)
     const base = {
       id,
+      ...(data.settings !== undefined ? { settings: data.settings } : {}),
       ...(data.depends_on !== undefined && data.depends_on.length > 0
         ? { depends_on: data.depends_on }
         : {}),

@@ -107,14 +107,78 @@ function isValidReference(value: string): boolean {
   return value.length >= 1 && value.length <= 256 && REFERENCE_PATTERN.test(value);
 }
 
-function validateRequestedModel(model: NodeRequestedModel, path: string, errors: string[]): void {
-  if (model.source === 'fixed') {
-    if (!model.provider.trim()) errors.push(`${path}.provider is required.`);
-    if (!model.model.trim()) errors.push(`${path}.model is required.`);
-    if (model.auth.profile !== undefined && !model.auth.profile.trim()) {
-      errors.push(`${path}.auth.profile cannot be blank.`);
-    }
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function validateObjectKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  path: string,
+  errors: string[]
+): void {
+  const unexpected = Object.keys(value).filter(key => !allowed.includes(key));
+  if (unexpected.length > 0) {
+    errors.push(`${path} contains unsupported fields: ${unexpected.join(', ')}.`);
   }
+}
+
+function validateRequestedModel(
+  model: unknown,
+  path: string,
+  errors: string[]
+): model is NodeRequestedModel {
+  const startingErrorCount = errors.length;
+  if (!isRecord(model)) {
+    errors.push(`${path} must be a requested-model object.`);
+    return false;
+  }
+  if (model.source !== 'fixed' && model.source !== 'kady-current') {
+    errors.push(`${path}.source must be fixed or kady-current.`);
+    return false;
+  }
+  if (!NODE_REASONING_LEVELS.includes(model.reasoning as NodeReasoningLevel)) {
+    errors.push(`${path}.reasoning is invalid.`);
+  }
+  if (!isRecord(model.auth)) {
+    errors.push(`${path}.auth must be an object.`);
+    return false;
+  }
+
+  if (model.source === 'kady-current') {
+    validateObjectKeys(model, ['source', 'auth', 'reasoning'], path, errors);
+    validateObjectKeys(model.auth, ['kind'], `${path}.auth`, errors);
+    if (model.auth.kind !== 'kady-current') {
+      errors.push(`${path}.auth.kind must be kady-current.`);
+    }
+    return errors.length === startingErrorCount;
+  }
+
+  validateObjectKeys(model, ['source', 'provider', 'model', 'auth', 'reasoning'], path, errors);
+  validateObjectKeys(model.auth, ['kind', 'profile'], `${path}.auth`, errors);
+  if (
+    typeof model.provider !== 'string' ||
+    model.provider.length < 1 ||
+    model.provider.length > 64 ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(model.provider)
+  ) {
+    errors.push(`${path}.provider must be a valid 1 to 64 character provider ID.`);
+  }
+  if (typeof model.model !== 'string' || model.model.length < 1 || model.model.length > 256) {
+    errors.push(`${path}.model must be a 1 to 256 character string.`);
+  }
+  if (!NODE_AUTH_KINDS.includes(model.auth.kind as NodeAuthKind)) {
+    errors.push(`${path}.auth.kind is invalid.`);
+  }
+  if (
+    model.auth.profile !== undefined &&
+    (typeof model.auth.profile !== 'string' ||
+      model.auth.profile.length < 1 ||
+      model.auth.profile.length > 128)
+  ) {
+    errors.push(`${path}.auth.profile must be a non-blank string of at most 128 characters.`);
+  }
+  return errors.length === startingErrorCount;
 }
 
 export function nodeRequestedModelIdentity(model: NodeRequestedModel): string {
@@ -145,41 +209,83 @@ export function nodeSpecV1InlineErrors(settings: NodeSpecV1 | undefined): string
   const errors: string[] = [];
 
   if (settings.model) {
-    validateRequestedModel(settings.model.requested, 'model.requested', errors);
-    if (settings.model.resolution.mode === 'explicit-fallback') {
-      if (settings.model.resolution.alternatives.length < 1) {
-        errors.push('model.resolution.alternatives requires at least one model.');
+    const modelRequest = settings.model as unknown;
+    if (!isRecord(modelRequest)) {
+      errors.push('model must be a model-request object.');
+      return errors;
+    }
+    validateObjectKeys(modelRequest, ['requested', 'resolution'], 'model', errors);
+    const requested = modelRequest.requested;
+    const requestedIsValid = validateRequestedModel(
+      requested,
+      'model.requested',
+      errors
+    );
+    const resolution = modelRequest.resolution;
+    if (!isRecord(resolution)) {
+      errors.push('model.resolution must be an object.');
+    } else if (resolution.mode === 'exact') {
+      validateObjectKeys(resolution, ['mode'], 'model.resolution', errors);
+    } else if (resolution.mode === 'explicit-fallback') {
+      validateObjectKeys(
+        resolution,
+        ['mode', 'alternatives', 'reason'],
+        'model.resolution',
+        errors
+      );
+      const alternatives = Array.isArray(resolution.alternatives)
+        ? resolution.alternatives
+        : undefined;
+      if (!alternatives) {
+        errors.push('model.resolution.alternatives must be an array.');
+      } else if (alternatives.length < 1 || alternatives.length > 8) {
+        errors.push('model.resolution.alternatives requires between one and eight models.');
       }
-      settings.model.resolution.alternatives.forEach((alternative, index) => {
-        validateRequestedModel(alternative, `model.resolution.alternatives[${index}]`, errors);
+      const validAlternatives: NodeRequestedModel[] = [];
+      alternatives?.forEach((alternative, index) => {
+        if (
+          validateRequestedModel(
+            alternative,
+            `model.resolution.alternatives[${index}]`,
+            errors
+          )
+        ) {
+          validAlternatives.push(alternative);
+        }
       });
-      if (!settings.model.resolution.reason.trim()) {
-        errors.push('model.resolution.reason is required for explicit fallback.');
+      if (
+        typeof resolution.reason !== 'string' ||
+        resolution.reason.length < 1 ||
+        resolution.reason.length > 256
+      ) {
+        errors.push('model.resolution.reason must be a 1 to 256 character string.');
       }
 
       if (
-        settings.model.requested.source === 'kady-current' ||
-        settings.model.resolution.alternatives.some(
-          alternative => alternative.source === 'kady-current'
-        )
+        (requestedIsValid && requested.source === 'kady-current') ||
+        validAlternatives.some(alternative => alternative.source === 'kady-current')
       ) {
         errors.push(
           'Kady Current is an exact runtime selection and cannot appear in an explicit fallback list.'
         );
       }
 
-      const requestedIdentity = nodeRequestedModelIdentity(settings.model.requested);
-      const fallbackIdentities = new Set<string>();
-      settings.model.resolution.alternatives.forEach(alternative => {
-        const identity = nodeRequestedModelIdentity(alternative);
-        if (identity === requestedIdentity) {
-          errors.push('An explicit fallback must differ from the requested model and auth.');
-        }
-        if (fallbackIdentities.has(identity)) {
-          errors.push('Explicit model fallbacks must be unique.');
-        }
-        fallbackIdentities.add(identity);
-      });
+      if (requestedIsValid) {
+        const requestedIdentity = nodeRequestedModelIdentity(requested);
+        const fallbackIdentities = new Set<string>();
+        validAlternatives.forEach(alternative => {
+          const identity = nodeRequestedModelIdentity(alternative);
+          if (identity === requestedIdentity) {
+            errors.push('An explicit fallback must differ from the requested model and auth.');
+          }
+          if (fallbackIdentities.has(identity)) {
+            errors.push('Explicit model fallbacks must be unique.');
+          }
+          fallbackIdentities.add(identity);
+        });
+      }
+    } else {
+      errors.push('model.resolution.mode must be exact or explicit-fallback.');
     }
   }
 
@@ -906,16 +1012,8 @@ function JsonTextareaField({
 }
 
 function isFixedRequestedModel(value: unknown): value is FixedNodeRequestedModel {
-  if (value === null || typeof value !== 'object') return false;
-  const candidate = value as Record<string, unknown>;
-  if (!NODE_REASONING_LEVELS.includes(candidate.reasoning as NodeReasoningLevel)) return false;
-  if (candidate.source !== 'fixed') return false;
-  const auth = candidate.auth as Record<string, unknown> | undefined;
-  return (
-    typeof candidate.provider === 'string' &&
-    typeof candidate.model === 'string' &&
-    NODE_AUTH_KINDS.includes(auth?.kind as NodeAuthKind)
-  );
+  const errors: string[] = [];
+  return validateRequestedModel(value, 'requested model', errors) && value.source === 'fixed';
 }
 
 export function parseRequestedModelAlternatives(

@@ -183,6 +183,54 @@ describe('NodeSpec v1 editor contract', () => {
     ).toContain('Kady Current is not allowed');
   });
 
+  test('rejects malformed requested-model optional fields without committing or throwing', () => {
+    const nonStringProfile = parseRequestedModelAlternatives(
+      '[{"source":"fixed","provider":"openrouter","model":"openai/gpt-5","auth":{"kind":"oauth","profile":123},"reasoning":"high"}]'
+    );
+    expect(nonStringProfile.value).toBeUndefined();
+    expect(nonStringProfile.error).toContain('valid fixed requested-model objects');
+
+    const malformedCandidates = [
+      {
+        source: 'fixed',
+        provider: 'openrouter',
+        model: 'openai/gpt-5',
+        auth: null,
+        reasoning: 'high',
+      },
+      {
+        source: 'fixed',
+        provider: 'openrouter',
+        model: 'openai/gpt-5',
+        auth: { kind: 'oauth', profile: { name: 'research' } },
+        reasoning: 'high',
+      },
+      {
+        source: 'fixed',
+        provider: 'openrouter',
+        model: 'openai/gpt-5',
+        auth: { kind: 'oauth', unexpected: true },
+        reasoning: 'high',
+      },
+    ];
+
+    for (const requested of malformedCandidates) {
+      const malformedSettings = {
+        model: { requested, resolution: { mode: 'exact' } },
+      } as unknown as NodeSpecV1;
+      expect(() => nodeSpecV1InlineErrors(malformedSettings)).not.toThrow();
+      expect(nodeSpecV1InlineErrors(malformedSettings).length).toBeGreaterThan(0);
+    }
+
+    const profileErrors = nodeSpecV1InlineErrors({
+      model: {
+        requested: malformedCandidates[1],
+        resolution: { mode: 'exact' },
+      },
+    } as unknown as NodeSpecV1);
+    expect(profileErrors.some(error => error.includes('auth.profile'))).toBe(true);
+  });
+
   test('fallback creation always produces distinct fixed model identities', () => {
     const fromKadyCurrent = createExplicitFallbackModelRequest({
       source: 'kady-current',

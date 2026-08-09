@@ -51,7 +51,12 @@
       "server/vendor/pipeline-engine/packages/web/src/components/canvasui/Liquid.tsx",
       "server/vendor/pipeline-engine/packages/web/src/hooks/useBuilderValidation.ts",
       "server/vendor/pipeline-engine/packages/web/src/lib/api.ts",
-      "server/vendor/pipeline-engine/packages/web/src/lib/dag-layout.ts"
+      "server/vendor/pipeline-engine/packages/web/src/lib/api.generated.d.ts",
+      "server/vendor/pipeline-engine/packages/web/src/lib/dag-layout.ts",
+      "server/vendor/pipeline-engine/packages/workflows/src/schemas/dag-node.ts",
+      "server/vendor/pipeline-engine/packages/workflows/src/schemas/index.ts",
+      "server/vendor/pipeline-engine/packages/workflows/src/dag-executor.ts",
+      "server/vendor/pipeline-engine/packages/server/src/routes/api.nodespec-settings.integration.test.ts"
     ],
     "S4": [
       "server/src/api/dag-workflows.ts",
@@ -90,7 +95,7 @@
       "server/src/personality-store/**",
       "server/src/agent/personality-store*.ts",
       "server/src/api/personality-store*.ts",
-      "server/vendor/pipeline-engine/packages/workflows/src/dag-executor*.ts",
+      "server/vendor/pipeline-engine/packages/workflows/src/dag-executor.test.ts",
       "server/src/workflows/supervisor/client.ts",
       "server/src/workflows/supervisor/coordinator.ts",
       "server/src/workflows/supervisor/entry.ts",
