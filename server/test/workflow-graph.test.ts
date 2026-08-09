@@ -11,6 +11,7 @@ import {
   normalizeWorkflowProjectPath,
   resolveWorkflowProjectPath,
   validateWorkflowGraphDocument,
+  workflowModelCallSlotsForNode,
   type ModelRequest,
   type RequestedModel,
   type WorkflowGraphDocument,
@@ -335,9 +336,60 @@ describe("workflow graph contract", () => {
     const bestOfN = nodeOfKind(document, "best-of-n");
     bestOfN.model = exactModel("ollama", "qwen3:32b", "local");
     bestOfN.candidateModels = [exactModel(), exactModel("openrouter", "openai/gpt-5")];
-    expect(issueCodes(validateWorkflowGraphDocument(document))).toContain(
-      "ambiguous-candidate-models",
-    );
+    const validation = validateWorkflowGraphDocument(document);
+    expect(validation).toMatchObject({ ok: false });
+    if (validation.ok) return;
+    expect(validation.issues).toContainEqual(expect.objectContaining({
+      code: "ambiguous-candidate-models",
+      path: "/nodes/3/candidateModels",
+    }));
+  });
+
+  it("does not mix an authoritative NodeSpec model with explicit candidate models", () => {
+    const document = validWorkflow();
+    const bestOfN = nodeOfKind(document, "best-of-n");
+    bestOfN.settings = {
+      model: exactModel("openrouter", "settings-model"),
+    };
+    bestOfN.candidateModels = [
+      exactModel("openrouter", "candidate-a"),
+      exactModel("openrouter", "candidate-b"),
+    ];
+
+    const validation = validateWorkflowGraphDocument(document);
+    expect(validation).toMatchObject({ ok: false });
+    if (validation.ok) return;
+    expect(validation.issues).toContainEqual(expect.objectContaining({
+      code: "ambiguous-candidate-models",
+      path: "/nodes/3/candidateModels",
+    }));
+  });
+
+  it("preserves exact candidate and explicit evaluator slot identities", () => {
+    const document = validWorkflow();
+    const bestOfN = nodeOfKind(document, "best-of-n");
+    const candidateA = exactModel("openrouter", "candidate-a");
+    const candidateB = exactModel("openrouter", "candidate-b");
+    const evaluator = exactModel("openrouter", "candidate-evaluator");
+    bestOfN.candidateModels = [candidateA, candidateB];
+    bestOfN.evaluator = evaluator;
+    bestOfN.evidence = {
+      enabled: false,
+      minimumIndependentSources: 0,
+      requireArtifactReferences: false,
+      onUnsupportedOutput: "fail",
+    };
+
+    const validation = validateWorkflowGraphDocument(document);
+    expect(validation).toMatchObject({ ok: true });
+    if (!validation.ok) return;
+    const validatedNode = nodeOfKind(validation.document, "best-of-n");
+
+    expect(workflowModelCallSlotsForNode(validation.document, validatedNode)).toEqual([
+      { id: "candidate-1", request: candidateA },
+      { id: "candidate-2", request: candidateB },
+      { id: "candidate-evaluator", request: evaluator },
+    ]);
   });
 
   it("rejects the retired debate name and a renamed Lean skill", () => {

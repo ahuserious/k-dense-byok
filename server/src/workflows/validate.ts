@@ -656,7 +656,10 @@ function validateNode(
       break;
     }
     case "best-of-n":
-      if (node.model && node.candidateModels) {
+      if (
+        (node.settings?.model !== undefined || node.model !== undefined) &&
+        node.candidateModels !== undefined
+      ) {
         issues.push({
           code: "ambiguous-candidate-models",
           path: `${nodePath}/candidateModels`,
