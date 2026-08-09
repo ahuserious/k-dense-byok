@@ -4,30 +4,30 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Value } from "typebox/value";
 import {
-  pendingInterviewFor,
-  resolveInterview,
-} from "../src/agent/interview.ts";
-import {
   PromptOptimizationArtifactSchema,
+  PromptOptimizationEnvelopeError,
   PromptOptimizationNodeSchema,
   createTypedWorkflowPromptDeliberationPort,
   executePromptOptimizationNode,
+  validatePromptOptimizationNode,
   type PromptOptimizationArtifactWriter,
   type PromptOptimizationDeliberationPort,
   type PromptOptimizationNode,
   type PromptOptimizationNodeExecutorContext,
 } from "../src/workflows/prompt-opt-node.ts";
+import { createPromptOptimizationInterviewContract } from "../src/workflows/prompt-opt-interview-contract.ts";
+import { handlePromptOptimizationInterviewAnswer } from "../src/workflows/prompt-opt-interview-api.ts";
 import { NodeSpecV1Schema } from "../src/workflows/schema.ts";
 import type { WorkflowNodeExecutor } from "../src/workflows/runner.ts";
+import type { WorkflowValidationIssue } from "../src/workflows/validate.ts";
 
 const temporaryDirectories: string[] = [];
+const artifactPath = ".kady/workflows/prompt-optimizations/result.json";
 
 afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories.splice(0).map((directory) =>
-      fs.rm(directory, { recursive: true, force: true })
-    ),
-  );
+  await Promise.all(temporaryDirectories.splice(0).map((directory) =>
+    fs.rm(directory, { recursive: true, force: true })
+  ));
 });
 
 function model(modelId: string) {
@@ -49,10 +49,14 @@ function node(overrides: Partial<PromptOptimizationNode> = {}): PromptOptimizati
     name: "Optimize target prompt",
     kind: "prompt-optimization",
     terminal: true,
-    workspace: { isolation: "read-only", writePaths: [] },
+    workspace: {
+      isolation: "isolated-worktree",
+      writePaths: [".kady/workflows/prompt-optimizations"],
+    },
     settings: { version: 1, budget: { maxTokens: 20_000, maxCostUsd: 10 } },
     originalPrompt: "Summarize the experiment.",
     objective: "Make the request precise, falsifiable, and explicit about evidence.",
+    artifactId: "prompt-artifact",
     iterations: 2,
     fusionDeliberation: {
       enabled: false,
@@ -80,21 +84,37 @@ function node(overrides: Partial<PromptOptimizationNode> = {}): PromptOptimizati
   };
 }
 
-const graph = {
-  limits: {
-    maxIterations: 20,
-    maxModelCalls: 100,
-    maxParallelism: 8,
-    maxSubagents: 8,
-    timeoutMs: 60_000,
-    maxTokens: 100_000,
-    maxCostUsd: 100,
-    maxRetries: 1,
-  },
-};
+function graph(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "workflow-a",
+    limits: {
+      maxIterations: 20,
+      maxModelCalls: 100,
+      maxParallelism: 8,
+      maxSubagents: 8,
+      timeoutMs: 60_000,
+      maxTokens: 100_000,
+      maxCostUsd: 100,
+      maxRetries: 1,
+    },
+    evidence: {
+      enabled: false,
+      minimumIndependentSources: 0,
+      requireArtifactReferences: false,
+      onUnsupportedOutput: "fail" as const,
+    },
+    artifacts: [{
+      id: "prompt-artifact",
+      kind: "report" as const,
+      writerNodeId: "optimize-prompt",
+      path: artifactPath,
+    }],
+    ...overrides,
+  };
+}
 
-const memoryWriter: PromptOptimizationArtifactWriter = async (artifact) => ({
-  path: `.kady/workflows/prompt-optimizations/${artifact.executionId}.json`,
+const memoryWriter: PromptOptimizationArtifactWriter = async (artifact, context) => ({
+  path: context.artifactPath,
   size: Buffer.byteLength(JSON.stringify(artifact)),
   sha256: "a".repeat(64),
   mediaType: "application/json",
@@ -106,13 +126,33 @@ function iterativeDeliberation(): PromptOptimizationDeliberationPort {
       return {
         candidatePrompt: `${input.currentPrompt} Revision ${input.iteration}.`,
         rationale: `Iteration ${input.iteration} removed ambiguity.`,
+        usage: { tokens: 1, costUsd: 0.01 },
       };
     },
   };
 }
 
+async function temporarySandbox(): Promise<string> {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "prompt-opt-test-"));
+  temporaryDirectories.push(directory);
+  return directory;
+}
+
+async function waitForPersistedInterview(
+  contract: ReturnType<typeof createPromptOptimizationInterviewContract>,
+  runId: string,
+  nodeId: string,
+) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const state = await contract.read(runId, nodeId);
+    if (state) return state;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("Interview was not persisted.");
+}
+
 describe("prompt-optimization node", () => {
-  it("round-trips its self-contained NodeSpec-v1-conformant schema fragment", () => {
+  it("round-trips its self-contained NodeSpec-v1 schema fragment", () => {
     const original = node({
       settings: {
         version: 1,
@@ -133,80 +173,154 @@ describe("prompt-optimization node", () => {
       },
     });
     const roundTripped = JSON.parse(JSON.stringify(original));
-
     expect(Value.Check(PromptOptimizationNodeSchema, roundTripped)).toBe(true);
     expect(Value.Check(NodeSpecV1Schema, roundTripped.settings)).toBe(true);
-    expect(roundTripped).toEqual(original);
+    expect(roundTripped.artifactId).toBe("prompt-artifact");
   });
 
-  it("pauses for INTERVIEW-USER and makes zero provider calls until answers resume it", async () => {
+  it("rejects enabled or overridden evidence before any provider call", async () => {
     const deliberate = vi.fn(iterativeDeliberation().deliberate);
-    const events: string[] = [];
-    const optimization = executePromptOptimizationNode({
+    const evidenceGraph = graph({ evidence: { ...graph().evidence, enabled: true } });
+    const issues: WorkflowValidationIssue[] = [];
+    validatePromptOptimizationNode(node(), "/nodes/0", evidenceGraph, issues);
+    expect(issues).toContainEqual(expect.objectContaining({
+      code: "prompt-optimization-evidence-policy-unsupported",
+    }));
+    const overrideIssues: WorkflowValidationIssue[] = [];
+    validatePromptOptimizationNode(node({ evidence: graph().evidence }), "/nodes/0", graph(), overrideIssues);
+    expect(overrideIssues).toContainEqual(expect.objectContaining({
+      code: "prompt-optimization-evidence-policy-unsupported",
+      path: "/nodes/0/evidence",
+    }));
+    await expect(executePromptOptimizationNode({
       projectId: "project-a",
-      sessionId: "session-a",
       sandboxPath: "/unused",
-      runId: "run-a",
-      executionId: "execution-a",
-      graph,
+      runId: "run-evidence",
+      executionId: "execution-evidence",
+      graph: evidenceGraph,
+      node: node(),
+      deliberation: { deliberate },
+      writeArtifact: memoryWriter,
+    })).rejects.toThrow(/evidence-policy-unsupported/);
+    expect(deliberate).not.toHaveBeenCalled();
+  });
+
+  it("enforces one cumulative token/cost cap across iterations", async () => {
+    const writeArtifact = vi.fn(memoryWriter);
+    const deliberate = vi.fn(async (input: Parameters<PromptOptimizationDeliberationPort["deliberate"]>[0]) => ({
+      candidatePrompt: `${input.currentPrompt} bounded`,
+      rationale: "bounded",
+      usage: {
+        tokens: input.iteration === 1 ? input.limits.maxTokens : input.limits.maxTokens + 1,
+        costUsd: input.limits.maxCostUsd,
+      },
+    }));
+    await expect(executePromptOptimizationNode({
+      projectId: "project-a",
+      sandboxPath: "/unused",
+      runId: "run-cap",
+      executionId: "execution-cap",
+      graph: graph(),
+      node: node({
+        iterations: 3,
+        settings: { version: 1, budget: { maxTokens: 6, maxCostUsd: 3 } },
+      }),
+      deliberation: { deliberate },
+      writeArtifact,
+      now: () => 1_000,
+    })).rejects.toMatchObject({
+      name: "PromptOptimizationEnvelopeError",
+      code: "PROMPT_OPTIMIZATION_ENVELOPE_EXHAUSTED",
+      completedIterations: 1,
+    } satisfies Partial<PromptOptimizationEnvelopeError>);
+    expect(deliberate).toHaveBeenCalledTimes(2);
+    expect(deliberate.mock.calls[0][0].remaining.maxTokens).toBe(6);
+    expect(deliberate.mock.calls[1][0].remaining.maxTokens).toBe(4);
+    expect(writeArtifact).not.toHaveBeenCalled();
+  });
+
+  it("pauses durably, makes zero provider calls, and counts interview time", async () => {
+    const sandboxPath = await temporarySandbox();
+    let clock = 1_000;
+    const contract = createPromptOptimizationInterviewContract({
+      sandboxPath,
+      now: () => clock,
+      pollIntervalMs: 5,
+    });
+    const deliberate = vi.fn(iterativeDeliberation().deliberate);
+    const execution = executePromptOptimizationNode({
+      projectId: "project-a",
+      sandboxPath,
+      runId: "run-interview",
+      executionId: "execution-interview",
+      graph: graph({ limits: { ...graph().limits, timeoutMs: 10_000 } }),
       node: node({
         iterations: 1,
         interviewUser: {
           title: "Optimization constraints",
-          questions: [
-            {
-              id: "audience",
-              type: "single",
-              question: "Who is the audience?",
-              options: ["domain experts", "general readers"],
-              recommended: "domain experts",
-              conviction: "strong",
-            },
-            { id: "must-keep", type: "text", question: "What must remain verbatim?" },
-          ],
+          questions: [{ id: "audience", type: "text", question: "Audience?" }],
         },
       }),
       deliberation: { deliberate },
+      interviewContract: contract,
       writeArtifact: memoryWriter,
-      onEvent: (event) => {
-        events.push(event.type);
-      },
-      now: () => 100,
+      now: () => clock,
     });
-
-    const pending = pendingInterviewFor("project-a", "session-a");
-    expect(pending?.payload.description).toMatch(/^Prompt optimization · /);
+    await waitForPersistedInterview(contract, "run-interview", "optimize-prompt");
     expect(deliberate).not.toHaveBeenCalled();
-    expect(events).toEqual(["run_waiting"]);
-
-    expect(
-      resolveInterview("project-a", "session-a", pending!.toolCallId, {
-        responses: [
-          { id: "audience", value: "domain experts" },
-          { id: "must-keep", value: "Keep the experiment name." },
-        ],
-      }),
-    ).toBe(true);
-
-    const result = await optimization;
-    expect(deliberate).toHaveBeenCalledTimes(1);
-    expect(deliberate.mock.calls[0][0].interview).toEqual({
-      cancelled: false,
-      responses: [
-        { id: "audience", value: "domain experts" },
-        { id: "must-keep", value: "Keep the experiment name." },
-      ],
+    clock = 5_000;
+    await handlePromptOptimizationInterviewAnswer({
+      contract,
+      runId: "run-interview",
+      nodeId: "optimize-prompt",
+      answer: { responses: [{ id: "audience", value: "domain experts" }] },
     });
-    expect(result.artifact.interview).toEqual(
-      deliberate.mock.calls[0][0].interview,
-    );
-    expect(events).toEqual(["run_waiting", "run_resumed"]);
+    await execution;
+    expect(deliberate).toHaveBeenCalledTimes(1);
+    expect(deliberate.mock.calls[0][0].remaining.timeoutMs).toBe(6_000);
+    expect(deliberate.mock.calls[0][0].interview?.responses[0].value).toBe("domain experts");
   });
 
-  it("routes the toggle to council or fusion deliberation with mock providers", async () => {
-    const providerKinds: string[] = [];
+  it("feeds durable interview timeout into the cumulative envelope with zero provider calls", async () => {
+    const sandboxPath = await temporarySandbox();
+    let clock = 1_000;
+    const contract = createPromptOptimizationInterviewContract({
+      sandboxPath,
+      now: () => clock,
+      pollIntervalMs: 5,
+    });
+    const deliberate = vi.fn(iterativeDeliberation().deliberate);
+    const execution = executePromptOptimizationNode({
+      projectId: "project-a",
+      sandboxPath,
+      runId: "run-interview-timeout",
+      executionId: "execution-interview-timeout",
+      graph: graph({ limits: { ...graph().limits, timeoutMs: 10_000 } }),
+      node: node({
+        iterations: 1,
+        interviewUser: {
+          title: "Optimization constraints",
+          questions: [{ id: "audience", type: "text", question: "Audience?" }],
+        },
+      }),
+      deliberation: { deliberate },
+      interviewContract: contract,
+      writeArtifact: memoryWriter,
+      now: () => clock,
+    });
+    await waitForPersistedInterview(contract, "run-interview-timeout", "optimize-prompt");
+    clock = 11_000;
+    await expect(execution).rejects.toMatchObject({
+      name: "PromptOptimizationEnvelopeError",
+      completedIterations: 0,
+    });
+    expect(deliberate).not.toHaveBeenCalled();
+  });
+
+  it("routes the toggle through typed council/fusion and propagates policies", async () => {
+    const seen: Array<PromptOptimizationNodeExecutorContext["node"]> = [];
     const typedExecutor: WorkflowNodeExecutor = async (context) => {
-      providerKinds.push(context.node.kind);
+      seen.push(context.node as unknown as PromptOptimizationNode);
       for (const slot of context.expectedModelCallSlots) {
         const requested = slot.request.requested;
         context.recordModelResolution(slot.id, {
@@ -222,35 +336,26 @@ describe("prompt-optimization node", () => {
         });
       }
       return context.node.kind === "council"
-        ? {
-            output: {
-              decision: "council optimized prompt",
-              rationale: "council scored and synthesized the candidates.",
-            },
-          }
-        : {
-            output: {
-              answer: "fusion optimized prompt",
-              rationale: "fusion scored and synthesized the candidates.",
-            },
-          };
+        ? { output: { decision: "council prompt", rationale: "council rationale" } }
+        : { output: { answer: "fusion prompt", rationale: "fusion rationale" } };
     };
-    const sourceContext: PromptOptimizationNodeExecutorContext = {
+    const parent = node({
+      iterations: 1,
+      rescue: { enabled: true, maxAttempts: 1, triggers: ["failure"] },
+      settings: {
+        version: 1,
+        reasoningEffort: "high",
+        skills: { mode: "auto", list: [] },
+        budget: { maxTokens: 2_000, maxCostUsd: 2 },
+      },
+    });
+    const sourceContext = {
       projectId: "project-a",
       runId: "run-source",
       workflowId: "workflow-a",
       workflowRevision: 1,
-      graph: {
-        id: "workflow-a",
-        limits: graph.limits,
-        evidence: {
-          enabled: false,
-          minimumIndependentSources: 0,
-          requireArtifactReferences: false,
-          onUnsupportedOutput: "fail",
-        },
-      },
-      node: node({ iterations: 1 }),
+      graph: graph(),
+      node: parent,
       runInput: {},
       attempt: 1,
       executionId: "execution-source",
@@ -258,95 +363,92 @@ describe("prompt-optimization node", () => {
       resumed: false,
       inbound: [],
       expectedModelCallSlots: [],
-      declareModelCallSlot() {
-        throw new Error("The outer prompt node has no direct slots.");
-      },
-      recordModelResolution() {
-        throw new Error("The outer prompt node has no direct slots.");
-      },
+      declareModelCallSlot() { throw new Error("No outer direct slots."); },
+      recordModelResolution() { throw new Error("No outer direct slots."); },
       recordCompactionCheck() {},
       signal: new AbortController().signal,
-    };
-    const deliberation = createTypedWorkflowPromptDeliberationPort(
-      typedExecutor,
-      sourceContext,
-    );
-    const common = {
-      projectId: "project-a",
-      sandboxPath: "/unused",
-      graph,
-      deliberation,
-      writeArtifact: memoryWriter,
-      now: () => 100,
-    };
-
-    await executePromptOptimizationNode({
-      ...common,
-      runId: "run-council",
-      executionId: "execution-council",
-      node: node({ iterations: 1 }),
-    });
-    await executePromptOptimizationNode({
-      ...common,
-      runId: "run-fusion",
-      executionId: "execution-fusion",
-      node: node({
-        iterations: 1,
-        fusionDeliberation: {
-          ...node().fusionDeliberation,
-          enabled: true,
-        },
-      }),
-    });
-
-    expect(providerKinds).toEqual(["council", "fusion"]);
+    } as unknown as PromptOptimizationNodeExecutorContext;
+    const deliberation = createTypedWorkflowPromptDeliberationPort(typedExecutor, sourceContext);
+    for (const enabled of [false, true]) {
+      await executePromptOptimizationNode({
+        projectId: "project-a",
+        sandboxPath: "/unused",
+        runId: enabled ? "run-fusion" : "run-council",
+        executionId: enabled ? "execution-fusion" : "execution-council",
+        graph: graph(),
+        node: node({
+          ...parent,
+          fusionDeliberation: { ...parent.fusionDeliberation, enabled },
+        }),
+        deliberation,
+        writeArtifact: memoryWriter,
+        now: () => 1_000,
+      });
+    }
+    expect(seen.map((synthetic) => synthetic.kind)).toEqual(["council", "fusion"]);
+    for (const synthetic of seen) {
+      expect(synthetic.workspace).toEqual({ isolation: "read-only", writePaths: [] });
+      expect(synthetic.rescue).toEqual(parent.rescue);
+      expect(synthetic.evidence).toEqual(graph().evidence);
+      expect(synthetic.settings?.skills).toEqual(parent.settings?.skills);
+      expect(synthetic.settings?.budget?.maxTokens).toBeLessThanOrEqual(2_000);
+    }
   });
 
-  it("writes the versioned artifact and surfaces its runtime-owned reference in a RunState event", async () => {
-    const sandboxPath = await fs.mkdtemp(path.join(os.tmpdir(), "prompt-opt-test-"));
-    temporaryDirectories.push(sandboxPath);
+  it("writes the declared artifact with a normalized receipt and RunState event", async () => {
+    const sandboxPath = await temporarySandbox();
     const result = await executePromptOptimizationNode({
       projectId: "project-a",
       sandboxPath,
       runId: "run-artifact",
       executionId: "execution-artifact",
-      graph,
+      graph: graph(),
       node: node(),
       deliberation: iterativeDeliberation(),
       now: () => 123_456,
     });
-
     expect(Value.Check(PromptOptimizationArtifactSchema, result.artifact)).toBe(true);
     expect(result.artifact).toMatchObject({
       schemaVersion: 1,
       artifactVersion: 1,
       originalPrompt: "Summarize the experiment.",
       winningPrompt: "Summarize the experiment. Revision 1. Revision 2.",
-      rationale: "Iteration 2 removed ambiguity.",
-      createdAt: 123_456,
+      envelope: { spentTokens: 2, spentCostUsd: 0.02 },
     });
-    expect(result.artifact.iterations).toHaveLength(2);
+    expect(result.artifactReference).toMatchObject({
+      path: artifactPath,
+      size: expect.any(Number),
+      sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(result.artifacts).toEqual([result.artifactReference]);
+    expect(JSON.parse(await fs.readFile(path.join(sandboxPath, artifactPath), "utf8")))
+      .toEqual(result.artifact);
+    expect(result.completionEvent.data?.artifacts).toEqual([result.artifactReference]);
+  });
 
-    const stored = JSON.parse(
-      await fs.readFile(
-        path.join(sandboxPath, ...result.artifactReference.path.split("/")),
-        "utf8",
-      ),
-    );
-    expect(stored).toEqual(result.artifact);
-    expect(result.completionEvent).toMatchObject({
-      type: "node_succeeded",
-      nodeId: "optimize-prompt",
-      data: {
-        routeCondition: "success",
-        output: {
-          kind: "prompt-optimization",
-          schemaVersion: 1,
-          artifactVersion: 1,
-          artifact: result.artifactReference,
-          winningPrompt: result.artifact.winningPrompt,
+  it("leaves no orphaned declared artifact when deliberation fails mid-run", async () => {
+    const sandboxPath = await temporarySandbox();
+    let calls = 0;
+    await expect(executePromptOptimizationNode({
+      projectId: "project-a",
+      sandboxPath,
+      runId: "run-failure",
+      executionId: "execution-failure",
+      graph: graph(),
+      node: node(),
+      deliberation: {
+        async deliberate(input) {
+          calls += 1;
+          if (calls === 2) throw new Error("provider failed");
+          return {
+            candidatePrompt: `${input.currentPrompt} first`,
+            rationale: "first",
+            usage: { tokens: 1, costUsd: 0 },
+          };
         },
       },
-    });
+      now: () => 1_000,
+    })).rejects.toThrow("provider failed");
+    await expect(fs.stat(path.join(sandboxPath, artifactPath))).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

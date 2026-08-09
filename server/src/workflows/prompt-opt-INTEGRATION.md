@@ -35,14 +35,29 @@ The wrapper delegates every synthetic council/fusion iteration to the existing
 outer prompt node has no direct provider slot: each checksummed iteration runs
 as a normal synthetic council/fusion execution with its own resolved slots.
 
-## D. NodeSpec v1 enforcement-table additions
+## D. Durable interview API and console surface
+
+- `server/src/index.ts` — anchor: with the other route-module imports
+  - `import { registerPromptOptimizationInterviewRoutes } from "./workflows/prompt-opt-interview-api.ts";`
+- `server/src/index.ts` — anchor: immediately before the exact line `  await registerPipelineRoutes(app);`
+  - `  await registerPromptOptimizationInterviewRoutes(app);`
+- `web/src/components/dag-workflow-console.tsx` — anchor: immediately after the `HelperAgentChat` import
+  - `import { PromptOptimizationConsoleSurface } from "@/components/prompt-opt-console";`
+- `web/src/components/dag-workflow-console.tsx` — anchor: immediately after `<RunDiagnostics diagnostics={diagnostics} />`
+  - `              <PromptOptimizationConsoleSurface projectId={projectId} runId={selectedRun.manifest.id} nodes={selectedRun.manifest.graph.nodes} />`
+
+## E. NodeSpec v1 enforcement-table additions
 
 - `docs/contracts/NODESPEC-V1.md` — anchor: enforcement table, immediately after the `reasoningEffort` row
-  - `| Prompt optimization node \`interviewUser\` | BOUND — INTERVIEW-USER pauses before deliberation, uses the originating main-session structured interview, and folds answers into every iteration |`
+  - `| Prompt optimization node \`interviewUser\` | BOUND — durable run+node state emits run_waiting/run_resumed, pauses inside the cumulative timeout with zero provider calls, and folds structured answers into every iteration |`
 - `docs/contracts/NODESPEC-V1.md` — anchor: immediately after the preceding S6 row
   - `| Prompt optimization node \`fusionDeliberation.enabled\` | BOUND — false dispatches typed council deliberation; true requires and dispatches the typed Fusion configuration |`
 - `docs/contracts/NODESPEC-V1.md` — anchor: immediately after the preceding S6 row
-  - `| Prompt optimization artifact v1 | BOUND — runtime-owned JSON records original prompt, iterations, winning prompt, and rationale; node_succeeded output surfaces its checksummed reference |`
+  - `| Prompt optimization cumulative envelope | BOUND — one deadline, token cap, and cost cap spans interview plus every iteration; each synthetic deliberation receives only its remaining bounded share and inherits resolved NodeSpec/rescue/evidence policy |`
+- `docs/contracts/NODESPEC-V1.md` — anchor: immediately after the preceding S6 row
+  - `| Prompt optimization evidence policy | FAIL-CLOSED(S6) — node overrides or enabled workflow evidence are rejected before provider calls pending full evaluator support |`
+- `docs/contracts/NODESPEC-V1.md` — anchor: immediately after the preceding S6 row
+  - `| Prompt optimization \`artifactId\` / artifact v1 | BOUND — the host atomically writes the exact graph-declared owned path and returns a checksummed runner-normalized receipt containing original prompt, iterations, winner, rationale, and cumulative usage |`
 
-No pre-existing `FAIL-CLOSED(S6)` row exists at contract freeze `03f9eb3`, so
-the merge adds these BOUND rows and flips no existing row.
+No pre-existing `FAIL-CLOSED(S6)` row exists at contract freeze `03f9eb3`; the
+merge adds the BOUND rows above plus the explicit evidence-policy fail-closed row.

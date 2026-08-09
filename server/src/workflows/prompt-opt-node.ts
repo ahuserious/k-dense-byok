@@ -2,14 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { Value } from "typebox/value";
-import {
-  makeInterviewTool,
-  type InterviewAnswer,
-  type InterviewResponse,
-} from "../agent/interview.ts";
+import type { InterviewResponse } from "../agent/interview.ts";
 import { resolvePaths } from "../projects.ts";
 import type {
   WorkflowGraphDocument,
+  WorkflowLimits,
   WorkflowNode,
 } from "./schema.ts";
 import {
@@ -22,8 +19,11 @@ import type {
   WorkflowNodeExecutorContext,
   WorkflowNodeExecutorResult,
 } from "./runner.ts";
-import { workflowStore } from "./store.ts";
 import type { WorkflowValidationIssue } from "./validate.ts";
+import {
+  normalizeWorkflowProjectPath,
+  resolveWorkflowProjectPath,
+} from "./validate.ts";
 import {
   pendingNodeSpecEnforcementMessage,
   pendingNodeSpecEnforcements,
@@ -38,6 +38,10 @@ import {
   type PromptOptimizationIteration,
   type PromptOptimizationNode,
 } from "./prompt-opt-schema.ts";
+import {
+  createPromptOptimizationInterviewContract,
+  type PromptOptimizationInterviewContract,
+} from "./prompt-opt-interview-contract.ts";
 
 export * from "./prompt-opt-schema.ts";
 
@@ -56,12 +60,18 @@ export interface PromptOptimizationDeliberationInput {
   currentPrompt: string;
   objective: string;
   interview: PromptOptimizationArtifact["interview"];
+  /** One bounded share of the one outer node envelope, never a fresh budget. */
+  limits: WorkflowLimits;
+  /** Cumulative limits still available before this iteration is admitted. */
+  remaining: { timeoutMs: number; maxTokens: number; maxCostUsd: number };
   signal: AbortSignal;
 }
 
 export interface PromptOptimizationDeliberationResult {
   candidatePrompt: string;
   rationale: string;
+  /** Omit only when the typed child cannot expose usage; its full share is then charged. */
+  usage?: { tokens: number; costUsd: number };
 }
 
 /**
@@ -77,9 +87,7 @@ export interface PromptOptimizationDeliberationPort {
 
 export interface PromptOptimizationArtifactWriteContext {
   sandboxPath: string;
-  runId: string;
-  executionId: string;
-  nodeId: string;
+  artifactPath: string;
 }
 
 export type PromptOptimizationArtifactWriter = (
@@ -89,14 +97,17 @@ export type PromptOptimizationArtifactWriter = (
 
 export interface ExecutePromptOptimizationNodeOptions {
   projectId: string;
-  sessionId?: string;
   sandboxPath: string;
   runId: string;
   executionId: string;
   node: PromptOptimizationNode;
-  graph: Pick<WorkflowGraphDocument, "defaultModel" | "limits" | "settings">;
+  graph: Pick<
+    WorkflowGraphDocument,
+    "id" | "defaultModel" | "limits" | "settings" | "rescue" | "evidence" | "artifacts"
+  >;
   signal?: AbortSignal;
   deliberation: PromptOptimizationDeliberationPort;
+  interviewContract?: PromptOptimizationInterviewContract;
   writeArtifact?: PromptOptimizationArtifactWriter;
   now?: () => number;
   onEvent?: (
@@ -124,13 +135,25 @@ export interface CreatePromptOptimizationNodeExecutorOptions {
   deliberation: (
     context: PromptOptimizationNodeExecutorContext,
   ) => PromptOptimizationDeliberationPort;
-  sessionIdForContext?: (
-    context: PromptOptimizationNodeExecutorContext,
-  ) => string | undefined | Promise<string | undefined>;
   sandboxPathForProject?: (projectId: string) => string;
+  interviewContractForContext?: (
+    context: PromptOptimizationNodeExecutorContext,
+    sandboxPath: string,
+  ) => PromptOptimizationInterviewContract;
   writeArtifact?: PromptOptimizationArtifactWriter;
   now?: () => number;
   onEvent?: ExecutePromptOptimizationNodeOptions["onEvent"];
+}
+
+export class PromptOptimizationEnvelopeError extends Error {
+  readonly code = "PROMPT_OPTIMIZATION_ENVELOPE_EXHAUSTED";
+  readonly completedIterations: number;
+
+  constructor(message: string, completedIterations: number) {
+    super(message);
+    this.name = "PromptOptimizationEnvelopeError";
+    this.completedIterations = completedIterations;
+  }
 }
 
 function issue(
@@ -301,24 +324,58 @@ function validateHostedPromptModel(
 export function validatePromptOptimizationNode(
   node: PromptOptimizationNode,
   nodePath: string,
-  document: Pick<WorkflowGraphDocument, "limits">,
+  document: Pick<WorkflowGraphDocument, "limits" | "evidence" | "artifacts">,
   issues: WorkflowValidationIssue[],
 ): void {
-  if (node.workspace.isolation !== "read-only") {
+  if (node.workspace.isolation === "read-only") {
     issue(
       issues,
-      "prompt-optimization-workspace-must-be-read-only",
+      "prompt-optimization-artifact-workspace-read-only",
       `${nodePath}/workspace/isolation`,
-      "Prompt optimization delegates through the typed council/fusion runtime and must use a read-only agent workspace.",
+      "Prompt optimization must own its declared normalized artifact path; use an isolated-worktree or exclusive-project workspace.",
     );
   }
-  if (node.workspace.writePaths.length > 0) {
+  if (node.evidence !== undefined || document.evidence.enabled) {
     issue(
       issues,
-      "read-only-write-path",
-      `${nodePath}/workspace/writePaths`,
-      "Prompt optimization uses a runtime-owned artifact writer; its agent workspace cannot own write paths.",
+      "prompt-optimization-evidence-policy-unsupported",
+      node.evidence !== undefined ? `${nodePath}/evidence` : "/evidence/enabled",
+      "Prompt optimization does not yet evaluate evidence policies; remove the node override and disable workflow evidence before any provider calls.",
     );
+  }
+  const artifact = document.artifacts?.find((candidate) => candidate.id === node.artifactId);
+  if (!artifact) {
+    issue(
+      issues,
+      "prompt-optimization-artifact-undeclared",
+      `${nodePath}/artifactId`,
+      `Prompt optimization artifact ${node.artifactId} must be declared in graph.artifacts.`,
+    );
+  } else if (artifact.writerNodeId !== node.id || !artifact.path) {
+    issue(
+      issues,
+      "prompt-optimization-artifact-invalid-declaration",
+      `${nodePath}/artifactId`,
+      `Artifact ${node.artifactId} must name ${node.id} as writer and provide one exact file path.`,
+    );
+  } else {
+    const normalizedArtifactPath = normalizeWorkflowProjectPath(artifact.path);
+    const ownsPath = normalizedArtifactPath !== undefined && node.workspace.writePaths.some(
+      (writePath) => {
+        const normalizedWritePath = normalizeWorkflowProjectPath(writePath);
+        return normalizedWritePath !== undefined &&
+          (normalizedArtifactPath === normalizedWritePath ||
+            normalizedArtifactPath.startsWith(`${normalizedWritePath}/`));
+      },
+    );
+    if (!ownsPath) {
+      issue(
+        issues,
+        "prompt-optimization-artifact-outside-write-paths",
+        `${nodePath}/workspace/writePaths`,
+        `Declared artifact path ${artifact.path} must be owned by this node's writePaths.`,
+      );
+    }
   }
   if (node.settings?.model !== undefined) {
     issue(
@@ -356,6 +413,14 @@ export function validatePromptOptimizationNode(
       "prompt-optimization-interview-has-no-input",
       `${nodePath}/interviewUser/questions`,
       "INTERVIEW-USER needs at least one answerable structured question.",
+    );
+  }
+  if (node.interviewUser?.questions.some((question) => question.type === "image")) {
+    issue(
+      issues,
+      "prompt-optimization-interview-image-unsupported",
+      `${nodePath}/interviewUser/questions`,
+      "Prompt optimization interviews currently fold text and selection answers only; image questions are not supported.",
     );
   }
 
@@ -510,14 +575,7 @@ function signalFor(signal: AbortSignal | undefined): AbortSignal {
   return signal ?? new AbortController().signal;
 }
 
-function safePathSegment(value: string, label: string): string {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)) {
-    throw new Error(`${label} is not a safe workflow identifier.`);
-  }
-  return value.replaceAll(":", "_");
-}
-
-/** Atomic runtime-owned artifact writer; the agent never receives this path as a write target. */
+/** Atomic host writer for the graph-declared path; child agents remain read-only. */
 export async function writePromptOptimizationArtifact(
   artifact: PromptOptimizationArtifact,
   context: PromptOptimizationArtifactWriteContext,
@@ -525,17 +583,11 @@ export async function writePromptOptimizationArtifact(
   if (!Value.Check(PromptOptimizationArtifactSchema, artifact)) {
     throw new Error("Prompt optimization produced an invalid versioned artifact.");
   }
-  const runSegment = safePathSegment(context.runId, "runId");
-  const executionSegment = safePathSegment(context.executionId, "executionId");
-  const nodeSegment = safePathSegment(context.nodeId, "nodeId");
-  const relativePath = path.posix.join(
-    ".kady",
-    "workflows",
-    "prompt-optimizations",
-    runSegment,
-    `${nodeSegment}-${executionSegment}.v${PROMPT_OPTIMIZATION_ARTIFACT_VERSION}.json`,
-  );
-  const targetPath = path.join(context.sandboxPath, ...relativePath.split("/"));
+  const relativePath = normalizeWorkflowProjectPath(context.artifactPath);
+  if (!relativePath || relativePath !== context.artifactPath) {
+    throw new Error("Prompt optimization artifact path is not a canonical workflow path.");
+  }
+  const targetPath = resolveWorkflowProjectPath(context.sandboxPath, relativePath);
   const directory = path.dirname(targetPath);
   const serialized = `${JSON.stringify(artifact, null, 2)}\n`;
   const bytes = Buffer.from(serialized, "utf8");
@@ -556,85 +608,119 @@ export async function writePromptOptimizationArtifact(
   };
 }
 
-function interviewResponsesFromResult(result: unknown): {
-  cancelled: boolean;
-  responses: InterviewResponse[];
-} {
-  const details = result && typeof result === "object"
-    ? (result as { details?: unknown }).details
-    : undefined;
-  if (!details || typeof details !== "object") {
-    throw new Error("INTERVIEW-USER returned no structured result details.");
+interface PromptOptimizationEnvelope {
+  startedAt: number;
+  deadlineAt: number;
+  maxTokens: number;
+  remainingTokens: number;
+  spentTokens: number;
+  maxCostUsd: number;
+  remainingCostUsd: number;
+  spentCostUsd: number;
+}
+
+function createEnvelope(options: ExecutePromptOptimizationNodeOptions): PromptOptimizationEnvelope {
+  const now = options.now ?? Date.now;
+  const startedAt = Math.max(0, Math.floor(now()));
+  const maxTokens = Math.min(
+    options.graph.limits.maxTokens,
+    options.node.limits?.maxTokens ?? options.graph.limits.maxTokens,
+    options.node.settings?.budget?.maxTokens ?? options.graph.limits.maxTokens,
+  );
+  const maxCostUsd = Math.min(
+    options.graph.limits.maxCostUsd,
+    options.node.limits?.maxCostUsd ?? options.graph.limits.maxCostUsd,
+    options.node.settings?.budget?.maxCostUsd ?? options.graph.limits.maxCostUsd,
+  );
+  const timeoutMs = Math.min(
+    options.graph.limits.timeoutMs,
+    options.node.limits?.timeoutMs ?? options.graph.limits.timeoutMs,
+  );
+  return {
+    startedAt,
+    deadlineAt: startedAt + timeoutMs,
+    maxTokens,
+    remainingTokens: maxTokens,
+    spentTokens: 0,
+    maxCostUsd,
+    remainingCostUsd: maxCostUsd,
+    spentCostUsd: 0,
+  };
+}
+
+function remainingEnvelope(
+  envelope: PromptOptimizationEnvelope,
+  now: () => number,
+  completedIterations: number,
+): { timeoutMs: number; maxTokens: number; maxCostUsd: number } {
+  const timeoutMs = Math.floor(envelope.deadlineAt - now());
+  if (timeoutMs < 1_000) {
+    throw new PromptOptimizationEnvelopeError(
+      `Prompt optimization exhausted its one cumulative timeout after ${completedIterations} iterations.`,
+      completedIterations,
+    );
   }
-  const record = details as { cancelled?: unknown; responses?: unknown };
-  if (record.cancelled === true) return { cancelled: true, responses: [] };
-  if (!Array.isArray(record.responses)) {
-    throw new Error("INTERVIEW-USER returned malformed structured responses.");
+  if (envelope.remainingTokens < 1) {
+    throw new PromptOptimizationEnvelopeError(
+      `Prompt optimization exhausted its one cumulative token cap after ${completedIterations} iterations.`,
+      completedIterations,
+    );
   }
-  const responses = record.responses.map((response) => {
-    const item = response as { id?: unknown; value?: unknown };
-    if (
-      typeof item.id !== "string" ||
-      !(
-        typeof item.value === "string" ||
-        (Array.isArray(item.value) && item.value.every((value) => typeof value === "string"))
-      )
-    ) {
-      throw new Error("INTERVIEW-USER returned a malformed response entry.");
-    }
-    return { id: item.id, value: item.value };
-  });
-  return { cancelled: false, responses };
+  return {
+    timeoutMs,
+    maxTokens: envelope.remainingTokens,
+    maxCostUsd: Math.max(0, envelope.remainingCostUsd),
+  };
 }
 
 async function runInterviewUserStep(
   options: ExecutePromptOptimizationNodeOptions,
   signal: AbortSignal,
+  envelope: PromptOptimizationEnvelope,
 ): Promise<PromptOptimizationArtifact["interview"]> {
   if (!options.node.interviewUser) return undefined;
-  if (!options.sessionId) {
-    throw new Error("INTERVIEW-USER requires the originating main chat session id.");
-  }
-
-  const toolCallId = `prompt-opt-${safePathSegment(options.executionId, "executionId")}`;
-  const tool = makeInterviewTool(options.projectId, () => options.sessionId!);
+  const now = options.now ?? Date.now;
+  remainingEnvelope(envelope, now, 0);
+  const contract = options.interviewContract ?? createPromptOptimizationInterviewContract({
+    sandboxPath: options.sandboxPath,
+    now,
+  });
   const params = {
     ...structuredClone(options.node.interviewUser),
     description:
       `${PROMPT_OPTIMIZATION_INTERVIEW_PREFIX}${options.node.interviewUser.description ?? "Answer before provider deliberation begins."}`,
   };
-  const noContext = undefined as never;
-  // makeInterviewTool registers the pending form synchronously before this
-  // promise yields. Deliberation is deliberately started only after it settles.
-  const interviewPromise = tool.execute(
-    toolCallId,
-    params,
-    signal,
-    undefined,
-    noContext,
+  const requestedTimeoutMs = Math.max(
+    60_000,
+    Math.min(3_600_000, Math.floor((params.timeout ?? 600) * 1_000)),
   );
-  await options.onEvent?.({
-    eventId: `prompt_opt_wait_${options.executionId}`,
-    type: "run_waiting",
-    executionId: options.executionId,
+  const launched = await contract.launch({
+    runId: options.runId,
     nodeId: options.node.id,
-    data: { reason: "interview-user", toolCallId },
-  });
-  const result = await interviewPromise;
-  const interview = interviewResponsesFromResult(result);
-  await options.onEvent?.({
-    eventId: `prompt_opt_resume_${options.executionId}`,
-    type: "run_resumed",
     executionId: options.executionId,
-    nodeId: options.node.id,
-    data: {
-      reason: "interview-user",
-      toolCallId,
-      cancelled: interview.cancelled,
-      responseCount: interview.responses.length,
-    },
+    questions: params,
+    deadlineAt: Math.min(envelope.deadlineAt, now() + requestedTimeoutMs),
   });
-  return interview;
+  await options.onEvent?.(launched.event);
+  const settled = launched.state.status === "pending"
+    ? await contract.waitForAnswer(options.runId, options.node.id, signal)
+    : launched;
+  await options.onEvent?.(settled.event);
+  if (settled.state.status === "timed-out") {
+    throw new PromptOptimizationEnvelopeError(
+      "Prompt optimization interview timed out inside the node's cumulative envelope; no provider deliberation was started.",
+      0,
+    );
+  }
+  const answer = settled.state.answer;
+  if (!answer || answer.cancelled) return { cancelled: true, responses: [] };
+  return {
+    cancelled: false,
+    responses: answer.responses.map((response: InterviewResponse) => ({
+      id: response.id,
+      value: structuredClone(response.value),
+    })),
+  };
 }
 
 function optimizationOutput(
@@ -662,8 +748,12 @@ export async function executePromptOptimizationNode(
   }
   const signal = signalFor(options.signal);
   if (signal.aborted) throw new Error("Prompt optimization was aborted before execution.");
+  const now = options.now ?? Date.now;
+  // This envelope is created once, before INTERVIEW-USER, and is monotonically
+  // debited. No iteration can recreate the parent's timeout, tokens, or cost.
+  const envelope = createEnvelope(options);
 
-  const interview = await runInterviewUserStep(options, signal);
+  const interview = await runInterviewUserStep(options, signal, envelope);
   const mode: DeliberationMode = options.node.fusionDeliberation.enabled
     ? "fusion"
     : "council";
@@ -672,6 +762,30 @@ export async function executePromptOptimizationNode(
 
   for (let iteration = 1; iteration <= options.node.iterations; iteration += 1) {
     if (signal.aborted) throw new Error("Prompt optimization was aborted.");
+    const remaining = remainingEnvelope(envelope, now, iterations.length);
+    const iterationsRemaining = options.node.iterations - iteration + 1;
+    const effectiveNodeLimits = options.node.limits ?? {};
+    const iterationLimits: WorkflowLimits = {
+      maxIterations: 1,
+      maxModelCalls: deliberationCallsPerIteration(options.node),
+      maxParallelism: Math.min(
+        options.graph.limits.maxParallelism,
+        effectiveNodeLimits.maxParallelism ?? options.graph.limits.maxParallelism,
+      ),
+      maxSubagents: Math.min(
+        options.graph.limits.maxSubagents,
+        effectiveNodeLimits.maxSubagents ?? options.graph.limits.maxSubagents,
+      ),
+      timeoutMs: remaining.timeoutMs,
+      // A fair share prevents an opaque typed child with no usage receipt from
+      // consuming a fresh full cap. Reported usage below this share is credited.
+      maxTokens: Math.max(1, Math.floor(remaining.maxTokens / iterationsRemaining)),
+      maxCostUsd: remaining.maxCostUsd / iterationsRemaining,
+      maxRetries: Math.min(
+        options.graph.limits.maxRetries,
+        effectiveNodeLimits.maxRetries ?? options.graph.limits.maxRetries,
+      ),
+    };
     const inputPrompt = currentPrompt;
     const result = await options.deliberation.deliberate({
       mode,
@@ -681,8 +795,32 @@ export async function executePromptOptimizationNode(
       currentPrompt: inputPrompt,
       objective: options.node.objective,
       interview: interview ? structuredClone(interview) : undefined,
-      signal,
+      limits: structuredClone(iterationLimits),
+      remaining: structuredClone(remaining),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(iterationLimits.timeoutMs)]),
     });
+    remainingEnvelope(envelope, now, iterations.length);
+    const usage = result.usage ?? {
+      tokens: iterationLimits.maxTokens,
+      costUsd: iterationLimits.maxCostUsd,
+    };
+    if (
+      !Number.isSafeInteger(usage.tokens) ||
+      usage.tokens < 0 ||
+      usage.tokens > iterationLimits.maxTokens ||
+      !Number.isFinite(usage.costUsd) ||
+      usage.costUsd < 0 ||
+      usage.costUsd > iterationLimits.maxCostUsd + Number.EPSILON
+    ) {
+      throw new PromptOptimizationEnvelopeError(
+        `Prompt optimization iteration ${iteration} exceeded its remaining cumulative token or cost allocation.`,
+        iterations.length,
+      );
+    }
+    envelope.remainingTokens -= usage.tokens;
+    envelope.spentTokens += usage.tokens;
+    envelope.remainingCostUsd = Math.max(0, envelope.remainingCostUsd - usage.costUsd);
+    envelope.spentCostUsd += usage.costUsd;
     const candidatePrompt = boundedText(
       result.candidatePrompt,
       MAX_PROMPT_OPTIMIZATION_PROMPT_LENGTH,
@@ -693,7 +831,14 @@ export async function executePromptOptimizationNode(
       4_096,
       `Iteration ${iteration} rationale`,
     );
-    iterations.push({ iteration, mode, inputPrompt, candidatePrompt, rationale });
+    iterations.push({
+      iteration,
+      mode,
+      inputPrompt,
+      candidatePrompt,
+      rationale,
+      usage: { tokens: usage.tokens, costUsd: usage.costUsd },
+    });
     currentPrompt = candidatePrompt;
   }
 
@@ -712,19 +857,31 @@ export async function executePromptOptimizationNode(
     iterations,
     winningPrompt: finalIteration.candidatePrompt,
     rationale: finalIteration.rationale,
-    createdAt: Math.max(0, Math.floor((options.now ?? Date.now)())),
+    envelope: {
+      startedAt: envelope.startedAt,
+      deadlineAt: envelope.deadlineAt,
+      maxTokens: envelope.maxTokens,
+      spentTokens: envelope.spentTokens,
+      maxCostUsd: envelope.maxCostUsd,
+      spentCostUsd: envelope.spentCostUsd,
+    },
+    createdAt: Math.max(0, Math.floor(now())),
   };
   if (!Value.Check(PromptOptimizationArtifactSchema, artifact)) {
     throw new Error("Prompt optimization produced an artifact outside the v1 contract.");
   }
 
+  const artifactDeclaration = options.graph.artifacts?.find(
+    (candidate) => candidate.id === options.node.artifactId,
+  );
+  if (!artifactDeclaration?.path) {
+    throw new Error(`Prompt optimization artifact ${options.node.artifactId} has no exact declared path.`);
+  }
   const artifactReference = await (options.writeArtifact ?? writePromptOptimizationArtifact)(
     artifact,
     {
       sandboxPath: options.sandboxPath,
-      runId: options.runId,
-      executionId: options.executionId,
-      nodeId: options.node.id,
+      artifactPath: artifactDeclaration.path,
     },
   );
   const output = optimizationOutput(artifact, artifactReference);
@@ -736,6 +893,7 @@ export async function executePromptOptimizationNode(
     data: {
       routeCondition: "success",
       output,
+      artifacts: [{ ...artifactReference }],
     },
   };
   return {
@@ -743,6 +901,7 @@ export async function executePromptOptimizationNode(
     artifactReference,
     completionEvent,
     output,
+    artifacts: [{ ...artifactReference }],
   };
 }
 
@@ -776,14 +935,35 @@ function deliberationGoal(input: PromptOptimizationDeliberationInput): string {
 
 function syntheticDeliberationNode(
   input: PromptOptimizationDeliberationInput,
+  sourceContext: PromptOptimizationNodeExecutorContext,
 ): DeliberationNode {
+  const inheritedSettings = structuredClone(input.node.settings ?? {});
+  delete inheritedSettings.model;
+  inheritedSettings.budget = {
+    maxTokens: input.limits.maxTokens,
+    maxCostUsd: input.limits.maxCostUsd,
+  };
   const common = {
     id: syntheticNodeId(input.node.id, input.mode),
     name: `${input.node.name} ${input.mode}`.slice(0, 256),
     description: `Prompt optimization iteration ${input.iteration}.`,
     terminal: false,
-    workspace: structuredClone(input.node.workspace),
-    ...(input.node.limits ? { limits: structuredClone(input.node.limits) } : {}),
+    // The parent owns exactly one host-written artifact. Deliberation children
+    // never inherit that filesystem authority and are deliberately read-only.
+    workspace: { isolation: "read-only" as const, writePaths: [] },
+    limits: structuredClone(input.limits),
+    // Role models remain authoritative, so the ambiguous parent primary model
+    // is excluded. Every other NodeSpec policy is inherited and the budget is
+    // replaced with this iteration's remaining-envelope share.
+    settings: inheritedSettings,
+    // Validation currently permits only disabled effective evidence. Copying
+    // it (instead of dropping it) preserves the fail-closed policy decision.
+    evidence: structuredClone(input.node.evidence ?? sourceContext.graph.evidence),
+    // Node rescue overrides workflow rescue; otherwise inherit the workflow
+    // policy exactly, matching normal NodeSpec resolution.
+    ...(input.node.rescue ?? sourceContext.graph.rescue
+      ? { rescue: structuredClone(input.node.rescue ?? sourceContext.graph.rescue!) }
+      : {}),
   };
   const goal = deliberationGoal(input);
   if (input.mode === "council") {
@@ -826,7 +1006,7 @@ export function createTypedWorkflowPromptDeliberationPort(
 ): PromptOptimizationDeliberationPort {
   return {
     async deliberate(input) {
-      const node = syntheticDeliberationNode(input);
+      const node = syntheticDeliberationNode(input, sourceContext);
       const slotGraph: WorkflowGraphDocument = {
         schemaVersion: "1.0",
         id: sourceContext.graph.id,
@@ -838,6 +1018,8 @@ export function createTypedWorkflowPromptDeliberationPort(
         ...(sourceContext.graph.settings
           ? { settings: structuredClone(sourceContext.graph.settings) }
           : {}),
+        // Run-wide limits remain the immutable outer admission ceiling. The
+        // synthetic node carries the strictly smaller remaining iteration share.
         limits: structuredClone(sourceContext.graph.limits),
         ...(sourceContext.graph.rescue
           ? { rescue: structuredClone(sourceContext.graph.rescue) }
@@ -899,19 +1081,22 @@ export function createPromptOptimizationNodeExecutor(
   options: CreatePromptOptimizationNodeExecutorOptions,
 ): PromptOptimizationNodeExecutor {
   return async (context) => {
-    const sessionId = await options.sessionIdForContext?.(context);
+    const sandboxPath = options.sandboxPathForProject?.(context.projectId) ??
+      resolvePaths(context.projectId).sandbox;
     return executePromptOptimizationNode({
       projectId: context.projectId,
-      ...(sessionId ? { sessionId } : {}),
-      sandboxPath:
-        options.sandboxPathForProject?.(context.projectId) ??
-        resolvePaths(context.projectId).sandbox,
+      sandboxPath,
       runId: context.runId,
       executionId: context.executionId,
       node: structuredClone(context.node),
       graph: context.graph,
       signal: context.signal,
       deliberation: options.deliberation(context),
+      interviewContract: options.interviewContractForContext?.(context, sandboxPath) ??
+        createPromptOptimizationInterviewContract({
+          sandboxPath,
+          ...(options.now ? { now: options.now } : {}),
+        }),
       ...(options.writeArtifact ? { writeArtifact: options.writeArtifact } : {}),
       ...(options.now ? { now: options.now } : {}),
       ...(options.onEvent ? { onEvent: options.onEvent } : {}),
@@ -936,8 +1121,6 @@ export function withPromptOptimizationNodeExecutor(
       ...overrides,
       deliberation: (currentContext) =>
         createTypedWorkflowPromptDeliberationPort(baseExecutor, currentContext),
-      sessionIdForContext: overrides.sessionIdForContext ?? ((currentContext) =>
-        workflowStore.readRun(currentContext.projectId, currentContext.runId)?.manifest.sessionId),
     });
     return executor(promptContext);
   };
@@ -947,6 +1130,3 @@ export function withPromptOptimizationNodeExecutor(
 export function isPromptOptimizationNode(value: unknown): value is PromptOptimizationNode {
   return Value.Check(PromptOptimizationNodeSchema, value);
 }
-
-/** Helper for route/tests that need to submit an answer without importing tool internals. */
-export type PromptOptimizationInterviewAnswer = InterviewAnswer;

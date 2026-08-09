@@ -349,6 +349,7 @@ export const PromptOptimizationNodeSchema = Type.Object(
     kind: Type.Literal("prompt-optimization"),
     originalPrompt: PromptSchema,
     objective: InstructionSchema,
+    artifactId: IdentifierSchema,
     iterations: Type.Integer({
       minimum: 1,
       maximum: MAX_PROMPT_OPTIMIZATION_ITERATIONS,
@@ -405,6 +406,13 @@ export const PromptOptimizationArtifactSchema = Type.Object(
           inputPrompt: PromptSchema,
           candidatePrompt: PromptSchema,
           rationale: Type.String({ minLength: 1, maxLength: 4_096 }),
+          usage: Type.Object(
+            {
+              tokens: Type.Integer({ minimum: 0, maximum: 100_000_000 }),
+              costUsd: Type.Number({ minimum: 0, maximum: 1_000_000 }),
+            },
+            { additionalProperties: false },
+          ),
         },
         { additionalProperties: false },
       ),
@@ -412,6 +420,17 @@ export const PromptOptimizationArtifactSchema = Type.Object(
     ),
     winningPrompt: PromptSchema,
     rationale: Type.String({ minLength: 1, maxLength: 4_096 }),
+    envelope: Type.Object(
+      {
+        startedAt: Type.Integer({ minimum: 0 }),
+        deadlineAt: Type.Integer({ minimum: 0 }),
+        maxTokens: Type.Integer({ minimum: 1, maximum: 100_000_000 }),
+        spentTokens: Type.Integer({ minimum: 0, maximum: 100_000_000 }),
+        maxCostUsd: Type.Number({ minimum: 0, maximum: 1_000_000 }),
+        spentCostUsd: Type.Number({ minimum: 0, maximum: 1_000_000 }),
+      },
+      { additionalProperties: false },
+    ),
     createdAt: Type.Integer({ minimum: 0 }),
   },
   { additionalProperties: false },
