@@ -29,9 +29,12 @@ import {
 } from "../src/workflows/run-state.ts";
 import type {
   ModelRequest,
+  NodeSpecV1,
   WorkflowGraphDocument,
   WorkflowNode,
+  WorkflowSettingsV1,
 } from "../src/workflows/schema.ts";
+import { validateWorkflowGraphDocument } from "../src/workflows/validate.ts";
 import {
   resolveWorkflowModel,
   type ResolvedWorkflowModel,
@@ -345,6 +348,7 @@ function contextFor(
     workflowRevision: 1,
     graph: {
       id: document.id,
+      settings: document.settings,
       defaultModel: document.defaultModel,
       limits: document.limits,
       rescue: document.rescue,
@@ -535,6 +539,424 @@ describe("production Kady DAG node executor", () => {
       kernelRunId: "kernel_dagx_executor-test",
       answer: "supported",
     });
+  });
+
+  it("feeds NodeSpec token and cost caps into durable usage admission", async () => {
+    const node: WorkflowNode = {
+      ...baseNode("agent"),
+      kind: "agent",
+      prompt: "Analyze within the frozen NodeSpec budget.",
+      model: openRouterModel(),
+      settings: { budget: { maxTokens: 1_000, maxCostUsd: 0.25 } },
+    };
+    const document = graph(node);
+    let admission: KadyWorkflowUsageAdmission | undefined;
+    const host = new FakeHost([analysis("bounded")]);
+
+    await executorFor(host, document, {
+      reserveUsage: (value) => {
+        admission = value;
+        return {
+          descriptor: supervisedDescriptor(value.slotId),
+          reconcile() {},
+        };
+      },
+    })(contextFor(document));
+
+    expect(admission).toMatchObject({
+      maxTokens: 1_000,
+      maxCostUsd: 0.25,
+      runMaxTokens: 32_000,
+      runMaxCostUsd: 8,
+    });
+    expect(host.calls[0].options.limits).toEqual({
+      maxTokens: 1_000,
+      maxCostUsd: 0.25,
+    });
+  });
+
+  it("executes with a settings-only model and reasoning override", async () => {
+    const settingsModel = openRouterModel("settings-only-model");
+    const node: WorkflowNode = {
+      ...baseNode("agent"),
+      kind: "agent",
+      prompt: "Use the authoritative NodeSpec model.",
+      settings: {
+        model: settingsModel,
+        reasoningEffort: "xhigh",
+        hyperparameters: { temperature: 1, top_p: 1, sampling: {} },
+        conditions: { exists: [] },
+        harness: "pi",
+        databases: [],
+        skills: { mode: "auto", list: [] },
+        subagents: { mode: "auto" },
+        autonomy: "strict",
+        deliberation: {
+          bestOfNPersonalityCount: 2,
+          mimeographs: { mode: "auto", personalityRefs: [] },
+        },
+        billingMode: "inherit",
+      },
+    };
+    const document = graph(node);
+    document.settings = { defaultHarness: "pi", databases: [] };
+    delete document.defaultModel;
+    const host = new FakeHost([analysis("settings model executed")]);
+
+    await executorFor(host, document)(contextFor(document));
+
+    expect(host.calls).toHaveLength(1);
+    expect(host.calls[0].request).toMatchObject({
+      model: "openrouter/settings-only-model",
+      thinking: "xhigh",
+    });
+  });
+
+  it("keeps an explicit evidence-policy evaluator separate from the primary NodeSpec model", () => {
+    const primary = openRouterModel("settings-primary");
+    const evaluator = openRouterModel("policy-evaluator");
+    const node: WorkflowNode = {
+      ...baseNode("agent"),
+      kind: "agent",
+      prompt: "Analyze with an independent evidence check.",
+      settings: { model: primary },
+      evidence: {
+        enabled: true,
+        minimumIndependentSources: 0,
+        requireArtifactReferences: false,
+        onUnsupportedOutput: "fail",
+        evaluator,
+      },
+    };
+    const document = graph(node);
+
+    expect(validateWorkflowGraphDocument(document)).toMatchObject({ ok: true });
+    expect(workflowModelCallSlotsForNode(document, node)).toEqual([
+      { id: "agent", request: primary },
+      { id: "evidence-policy-evaluator", request: evaluator },
+    ]);
+  });
+
+  it("keeps every explicit Council role model when settings.model is present", () => {
+    const settingsModel = openRouterModel("settings-primary");
+    const memberA = openRouterModel("council-member-a");
+    const memberB = openRouterModel("council-member-b");
+    const chair = openRouterModel("council-chair");
+    const node: WorkflowNode = {
+      ...baseNode("council"),
+      kind: "council",
+      goal: "Review the evidence.",
+      settings: { model: settingsModel },
+      members: [
+        { id: "a", role: "Reviewer A", model: memberA },
+        { id: "b", role: "Reviewer B", model: memberB },
+      ],
+      chair,
+      rounds: 1,
+      preserveMinorityReports: true,
+    };
+    const document = graph(node);
+    const validation = validateWorkflowGraphDocument(document);
+
+    expect(validation).toMatchObject({ ok: false });
+    if (!validation.ok) {
+      expect(validation.issues).toContainEqual(expect.objectContaining({
+        code: "ambiguous-node-spec-model",
+        path: "/nodes/0/settings/model",
+      }));
+    }
+    expect(workflowModelCallSlotsForNode(document, node)).toEqual([
+      { id: "council-round-1-member-a", request: memberA },
+      { id: "council-round-1-member-b", request: memberB },
+      { id: "council-round-1-chair", request: chair },
+    ]);
+  });
+
+  it("keeps every explicit Fusion role model when settings.model is present", () => {
+    const settingsModel = openRouterModel("settings-primary");
+    const memberA = openRouterModel("fusion-member-a");
+    const memberB = openRouterModel("fusion-member-b");
+    const synthesizer = openRouterModel("fusion-synthesizer");
+    const node: WorkflowNode = {
+      ...baseNode("fusion"),
+      kind: "fusion",
+      goal: "Fuse the panel.",
+      settings: { model: settingsModel },
+      fusion: {
+        mode: "kady-panel",
+        members: [
+          { id: "a", role: "Analyst A", model: memberA },
+          { id: "b", role: "Analyst B", model: memberB },
+        ],
+        synthesizer,
+        rounds: 1,
+      },
+      preserveMinorityReports: true,
+    };
+    const document = graph(node);
+    const validation = validateWorkflowGraphDocument(document);
+
+    expect(validation).toMatchObject({ ok: false });
+    if (!validation.ok) {
+      expect(validation.issues).toContainEqual(expect.objectContaining({
+        code: "ambiguous-node-spec-model",
+        path: "/nodes/0/settings/model",
+      }));
+    }
+    expect(workflowModelCallSlotsForNode(document, node)).toEqual([
+      { id: "fusion-round-1-member-a", request: memberA },
+      { id: "fusion-round-1-member-b", request: memberB },
+      { id: "fusion-synthesizer", request: synthesizer },
+    ]);
+  });
+
+  it("keeps hosted Fusion member and judge models when settings.model is present", () => {
+    const settingsModel = openRouterModel("settings-primary");
+    const memberA = openRouterModel("hosted-member-a");
+    const memberB = openRouterModel("hosted-member-b");
+    const judge = openRouterModel("hosted-judge");
+    const node: WorkflowNode = {
+      ...baseNode("fusion"),
+      kind: "fusion",
+      goal: "Keep every hosted role request exact.",
+      settings: { model: settingsModel },
+      fusion: {
+        mode: "openrouter-router",
+        router: openRouterModel("openrouter/fusion"),
+        members: [
+          { id: "a", role: "Analyst A", model: memberA },
+          { id: "b", role: "Analyst B", model: memberB },
+        ],
+        judge,
+      },
+      preserveMinorityReports: true,
+    };
+    const document = graph(node);
+    const validation = validateWorkflowGraphDocument(document);
+
+    expect(validation).toMatchObject({ ok: false });
+    if (!validation.ok) {
+      expect(validation.issues).toContainEqual(expect.objectContaining({
+        code: "ambiguous-node-spec-model",
+        path: "/nodes/0/settings/model",
+      }));
+    }
+    expect(workflowModelCallSlotsForNode(document, node)).toEqual([
+      { id: "fusion-panel-a", request: memberA },
+      { id: "fusion-panel-b", request: memberB },
+      { id: "fusion-judge-deliberation", request: judge },
+      { id: "fusion-judge-final", request: judge },
+    ]);
+  });
+
+  it("uses settings.model only for repeated Best-of-N candidates", () => {
+    const settingsModel = openRouterModel("settings-primary");
+    const evaluator = openRouterModel("best-of-n-evaluator");
+    const node: WorkflowNode = {
+      ...baseNode("best-of-n"),
+      kind: "best-of-n",
+      goal: "Choose the strongest candidate.",
+      settings: { model: settingsModel },
+      candidateCount: 2,
+      evaluator,
+    };
+    const document = graph(node);
+
+    expect(validateWorkflowGraphDocument(document)).toMatchObject({ ok: true });
+    expect(workflowModelCallSlotsForNode(document, node)).toEqual([
+      { id: "candidate-1", request: settingsModel },
+      { id: "candidate-2", request: settingsModel },
+      { id: "candidate-evaluator", request: evaluator },
+    ]);
+  });
+
+  it("keeps an explicit evidence-gate evaluator when settings.model is present", () => {
+    const settingsModel = openRouterModel("settings-primary");
+    const evaluator = openRouterModel("gate-evaluator");
+    const node: WorkflowNode = {
+      ...baseNode("evidence-gate"),
+      kind: "evidence-gate",
+      settings: { model: settingsModel },
+      checks: ["claim-support"],
+      artifactIds: [],
+      evaluator,
+      onUnsupportedOutput: "fail",
+    };
+    const document = graph(node);
+    const validation = validateWorkflowGraphDocument(document);
+
+    expect(validation).toMatchObject({ ok: false });
+    if (!validation.ok) {
+      expect(validation.issues).toContainEqual(expect.objectContaining({
+        code: "ambiguous-node-spec-model",
+        path: "/nodes/0/settings/model",
+      }));
+    }
+    expect(workflowModelCallSlotsForNode(document, node)).toEqual([
+      { id: "evidence-evaluator", request: evaluator },
+    ]);
+  });
+
+  it.each([
+    {
+      label: "conditions.when",
+      settings: { conditions: { when: "inputs.ready" } },
+      code: "node-conditions-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "conditions.exists",
+      settings: { conditions: { exists: ["inputs/missing.csv"] } },
+      code: "node-conditions-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "harness",
+      settings: { harness: "codex" },
+      code: "node-harness-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "hyperparameters.temperature",
+      settings: { hyperparameters: { temperature: 0.2 } },
+      code: "node-hyperparameters-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "hyperparameters.top_p",
+      settings: { hyperparameters: { top_p: 0.9 } },
+      code: "node-hyperparameters-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "hyperparameters.sampling",
+      settings: { hyperparameters: { sampling: { seed: 7 } } },
+      code: "node-hyperparameters-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "databases",
+      settings: { databases: ["pubmed"] },
+      code: "node-databases-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "skills mode",
+      settings: { skills: { mode: "manual" } },
+      code: "node-skills-mode-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "skills list",
+      settings: { skills: { list: ["database-lookup"] } },
+      code: "node-skills-list-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "subagents mode",
+      settings: { subagents: { mode: "auto-manual" } },
+      code: "node-subagents-mode-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "autonomy",
+      settings: { autonomy: "loose" },
+      code: "node-autonomy-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "deliberation.personalityStoreRef",
+      settings: { deliberation: { personalityStoreRef: "scientific-agents/v1" } },
+      code: "node-deliberation-enforcement-pending",
+      unit: "S5",
+    },
+    {
+      label: "deliberation.bestOfNPersonalityCount",
+      settings: { deliberation: { bestOfNPersonalityCount: 4 } },
+      code: "node-deliberation-enforcement-pending",
+      unit: "S5",
+    },
+    {
+      label: "deliberation.mimeographs.mode",
+      settings: { deliberation: { mimeographs: { mode: "manual" } } },
+      code: "node-deliberation-enforcement-pending",
+      unit: "S5",
+    },
+    {
+      label: "deliberation.mimeographs.personalityRefs",
+      settings: {
+        deliberation: {
+          mimeographs: { personalityRefs: ["skeptical-reviewer"] },
+        },
+      },
+      code: "node-deliberation-enforcement-pending",
+      unit: "S5",
+    },
+    {
+      label: "billing mode",
+      settings: { billingMode: "subscription" },
+      code: "node-billing-mode-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "workflow default harness",
+      workflowSettings: { defaultHarness: "codex" },
+      code: "workflow-default-harness-enforcement-pending",
+      unit: "S4",
+    },
+    {
+      label: "workflow databases",
+      workflowSettings: { databases: ["arxiv"] },
+      code: "workflow-databases-enforcement-pending",
+      unit: "S4",
+    },
+  ] satisfies Array<{
+    label: string;
+    settings?: NodeSpecV1;
+    workflowSettings?: WorkflowSettingsV1;
+    code: string;
+    unit: "S4" | "S5";
+  }>)("fails closed on non-default $label before receipt, reservation, or provider call", async ({
+    settings,
+    workflowSettings,
+    code,
+    unit,
+  }) => {
+    const node: WorkflowNode = {
+      ...baseNode("agent"),
+      kind: "agent",
+      prompt: "Do not execute an unbound NodeSpec field.",
+      ...(settings ? { settings } : {}),
+    };
+    const document = graph(node);
+    if (workflowSettings) document.settings = workflowSettings;
+    const events: string[] = [];
+    const host = new FakeHost([analysis("must not run")], events);
+    const onReserve = vi.fn();
+    const onResolve = vi.fn();
+
+    const validation = validateWorkflowGraphDocument(document);
+    expect(validation).toMatchObject({ ok: false });
+    if (!validation.ok) {
+      expect(validation.issues).toContainEqual(expect.objectContaining({
+        code,
+        message: expect.stringContaining(`(${unit})`),
+      }));
+    }
+
+    await expect(
+      executorFor(host, document, { onReserve, onResolve })(
+        contextFor(document, events),
+      ),
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_NODE_INVALID_CONTEXT",
+      message: expect.stringContaining(`(${unit})`),
+    });
+
+    expect(events.some((event) => event.startsWith("record:"))).toBe(false);
+    expect(onReserve).not.toHaveBeenCalled();
+    expect(onResolve).not.toHaveBeenCalled();
+    expect(host.calls).toHaveLength(0);
   });
 
   it.each([
@@ -1893,6 +2315,87 @@ describe("production Kady DAG node executor", () => {
       retryable: true,
     });
     expect(delegationCalls).toBe(1);
+  });
+
+  it("rejects non-default hosted Fusion reasoning before receipts or provider work", async () => {
+    const node: WorkflowNode = {
+      ...baseNode("fusion"),
+      kind: "fusion",
+      goal: "Reject unsupported hosted reasoning plumbing.",
+      settings: { reasoningEffort: "xhigh" },
+      fusion: {
+        mode: "openrouter-router",
+        router: openRouterModel("openrouter/fusion"),
+        members: [
+          { id: "one", role: "One", model: openRouterModel("vendor/one") },
+          { id: "two", role: "Two", model: openRouterModel("vendor/two") },
+        ],
+        judge: openRouterModel("vendor/judge"),
+      },
+      preserveMinorityReports: true,
+    };
+    const document = graph(node);
+    const validation = validateWorkflowGraphDocument(document);
+    const events: string[] = [];
+    const onReserve = vi.fn();
+    const onResolve = vi.fn();
+    const runHostedFusion = vi.fn(async () => {
+      throw new Error("hosted Fusion must not run");
+    });
+
+    expect(validation).toMatchObject({ ok: false });
+    if (!validation.ok) {
+      expect(validation.issues).toContainEqual(expect.objectContaining({
+        code: "hosted-fusion-reasoning-enforcement-pending",
+        path: "/nodes/0/settings/reasoningEffort",
+        message: expect.stringContaining("fusion-topology unit (S5)"),
+      }));
+    }
+    await expect(
+      executorFor(new FakeHost([], events), document, {
+        onReserve,
+        onResolve,
+        runHostedFusion,
+      })(contextFor(document, events)),
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_NODE_INVALID_CONTEXT",
+      message: expect.stringContaining("fusion-topology unit (S5)"),
+    });
+    expect(events.some((event) => event.startsWith("record:"))).toBe(false);
+    expect(onResolve).not.toHaveBeenCalled();
+    expect(onReserve).not.toHaveBeenCalled();
+    expect(runHostedFusion).not.toHaveBeenCalled();
+  });
+
+  it("keeps default-effort hosted Fusion slots identical to persisted requests", () => {
+    const memberOne = openRouterModel("vendor/one");
+    const memberTwo = openRouterModel("vendor/two");
+    const judge = openRouterModel("vendor/judge");
+    const node: WorkflowNode = {
+      ...baseNode("fusion"),
+      kind: "fusion",
+      goal: "Keep the persisted hosted topology exact.",
+      settings: { reasoningEffort: "high" },
+      fusion: {
+        mode: "openrouter-router",
+        router: openRouterModel("openrouter/fusion"),
+        members: [
+          { id: "one", role: "One", model: memberOne },
+          { id: "two", role: "Two", model: memberTwo },
+        ],
+        judge,
+      },
+      preserveMinorityReports: true,
+    };
+    const document = graph(node);
+
+    expect(validateWorkflowGraphDocument(document)).toMatchObject({ ok: true });
+    expect(workflowModelCallSlotsForNode(document, node)).toEqual([
+      { id: "fusion-panel-one", request: memberOne },
+      { id: "fusion-panel-two", request: memberTwo },
+      { id: "fusion-judge-deliberation", request: judge },
+      { id: "fusion-judge-final", request: judge },
+    ]);
   });
 
   it("runs hosted OpenRouter Fusion as one compound reservation without a Pi-subagent slot", async () => {

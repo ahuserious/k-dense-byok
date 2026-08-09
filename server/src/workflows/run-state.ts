@@ -1,3 +1,4 @@
+import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 import type {
   ModelRequest,
@@ -17,6 +18,7 @@ import {
   WORKFLOW_EVIDENCE_POLICY_SLOT_ID,
 } from "./evidence-policy.ts";
 import { trustedLeanArtifactPaths } from "./lean4-artifacts.ts";
+import { resolveNodeSpecV1 } from "./validate.ts";
 
 export const WORKFLOW_RUN_STORAGE_VERSION = 1 as const;
 export const WORKFLOW_RUN_EVENT_SCHEMA_VERSION = 1 as const;
@@ -222,6 +224,255 @@ export interface WorkflowRunState {
   lastError?: WorkflowRunErrorInfo;
   recoverable: boolean;
   diagnostics: WorkflowRunDiagnostic[];
+}
+
+export const RUN_STATE_V1_SCHEMA_VERSION = 1 as const;
+
+const RunStateV1IdentifierSchema = Type.String({
+  minLength: 1,
+  maxLength: 128,
+  pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+});
+
+const RunStateV1NodeStatusSchema = Type.Union([
+  Type.Literal("pending"),
+  Type.Literal("running"),
+  Type.Literal("waiting"),
+  Type.Literal("blocked"),
+  Type.Literal("succeeded"),
+  Type.Literal("failed"),
+  Type.Literal("skipped"),
+  Type.Literal("interrupted"),
+  Type.Literal("cancelled"),
+]);
+
+const RunStateV1ErrorSchema = Type.Object(
+  {
+    code: Type.String({ minLength: 1, maxLength: 64 }),
+    message: Type.String({ minLength: 1, maxLength: 2_048 }),
+    retryable: Type.Boolean(),
+  },
+  { additionalProperties: false },
+);
+
+/** JSON-schema contract consumed by the future S8 chat live-graph adapter. */
+export const RunStateV1Schema = Type.Object(
+  {
+    schemaVersion: Type.Literal(RUN_STATE_V1_SCHEMA_VERSION),
+    runId: RunStateV1IdentifierSchema,
+    workflowId: RunStateV1IdentifierSchema,
+    workflowRevision: Type.Integer({ minimum: 1 }),
+    status: Type.Union([
+      Type.Literal("queued"),
+      Type.Literal("running"),
+      Type.Literal("waiting"),
+      Type.Literal("blocked"),
+      Type.Literal("paused"),
+      Type.Literal("interrupted"),
+      Type.Literal("succeeded"),
+      Type.Literal("failed"),
+      Type.Literal("cancelled"),
+    ]),
+    nodes: Type.Array(
+      Type.Object(
+        {
+          id: RunStateV1IdentifierSchema,
+          status: RunStateV1NodeStatusSchema,
+          progress: Type.Object(
+            {
+              completed: Type.Integer({ minimum: 0 }),
+              total: Type.Integer({ minimum: 1 }),
+              message: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })),
+            },
+            { additionalProperties: false },
+          ),
+          executionId: Type.Optional(RunStateV1IdentifierSchema),
+        },
+        { additionalProperties: false },
+      ),
+      { maxItems: 256 },
+    ),
+    topology: Type.Object(
+      {
+        nodes: Type.Array(
+          Type.Object(
+            { id: RunStateV1IdentifierSchema },
+            { additionalProperties: false },
+          ),
+          { maxItems: 256 },
+        ),
+        edges: Type.Array(
+          Type.Object(
+            {
+              id: RunStateV1IdentifierSchema,
+              from: RunStateV1IdentifierSchema,
+              to: RunStateV1IdentifierSchema,
+            },
+            { additionalProperties: false },
+          ),
+          { maxItems: 1_024 },
+        ),
+      },
+      { additionalProperties: false },
+    ),
+    backgroundAgentTrailingNode: Type.Optional(
+      Type.Object(
+        {
+          slotId: RunStateV1IdentifierSchema,
+          agentId: RunStateV1IdentifierSchema,
+          nodeId: Type.Optional(RunStateV1IdentifierSchema),
+          status: RunStateV1NodeStatusSchema,
+        },
+        { additionalProperties: false },
+      ),
+    ),
+    errorRouting: Type.Optional(
+      Type.Object(
+        {
+          source: Type.Literal("chat-stream"),
+          surface: Type.Literal(true),
+          nodeId: Type.Optional(RunStateV1IdentifierSchema),
+          error: RunStateV1ErrorSchema,
+        },
+        { additionalProperties: false },
+      ),
+    ),
+    updatedAt: Type.Integer({ minimum: 0 }),
+  },
+  { additionalProperties: false },
+);
+
+export type RunStateV1 = Static<typeof RunStateV1Schema>;
+
+type RunStateV1RunStatus = RunStateV1["status"];
+type RunStateV1NodeStatus = RunStateV1["nodes"][number]["status"];
+
+const ALL_RUN_STATE_V1_NODE_STATUSES = new Set<RunStateV1NodeStatus>([
+  "pending",
+  "running",
+  "waiting",
+  "blocked",
+  "succeeded",
+  "failed",
+  "skipped",
+  "interrupted",
+  "cancelled",
+]);
+const TERMINAL_RUN_STATE_V1_NODE_STATUSES = new Set<RunStateV1NodeStatus>([
+  "pending",
+  "succeeded",
+  "failed",
+  "skipped",
+  "interrupted",
+  "cancelled",
+]);
+const RUN_STATE_V1_STATUS_COHERENCE: Record<
+  RunStateV1RunStatus,
+  ReadonlySet<RunStateV1NodeStatus>
+> = {
+  queued: new Set(["pending"]),
+  running: ALL_RUN_STATE_V1_NODE_STATUSES,
+  waiting: ALL_RUN_STATE_V1_NODE_STATUSES,
+  blocked: ALL_RUN_STATE_V1_NODE_STATUSES,
+  paused: ALL_RUN_STATE_V1_NODE_STATUSES,
+  interrupted: TERMINAL_RUN_STATE_V1_NODE_STATUSES,
+  succeeded: new Set(["succeeded", "skipped"]),
+  failed: TERMINAL_RUN_STATE_V1_NODE_STATUSES,
+  cancelled: TERMINAL_RUN_STATE_V1_NODE_STATUSES,
+};
+
+function assertRunStateV1StatusCoherence(
+  runStatus: RunStateV1RunStatus,
+  nodeStatus: RunStateV1NodeStatus,
+  nodeLabel: string,
+): void {
+  if (RUN_STATE_V1_STATUS_COHERENCE[runStatus].has(nodeStatus)) return;
+  throw new Error(
+    `Invalid RunState v1 status coherence: run ${runStatus} cannot contain ${nodeLabel} with status ${nodeStatus}.`,
+  );
+}
+
+function assertRunStateV1(value: unknown): asserts value is RunStateV1 {
+  const schemaErrors = [...Value.Errors(RunStateV1Schema, value)];
+  if (schemaErrors.length > 0) {
+    const firstError = schemaErrors[0];
+    throw new Error(
+      `Invalid RunState v1 at ${firstError.instancePath || "/"}: ${firstError.message}`,
+    );
+  }
+  const state = value as RunStateV1;
+  const stateNodeIds = new Set<string>();
+  for (const node of state.nodes) {
+    if (stateNodeIds.has(node.id)) {
+      throw new Error(`Invalid RunState v1 nodes: duplicate node id ${node.id}.`);
+    }
+    stateNodeIds.add(node.id);
+    if (node.progress.completed > node.progress.total) {
+      throw new Error(`Invalid RunState v1 progress for node ${node.id}.`);
+    }
+    assertRunStateV1StatusCoherence(state.status, node.status, `node ${node.id}`);
+  }
+  if (state.backgroundAgentTrailingNode) {
+    assertRunStateV1StatusCoherence(
+      state.status,
+      state.backgroundAgentTrailingNode.status,
+      `background-agent trailing slot ${state.backgroundAgentTrailingNode.slotId}`,
+    );
+  }
+  if (
+    state.status === "succeeded" &&
+    !state.nodes.some((node) => node.status === "succeeded")
+  ) {
+    throw new Error(
+      "Invalid RunState v1 status coherence: a succeeded run requires at least one succeeded node.",
+    );
+  }
+  const topologyNodeIds = new Set(state.topology.nodes.map((node) => node.id));
+  if (topologyNodeIds.size !== state.topology.nodes.length) {
+    throw new Error("Invalid RunState v1 topology: duplicate node id.");
+  }
+  if ([...stateNodeIds].some((nodeId) => !topologyNodeIds.has(nodeId))) {
+    throw new Error("Invalid RunState v1 nodes: state node is absent from topology.");
+  }
+  const topologyEdgeIds = new Set(state.topology.edges.map((edge) => edge.id));
+  if (topologyEdgeIds.size !== state.topology.edges.length) {
+    throw new Error("Invalid RunState v1 topology: duplicate edge id.");
+  }
+  if (state.topology.edges.some((edge) =>
+    !topologyNodeIds.has(edge.from) || !topologyNodeIds.has(edge.to)
+  )) {
+    throw new Error("Invalid RunState v1 topology: edge references an unknown node.");
+  }
+  if (
+    state.errorRouting?.nodeId !== undefined &&
+    !topologyNodeIds.has(state.errorRouting.nodeId)
+  ) {
+    throw new Error("Invalid RunState v1 error routing: node reference is absent from topology.");
+  }
+  if (
+    state.backgroundAgentTrailingNode?.nodeId !== undefined &&
+    !topologyNodeIds.has(state.backgroundAgentTrailingNode.nodeId)
+  ) {
+    throw new Error(
+      "Invalid RunState v1 background-agent trailing node: node reference is absent from topology.",
+    );
+  }
+}
+
+export function serializeRunStateV1(state: RunStateV1): string {
+  assertRunStateV1(state);
+  return JSON.stringify(state);
+}
+
+export function parseRunStateV1(serialized: string): RunStateV1 {
+  let value: unknown;
+  try {
+    value = JSON.parse(serialized);
+  } catch {
+    throw new Error("Invalid RunState v1 JSON.");
+  }
+  assertRunStateV1(value);
+  return structuredClone(value);
 }
 
 const TERMINAL_RUN_STATUSES = new Set<WorkflowRunStatus>([
@@ -470,38 +721,56 @@ function modelRequestsForNode(
   graph: WorkflowGraphDocument,
   node: WorkflowNode,
 ): ModelRequest[] {
-  const requests: Array<ModelRequest | undefined> = [];
+  const requests: ModelRequest[] = [];
+  const add = (
+    legacyModel: ModelRequest | undefined,
+    applySettingsModel: boolean,
+  ): void => {
+    const request = resolvedNodeSlotModel(
+      graph,
+      node,
+      legacyModel,
+      applySettingsModel,
+    );
+    if (request) requests.push(request);
+  };
   switch (node.kind) {
     case "agent":
     case "research-until-goal":
-      requests.push(node.model ?? graph.defaultModel);
+      add(node.model ?? graph.defaultModel, true);
       break;
     case "council":
-      requests.push(...node.members.map((member) => member.model), node.chair);
+      node.members.forEach((member) => add(member.model, false));
+      add(node.chair, false);
       break;
     case "fusion":
-      requests.push(...node.fusion.members.map((member) => member.model));
+      node.fusion.members.forEach((member) => add(member.model, false));
       if (node.fusion.mode === "openrouter-router") {
-        requests.push(node.fusion.router, node.fusion.judge);
+        add(node.fusion.router, false);
+        add(node.fusion.judge, false);
       } else {
-        requests.push(node.fusion.synthesizer);
+        add(node.fusion.synthesizer, false);
       }
       break;
     case "best-of-n":
-      requests.push(...(node.candidateModels ?? [node.model ?? graph.defaultModel]));
-      requests.push(node.evaluator ?? graph.defaultModel);
+      if (node.candidateModels) {
+        node.candidateModels.forEach((candidate) => add(candidate, false));
+      } else {
+        add(node.model ?? graph.defaultModel, true);
+      }
+      add(node.evaluator ?? graph.defaultModel, false);
       break;
     case "evidence-gate":
-      requests.push(workflowEvidenceGateEvaluator(graph, node));
+      add(workflowEvidenceGateEvaluator(graph, node), false);
       break;
     case "lean4":
-      requests.push(node.solverModel ?? graph.defaultModel);
+      add(node.solverModel ?? graph.defaultModel, true);
       break;
   }
   if (requiresWorkflowEvidencePolicyEvaluation(graph, node)) {
-    requests.push(workflowEvidencePolicyEvaluator(graph, node));
+    add(workflowEvidencePolicyEvaluator(graph, node), false);
   }
-  return requests.filter((request): request is ModelRequest => request !== undefined);
+  return requests;
 }
 
 const MODEL_CALL_SLOT_ID_RE = /^[a-z0-9][a-z0-9._:-]{0,127}$/;
@@ -514,13 +783,28 @@ function modelCallSlot(id: string, request: ModelRequest | undefined): WorkflowM
   return request ? [{ id, request: structuredClone(request) }] : [];
 }
 
+function resolvedNodeSlotModel(
+  graph: WorkflowGraphDocument,
+  node: WorkflowNode,
+  legacyModel: ModelRequest | undefined,
+  applySettingsModel: boolean,
+): ModelRequest | undefined {
+  if (!legacyModel && (!applySettingsModel || !node.settings?.model)) return undefined;
+  return resolveNodeSpecV1(graph, node, legacyModel, applySettingsModel).model;
+}
+
 function withEvidencePolicySlot(
   graph: WorkflowGraphDocument,
   node: WorkflowNode,
   slots: WorkflowModelCallSlot[],
 ): WorkflowModelCallSlot[] {
   if (!requiresWorkflowEvidencePolicyEvaluation(graph, node)) return slots;
-  const evaluator = workflowEvidencePolicyEvaluator(graph, node);
+  const evaluator = resolvedNodeSlotModel(
+    graph,
+    node,
+    workflowEvidencePolicyEvaluator(graph, node),
+    false,
+  );
   return evaluator
     ? [
         ...slots,
@@ -546,13 +830,19 @@ export function workflowModelCallSlotsForNode(
       return withEvidencePolicySlot(
         graph,
         node,
-        modelCallSlot("agent", node.model ?? graph.defaultModel),
+        modelCallSlot(
+          "agent",
+          resolvedNodeSlotModel(graph, node, node.model ?? graph.defaultModel, true),
+        ),
       );
     case "research-until-goal":
       return withEvidencePolicySlot(
         graph,
         node,
-        modelCallSlot("research-iteration-1", node.model ?? graph.defaultModel),
+        modelCallSlot(
+          "research-iteration-1",
+          resolvedNodeSlotModel(graph, node, node.model ?? graph.defaultModel, true),
+        ),
       );
     case "council": {
       const slots: WorkflowModelCallSlot[] = [];
@@ -560,12 +850,12 @@ export function workflowModelCallSlotsForNode(
         for (const member of node.members) {
           slots.push({
             id: `council-round-${round}-member-${member.id}`,
-            request: structuredClone(member.model),
+            request: resolvedNodeSlotModel(graph, node, member.model, false)!,
           });
         }
         slots.push({
           id: `council-round-${round}-chair`,
-          request: structuredClone(node.chair),
+          request: resolvedNodeSlotModel(graph, node, node.chair, false)!,
         });
       }
       return withEvidencePolicySlot(graph, node, slots);
@@ -575,10 +865,16 @@ export function workflowModelCallSlotsForNode(
         return withEvidencePolicySlot(graph, node, [
           ...node.fusion.members.map((member) => ({
             id: `fusion-panel-${member.id}`,
-            request: structuredClone(member.model),
+            request: resolvedNodeSlotModel(graph, node, member.model, false)!,
           })),
-          { id: "fusion-judge-deliberation", request: structuredClone(node.fusion.judge) },
-          { id: "fusion-judge-final", request: structuredClone(node.fusion.judge) },
+          {
+            id: "fusion-judge-deliberation",
+            request: resolvedNodeSlotModel(graph, node, node.fusion.judge, false)!,
+          },
+          {
+            id: "fusion-judge-final",
+            request: resolvedNodeSlotModel(graph, node, node.fusion.judge, false)!,
+          },
         ]);
       }
       const slots: WorkflowModelCallSlot[] = [];
@@ -586,22 +882,29 @@ export function workflowModelCallSlotsForNode(
         for (const member of node.fusion.members) {
           slots.push({
             id: `fusion-round-${round}-member-${member.id}`,
-            request: structuredClone(member.model),
+            request: resolvedNodeSlotModel(graph, node, member.model, false)!,
           });
         }
       }
       slots.push({
         id: "fusion-synthesizer",
-        request: structuredClone(node.fusion.synthesizer),
+        request: resolvedNodeSlotModel(graph, node, node.fusion.synthesizer, false)!,
       });
       return withEvidencePolicySlot(graph, node, slots);
     }
     case "best-of-n": {
       const candidateCount = node.candidateCount ?? node.candidateModels?.length ?? 2;
-      const repeatedRequest = node.model ?? graph.defaultModel;
+      const repeatedRequest = resolvedNodeSlotModel(
+        graph,
+        node,
+        node.model ?? graph.defaultModel,
+        true,
+      );
       const slots: WorkflowModelCallSlot[] = [];
       for (let index = 0; index < candidateCount; index += 1) {
-        const request = node.candidateModels?.[index] ?? repeatedRequest;
+        const request = node.candidateModels?.[index]
+          ? resolvedNodeSlotModel(graph, node, node.candidateModels[index], false)
+          : repeatedRequest;
         if (request) {
           slots.push({
             id: `candidate-${index + 1}`,
@@ -609,7 +912,12 @@ export function workflowModelCallSlotsForNode(
           });
         }
       }
-      const evaluator = node.evaluator ?? graph.defaultModel;
+      const evaluator = resolvedNodeSlotModel(
+        graph,
+        node,
+        node.evaluator ?? graph.defaultModel,
+        false,
+      );
       if (evaluator) {
         slots.push({ id: "candidate-evaluator", request: structuredClone(evaluator) });
       }
@@ -619,7 +927,15 @@ export function workflowModelCallSlotsForNode(
       const usesModel = node.evaluator !== undefined ||
         node.checks.some((check) => check !== "artifact-exists");
       return usesModel
-        ? modelCallSlot("evidence-evaluator", workflowEvidenceGateEvaluator(graph, node))
+        ? modelCallSlot(
+            "evidence-evaluator",
+            resolvedNodeSlotModel(
+              graph,
+              node,
+              workflowEvidenceGateEvaluator(graph, node),
+              false,
+            ),
+          )
         : [];
     }
     case "lean4":
@@ -627,7 +943,15 @@ export function workflowModelCallSlotsForNode(
         graph,
         node,
         node.mode === "solve"
-          ? modelCallSlot("lean-solver", node.solverModel ?? graph.defaultModel)
+          ? modelCallSlot(
+              "lean-solver",
+              resolvedNodeSlotModel(
+                graph,
+                node,
+                node.solverModel ?? graph.defaultModel,
+                true,
+              ),
+            )
           : [],
       );
   }
@@ -645,7 +969,12 @@ export function workflowModelCallSlotForNode(
     if (match) {
       const iteration = Number(match[1]);
       const maximumIterations = node.limits?.maxIterations ?? graph.limits.maxIterations;
-      const request = node.model ?? graph.defaultModel;
+      const request = resolvedNodeSlotModel(
+        graph,
+        node,
+        node.model ?? graph.defaultModel,
+        true,
+      );
       return request && iteration >= 1 && iteration <= maximumIterations
         ? { id: slotId, request: structuredClone(request) }
         : undefined;

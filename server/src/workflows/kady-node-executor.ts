@@ -65,6 +65,12 @@ import type {
 import type {
   SupervisedWorkflowBudgetDescriptorV1,
 } from "./supervised-budget.ts";
+import {
+  pendingNodeKindSpecEnforcements,
+  pendingNodeSpecEnforcementMessage,
+  pendingNodeSpecEnforcements,
+  pendingWorkflowSettingsEnforcements,
+} from "./node-spec-enforcement.ts";
 
 export const KADY_WORKFLOW_READ_ONLY_AGENT =
   "dag-workflow-readonly-executor" as const;
@@ -594,14 +600,23 @@ function delegationPolicyWithDefaults(
 function effectiveNodeLimits(context: WorkflowNodeExecutorContext): EffectiveNodeLimits {
   const graph = context.graph.limits;
   const node = context.node.limits;
+  const budget = context.node.settings?.budget;
   return {
     maxIterations: Math.min(graph.maxIterations, node?.maxIterations ?? graph.maxIterations),
     maxModelCalls: Math.min(graph.maxModelCalls, node?.maxModelCalls ?? graph.maxModelCalls),
     maxParallelism: Math.min(graph.maxParallelism, node?.maxParallelism ?? graph.maxParallelism),
     maxSubagents: Math.min(graph.maxSubagents, node?.maxSubagents ?? graph.maxSubagents),
     timeoutMs: Math.min(graph.timeoutMs, node?.timeoutMs ?? graph.timeoutMs),
-    maxTokens: Math.min(graph.maxTokens, node?.maxTokens ?? graph.maxTokens),
-    maxCostUsd: Math.min(graph.maxCostUsd, node?.maxCostUsd ?? graph.maxCostUsd),
+    maxTokens: Math.min(
+      graph.maxTokens,
+      node?.maxTokens ?? graph.maxTokens,
+      budget?.maxTokens ?? graph.maxTokens,
+    ),
+    maxCostUsd: Math.min(
+      graph.maxCostUsd,
+      node?.maxCostUsd ?? graph.maxCostUsd,
+      budget?.maxCostUsd ?? graph.maxCostUsd,
+    ),
     maxRetries: Math.min(graph.maxRetries, node?.maxRetries ?? graph.maxRetries),
   };
 }
@@ -1416,6 +1431,17 @@ export function createKadyWorkflowNodeExecutor(
   const policy = delegationPolicyWithDefaults(options.delegationPolicy);
 
   return async (context): Promise<WorkflowNodeExecutorResult> => {
+    const pendingEnforcement = [
+      ...pendingWorkflowSettingsEnforcements(context.graph.settings),
+      ...pendingNodeSpecEnforcements(context.node.settings),
+      ...pendingNodeKindSpecEnforcements(context.node),
+    ][0];
+    if (pendingEnforcement) {
+      fail(
+        "WORKFLOW_NODE_INVALID_CONTEXT",
+        pendingNodeSpecEnforcementMessage(pendingEnforcement),
+      );
+    }
     assertReadOnlyWorkspace(context.node);
     const limits = effectiveNodeLimits(context);
     const callCeiling = maximumModelCalls(context, limits);
@@ -1914,6 +1940,7 @@ export function createKadyWorkflowNodeExecutor(
         };
         const dynamicNode = {
           ...node,
+          model: structuredClone(slot.request),
           limits: { ...dynamicCallLimits },
         };
         const dynamicResult = await executeAgentNode({

@@ -7,6 +7,7 @@ import {
   WorkflowGraphDocumentSchema,
   type EvidencePolicy,
   type ModelRequest,
+  type NodeSpecV1,
   type NodeLimits,
   type RequestedModel,
   type RescuePolicy,
@@ -20,6 +21,12 @@ import {
   workflowEvidenceGateEvaluator,
   workflowEvidencePolicyEvaluator,
 } from "./evidence-policy.ts";
+import {
+  pendingNodeKindSpecEnforcements,
+  pendingNodeSpecEnforcementMessage,
+  pendingNodeSpecEnforcements,
+  pendingWorkflowSettingsEnforcements,
+} from "./node-spec-enforcement.ts";
 
 export interface WorkflowValidationIssue {
   code: string;
@@ -42,6 +49,50 @@ export const DEFAULT_WORKFLOW_RESCUE_POLICY: RescuePolicy = {
     "post-compaction",
   ],
 };
+
+export const DEFAULT_NODE_SPEC_V1 = {
+  version: 1,
+  reasoningEffort: "high",
+  hyperparameters: { temperature: 1, top_p: 1, sampling: {} },
+  conditions: { exists: [] },
+  harness: "pi",
+  databases: [],
+  skills: { mode: "auto", list: [] },
+  subagents: { mode: "auto" },
+  autonomy: "strict",
+  deliberation: {
+    bestOfNPersonalityCount: 2,
+    mimeographs: { mode: "auto", personalityRefs: [] },
+  },
+  billingMode: "inherit",
+} as const;
+
+export interface ResolvedNodeSpecV1 {
+  version: 1;
+  model?: ModelRequest;
+  reasoningEffort: RequestedModel["reasoning"];
+  hyperparameters: {
+    temperature: number;
+    top_p: number;
+    sampling: Record<string, string | number | boolean>;
+  };
+  conditions: { when?: string; exists: string[] };
+  harness: "pi" | "claude-code" | "codex" | "opencode" | "copilot";
+  databases: string[];
+  skills: { mode: "auto" | "auto-manual" | "manual"; list: string[] };
+  subagents: { mode: "auto" | "auto-manual" };
+  autonomy: "strict" | "loose";
+  deliberation: {
+    personalityStoreRef?: string;
+    bestOfNPersonalityCount: number;
+    mimeographs: {
+      mode: "auto" | "manual";
+      personalityRefs: string[];
+    };
+  };
+  billingMode: "inherit" | "api" | "subscription";
+  budget: { maxTokens: number; maxCostUsd: number };
+}
 
 /**
  * Apply canonical defaults without repairing invalid references or topology.
@@ -124,6 +175,14 @@ export function validateWorkflowGraphSemantics(
     "duplicate-artifact-id",
     issues,
   );
+
+  for (const finding of pendingWorkflowSettingsEnforcements(document.settings)) {
+    issues.push({
+      code: finding.code,
+      path: `/settings/${finding.pathSuffix}`,
+      message: pendingNodeSpecEnforcementMessage(finding),
+    });
+  }
 
   validateRescuePolicy(
     document.rescue ?? DEFAULT_WORKFLOW_RESCUE_POLICY,
@@ -233,6 +292,113 @@ function cloneRescuePolicy(policy: RescuePolicy): RescuePolicy {
   return { ...policy, triggers: [...policy.triggers] };
 }
 
+function inheritedNodeModel(
+  node: WorkflowNode,
+  document: WorkflowGraphDocument,
+): ModelRequest | undefined {
+  if (
+    node.kind === "agent" || node.kind === "research-until-goal" ||
+    node.kind === "best-of-n"
+  ) {
+    return node.model ?? document.defaultModel;
+  }
+  return document.defaultModel;
+}
+
+/** Resolve optional NodeSpec v1 fields without mutating the persisted graph. */
+export function resolveNodeSpecV1(
+  document: WorkflowGraphDocument,
+  node: WorkflowNode,
+  legacyModel?: ModelRequest,
+  applySettingsModel = true,
+): ResolvedNodeSpecV1 {
+  const settings: NodeSpecV1 = node.settings ?? {};
+  const model = applySettingsModel
+    ? settings.model ?? legacyModel ?? inheritedNodeModel(node, document)
+    : legacyModel;
+  const reasoningOverride =
+    node.kind === "fusion" &&
+      node.fusion.mode === "openrouter-router" &&
+      settings.reasoningEffort === "high"
+      ? undefined
+      : settings.reasoningEffort;
+  const reasoningEffort =
+    settings.reasoningEffort ?? model?.requested.reasoning ??
+    DEFAULT_NODE_SPEC_V1.reasoningEffort;
+  const executableModel = model === undefined
+    ? undefined
+    : modelRequestWithReasoningOverride(model, reasoningOverride);
+  const effectiveLimits = effectiveNodeLimits(node, document);
+  const workflowDatabases = document.settings?.databases ?? [];
+  const nodeDatabases = settings.databases ?? [];
+  return {
+    version: 1,
+    ...(executableModel ? { model: executableModel } : {}),
+    reasoningEffort,
+    hyperparameters: {
+      temperature:
+        settings.hyperparameters?.temperature ??
+        DEFAULT_NODE_SPEC_V1.hyperparameters.temperature,
+      top_p:
+        settings.hyperparameters?.top_p ??
+        DEFAULT_NODE_SPEC_V1.hyperparameters.top_p,
+      sampling: { ...(settings.hyperparameters?.sampling ?? {}) },
+    },
+    conditions: {
+      ...(settings.conditions?.when ? { when: settings.conditions.when } : {}),
+      exists: [...(settings.conditions?.exists ?? [])],
+    },
+    harness:
+      settings.harness ?? document.settings?.defaultHarness ??
+      DEFAULT_NODE_SPEC_V1.harness,
+    databases: [...new Set([...workflowDatabases, ...nodeDatabases])],
+    skills: {
+      mode: settings.skills?.mode ?? DEFAULT_NODE_SPEC_V1.skills.mode,
+      list: [...(settings.skills?.list ?? [])],
+    },
+    subagents: {
+      mode: settings.subagents?.mode ?? DEFAULT_NODE_SPEC_V1.subagents.mode,
+    },
+    autonomy: settings.autonomy ?? DEFAULT_NODE_SPEC_V1.autonomy,
+    deliberation: {
+      ...(settings.deliberation?.personalityStoreRef
+        ? { personalityStoreRef: settings.deliberation.personalityStoreRef }
+        : {}),
+      bestOfNPersonalityCount:
+        settings.deliberation?.bestOfNPersonalityCount ??
+        DEFAULT_NODE_SPEC_V1.deliberation.bestOfNPersonalityCount,
+      mimeographs: {
+        mode:
+          settings.deliberation?.mimeographs?.mode ??
+          DEFAULT_NODE_SPEC_V1.deliberation.mimeographs.mode,
+        personalityRefs: [
+          ...(settings.deliberation?.mimeographs?.personalityRefs ?? []),
+        ],
+      },
+    },
+    billingMode: settings.billingMode ?? DEFAULT_NODE_SPEC_V1.billingMode,
+    budget: {
+      maxTokens: effectiveLimits.maxTokens,
+      maxCostUsd: effectiveLimits.maxCostUsd,
+    },
+  };
+}
+
+function modelRequestWithReasoningOverride(
+  request: ModelRequest,
+  reasoningEffort: RequestedModel["reasoning"] | undefined,
+): ModelRequest {
+  const resolved = structuredClone(request);
+  if (reasoningEffort === undefined) return resolved;
+  resolved.requested.reasoning = reasoningEffort;
+  if (resolved.resolution.mode === "explicit-fallback") {
+    for (const alternative of resolved.resolution.alternatives) {
+      alternative.reasoning = reasoningEffort;
+    }
+  }
+  return resolved;
+}
+
 export interface WorkflowNodeDemand {
   minimumModelCalls: number;
   maximumModelCalls: number;
@@ -254,8 +420,14 @@ function effectiveNodeLimits(
     maxParallelism: node.limits?.maxParallelism ?? document.limits.maxParallelism,
     maxSubagents: node.limits?.maxSubagents ?? document.limits.maxSubagents,
     timeoutMs: node.limits?.timeoutMs ?? document.limits.timeoutMs,
-    maxTokens: node.limits?.maxTokens ?? document.limits.maxTokens,
-    maxCostUsd: node.limits?.maxCostUsd ?? document.limits.maxCostUsd,
+    maxTokens: Math.min(
+      node.limits?.maxTokens ?? document.limits.maxTokens,
+      node.settings?.budget?.maxTokens ?? document.limits.maxTokens,
+    ),
+    maxCostUsd: Math.min(
+      node.limits?.maxCostUsd ?? document.limits.maxCostUsd,
+      node.settings?.budget?.maxCostUsd ?? document.limits.maxCostUsd,
+    ),
     maxRetries: node.limits?.maxRetries ?? document.limits.maxRetries,
   };
 }
@@ -401,6 +573,41 @@ function uniqueItemsById<T extends { id: string }>(
   return uniqueItems;
 }
 
+function nodeHasModelOrEvidenceEvaluatorSlot(
+  node: WorkflowNode,
+  document: WorkflowGraphDocument,
+): boolean {
+  if (
+    requiresWorkflowEvidencePolicyEvaluation(document, node) &&
+    workflowEvidencePolicyEvaluator(document, node) !== undefined
+  ) {
+    return true;
+  }
+
+  switch (node.kind) {
+    case "agent":
+    case "research-until-goal":
+      return node.settings?.model !== undefined || node.model !== undefined ||
+        document.defaultModel !== undefined;
+    case "council":
+    case "fusion":
+      return true;
+    case "best-of-n":
+      return node.candidateModels !== undefined || node.settings?.model !== undefined ||
+        node.model !== undefined || node.evaluator !== undefined ||
+        document.defaultModel !== undefined;
+    case "evidence-gate":
+      return (
+        node.evaluator !== undefined ||
+        node.checks.some((check) => check !== "artifact-exists")
+      ) && workflowEvidenceGateEvaluator(document, node) !== undefined;
+    case "lean4":
+      return node.mode === "solve" &&
+        (node.settings?.model !== undefined || node.solverModel !== undefined ||
+          document.defaultModel !== undefined);
+  }
+}
+
 function validateNode(
   node: WorkflowNode,
   nodePath: string,
@@ -409,10 +616,81 @@ function validateNode(
   issues: WorkflowValidationIssue[],
 ): void {
   if (node.limits) validateNodeLimits(node.limits, nodePath, document, issues);
+  for (const finding of pendingNodeSpecEnforcements(node.settings)) {
+    issues.push({
+      code: finding.code,
+      path: `${nodePath}/settings/${finding.pathSuffix}`,
+      message: pendingNodeSpecEnforcementMessage(finding),
+    });
+  }
+  for (const finding of pendingNodeKindSpecEnforcements(node)) {
+    issues.push({
+      code: finding.code,
+      path: `${nodePath}/settings/${finding.pathSuffix}`,
+      message: pendingNodeSpecEnforcementMessage(finding),
+    });
+  }
+  const resolveModel = (
+    legacyModel?: ModelRequest,
+    inheritNodeModel = true,
+    applySettingsModel = true,
+  ): ModelRequest | undefined => {
+    if (
+      !inheritNodeModel &&
+      !legacyModel &&
+      (!applySettingsModel || !node.settings?.model)
+    ) return undefined;
+    return resolveNodeSpecV1(document, node, legacyModel, applySettingsModel).model;
+  };
+  const nodeSpecModel = node.settings?.model ? resolveModel() : undefined;
+  if (nodeSpecModel) {
+    validateModelRequest(nodeSpecModel, `${nodePath}/settings/model`, issues);
+  }
+  const validateResolvedModel = (
+    legacyModel: ModelRequest | undefined,
+    legacyPath: string,
+    inheritNodeModel = true,
+    applySettingsModel = true,
+  ): ModelRequest | undefined => {
+    const resolvedModel = resolveModel(
+      legacyModel,
+      inheritNodeModel,
+      applySettingsModel,
+    );
+    if (resolvedModel && (!nodeSpecModel || !applySettingsModel)) {
+      validateModelRequest(resolvedModel, legacyPath, issues);
+    }
+    return resolvedModel;
+  };
+  if (
+    node.settings?.budget?.maxTokens !== undefined &&
+    node.settings.budget.maxTokens > document.limits.maxTokens
+  ) {
+    issues.push({
+      code: "node-budget-exceeds-workflow-limit",
+      path: `${nodePath}/settings/budget/maxTokens`,
+      message: "NodeSpec maxTokens cannot exceed the workflow maxTokens limit.",
+    });
+  }
+  if (
+    node.settings?.budget?.maxCostUsd !== undefined &&
+    node.settings.budget.maxCostUsd > document.limits.maxCostUsd
+  ) {
+    issues.push({
+      code: "node-budget-exceeds-workflow-limit",
+      path: `${nodePath}/settings/budget/maxCostUsd`,
+      message: "NodeSpec maxCostUsd cannot exceed the workflow maxCostUsd limit.",
+    });
+  }
   if (node.rescue) validateRescuePolicy(node.rescue, `${nodePath}/rescue`, issues);
   if (node.evidence) {
     if (node.evidence.evaluator) {
-      validateModelRequest(node.evidence.evaluator, `${nodePath}/evidence/evaluator`, issues);
+      validateResolvedModel(
+        node.evidence.evaluator,
+        `${nodePath}/evidence/evaluator`,
+        false,
+        false,
+      );
     }
     validateEvidenceRescueAvailability(
       node.evidence,
@@ -423,7 +701,7 @@ function validateNode(
   }
   if (
     requiresWorkflowEvidencePolicyEvaluation(document, node) &&
-    !workflowEvidencePolicyEvaluator(document, node)
+    !resolveModel(workflowEvidencePolicyEvaluator(document, node), false, false)
   ) {
     issues.push({
       code: "missing-evidence-policy-evaluator",
@@ -434,14 +712,43 @@ function validateNode(
   }
   validateWorkspacePolicy(node, nodePath, issues);
 
+  if (
+    node.settings?.reasoningEffort !== undefined &&
+    node.settings.reasoningEffort !== DEFAULT_NODE_SPEC_V1.reasoningEffort &&
+    !nodeHasModelOrEvidenceEvaluatorSlot(node, document)
+  ) {
+    issues.push({
+      code: "slotless-node-reasoning-effort",
+      path: `${nodePath}/settings/reasoningEffort`,
+      message:
+        "Non-default NodeSpec reasoningEffort requires a model slot or evidence-evaluator slot.",
+    });
+  }
+
+  if (
+    node.settings?.model !== undefined &&
+    (node.kind === "council" || node.kind === "fusion" || node.kind === "evidence-gate")
+  ) {
+    issues.push({
+      code: "ambiguous-node-spec-model",
+      path: `${nodePath}/settings/model`,
+      message:
+        `NodeSpec model has no unambiguous primary slot on ${node.kind}; explicit role models remain authoritative.`,
+    });
+  }
+
   switch (node.kind) {
     case "agent":
-    case "research-until-goal":
-      validateInheritedModel(node.model, nodePath, document, issues);
-      if (node.model) validateModelRequest(node.model, `${nodePath}/model`, issues);
+    case "research-until-goal": {
+      const model = validateResolvedModel(node.model, `${nodePath}/model`);
+      validateInheritedModel(model, nodePath, document, issues);
       break;
+    }
     case "best-of-n":
-      if (node.model && node.candidateModels) {
+      if (
+        (node.settings?.model !== undefined || node.model !== undefined) &&
+        node.candidateModels !== undefined
+      ) {
         issues.push({
           code: "ambiguous-candidate-models",
           path: `${nodePath}/candidateModels`,
@@ -449,14 +756,18 @@ function validateNode(
         });
       }
       if (!node.candidateModels) {
-        validateInheritedModel(node.model, nodePath, document, issues);
+        const model = validateResolvedModel(node.model, `${nodePath}/model`);
+        validateInheritedModel(model, nodePath, document, issues);
       }
-      if (node.model) validateModelRequest(node.model, `${nodePath}/model`, issues);
+      if (node.model && node.candidateModels) {
+        validateResolvedModel(node.model, `${nodePath}/model`, false, false);
+      }
       for (const [index, candidateModel] of (node.candidateModels ?? []).entries()) {
-        validateModelRequest(
+        validateResolvedModel(
           candidateModel,
           `${nodePath}/candidateModels/${index}`,
-          issues,
+          false,
+          false,
         );
       }
       if (
@@ -470,9 +781,12 @@ function validateNode(
           message: "candidateCount must match the explicit candidateModels list.",
         });
       }
-      if (node.evaluator) {
-        validateModelRequest(node.evaluator, `${nodePath}/evaluator`, issues);
-      } else if (!document.defaultModel) {
+      if (!validateResolvedModel(
+        node.evaluator ?? document.defaultModel,
+        `${nodePath}/evaluator`,
+        false,
+        false,
+      )) {
         issues.push({
           code: "missing-evaluator-model",
           path: `${nodePath}/evaluator`,
@@ -482,58 +796,83 @@ function validateNode(
       break;
     case "council":
       validateUniqueMemberIds(node.members, `${nodePath}/members`, issues);
-      validateModelRequest(node.chair, `${nodePath}/chair`, issues);
+      validateResolvedModel(node.chair, `${nodePath}/chair`, false, false);
       for (const [index, member] of node.members.entries()) {
-        validateModelRequest(member.model, `${nodePath}/members/${index}/model`, issues);
+        validateResolvedModel(
+          member.model,
+          `${nodePath}/members/${index}/model`,
+          false,
+          false,
+        );
       }
       break;
     case "fusion":
       if (node.fusion.mode === "openrouter-router") {
-        validateModelRequest(node.fusion.router, `${nodePath}/fusion/router`, issues);
-        validateHostedOpenRouterModelRequest(
+        const router = validateResolvedModel(
           node.fusion.router,
+          `${nodePath}/fusion/router`,
+          false,
+          false,
+        )!;
+        validateHostedOpenRouterModelRequest(
+          router,
           `${nodePath}/fusion/router`,
           "invalid-openrouter-router",
           true,
           issues,
         );
         validateUniqueMemberIds(node.fusion.members, `${nodePath}/fusion/members`, issues);
+        const participants: Array<{ request: ModelRequest; path: string }> = [];
         for (const [index, member] of node.fusion.members.entries()) {
-          validateModelRequest(
+          const path = `${nodePath}/fusion/members/${index}/model`;
+          const request = validateResolvedModel(
             member.model,
-            `${nodePath}/fusion/members/${index}/model`,
-            issues,
-          );
+            path,
+            false,
+            false,
+          )!;
+          participants.push({ request, path: `${path}/requested/reasoning` });
           validateHostedOpenRouterModelRequest(
-            member.model,
-            `${nodePath}/fusion/members/${index}/model`,
+            request,
+            path,
             "invalid-openrouter-panel-model",
             false,
             issues,
           );
         }
-        validateModelRequest(node.fusion.judge, `${nodePath}/fusion/judge`, issues);
-        validateHostedOpenRouterModelRequest(
+        const judge = validateResolvedModel(
           node.fusion.judge,
+          `${nodePath}/fusion/judge`,
+          false,
+          false,
+        )!;
+        participants.push({
+          request: judge,
+          path: `${nodePath}/fusion/judge/requested/reasoning`,
+        });
+        validateHostedOpenRouterModelRequest(
+          judge,
           `${nodePath}/fusion/judge`,
           "invalid-openrouter-judge",
           false,
           issues,
         );
-        validateHostedFusionReasoning(node.fusion, nodePath, issues);
+        validateHostedFusionReasoning(router, participants, issues);
       } else {
         validateUniqueMemberIds(node.fusion.members, `${nodePath}/fusion/members`, issues);
         for (const [index, member] of node.fusion.members.entries()) {
-          validateModelRequest(
+          validateResolvedModel(
             member.model,
             `${nodePath}/fusion/members/${index}/model`,
-            issues,
+            false,
+            false,
           );
         }
-        validateModelRequest(
+        validateResolvedModel(
           node.fusion.synthesizer,
           `${nodePath}/fusion/synthesizer`,
-          issues,
+          false,
+          false,
         );
       }
       break;
@@ -554,11 +893,24 @@ function validateNode(
           });
         }
       }
-      if (node.evaluator) {
-        validateModelRequest(node.evaluator, `${nodePath}/evaluator`, issues);
-      }
       const needsModelEvaluator = node.checks.some((check) => check !== "artifact-exists");
-      if (needsModelEvaluator && !workflowEvidenceGateEvaluator(document, node)) {
+      let evaluator: ModelRequest | undefined;
+      if (node.evaluator) {
+        evaluator = validateResolvedModel(
+          node.evaluator,
+          `${nodePath}/evaluator`,
+          false,
+          false,
+        );
+      } else if (needsModelEvaluator) {
+        evaluator = validateResolvedModel(
+          workflowEvidenceGateEvaluator(document, node),
+          `${nodePath}/evaluator`,
+          false,
+          false,
+        );
+      }
+      if (needsModelEvaluator && !evaluator) {
         issues.push({
           code: "missing-evidence-evaluator",
           path: `${nodePath}/evaluator`,
@@ -575,8 +927,13 @@ function validateNode(
       break;
     }
     case "lean4":
-      if (node.solverModel) {
-        validateModelRequest(node.solverModel, `${nodePath}/solverModel`, issues);
+      if (node.mode === "verify" && node.settings?.model) {
+        issues.push({
+          code: "unexpected-lean-node-spec-model",
+          path: `${nodePath}/settings/model`,
+          message:
+            "Lean verify mode is deterministic and has no primary model slot; settings.model would be discarded.",
+        });
       }
       if (node.mode === "verify" && node.solverModel) {
         issues.push({
@@ -585,7 +942,14 @@ function validateNode(
           message: "Lean verify mode is deterministic and must not declare a solver model.",
         });
       }
-      if (node.mode === "solve" && !node.solverModel && !document.defaultModel) {
+      if (
+        node.mode === "solve" &&
+        !validateResolvedModel(
+          node.solverModel ?? document.defaultModel,
+          `${nodePath}/solverModel`,
+          false,
+        )
+      ) {
         issues.push({
           code: "missing-lean-solver-model",
           path: `${nodePath}/solverModel`,
@@ -726,28 +1090,13 @@ function validateHostedOpenRouterModelRequest(
   }
 }
 
-type HostedFusion = Extract<
-  Extract<WorkflowNode, { kind: "fusion" }>["fusion"],
-  { mode: "openrouter-router" }
->;
-
 function validateHostedFusionReasoning(
-  fusion: HostedFusion,
-  nodePath: string,
+  router: ModelRequest,
+  participants: Array<{ request: ModelRequest; path: string }>,
   issues: WorkflowValidationIssue[],
 ): void {
-  if (fusion.router.requested.source !== "fixed") return;
-  const routerReasoning = fusion.router.requested.reasoning;
-  const participants = [
-    ...fusion.members.map((member, index) => ({
-      request: member.model,
-      path: `${nodePath}/fusion/members/${index}/model/requested/reasoning`,
-    })),
-    {
-      request: fusion.judge,
-      path: `${nodePath}/fusion/judge/requested/reasoning`,
-    },
-  ];
+  if (router.requested.source !== "fixed") return;
+  const routerReasoning = router.requested.reasoning;
   for (const participant of participants) {
     if (
       participant.request.requested.source === "fixed" &&

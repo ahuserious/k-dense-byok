@@ -22,6 +22,7 @@
     "S2": [
       "start.mjs",
       "server/src/agent/pipeline-engine/**",
+      "server/src/agent/skills.ts",
       "web/src/components/pipelines-panel.tsx",
       "web/src/components/pipeline-builder-panel.tsx",
       "web/src/components/engine-iframe-panel.tsx",
@@ -55,7 +56,8 @@
       "server/src/workflows/kady-node-executor.ts",
       "server/src/workflows/supervised-budget.ts",
       "server/src/workflows/supervisor/credential-contract.ts",
-      "server/src/workflows/supervisor/credentials.ts"
+      "server/src/workflows/supervisor/credentials.ts",
+      "web/src/components/database-selector.tsx"
     ],
     "S5": [
       "server/src/workflows/index.ts",
@@ -73,6 +75,14 @@
       "server/src/workflows/hosted-fusion.ts",
       "server/src/workflows/lean4-artifacts.ts",
       "server/src/workflows/lean4-verifier.ts",
+      "server/src/workflows/behavior-registry.ts",
+      "server/src/api/workflow-run-state.ts",
+      "server/src/config.ts",
+      "server/src/agent/subagents.ts",
+      "server/src/personality-store/**",
+      "server/src/agent/personality-store*.ts",
+      "server/src/api/personality-store*.ts",
+      "server/vendor/pipeline-engine/packages/workflows/src/dag-executor*.ts",
       "server/src/workflows/supervisor/client.ts",
       "server/src/workflows/supervisor/coordinator.ts",
       "server/src/workflows/supervisor/entry.ts",
@@ -93,7 +103,8 @@
       "server/src/workflows/context-watcher*.ts",
       "server/src/workflows/compaction-watcher*.ts",
       "web/src/components/context-watcher*.tsx",
-      "web/src/components/compaction-watcher*.tsx"
+      "web/src/components/compaction-watcher*.tsx",
+      "server/src/context/lateral-pass*"
     ],
     "S8": [
       "server/src/api/sessions.ts",
@@ -122,6 +133,12 @@
       "web/src/lib/dag-workflow-templates.ts",
       "web/src/components/workflow-library*.tsx",
       "web/src/lib/workflow-library*.ts"
+    ],
+    "S11": [
+      "e2e/**",
+      "playwright.config.*",
+      ".stably/**",
+      "docs/e2e/**"
     ]
   }
 }

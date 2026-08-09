@@ -11,6 +11,7 @@ import {
   normalizeWorkflowProjectPath,
   resolveWorkflowProjectPath,
   validateWorkflowGraphDocument,
+  workflowModelCallSlotsForNode,
   type ModelRequest,
   type RequestedModel,
   type WorkflowGraphDocument,
@@ -335,9 +336,60 @@ describe("workflow graph contract", () => {
     const bestOfN = nodeOfKind(document, "best-of-n");
     bestOfN.model = exactModel("ollama", "qwen3:32b", "local");
     bestOfN.candidateModels = [exactModel(), exactModel("openrouter", "openai/gpt-5")];
-    expect(issueCodes(validateWorkflowGraphDocument(document))).toContain(
-      "ambiguous-candidate-models",
-    );
+    const validation = validateWorkflowGraphDocument(document);
+    expect(validation).toMatchObject({ ok: false });
+    if (validation.ok) return;
+    expect(validation.issues).toContainEqual(expect.objectContaining({
+      code: "ambiguous-candidate-models",
+      path: "/nodes/3/candidateModels",
+    }));
+  });
+
+  it("does not mix an authoritative NodeSpec model with explicit candidate models", () => {
+    const document = validWorkflow();
+    const bestOfN = nodeOfKind(document, "best-of-n");
+    bestOfN.settings = {
+      model: exactModel("openrouter", "settings-model"),
+    };
+    bestOfN.candidateModels = [
+      exactModel("openrouter", "candidate-a"),
+      exactModel("openrouter", "candidate-b"),
+    ];
+
+    const validation = validateWorkflowGraphDocument(document);
+    expect(validation).toMatchObject({ ok: false });
+    if (validation.ok) return;
+    expect(validation.issues).toContainEqual(expect.objectContaining({
+      code: "ambiguous-candidate-models",
+      path: "/nodes/3/candidateModels",
+    }));
+  });
+
+  it("preserves exact candidate and explicit evaluator slot identities", () => {
+    const document = validWorkflow();
+    const bestOfN = nodeOfKind(document, "best-of-n");
+    const candidateA = exactModel("openrouter", "candidate-a");
+    const candidateB = exactModel("openrouter", "candidate-b");
+    const evaluator = exactModel("openrouter", "candidate-evaluator");
+    bestOfN.candidateModels = [candidateA, candidateB];
+    bestOfN.evaluator = evaluator;
+    bestOfN.evidence = {
+      enabled: false,
+      minimumIndependentSources: 0,
+      requireArtifactReferences: false,
+      onUnsupportedOutput: "fail",
+    };
+
+    const validation = validateWorkflowGraphDocument(document);
+    expect(validation).toMatchObject({ ok: true });
+    if (!validation.ok) return;
+    const validatedNode = nodeOfKind(validation.document, "best-of-n");
+
+    expect(workflowModelCallSlotsForNode(validation.document, validatedNode)).toEqual([
+      { id: "candidate-1", request: candidateA },
+      { id: "candidate-2", request: candidateB },
+      { id: "candidate-evaluator", request: evaluator },
+    ]);
   });
 
   it("rejects the retired debate name and a renamed Lean skill", () => {
@@ -371,6 +423,73 @@ describe("workflow graph contract", () => {
     expect(issueCodes(validateWorkflowGraphDocument(document))).not.toContain(
       "missing-lean-solver-model",
     );
+  });
+
+  it("rejects settings.model on slotless Lean verify nodes", () => {
+    const document = validWorkflow();
+    const lean = nodeOfKind(document, "lean4");
+    lean.evidence = {
+      enabled: false,
+      minimumIndependentSources: 0,
+      requireArtifactReferences: false,
+      onUnsupportedOutput: "fail",
+    };
+    lean.settings = { model: exactModel("openrouter", "discarded-verify-model") };
+
+    expect(issueCodes(validateWorkflowGraphDocument(document))).toContain(
+      "unexpected-lean-node-spec-model",
+    );
+    expect(workflowModelCallSlotsForNode(document, lean)).toEqual([]);
+  });
+
+  it("keeps Lean verify without NodeSpec settings deterministic and slotless", () => {
+    const document = validWorkflow();
+    const lean = nodeOfKind(document, "lean4");
+    lean.evidence = {
+      enabled: false,
+      minimumIndependentSources: 0,
+      requireArtifactReferences: false,
+      onUnsupportedOutput: "fail",
+    };
+
+    expect(validateWorkflowGraphDocument(document)).toMatchObject({ ok: true });
+    expect(workflowModelCallSlotsForNode(document, lean)).toEqual([]);
+  });
+
+  it("rejects non-default reasoning on a slotless artifact-only evidence gate", () => {
+    const document = validWorkflow();
+    const gate = nodeOfKind(document, "evidence-gate");
+    gate.checks = ["artifact-exists"];
+    delete gate.evaluator;
+    gate.settings = { reasoningEffort: "xhigh" };
+
+    expect(issueCodes(validateWorkflowGraphDocument(document))).toContain(
+      "slotless-node-reasoning-effort",
+    );
+    expect(workflowModelCallSlotsForNode(document, gate)).toEqual([]);
+
+    gate.settings.reasoningEffort = "high";
+    expect(validateWorkflowGraphDocument(document)).toMatchObject({ ok: true });
+    expect(workflowModelCallSlotsForNode(document, gate)).toEqual([]);
+  });
+
+  it("binds non-default reasoning when an artifact-only gate has an evaluator slot", () => {
+    const document = validWorkflow();
+    const gate = nodeOfKind(document, "evidence-gate");
+    gate.checks = ["artifact-exists"];
+    gate.evaluator = exactModel("openrouter", "artifact-evaluator");
+    gate.settings = { reasoningEffort: "xhigh" };
+
+    expect(validateWorkflowGraphDocument(document)).toMatchObject({ ok: true });
+    expect(workflowModelCallSlotsForNode(document, gate)).toEqual([
+      {
+        id: "evidence-evaluator",
+        request: {
+          ...gate.evaluator,
+          requested: { ...gate.evaluator.requested, reasoning: "xhigh" },
+        },
+      },
+    ]);
   });
 
   it("allows trusted Lean failure receipts without a model policy and keeps enabled policies strict", () => {
@@ -685,6 +804,71 @@ describe("workflow graph contract", () => {
     expect(issueCodes(validateWorkflowGraphDocument(document))).not.toContain(
       "missing-evidence-evaluator",
     );
+  });
+
+  it("rejects an invalid explicit evaluator on an artifact-only gate", () => {
+    const document = validWorkflow();
+    const gate = nodeOfKind(document, "evidence-gate");
+    const requested = exactModel().requested;
+    gate.checks = ["artifact-exists"];
+    gate.evaluator = {
+      requested,
+      resolution: {
+        mode: "explicit-fallback",
+        alternatives: [structuredClone(requested)],
+        reason: "Use only the approved evaluator.",
+      },
+    };
+
+    expect(issueCodes(validateWorkflowGraphDocument(document))).toContain(
+      "fallback-repeats-request",
+    );
+  });
+
+  it("accepts a valid explicit evaluator on an artifact-only gate", () => {
+    const document = validWorkflow();
+    const gate = nodeOfKind(document, "evidence-gate");
+    gate.checks = ["artifact-exists"];
+    gate.evaluator = exactModel();
+
+    expect(validateWorkflowGraphDocument(document)).toMatchObject({ ok: true });
+  });
+
+  it("does not require an inherited evaluator for an artifact-only gate", () => {
+    const document = validWorkflow();
+    const gate = structuredClone(nodeOfKind(document, "evidence-gate"));
+    const terminal = structuredClone(nodeOfKind(document, "lean4"));
+    gate.terminal = false;
+    gate.checks = ["artifact-exists"];
+    gate.artifactIds = [];
+    gate.onUnsupportedOutput = "route";
+    delete gate.evaluator;
+    terminal.terminal = true;
+    terminal.evidence = {
+      ...document.evidence,
+      enabled: false,
+      onUnsupportedOutput: "fail",
+    };
+    delete document.defaultModel;
+    document.entryNodeId = gate.id;
+    document.nodes = [gate, terminal];
+    document.edges = [
+      {
+        id: "gate-supported",
+        from: gate.id,
+        to: terminal.id,
+        condition: "evidence-supported",
+      },
+      {
+        id: "gate-unsupported",
+        from: gate.id,
+        to: terminal.id,
+        condition: "evidence-unsupported",
+      },
+    ];
+    document.artifacts = [];
+
+    expect(validateWorkflowGraphDocument(document)).toMatchObject({ ok: true });
   });
 
   it("requires explicit supported and routed-unsupported gate paths", () => {
