@@ -3,7 +3,25 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
-import type { DagNodeData } from './DagNodeComponent';
+import {
+  NODE_AUTH_KINDS,
+  NODE_HARNESSES,
+  NODE_REASONING_LEVELS,
+  NODE_SKILLS_MODES,
+  NODE_SUBAGENT_MODES,
+} from './DagNodeComponent';
+import type {
+  DagNodeData,
+  FixedNodeRequestedModel,
+  NodeAuthKind,
+  NodeModelRequest,
+  NodeReasoningLevel,
+  NodeRequestedModel,
+  NodeSamplingValue,
+  NodeSkillsMode,
+  NodeSpecV1,
+  NodeSubagentMode,
+} from './DagNodeComponent';
 import type { CommandEntry, DagNode } from '@/lib/api';
 import { useProviders } from '@/hooks/useProviders';
 
@@ -36,6 +54,212 @@ const labelClass = 'text-[10px] text-text-tertiary uppercase tracking-wide';
 
 const textareaClass =
   'w-full rounded-md border border-border bg-surface px-2 py-1.5 text-xs text-text-primary font-mono placeholder:text-text-tertiary focus:outline-none focus:ring-1 focus:ring-accent resize-y';
+
+export const NODE_SPEC_EDITOR_DROPDOWNS = {
+  modelSource: ['inherit', 'kady-current', 'fixed'],
+  authKind: NODE_AUTH_KINDS,
+  reasoning: NODE_REASONING_LEVELS,
+  harness: NODE_HARNESSES,
+  skillsMode: NODE_SKILLS_MODES,
+  subagentsMode: NODE_SUBAGENT_MODES,
+  autonomy: ['strict', 'loose'],
+  billingMode: ['inherit', 'api', 'subscription'],
+  mimeographsMode: ['auto', 'manual'],
+} as const;
+
+export const NODE_SPEC_V1_BINDING_FIELDS = [
+  'version',
+  'model',
+  'model.requested.auth.kind',
+  'reasoningEffort',
+  'hyperparameters.temperature',
+  'hyperparameters.top_p',
+  'hyperparameters.sampling',
+  'conditions.when',
+  'conditions.exists',
+  'harness',
+  'databases',
+  'skills.mode',
+  'skills.list',
+  'subagents.mode',
+  'autonomy',
+  'deliberation.personalityStoreRef',
+  'deliberation.bestOfNPersonalityCount',
+  'deliberation.mimeographs.mode',
+  'deliberation.mimeographs.personalityRefs',
+  'billingMode',
+  'budget.maxTokens',
+  'budget.maxCostUsd',
+] as const;
+
+const REFERENCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/;
+const SAMPLING_KEY_PATTERN = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
+
+/** Immutable update primitive used by every NodeSpec editor control. */
+export function mergeNodeSpecV1(
+  current: NodeSpecV1 | undefined,
+  updates: Partial<NodeSpecV1>
+): NodeSpecV1 {
+  return { version: 1, ...current, ...updates };
+}
+
+function isValidReference(value: string): boolean {
+  return value.length >= 1 && value.length <= 256 && REFERENCE_PATTERN.test(value);
+}
+
+function validateRequestedModel(model: NodeRequestedModel, path: string, errors: string[]): void {
+  if (model.source === 'fixed') {
+    if (!model.provider.trim()) errors.push(`${path}.provider is required.`);
+    if (!model.model.trim()) errors.push(`${path}.model is required.`);
+    if (model.auth.profile !== undefined && !model.auth.profile.trim()) {
+      errors.push(`${path}.auth.profile cannot be blank.`);
+    }
+  }
+}
+
+function validateReferences(values: string[] | undefined, path: string, errors: string[]): void {
+  for (const value of values ?? []) {
+    if (!isValidReference(value)) {
+      errors.push(`${path} contains invalid reference "${value}".`);
+    }
+  }
+}
+
+/** Schema and current enforcement diagnostics; edits remain saveable for server validation. */
+export function nodeSpecV1InlineErrors(settings: NodeSpecV1 | undefined): string[] {
+  if (!settings) return [];
+  const errors: string[] = [];
+
+  if (settings.model) {
+    validateRequestedModel(settings.model.requested, 'model.requested', errors);
+    if (settings.model.resolution.mode === 'explicit-fallback') {
+      if (settings.model.resolution.alternatives.length < 1) {
+        errors.push('model.resolution.alternatives requires at least one model.');
+      }
+      settings.model.resolution.alternatives.forEach((alternative, index) => {
+        validateRequestedModel(alternative, `model.resolution.alternatives[${index}]`, errors);
+      });
+      if (!settings.model.resolution.reason.trim()) {
+        errors.push('model.resolution.reason is required for explicit fallback.');
+      }
+    }
+  }
+
+  const temperature = settings.hyperparameters?.temperature;
+  if (temperature !== undefined && (temperature < 0 || temperature > 2)) {
+    errors.push('hyperparameters.temperature must be between 0 and 2.');
+  }
+  const topP = settings.hyperparameters?.top_p;
+  if (topP !== undefined && (topP < 0 || topP > 1)) {
+    errors.push('hyperparameters.top_p must be between 0 and 1.');
+  }
+  const sampling = settings.hyperparameters?.sampling;
+  if (sampling) {
+    for (const [key, value] of Object.entries(sampling)) {
+      if (!SAMPLING_KEY_PATTERN.test(key)) {
+        errors.push(`hyperparameters.sampling has invalid key "${key}".`);
+      }
+      if (!['string', 'number', 'boolean'].includes(typeof value)) {
+        errors.push(`hyperparameters.sampling.${key} must be a string, number, or boolean.`);
+      }
+    }
+  }
+
+  if ((settings.conditions?.when?.length ?? 0) > 32_768) {
+    errors.push('conditions.when exceeds 32,768 characters.');
+  }
+  for (const value of settings.conditions?.exists ?? []) {
+    if (!value || value.length > 1_024) {
+      errors.push('conditions.exists entries must contain 1 to 1,024 characters.');
+    }
+  }
+  validateReferences(settings.databases, 'databases', errors);
+  validateReferences(settings.skills?.list, 'skills.list', errors);
+  if (
+    settings.deliberation?.personalityStoreRef !== undefined &&
+    !isValidReference(settings.deliberation.personalityStoreRef)
+  ) {
+    errors.push('deliberation.personalityStoreRef is not a valid reference.');
+  }
+  validateReferences(
+    settings.deliberation?.mimeographs?.personalityRefs,
+    'deliberation.mimeographs.personalityRefs',
+    errors
+  );
+  const personalityCount = settings.deliberation?.bestOfNPersonalityCount;
+  if (personalityCount !== undefined && (personalityCount < 1 || personalityCount > 32)) {
+    errors.push('deliberation.bestOfNPersonalityCount must be between 1 and 32.');
+  }
+  const maxTokens = settings.budget?.maxTokens;
+  if (
+    maxTokens !== undefined &&
+    (!Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > 100_000_000)
+  ) {
+    errors.push('budget.maxTokens must be an integer between 1 and 100,000,000.');
+  }
+  const maxCostUsd = settings.budget?.maxCostUsd;
+  if (maxCostUsd !== undefined && (maxCostUsd < 0 || maxCostUsd > 1_000_000)) {
+    errors.push('budget.maxCostUsd must be between 0 and 1,000,000.');
+  }
+
+  if (
+    temperature !== undefined &&
+    temperature !== 1
+  ) {
+    errors.push('Server validation currently rejects non-default temperature until S4 binds it.');
+  }
+  if (topP !== undefined && topP !== 1) {
+    errors.push('Server validation currently rejects non-default top_p until S4 binds it.');
+  }
+  if (sampling && Object.keys(sampling).length > 0) {
+    errors.push('Server validation currently rejects sampling overrides until S4 binds them.');
+  }
+  if (settings.conditions?.when) {
+    errors.push('Server validation currently rejects conditions.when until S4 binds it.');
+  }
+  if ((settings.conditions?.exists?.length ?? 0) > 0) {
+    errors.push('Server validation currently rejects conditions.exists until S4 binds it.');
+  }
+  if (settings.harness !== undefined && settings.harness !== 'pi') {
+    errors.push('Server validation currently rejects non-pi harnesses until S4 binds them.');
+  }
+  if ((settings.databases?.length ?? 0) > 0) {
+    errors.push('Server validation currently rejects per-node databases until S4 binds them.');
+  }
+  if (settings.skills?.mode !== undefined && settings.skills.mode !== 'auto') {
+    errors.push('Server validation currently rejects non-auto skills mode until S4 binds it.');
+  }
+  if ((settings.skills?.list?.length ?? 0) > 0) {
+    errors.push('Server validation currently rejects per-node skills lists until S4 binds them.');
+  }
+  if (settings.subagents?.mode !== undefined && settings.subagents.mode !== 'auto') {
+    errors.push('Server validation currently rejects non-auto subagent mode until S4 binds it.');
+  }
+  if (settings.autonomy !== undefined && settings.autonomy !== 'strict') {
+    errors.push('Server validation currently rejects loose autonomy until S4 binds it.');
+  }
+  if (settings.billingMode !== undefined && settings.billingMode !== 'inherit') {
+    errors.push('Server validation currently rejects billing overrides until S4 binds them.');
+  }
+  const deliberation = settings.deliberation;
+  if (deliberation?.personalityStoreRef) {
+    errors.push('Server validation currently rejects personalityStoreRef until S5 binds it.');
+  }
+  if (
+    deliberation?.bestOfNPersonalityCount !== undefined &&
+    deliberation.bestOfNPersonalityCount !== 2
+  ) {
+    errors.push('Server validation currently rejects non-default personality counts until S5 binds them.');
+  }
+  if (deliberation?.mimeographs?.mode !== undefined && deliberation.mimeographs.mode !== 'auto') {
+    errors.push('Server validation currently rejects manual mimeographs until S5 binds them.');
+  }
+  if ((deliberation?.mimeographs?.personalityRefs?.length ?? 0) > 0) {
+    errors.push('Server validation currently rejects mimeograph personality refs until S5 binds them.');
+  }
+
+  return errors;
+}
 
 function parseToolsList(value: string): string[] | undefined {
   if (!value.trim()) return undefined;
@@ -609,9 +833,13 @@ function JsonTextareaField({
         return;
       }
       try {
-        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        const parsed = JSON.parse(raw) as unknown;
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          setError('Expected a JSON object.');
+          return;
+        }
         setError(null);
-        onCommit(parsed);
+        onCommit(parsed as Record<string, unknown>);
       } catch (e) {
         if (e instanceof SyntaxError) {
           setError(e.message);
@@ -633,6 +861,72 @@ function JsonTextareaField({
         rows={rows}
         placeholder={placeholder}
         className={cn(textareaClass, 'min-h-[100px]')}
+      />
+      {error && <p className="text-[10px] text-error">{error}</p>}
+    </Field>
+  );
+}
+
+function isRequestedModel(value: unknown): value is NodeRequestedModel {
+  if (value === null || typeof value !== 'object') return false;
+  const candidate = value as Record<string, unknown>;
+  if (!NODE_REASONING_LEVELS.includes(candidate.reasoning as NodeReasoningLevel)) return false;
+  if (candidate.source === 'kady-current') {
+    const auth = candidate.auth as Record<string, unknown> | undefined;
+    return auth?.kind === 'kady-current';
+  }
+  if (candidate.source !== 'fixed') return false;
+  const auth = candidate.auth as Record<string, unknown> | undefined;
+  return (
+    typeof candidate.provider === 'string' &&
+    typeof candidate.model === 'string' &&
+    NODE_AUTH_KINDS.includes(auth?.kind as NodeAuthKind)
+  );
+}
+
+export function parseRequestedModelAlternatives(
+  raw: string
+): { value?: NodeRequestedModel[]; error?: string } {
+  if (!raw.trim()) return { value: [] };
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed) || !parsed.every(isRequestedModel)) {
+      return { error: 'Expected a JSON array of valid requested-model objects.' };
+    }
+    if (parsed.length > 8) return { error: 'At most eight fallback alternatives are allowed.' };
+    return { value: parsed };
+  } catch (error) {
+    return { error: error instanceof SyntaxError ? error.message : String(error) };
+  }
+}
+
+function RequestedModelAlternativesField({
+  value,
+  onCommit,
+}: {
+  value: NodeRequestedModel[];
+  onCommit: (models: NodeRequestedModel[]) => void;
+}): React.ReactElement {
+  const [text, setText] = useState(JSON.stringify(value, null, 2));
+  const [error, setError] = useState<string | null>(null);
+
+  return (
+    <Field label="Fallback alternatives (JSON)">
+      <textarea
+        value={text}
+        rows={7}
+        className={cn(textareaClass, 'min-h-[140px]')}
+        onChange={(event): void => {
+          const raw = event.target.value;
+          setText(raw);
+          const parsed = parseRequestedModelAlternatives(raw);
+          if (parsed.error) {
+            setError(parsed.error);
+            return;
+          }
+          setError(null);
+          onCommit(parsed.value ?? []);
+        }}
       />
       {error && <p className="text-[10px] text-error">{error}</p>}
     </Field>
@@ -698,6 +992,592 @@ function AdvancedTab({
   );
 }
 
+function SectionHeading({ children }: { children: React.ReactNode }): React.ReactElement {
+  return (
+    <p className="border-t border-border pt-3 text-[10px] font-semibold uppercase tracking-wide text-text-secondary">
+      {children}
+    </p>
+  );
+}
+
+function defaultFixedRequestedModel(): FixedNodeRequestedModel {
+  return {
+    source: 'fixed',
+    provider: 'openrouter',
+    model: 'anthropic/claude-sonnet-4',
+    auth: { kind: 'api-key' },
+    reasoning: 'high',
+  };
+}
+
+function defaultFallbackFor(requested: NodeRequestedModel): NodeRequestedModel {
+  if (requested.source === 'fixed') {
+    return {
+      source: 'kady-current',
+      auth: { kind: 'kady-current' },
+      reasoning: requested.reasoning,
+    };
+  }
+  return defaultFixedRequestedModel();
+}
+
+export function NodeSpecTab({
+  node,
+  onUpdate,
+}: {
+  node: DagNodeData;
+  onUpdate: (updates: Partial<DagNodeData>) => void;
+}): React.ReactElement {
+  const settings = node.settings;
+  const model = settings?.model;
+  const fixedRequested = model?.requested.source === 'fixed' ? model.requested : undefined;
+  const inlineErrors = nodeSpecV1InlineErrors(settings);
+
+  const commit = (updates: Partial<NodeSpecV1>): void => {
+    onUpdate({ settings: mergeNodeSpecV1(settings, updates) });
+  };
+
+  const commitModel = (nextModel: NodeModelRequest | undefined): void => {
+    commit({ model: nextModel });
+  };
+
+  const commitRequested = (requested: NodeRequestedModel): void => {
+    commitModel({ requested, resolution: model?.resolution ?? { mode: 'exact' } });
+  };
+
+  return (
+    <div className="flex flex-col gap-3 p-3">
+      <p className="text-[10px] leading-relaxed text-text-tertiary">
+        Edits write the frozen per-node <code>settings</code> object. Values awaiting runtime
+        binding remain editable; current server rejections appear below.
+      </p>
+
+      {inlineErrors.length > 0 && (
+        <div
+          role="alert"
+          className="rounded-md border border-error/40 bg-error/10 p-2 text-[10px] text-error"
+        >
+          <p className="mb-1 font-semibold">NodeSpec validation</p>
+          <ul className="list-disc space-y-0.5 pl-4">
+            {inlineErrors.map(error => (
+              <li key={error}>{error}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <Field label="NodeSpec version">
+        <input value="1" readOnly disabled className={cn(inputClass, 'opacity-70')} />
+      </Field>
+
+      <SectionHeading>Model and authentication</SectionHeading>
+
+      <Field label="Model source">
+        <select
+          data-testid="nodespec-model-source"
+          value={model?.requested.source ?? 'inherit'}
+          className={selectClass}
+          onChange={(event): void => {
+            const source = event.target.value;
+            if (source === 'inherit') {
+              commitModel(undefined);
+            } else if (source === 'kady-current') {
+              commitModel({
+                requested: {
+                  source: 'kady-current',
+                  auth: { kind: 'kady-current' },
+                  reasoning: model?.requested.reasoning ?? 'high',
+                },
+                resolution: { mode: 'exact' },
+              });
+            } else {
+              commitModel({ requested: defaultFixedRequestedModel(), resolution: { mode: 'exact' } });
+            }
+          }}
+        >
+          <option value="inherit">Inherit node/default model</option>
+          <option value="kady-current">Kady current</option>
+          <option value="fixed">Fixed provider/model</option>
+        </select>
+      </Field>
+
+      {fixedRequested && (
+        <>
+          <Field label="Provider">
+            <input
+              value={fixedRequested.provider}
+              className={inputClass}
+              placeholder="openrouter"
+              onChange={(event): void => {
+                commitRequested({ ...fixedRequested, provider: event.target.value });
+              }}
+            />
+          </Field>
+          <Field label="Model ID">
+            <input
+              value={fixedRequested.model}
+              className={inputClass}
+              placeholder="anthropic/claude-sonnet-4"
+              onChange={(event): void => {
+                commitRequested({ ...fixedRequested, model: event.target.value });
+              }}
+            />
+          </Field>
+          <Field label="Authentication">
+            <select
+              data-testid="nodespec-auth-kind"
+              value={fixedRequested.auth.kind}
+              className={selectClass}
+              onChange={(event): void => {
+                commitRequested({
+                  ...fixedRequested,
+                  auth: {
+                    ...fixedRequested.auth,
+                    kind: event.target.value as NodeAuthKind,
+                  },
+                });
+              }}
+            >
+              <option value="api-key">API key</option>
+              <option value="oauth">Subscription / OAuth</option>
+              <option value="local">Local</option>
+              <option value="custom">Custom</option>
+            </select>
+          </Field>
+          <Field label="Auth profile">
+            <input
+              value={fixedRequested.auth.profile ?? ''}
+              className={inputClass}
+              placeholder="Optional profile"
+              onChange={(event): void => {
+                commitRequested({
+                  ...fixedRequested,
+                  auth: {
+                    ...fixedRequested.auth,
+                    profile: event.target.value || undefined,
+                  },
+                });
+              }}
+            />
+          </Field>
+        </>
+      )}
+
+      {model && (
+        <>
+          <Field label="Requested-model reasoning">
+            <select
+              value={model.requested.reasoning}
+              className={selectClass}
+              onChange={(event): void => {
+                commitRequested({
+                  ...model.requested,
+                  reasoning: event.target.value as NodeReasoningLevel,
+                });
+              }}
+            >
+              {NODE_REASONING_LEVELS.map(level => (
+                <option key={level} value={level}>
+                  {level}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Resolution">
+            <select
+              value={model.resolution.mode}
+              className={selectClass}
+              onChange={(event): void => {
+                if (event.target.value === 'exact') {
+                  commitModel({ requested: model.requested, resolution: { mode: 'exact' } });
+                } else {
+                  commitModel({
+                    requested: model.requested,
+                    resolution: {
+                      mode: 'explicit-fallback',
+                      alternatives: [defaultFallbackFor(model.requested)],
+                      reason: 'Use the declared fallback if the primary model is unavailable.',
+                    },
+                  });
+                }
+              }}
+            >
+              <option value="exact">Exact</option>
+              <option value="explicit-fallback">Explicit fallback</option>
+            </select>
+          </Field>
+          {model.resolution.mode === 'explicit-fallback' && (
+            <>
+              <RequestedModelAlternativesField
+                value={model.resolution.alternatives}
+                onCommit={(alternatives): void => {
+                  commitModel({
+                    requested: model.requested,
+                    resolution: {
+                      mode: 'explicit-fallback',
+                      alternatives,
+                      reason:
+                        model.resolution.mode === 'explicit-fallback'
+                          ? model.resolution.reason
+                          : '',
+                    },
+                  });
+                }}
+              />
+              <Field label="Fallback reason">
+                <textarea
+                  value={model.resolution.reason}
+                  rows={3}
+                  className={textareaClass}
+                  onChange={(event): void => {
+                    commitModel({
+                      requested: model.requested,
+                      resolution: {
+                        mode: 'explicit-fallback',
+                        alternatives:
+                          model.resolution.mode === 'explicit-fallback'
+                            ? model.resolution.alternatives
+                            : [],
+                        reason: event.target.value,
+                      },
+                    });
+                  }}
+                />
+              </Field>
+            </>
+          )}
+        </>
+      )}
+
+      <Field label="Per-node reasoning effort">
+        <select
+          value={settings?.reasoningEffort ?? ''}
+          className={selectClass}
+          onChange={(event): void => {
+            commit({
+              reasoningEffort: (event.target.value || undefined) as
+                | NodeReasoningLevel
+                | undefined,
+            });
+          }}
+        >
+          <option value="">Inherit</option>
+          {NODE_REASONING_LEVELS.map(level => (
+            <option key={level} value={level}>
+              {level}
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      <SectionHeading>Hyperparameters and conditions</SectionHeading>
+
+      <Field label="Temperature (0-2)">
+        <input
+          type="number"
+          min={0}
+          max={2}
+          step="0.01"
+          value={settings?.hyperparameters?.temperature ?? ''}
+          className={inputClass}
+          onChange={(event): void => {
+            commit({
+              hyperparameters: {
+                ...settings?.hyperparameters,
+                temperature: event.target.value ? Number(event.target.value) : undefined,
+              },
+            });
+          }}
+        />
+      </Field>
+      <Field label="Top p (0-1)">
+        <input
+          type="number"
+          min={0}
+          max={1}
+          step="0.01"
+          value={settings?.hyperparameters?.top_p ?? ''}
+          className={inputClass}
+          onChange={(event): void => {
+            commit({
+              hyperparameters: {
+                ...settings?.hyperparameters,
+                top_p: event.target.value ? Number(event.target.value) : undefined,
+              },
+            });
+          }}
+        />
+      </Field>
+      <JsonTextareaField
+        label="Sampling overrides (JSON)"
+        value={settings?.hyperparameters?.sampling}
+        placeholder='{"seed": 42, "frequency_penalty": 0.2}'
+        rows={4}
+        onCommit={(sampling): void => {
+          commit({
+            hyperparameters: {
+              ...settings?.hyperparameters,
+              sampling: sampling as Record<string, NodeSamplingValue> | undefined,
+            },
+          });
+        }}
+      />
+      <Field label="When condition">
+        <textarea
+          value={settings?.conditions?.when ?? ''}
+          rows={3}
+          className={textareaClass}
+          placeholder="Harness condition expression"
+          onChange={(event): void => {
+            commit({
+              conditions: {
+                ...settings?.conditions,
+                when: event.target.value || undefined,
+              },
+            });
+          }}
+        />
+      </Field>
+      <Field label="Required paths / inputs">
+        <input
+          value={settings?.conditions?.exists?.join(', ') ?? ''}
+          className={inputClass}
+          placeholder="artifact/report.md, named-input"
+          onChange={(event): void => {
+            commit({
+              conditions: {
+                ...settings?.conditions,
+                exists: parseToolsList(event.target.value),
+              },
+            });
+          }}
+        />
+      </Field>
+
+      <SectionHeading>Harness topology and resources</SectionHeading>
+
+      <Field label="CLI / harness">
+        <select
+          data-testid="nodespec-harness"
+          value={settings?.harness ?? 'pi'}
+          className={selectClass}
+          onChange={(event): void => {
+            commit({ harness: event.target.value as NodeSpecV1['harness'] });
+          }}
+        >
+          {NODE_HARNESSES.map(harness => (
+            <option key={harness} value={harness}>
+              {harness}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <Field label="Databases">
+        <input
+          value={settings?.databases?.join(', ') ?? ''}
+          className={inputClass}
+          placeholder="database/ref, corpus:v1"
+          onChange={(event): void => {
+            commit({ databases: parseToolsList(event.target.value) });
+          }}
+        />
+      </Field>
+      <Field label="Billing mode">
+        <select
+          value={settings?.billingMode ?? 'inherit'}
+          className={selectClass}
+          onChange={(event): void => {
+            commit({ billingMode: event.target.value as NodeSpecV1['billingMode'] });
+          }}
+        >
+          <option value="inherit">Inherit</option>
+          <option value="api">API</option>
+          <option value="subscription">Subscription</option>
+        </select>
+      </Field>
+
+      <SectionHeading>Skills, subagents, and autonomy</SectionHeading>
+
+      <Field label="Skills mode">
+        <select
+          value={settings?.skills?.mode ?? 'auto'}
+          className={selectClass}
+          onChange={(event): void => {
+            commit({
+              skills: {
+                ...settings?.skills,
+                mode: event.target.value as NodeSkillsMode,
+              },
+            });
+          }}
+        >
+          {NODE_SKILLS_MODES.map(mode => (
+            <option key={mode} value={mode}>
+              {mode}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <Field label="Skills list">
+        <input
+          value={settings?.skills?.list?.join(', ') ?? ''}
+          className={inputClass}
+          placeholder="literature-review, data-analysis"
+          onChange={(event): void => {
+            commit({
+              skills: { ...settings?.skills, list: parseToolsList(event.target.value) },
+            });
+          }}
+        />
+      </Field>
+      <Field label="Subagents mode">
+        <select
+          value={settings?.subagents?.mode ?? 'auto'}
+          className={selectClass}
+          onChange={(event): void => {
+            commit({
+              subagents: {
+                mode: event.target.value as NodeSubagentMode,
+              },
+            });
+          }}
+        >
+          {NODE_SUBAGENT_MODES.map(mode => (
+            <option key={mode} value={mode}>
+              {mode}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <Field label="Autonomy">
+        <select
+          value={settings?.autonomy ?? 'strict'}
+          className={selectClass}
+          onChange={(event): void => {
+            commit({ autonomy: event.target.value as NodeSpecV1['autonomy'] });
+          }}
+        >
+          <option value="strict">Strict</option>
+          <option value="loose">Loose</option>
+        </select>
+      </Field>
+
+      <SectionHeading>Deliberation</SectionHeading>
+
+      <Field label="Personality store ref">
+        <input
+          value={settings?.deliberation?.personalityStoreRef ?? ''}
+          className={inputClass}
+          placeholder="personalities/scientific-v1"
+          onChange={(event): void => {
+            commit({
+              deliberation: {
+                ...settings?.deliberation,
+                personalityStoreRef: event.target.value || undefined,
+              },
+            });
+          }}
+        />
+      </Field>
+      <Field label="Best-of-N personality count (1-32)">
+        <input
+          type="number"
+          min={1}
+          max={32}
+          value={settings?.deliberation?.bestOfNPersonalityCount ?? ''}
+          className={inputClass}
+          onChange={(event): void => {
+            commit({
+              deliberation: {
+                ...settings?.deliberation,
+                bestOfNPersonalityCount: event.target.value
+                  ? Number(event.target.value)
+                  : undefined,
+              },
+            });
+          }}
+        />
+      </Field>
+      <Field label="Mimeographs mode">
+        <select
+          value={settings?.deliberation?.mimeographs?.mode ?? 'auto'}
+          className={selectClass}
+          onChange={(event): void => {
+            commit({
+              deliberation: {
+                ...settings?.deliberation,
+                mimeographs: {
+                  ...settings?.deliberation?.mimeographs,
+                  mode: event.target.value as 'auto' | 'manual',
+                },
+              },
+            });
+          }}
+        >
+          <option value="auto">Auto</option>
+          <option value="manual">Manual</option>
+        </select>
+      </Field>
+      <Field label="Mimeograph personality refs">
+        <input
+          value={settings?.deliberation?.mimeographs?.personalityRefs?.join(', ') ?? ''}
+          className={inputClass}
+          placeholder="personality/optimist, personality/skeptic"
+          onChange={(event): void => {
+            commit({
+              deliberation: {
+                ...settings?.deliberation,
+                mimeographs: {
+                  ...settings?.deliberation?.mimeographs,
+                  personalityRefs: parseToolsList(event.target.value),
+                },
+              },
+            });
+          }}
+        />
+      </Field>
+
+      <SectionHeading>Budget</SectionHeading>
+
+      <Field label="Max tokens">
+        <input
+          type="number"
+          min={1}
+          max={100_000_000}
+          value={settings?.budget?.maxTokens ?? ''}
+          className={inputClass}
+          onChange={(event): void => {
+            commit({
+              budget: {
+                ...settings?.budget,
+                maxTokens: event.target.value ? Number(event.target.value) : undefined,
+              },
+            });
+          }}
+        />
+      </Field>
+      <Field label="Max cost (USD)">
+        <input
+          type="number"
+          min={0}
+          max={1_000_000}
+          step="0.01"
+          value={settings?.budget?.maxCostUsd ?? ''}
+          className={inputClass}
+          onChange={(event): void => {
+            commit({
+              budget: {
+                ...settings?.budget,
+                maxCostUsd: event.target.value ? Number(event.target.value) : undefined,
+              },
+            });
+          }}
+        />
+      </Field>
+    </div>
+  );
+}
+
 function DagInspector({
   node,
   commands,
@@ -735,7 +1615,7 @@ function DagInspector({
 
       {/* Tabbed content */}
       <Tabs defaultValue="general" className="flex-1 flex flex-col gap-0">
-        <TabsList variant="line" className="px-2 pt-1 w-full justify-start">
+        <TabsList variant="line" className="w-full justify-start overflow-x-auto px-2 pt-1">
           <TabsTrigger value="general" className="text-xs">
             General
           </TabsTrigger>
@@ -752,6 +1632,9 @@ function DagInspector({
               Advanced
             </TabsTrigger>
           )}
+          <TabsTrigger value="nodespec" className="text-xs">
+            NodeSpec
+          </TabsTrigger>
         </TabsList>
 
         <ScrollArea className="flex-1">
@@ -774,6 +1657,10 @@ function DagInspector({
               <AdvancedTab key={node.id} node={node} onUpdate={onUpdate} />
             </TabsContent>
           )}
+
+          <TabsContent value="nodespec">
+            <NodeSpecTab key={node.id} node={node} onUpdate={onUpdate} />
+          </TabsContent>
         </ScrollArea>
       </Tabs>
     </div>

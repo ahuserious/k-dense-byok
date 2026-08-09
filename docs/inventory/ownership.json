@@ -43,7 +43,8 @@
       "server/vendor/pipeline-engine/packages/web/src/components/workflows/NodeLibrary.tsx",
       "server/vendor/pipeline-engine/packages/web/src/components/workflows/QuickAddPicker.tsx",
       "server/vendor/pipeline-engine/packages/web/src/components/workflows/CommandPicker.tsx",
-      "server/vendor/pipeline-engine/packages/web/src/components/workflows/StatusIcon.tsx"
+      "server/vendor/pipeline-engine/packages/web/src/components/workflows/StatusIcon.tsx",
+      "server/vendor/pipeline-engine/packages/web/src/components/canvasui/**"
     ],
     "S4": [
       "server/src/api/dag-workflows.ts",
