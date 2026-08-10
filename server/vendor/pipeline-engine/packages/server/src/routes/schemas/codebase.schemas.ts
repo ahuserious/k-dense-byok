@@ -23,9 +23,28 @@ export const addCodebaseBodySchema = z
   .object({
     url: z.string().min(1).optional(),
     path: z.string().min(1).optional(),
+    registrationMode: z.enum(['git', 'workspace']).optional(),
+    name: z.string().min(1).max(255).optional(),
   })
-  .refine(b => (b.url !== undefined) !== (b.path !== undefined), {
-    message: 'Provide either "url" or "path", not both and not neither',
+  .superRefine((body, ctx) => {
+    if ((body.url !== undefined) === (body.path !== undefined)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'Provide either "url" or "path", not both and not neither',
+      });
+    }
+    if (body.registrationMode === 'workspace' && body.path === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'Workspace registration requires path',
+      });
+    }
+    if (body.name !== undefined && body.registrationMode !== 'workspace') {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'name is only supported for workspace registration',
+      });
+    }
   })
   .openapi('AddCodebaseBody');
 

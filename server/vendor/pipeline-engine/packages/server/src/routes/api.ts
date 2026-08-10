@@ -69,7 +69,6 @@ import {
   getWorkflowFolderSearchPaths,
   getCommandFolderSearchPaths,
   getDefaultCommandsPath,
-  getDefaultWorkflowsPath,
   getArchonWorkspacesPath,
   getHomeCommandsPath,
   getHomeWorkflowsPath,
@@ -84,7 +83,7 @@ import {
 import { discoverWorkflowsWithConfig } from '@archon/workflows/workflow-discovery';
 import { parseWorkflow } from '@archon/workflows/loader';
 import { isValidCommandName } from '@archon/workflows/command-validation';
-import { BUNDLED_WORKFLOWS, BUNDLED_COMMANDS, isBinaryBuild } from '@archon/workflows/defaults';
+import { BUNDLED_COMMANDS, isBinaryBuild } from '@archon/workflows/defaults';
 import {
   RESUMABLE_WORKFLOW_STATUSES,
   TERMINAL_WORKFLOW_STATUSES,
@@ -3014,7 +3013,12 @@ export function registerApiRoutes(
       // .refine() guarantees exactly one of url/path is present
       const result = body.url
         ? await cloneRepository(body.url)
-        : await registerRepository(body.path ?? '');
+        : body.registrationMode === 'workspace'
+          ? await registerRepository(body.path ?? '', {
+              allowNonGit: true,
+              ...(body.name ? { name: body.name } : {}),
+            })
+          : await registerRepository(body.path ?? '');
 
       // Fetch the full codebase record for a consistent response
       const codebase = await codebaseDb.getCodebase(result.codebaseId);

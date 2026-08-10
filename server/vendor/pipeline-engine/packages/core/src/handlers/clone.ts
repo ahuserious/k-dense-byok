@@ -2,7 +2,7 @@
  * Standalone repository clone/register logic.
  * Extracted from command-handler.ts for reuse by REST endpoints.
  */
-import { access, rm } from 'fs/promises';
+import { access, rm, stat } from 'fs/promises';
 import { join, basename, resolve } from 'path';
 import * as codebaseDb from '../db/codebases';
 import { sanitizeError } from '../utils/credential-sanitizer';
@@ -132,6 +132,13 @@ export interface RegisterResult {
   alreadyExisted: boolean;
 }
 
+export interface RegisterRepositoryOptions {
+  /** Explicit Kady workspace mode. Ordinary local registration remains git-only. */
+  allowNonGit?: boolean;
+  /** Stable caller-owned identity used instead of the sandbox directory basename. */
+  name?: string;
+}
+
 async function detectCurrentGitBranch(targetPath: string): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync(
@@ -152,13 +159,18 @@ async function detectCurrentGitBranch(targetPath: string): Promise<string | null
 async function registerRepoAtPath(
   targetPath: string,
   name: string,
-  repositoryUrl: string | null
+  repositoryUrl: string | null,
+  options: { detectGitMetadata?: boolean; dedupeByName?: boolean } = {}
 ): Promise<RegisterResult> {
   const suggestedAssistant = await resolveDefaultAssistant(targetPath);
-  const detectedBranch = await detectCurrentGitBranch(targetPath);
+  const detectedBranch = options.detectGitMetadata === false
+    ? null
+    : await detectCurrentGitBranch(targetPath);
 
   // Check if a codebase with this name already exists (dedup by project identity)
-  const existing = await codebaseDb.findCodebaseByName(name);
+  const existing = options.dedupeByName === false
+    ? null
+    : await codebaseDb.findCodebaseByName(name);
   if (existing) {
     // Determine if the new path is "better" (local > pipeline-managed clone)
     const isNewPathLocal = !targetPath.includes('/.archon/workspaces/');
@@ -396,12 +408,23 @@ export async function cloneRepository(repoUrl: string): Promise<RegisterResult> 
 /**
  * Register an existing local repository in the database (no git clone).
  */
-export async function registerRepository(localPath: string): Promise<RegisterResult> {
-  // Validate path exists and is a git repo
-  try {
-    await execFileAsync('git', ['-C', localPath, 'rev-parse', '--git-dir']);
-  } catch (error) {
-    throw new Error(`Path is not a git repository: ${localPath} (${(error as Error).message})`);
+export async function registerRepository(
+  localPath: string,
+  options: RegisterRepositoryOptions = {}
+): Promise<RegisterResult> {
+  if (options.allowNonGit) {
+    const pathStat = await stat(localPath).catch(() => null);
+    if (!pathStat?.isDirectory()) {
+      throw new Error(`Workspace path is not a directory: ${localPath}`);
+    }
+  } else {
+    // Default registration remains git-only. Non-git admission is available
+    // solely through the explicit workspace mode used by Kady.
+    try {
+      await execFileAsync('git', ['-C', localPath, 'rev-parse', '--git-dir']);
+    } catch (error) {
+      throw new Error(`Path is not a git repository: ${localPath} (${(error as Error).message})`);
+    }
   }
 
   // Check if already registered by path
@@ -416,6 +439,13 @@ export async function registerRepository(localPath: string): Promise<RegisterRes
       commandCount: 0,
       alreadyExisted: true,
     };
+  }
+
+  if (options.allowNonGit) {
+    return registerRepoAtPath(localPath, options.name ?? basename(localPath), null, {
+      detectGitMetadata: false,
+      dedupeByName: false,
+    });
   }
 
   // Get remote URL (optional — local-only repos may not have one)

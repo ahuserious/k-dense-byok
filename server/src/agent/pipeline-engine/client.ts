@@ -181,7 +181,10 @@ export async function listCodebases(): Promise<unknown> {
  * a codebase already points at `localPath`. The list shape is loose, so we walk
  * each entry and treat any string field equal to `localPath` as a match.
  */
-export async function registerCodebase(localPath: string): Promise<unknown> {
+export async function registerCodebase(
+  localPath: string,
+  options: { registrationMode?: "git" | "workspace"; name?: string } = {},
+): Promise<unknown> {
   const existing = await listCodebases();
   if (Array.isArray(existing)) {
     const alreadyRegistered = existing.some((entry) => {
@@ -197,7 +200,7 @@ export async function registerCodebase(localPath: string): Promise<unknown> {
   }
   return pipelineEngineFetch("/api/codebases", {
     method: "POST",
-    body: JSON.stringify({ path: localPath }),
+    body: JSON.stringify({ path: localPath, ...options }),
   });
 }
 

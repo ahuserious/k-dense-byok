@@ -441,6 +441,37 @@ describe('POST /api/codebases', () => {
     expect(mockRegisterRepository).toHaveBeenCalledWith('/home/user/my-repo');
   });
 
+  test('registers an explicit non-git workspace without changing default path semantics', async () => {
+    mockRegisterRepository.mockImplementationOnce(async () => ({
+      codebaseId: 'register-uuid-1',
+      alreadyExisted: false,
+    }));
+    mockGetCodebase.mockImplementationOnce(async () => ({
+      ...MOCK_CODEBASE,
+      id: 'register-uuid-1',
+      name: 'kady/project-a',
+      repository_url: null,
+      default_cwd: '/projects/project-a/sandbox',
+    }));
+
+    const app = makeApp();
+    const response = await app.request('/api/codebases', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        path: '/projects/project-a/sandbox',
+        registrationMode: 'workspace',
+        name: 'kady/project-a',
+      }),
+    });
+
+    expect(response.status).toBe(201);
+    expect(mockRegisterRepository).toHaveBeenCalledWith('/projects/project-a/sandbox', {
+      allowNonGit: true,
+      name: 'kady/project-a',
+    });
+  });
+
   test('returns 400 when both url and path are provided', async () => {
     const app = makeApp();
     const response = await app.request('/api/codebases', {

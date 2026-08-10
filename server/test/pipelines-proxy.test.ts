@@ -30,7 +30,11 @@ const stub = http.createServer((req, res) => {
       return;
     }
     if (req.method === "POST" && req.url === "/api/codebases") {
-      const request = JSON.parse(body || "{}") as { path?: string };
+      const request = JSON.parse(body || "{}") as {
+        path?: string;
+        registrationMode?: string;
+        name?: string;
+      };
       res.end(JSON.stringify({ id: "stub-codebase", default_cwd: request.path }));
       return;
     }
@@ -81,6 +85,10 @@ describe("pipelines proxy (engine up)", () => {
     );
     const resolvedCwd = (JSON.parse(registration?.body ?? "{}") as { path?: string }).path;
     expect(resolvedCwd).toMatch(/\/default\/sandbox$/);
+    expect(JSON.parse(registration?.body ?? "{}")).toMatchObject({
+      registrationMode: "workspace",
+      name: "kady/default",
+    });
     expect(workflowUrl.searchParams.get("cwd")).toBe(resolvedCwd);
   });
 

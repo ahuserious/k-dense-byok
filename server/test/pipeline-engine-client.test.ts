@@ -6,6 +6,7 @@ import {
   PIPELINE_ENGINE_LIST_TIMEOUT_MS,
   PipelineEngineRequestAbortedError,
   PipelineEngineTimeoutError,
+  registerCodebase,
   runWorkflow,
   saveWorkflow,
 } from "../src/agent/pipeline-engine/client.ts";
@@ -36,6 +37,29 @@ afterEach(() => {
 });
 
 describe("pipeline engine workflow-list cancellation", () => {
+  it("registers a Kady sandbox through the explicit non-git workspace mode", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(
+      new Response(JSON.stringify({
+        id: "codebase-a",
+        default_cwd: "/projects/a/sandbox",
+      }), { status: 201 }),
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await registerCodebase("/projects/a/sandbox", {
+      registrationMode: "workspace",
+      name: "kady/project-a",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(new URL(String(fetchMock.mock.calls[1]?.[0])).pathname).toBe("/api/codebases");
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
+      path: "/projects/a/sandbox",
+      registrationMode: "workspace",
+      name: "kady/project-a",
+    });
+  });
+
   it("keeps different Kady project workflow lists isolated by cwd and codebase id", async () => {
     const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(
       new Response(JSON.stringify({ workflows: [] }), { status: 200 }),

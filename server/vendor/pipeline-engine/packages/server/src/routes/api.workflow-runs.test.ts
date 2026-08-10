@@ -135,6 +135,10 @@ mock.module('@archon/paths', () => ({
 
 mockAllWorkflowModules();
 
+import { discoverWorkflowsWithConfig } from '@archon/workflows/workflow-discovery';
+
+const mockDiscoverWorkflowsWithConfig = discoverWorkflowsWithConfig as ReturnType<typeof mock>;
+
 mock.module('@archon/git', () => ({
   removeWorktree: mock(async () => {}),
   toRepoPath: (p: string) => p,
@@ -316,6 +320,30 @@ describe('POST /api/workflows/:name/run', () => {
     mockHandleMessage.mockReset();
     mockAddMessage.mockReset();
     mockGenerateAndSetTitle.mockReset();
+    mockDiscoverWorkflowsWithConfig.mockReset();
+    mockDiscoverWorkflowsWithConfig.mockImplementation(async () => ({
+      workflows: [
+        {
+          workflow: {
+            name: 'deploy',
+            description: 'Deploy workflow',
+            nodes: [{ id: 'deploy', prompt: 'Deploy.' }],
+          },
+          source: 'project',
+          filename: 'deploy.yaml',
+        },
+        {
+          workflow: {
+            name: 'test-suite',
+            description: 'Test workflow',
+            nodes: [{ id: 'test', prompt: 'Test.' }],
+          },
+          source: 'project',
+          filename: 'test-suite.yaml',
+        },
+      ],
+      errors: [],
+    }));
   });
 
   test('dispatches workflow run to orchestrator and returns accepted', async () => {
@@ -479,7 +507,7 @@ describe('POST /api/workflows/:name/run', () => {
     expect(response.status).toBe(400);
 
     const body = (await response.json()) as { error: string };
-    expect(body.error).toContain('Invalid workflow name');
+    expect(body.error).toContain('Invalid workflow identifier');
   });
 
   test('returns 400 for malformed JSON body', async () => {
