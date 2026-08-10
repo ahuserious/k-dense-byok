@@ -7,6 +7,7 @@ import * as dagApi from "@/lib/dag-workflows";
 import * as pipelinesApi from "@/lib/pipelines";
 import { createDefaultWorkflowGraph } from "@/lib/dag-workflow-builder";
 import * as registryApi from "@/lib/scientific-pipeline-registry";
+import { createDagWorkflowTemplateGraph } from "@/lib/dag-workflow-templates";
 
 beforeEach(() => {
   window.sessionStorage.clear();
@@ -812,6 +813,11 @@ describe("DagWorkflowsPanel", () => {
 
   it("creates the selected Machine Learning & AI template with best-of-2 and evidence routing", async () => {
     vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
+    const expectedGraph = createDagWorkflowTemplateGraph(
+      "ml-model-selection-review",
+      "ml-model-selection-review",
+      "ML Model Selection Review",
+    );
     const created: dagApi.VersionedDagWorkflowDefinition = {
       etag: '"1"',
       definition: {
@@ -821,10 +827,7 @@ describe("DagWorkflowsPanel", () => {
         createdAt: 1,
         updatedAt: 1,
         graphSha256: "template-sha",
-        graph: createDefaultWorkflowGraph(
-          "ml-model-selection-review",
-          "ML Model Selection Review",
-        ),
+        graph: expectedGraph,
       },
     };
     vi.spyOn(dagApi, "saveDagWorkflowDefinition").mockResolvedValue(created);
@@ -851,23 +854,7 @@ describe("DagWorkflowsPanel", () => {
       expect(dagApi.saveDagWorkflowDefinition).toHaveBeenCalledWith(
         "project-a",
         "ml-model-selection-review",
-        expect.objectContaining({
-          id: "ml-model-selection-review",
-          name: "ML Model Selection Review",
-          defaultModel: {
-            requested: expect.objectContaining({ source: "kady-current" }),
-            resolution: { mode: "exact" },
-          },
-          rescue: expect.objectContaining({ enabled: true }),
-          evidence: expect.objectContaining({ enabled: true }),
-          nodes: expect.arrayContaining([
-            expect.objectContaining({ kind: "best-of-n", candidateCount: 2 }),
-            expect.objectContaining({ kind: "evidence-gate", onUnsupportedOutput: "rescue" }),
-          ]),
-          edges: expect.arrayContaining([
-            expect.objectContaining({ condition: "evidence-supported" }),
-          ]),
-        }),
+        expectedGraph,
       );
       expect(screen.getByRole("heading", { name: "ML Model Selection Review" })).toBeInTheDocument();
     });
