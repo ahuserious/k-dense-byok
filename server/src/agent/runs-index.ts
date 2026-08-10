@@ -57,7 +57,8 @@ export interface WorkflowRunAssociation {
   schemaVersion: 1;
   sessionId: string;
   workflowRunId: string;
-  source: "chat-prompt" | "chat-event";
+  chatRunId: string | null;
+  source: "chat-prompt" | "chat-event" | "typed-launch";
   associatedAt: number;
 }
 
@@ -89,6 +90,7 @@ export interface LoopRecord {
 // (no leading dot, no slash, no '..'). loopId gets the same treatment.
 const SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const WORKFLOW_RUN_ID_RE = /^wrun_[a-f0-9]{32}$/;
+const CHAT_RUN_ID_RE = /^[a-f0-9]{32}$/;
 
 function assertSafeSegment(value: string, kind: "session id" | "loop id"): void {
   if (!SEGMENT_RE.test(value)) {
@@ -143,8 +145,7 @@ export function startRun(
     status: partial.status ?? "running",
   };
   const file = runsJsonlPath(projectId, record.sessionId);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.appendFileSync(file, JSON.stringify(record) + "\n", "utf-8");
+  appendJsonl(file, record);
   return id;
 }
 
@@ -191,24 +192,77 @@ export function finishRun(
     ...(fields.tokensOut !== undefined ? { tokensOut: fields.tokensOut } : {}),
     ...(fields.numTurns !== undefined ? { numTurns: fields.numTurns } : {}),
   };
-  fs.appendFileSync(file, JSON.stringify(terminal) + "\n", "utf-8");
+  appendJsonl(file, terminal);
   return true;
 }
 
 function readJsonl<T>(file: string): T[] {
+  let contents: Buffer;
   try {
-    return fs
-      .readFileSync(file, "utf-8")
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as T);
+    contents = fs.readFileSync(file);
   } catch {
-    // Missing file or a torn final line → treat as empty. A partial last line
-    // (crash mid-append) is the only realistic JSON.parse failure; dropping the
-    // whole file on that is too aggressive, but appendFileSync writes one line
-    // atomically per call, so a torn line is unlikely. We accept the simple path.
     return [];
   }
+  const rows: T[] = [];
+  forEachJsonlRow(contents, (line) => {
+    if (!line.trim()) return;
+    try {
+      rows.push(JSON.parse(line) as T);
+    } catch {
+      // A bad row cannot erase intact history. Append repair is deliberately
+      // narrower: only the final malformed row may be truncated.
+    }
+  });
+  return rows;
+}
+
+function forEachJsonlRow(
+  contents: Buffer,
+  visit: (line: string, start: number) => void,
+): void {
+  let start = 0;
+  for (let index = 0; index <= contents.length; index += 1) {
+    if (index !== contents.length && contents[index] !== 0x0a) continue;
+    let end = index;
+    if (end > start && contents[end - 1] === 0x0d) end -= 1;
+    visit(contents.subarray(start, end).toString("utf-8"), start);
+    start = index + 1;
+  }
+}
+
+/** Make one append safe without rewriting any intact or non-final row. */
+function repairJsonlTailForAppend(file: string): void {
+  let contents: Buffer;
+  try {
+    contents = fs.readFileSync(file);
+  } catch {
+    return;
+  }
+  let finalRowStart: number | null = null;
+  let finalRowIsValid = true;
+  forEachJsonlRow(contents, (line, start) => {
+    if (!line.trim()) return;
+    finalRowStart = start;
+    try {
+      JSON.parse(line);
+      finalRowIsValid = true;
+    } catch {
+      finalRowIsValid = false;
+    }
+  });
+  if (finalRowStart !== null && !finalRowIsValid) {
+    fs.truncateSync(file, finalRowStart);
+    return;
+  }
+  if (contents.length > 0 && contents[contents.length - 1] !== 0x0a) {
+    fs.appendFileSync(file, "\n", "utf-8");
+  }
+}
+
+function appendJsonl(file: string, value: unknown): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  repairJsonlTailForAppend(file);
+  fs.appendFileSync(file, JSON.stringify(value) + "\n", "utf-8");
 }
 
 /** Fold rows to the latest occurrence per id, preserving first-seen order. */
@@ -279,22 +333,37 @@ export function associateWorkflowRun(
   sessionId: string,
   workflowRunId: string,
   source: WorkflowRunAssociation["source"],
+  chatRunId: string | null,
 ): void {
   if (!WORKFLOW_RUN_ID_RE.test(workflowRunId)) {
     throw new Error(`Invalid workflow run id: ${workflowRunId}`);
   }
+  if (chatRunId !== null && !CHAT_RUN_ID_RE.test(chatRunId)) {
+    throw new Error(`Invalid chat run id: ${chatRunId}`);
+  }
+  if (source === "typed-launch" && chatRunId !== null) {
+    throw new Error("Typed workflow launches cannot claim a chat turn.");
+  }
+  if (source !== "typed-launch" && chatRunId === null) {
+    throw new Error("Chat workflow associations require an indexed chat run id.");
+  }
   const file = workflowAssociationsJsonlPath(projectId, sessionId);
   const latest = readJsonl<WorkflowRunAssociation>(file).at(-1);
-  if (latest?.workflowRunId === workflowRunId) return;
+  if (
+    latest?.workflowRunId === workflowRunId &&
+    latest.chatRunId === chatRunId
+  ) {
+    return;
+  }
   const association: WorkflowRunAssociation = {
     schemaVersion: 1,
     sessionId,
     workflowRunId,
+    chatRunId,
     source,
     associatedAt: Date.now(),
   };
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.appendFileSync(file, JSON.stringify(association) + "\n", "utf-8");
+  appendJsonl(file, association);
 }
 
 /** Read only one session's association log; corrupt rows fail closed. */
@@ -311,7 +380,11 @@ export function latestWorkflowRunAssociation(
     latest.schemaVersion !== 1 ||
     latest.sessionId !== sessionId ||
     !WORKFLOW_RUN_ID_RE.test(latest.workflowRunId) ||
-    (latest.source !== "chat-prompt" && latest.source !== "chat-event") ||
+    (latest.chatRunId !== null && !CHAT_RUN_ID_RE.test(latest.chatRunId)) ||
+    (latest.source !== "chat-prompt" &&
+      latest.source !== "chat-event" &&
+      latest.source !== "typed-launch") ||
+    (latest.source === "typed-launch") !== (latest.chatRunId === null) ||
     !Number.isSafeInteger(latest.associatedAt) ||
     latest.associatedAt < 0
   ) {

@@ -57,6 +57,7 @@ import { MethodsDraftError, runMethodsDraft } from "../agent/methods-draft.ts";
 import { mintRunId, setSessionRunId } from "../agent/run-ids.ts";
 import { runBroker, type RunHandle } from "../agent/run-broker.ts";
 import {
+  associateTypedWorkflowLaunch,
   backgroundAgentTrailingNodeForSession,
   chatStreamErrorForSession,
   completeChatTurnRun,
@@ -104,6 +105,14 @@ import {
   billingForModel,
   type BillingContext,
 } from "../cost/billing.ts";
+
+const TYPED_WORKFLOW_RUN_ROUTE = "/dag-workflows/:workflowId/runs";
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
 
 function snapshot(session: { getSessionStats(): { cost: number; tokens: { input: number; output: number; cacheRead: number; total: number } } }): CostSnapshot {
   const s = session.getSessionStats();
@@ -349,6 +358,60 @@ function streamRun(
 }
 
 export async function registerSessionRoutes(app: FastifyInstance): Promise<void> {
+  // The typed workflow route is S4-owned and registered after this S8 surface.
+  // Association is an enhancement after admission: validation or persistence
+  // failure must never change the typed route's contractual 202 response.
+  app.addHook("preSerialization", async (request, reply, payload) => {
+    if (
+      request.method !== "POST" ||
+      request.routeOptions.url !== TYPED_WORKFLOW_RUN_ROUTE ||
+      reply.statusCode !== 202
+    ) {
+      return payload;
+    }
+    const sessionId = objectRecord(request.body)?.sessionId;
+    if (typeof sessionId !== "string") return payload;
+    const projectId = currentProjectId();
+    let binding: SessionProfileBinding;
+    try {
+      binding = readSessionProfileBinding(activePaths(), sessionId);
+    } catch (error) {
+      request.log.warn(
+        { err: error, projectId, sessionId },
+        "skipped typed workflow chat association for an invalid session",
+      );
+      return payload;
+    }
+    if (binding.profile !== "main") {
+      request.log.warn(
+        { projectId, sessionId, profile: binding.profile },
+        "skipped typed workflow chat association for a helper session",
+      );
+      return payload;
+    }
+    const response = objectRecord(payload);
+    const manifest = objectRecord(response?.manifest);
+    if (
+      typeof manifest?.id !== "string" ||
+      manifest.sessionId !== sessionId
+    ) {
+      request.log.warn(
+        { projectId, sessionId },
+        "skipped typed workflow chat association for inconsistent run metadata",
+      );
+      return payload;
+    }
+    try {
+      associateTypedWorkflowLaunch(projectId, sessionId, manifest.id);
+    } catch (error) {
+      request.log.warn(
+        { err: error, projectId, sessionId, workflowRunId: manifest.id },
+        "failed to persist typed workflow chat association",
+      );
+    }
+    return payload;
+  });
+
   app.post("/sessions", async () => {
     const session = await createSession(currentProjectId(), activePaths());
     return { id: session.sessionId, sessionFile: session.sessionFile };
@@ -725,7 +788,11 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
           workflowRun.manifest.id,
           workflowRun.state.status,
         );
-        const chatStreamError = chatStreamErrorForSession(projectId, req.params.id);
+        const chatStreamError = chatStreamErrorForSession(
+          projectId,
+          req.params.id,
+          workflowRun.manifest.id,
+        );
         const state = projectWorkflowRunStateV1(workflowRun, {
           ...(backgroundAgentTrailingNode ? { backgroundAgentTrailingNode } : {}),
           ...(chatStreamError ? { chatStreamError } : {}),
@@ -1191,7 +1258,14 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
               const frame = toClientFrame(ev, paths.sandbox);
               if (frame) {
                 try {
-                  indexWorkflowRunReferences(projectId, sessionId, frame);
+                  if (indexedChatRunId) {
+                    indexWorkflowRunReferences(
+                      projectId,
+                      sessionId,
+                      indexedChatRunId,
+                      frame,
+                    );
+                  }
                 } catch (error) {
                   log.warn({ err: error }, "failed to index chat workflow-run reference");
                 }

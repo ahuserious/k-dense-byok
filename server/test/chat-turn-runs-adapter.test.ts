@@ -1,8 +1,11 @@
 import fs from "node:fs";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_PROJECT_ID, PROJECTS_ROOT } from "../src/config.ts";
-import { ensureProjectExists } from "../src/projects.ts";
+import { buildApp } from "../src/index.ts";
+import { ensureProjectExists, resolvePaths } from "../src/projects.ts";
 import {
+  associateTypedWorkflowLaunch,
   chatStreamErrorForSession,
   backgroundAgentTrailingNodeForSession,
   completeChatTurnRun,
@@ -14,8 +17,10 @@ import {
 } from "../src/agent/chat-turn-runs-adapter.ts";
 import { RunBroker } from "../src/agent/run-broker.ts";
 import {
+  WorkflowRunController,
   workflowStore,
   type WorkflowGraphDocument,
+  type WorkflowModelResolutionReceipt,
   type WorkflowRunRecord,
 } from "../src/workflows/index.ts";
 
@@ -73,6 +78,20 @@ function storedGraph(): WorkflowGraphDocument {
       },
     ],
     edges: [],
+  };
+}
+
+function workflowReceipt(): WorkflowModelResolutionReceipt {
+  return {
+    request: storedGraph().defaultModel!,
+    resolved: {
+      provider: "ollama",
+      model: "qwen3:32b",
+      auth: { kind: "local" },
+      reasoning: "high",
+      runtime: "local",
+    },
+    fallbackUsed: false,
   };
 }
 
@@ -182,12 +201,51 @@ describe("chat-turn runs-index adapter", () => {
       error: "provider disconnected",
     });
     expect(
-      chatStreamErrorForSession(DEFAULT_PROJECT_ID, "chat-session"),
+      chatStreamErrorForSession(
+        DEFAULT_PROJECT_ID,
+        "chat-session",
+        "wrun_11111111111111111111111111111111",
+      ),
     ).toEqual({
       code: "CHAT_STREAM_ERROR",
       message: "provider disconnected",
       retryable: true,
     });
+  });
+
+  it("does not route an unrelated later failed turn to the associated workflow", () => {
+    const workflowRunId = "wrun_11111111111111111111111111111111";
+    const associatedChatRunId = registerChatTurnRun({
+      projectId: DEFAULT_PROJECT_ID,
+      sessionId: "chat-session",
+      prompt: `Inspect ${workflowRunId}`,
+    });
+    completeChatTurnRun({
+      projectId: DEFAULT_PROJECT_ID,
+      sessionId: "chat-session",
+      indexRunId: associatedChatRunId,
+      status: "completed",
+    });
+    const unrelatedChatRunId = registerChatTurnRun({
+      projectId: DEFAULT_PROJECT_ID,
+      sessionId: "chat-session",
+      prompt: "Answer an unrelated question.",
+    });
+    completeChatTurnRun({
+      projectId: DEFAULT_PROJECT_ID,
+      sessionId: "chat-session",
+      indexRunId: unrelatedChatRunId,
+      status: "failed",
+      error: "unrelated provider failure",
+    });
+
+    expect(
+      chatStreamErrorForSession(
+        DEFAULT_PROJECT_ID,
+        "chat-session",
+        workflowRunId,
+      ),
+    ).toBeUndefined();
   });
 
   it("resolves an exact session association with 200+ newer unrelated runs", () => {
@@ -203,10 +261,19 @@ describe("chat-turn runs-index adapter", () => {
       sessionId: "chat-session",
     });
     expect(
-      indexWorkflowRunReferences(DEFAULT_PROJECT_ID, "chat-session", {
-        type: "tool_end",
-        result: { workflowRunId: target.id },
-      }),
+      indexWorkflowRunReferences(
+        DEFAULT_PROJECT_ID,
+        "chat-session",
+        registerChatTurnRun({
+          projectId: DEFAULT_PROJECT_ID,
+          sessionId: "chat-session",
+          prompt: "Launch a typed workflow.",
+        }),
+        {
+          type: "tool_end",
+          result: { workflowRunId: target.id },
+        },
+      ),
     ).toEqual([target.id]);
     const newerUnrelatedRuns = Array.from({ length: 201 }, (_, index) => {
       const run = syntheticRun();
@@ -231,6 +298,188 @@ describe("chat-turn runs-index adapter", () => {
     ).toBe(target.id);
     expect(listRuns).not.toHaveBeenCalled();
     expect(readdir).not.toHaveBeenCalled();
+  });
+
+  it("recovers a torn association tail across restart and accepts a later write", () => {
+    workflowStore.saveDefinition(
+      DEFAULT_PROJECT_ID,
+      "indexed-workflow",
+      storedGraph(),
+    );
+    const first = workflowStore.createRun(DEFAULT_PROJECT_ID, {
+      workflowId: "indexed-workflow",
+      requestId: "torn-association-first",
+      requestedBy: "user",
+      sessionId: "chat-session",
+    });
+    registerChatTurnRun({
+      projectId: DEFAULT_PROJECT_ID,
+      sessionId: "chat-session",
+      prompt: `Inspect ${first.id}`,
+    });
+    const associationFile = path.join(
+      resolvePaths(DEFAULT_PROJECT_ID).runsDir,
+      "chat-session",
+      "workflow-associations.jsonl",
+    );
+    fs.appendFileSync(associationFile, '{"schemaVersion":1');
+
+    expect(
+      workflowRunForChatSession(DEFAULT_PROJECT_ID, "chat-session")?.manifest
+        .id,
+    ).toBe(first.id);
+
+    const second = workflowStore.createRun(DEFAULT_PROJECT_ID, {
+      workflowId: "indexed-workflow",
+      requestId: "torn-association-second",
+      requestedBy: "user",
+      sessionId: "chat-session",
+    });
+    associateTypedWorkflowLaunch(
+      DEFAULT_PROJECT_ID,
+      "chat-session",
+      second.id,
+    );
+    expect(
+      workflowRunForChatSession(DEFAULT_PROJECT_ID, "chat-session")?.manifest
+        .id,
+    ).toBe(second.id);
+    expect(() => {
+      for (const line of fs
+        .readFileSync(associationFile, "utf-8")
+        .trim()
+        .split("\n")) {
+        JSON.parse(line);
+      }
+    }).not.toThrow();
+  });
+
+  it("recovers a torn runs-index tail across restart and completes the run", () => {
+    const indexRunId = registerChatTurnRun({
+      projectId: DEFAULT_PROJECT_ID,
+      sessionId: "chat-session",
+      prompt: "Survive a torn terminal append.",
+    });
+    const runsFile = path.join(
+      resolvePaths(DEFAULT_PROJECT_ID).runsDir,
+      "chat-session",
+      "runs.jsonl",
+    );
+    fs.appendFileSync(runsFile, '{"id":"torn"');
+
+    expect(latestChatTurnRun(DEFAULT_PROJECT_ID, "chat-session")?.id).toBe(
+      indexRunId,
+    );
+    expect(
+      completeChatTurnRun({
+        projectId: DEFAULT_PROJECT_ID,
+        sessionId: "chat-session",
+        indexRunId,
+        status: "completed",
+      }),
+    ).toBe(true);
+    expect(latestChatTurnRun(DEFAULT_PROJECT_ID, "chat-session")).toMatchObject(
+      { id: indexRunId, status: "completed" },
+    );
+    expect(fs.readFileSync(runsFile, "utf-8")).not.toContain('{"id":"torn"');
+  });
+
+  it("associates a validated typed launch with its active main chat", async () => {
+    const app = await buildApp({ workflowController: null });
+    try {
+      const createdSession = await app.inject({
+        method: "POST",
+        url: "/sessions",
+        headers: { "x-project-id": DEFAULT_PROJECT_ID },
+      });
+      expect(createdSession.statusCode).toBe(200);
+      const sessionId = createdSession.json<{ id: string }>().id;
+      const saved = await app.inject({
+        method: "PUT",
+        url: "/dag-workflows/indexed-workflow",
+        headers: { "x-project-id": DEFAULT_PROJECT_ID },
+        payload: storedGraph(),
+      });
+      expect(saved.statusCode).toBe(201);
+      const launched = await app.inject({
+        method: "POST",
+        url: "/dag-workflows/indexed-workflow/runs",
+        headers: { "x-project-id": DEFAULT_PROJECT_ID },
+        payload: {
+          requestId: "typed-launch-chat-projection",
+          expectedWorkflowRevision: 1,
+          sessionId,
+        },
+      });
+      expect(launched.statusCode).toBe(202);
+      const launchedRunId = launched.json<{
+        manifest: { id: string };
+      }>().manifest.id;
+
+      const projection = await app.inject({
+        method: "GET",
+        url: `/sessions/${encodeURIComponent(sessionId)}/workflow-run-state`,
+        headers: { "x-project-id": DEFAULT_PROJECT_ID },
+      });
+      expect(projection.statusCode).toBe(200);
+      expect(projection.json()).toMatchObject({
+        state: {
+          schemaVersion: 1,
+          runId: launchedRunId,
+          workflowId: "indexed-workflow",
+          status: "queued",
+        },
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("starts a typed run with an unknown session without associating it", async () => {
+    const controller = new WorkflowRunController({
+      createExecutor: () => async (context) => {
+        context.recordModelResolution("agent", workflowReceipt());
+        return { output: { ok: true } };
+      },
+    });
+    const app = await buildApp({ workflowController: controller });
+    try {
+      const saved = await app.inject({
+        method: "PUT",
+        url: "/dag-workflows/indexed-workflow",
+        headers: { "x-project-id": DEFAULT_PROJECT_ID },
+        payload: storedGraph(),
+      });
+      expect(saved.statusCode).toBe(201);
+      const sessionId = "unknown-main-session";
+      const launched = await app.inject({
+        method: "POST",
+        url: "/dag-workflows/indexed-workflow/runs",
+        headers: { "x-project-id": DEFAULT_PROJECT_ID },
+        payload: { requestId: "unknown-session-launch", sessionId },
+      });
+      expect(launched.statusCode).toBe(202);
+      const runId = launched.json<{ manifest: { id: string } }>().manifest.id;
+      await vi.waitFor(() => {
+        expect(
+          workflowStore.readRun(DEFAULT_PROJECT_ID, runId)?.state.status,
+        ).toBe("succeeded");
+      });
+      expect(
+        workflowRunForChatSession(DEFAULT_PROJECT_ID, sessionId),
+      ).toBeNull();
+      expect(
+        fs.existsSync(
+          path.join(
+            resolvePaths(DEFAULT_PROJECT_ID).runsDir,
+            sessionId,
+            "workflow-associations.jsonl",
+          ),
+        ),
+      ).toBe(false);
+    } finally {
+      await app.close();
+    }
   });
 });
 

@@ -91,6 +91,7 @@ export function registerChatTurnRun(input: RegisterChatTurnInput): string {
       input.sessionId,
       workflowRunId,
       input.workflowRunId ? "chat-event" : "chat-prompt",
+      indexRunId,
     );
   }
   return indexRunId;
@@ -151,14 +152,36 @@ function collectWorkflowRunReferences(
 export function indexWorkflowRunReferences(
   projectId: string,
   sessionId: string,
+  chatRunId: string,
   value: unknown,
 ): string[] {
   const references = new Set<string>();
   collectWorkflowRunReferences(value, references);
   for (const workflowRunId of references) {
-    associateWorkflowRun(projectId, sessionId, workflowRunId, "chat-event");
+    associateWorkflowRun(
+      projectId,
+      sessionId,
+      workflowRunId,
+      "chat-event",
+      chatRunId,
+    );
   }
   return [...references];
+}
+
+/** Persist a validated typed launch that is not owned by any chat turn. */
+export function associateTypedWorkflowLaunch(
+  projectId: string,
+  sessionId: string,
+  workflowRunId: string,
+): void {
+  associateWorkflowRun(
+    projectId,
+    sessionId,
+    workflowRunId,
+    "typed-launch",
+    null,
+  );
 }
 
 /** Resolve a chat session's indexed workflow run by its exact durable id. */
@@ -176,8 +199,19 @@ export function workflowRunForChatSession(
 export function chatStreamErrorForSession(
   projectId: string,
   sessionId: string,
+  workflowRunId: string,
 ): ProjectWorkflowRunOptions["chatStreamError"] | undefined {
-  const chatTurn = latestChatTurnRun(projectId, sessionId);
+  const association = latestWorkflowRunAssociation(projectId, sessionId);
+  if (
+    !association ||
+    association.workflowRunId !== workflowRunId ||
+    association.chatRunId === null
+  ) {
+    return undefined;
+  }
+  const chatTurn = listRunsForSession(projectId, sessionId).find(
+    (run) => run.id === association.chatRunId && run.role === "agent",
+  );
   if (!chatTurn || chatTurn.status !== "failed") return undefined;
   return {
     code: "CHAT_STREAM_ERROR",
