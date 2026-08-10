@@ -58,7 +58,7 @@ export interface WorkflowRunAssociation {
   sessionId: string;
   workflowRunId: string;
   chatRunId: string | null;
-  source: "turn-index" | "typed-launch";
+  source: "turn-index" | "typed-launch" | "manual-rescue";
   associatedAt: number;
 }
 
@@ -327,7 +327,7 @@ export function listRunsForSession(
   return records;
 }
 
-/** Persist the latest chat-session → typed workflow-run association append-only. */
+/** Persist the latest chat-session → workflow-run association append-only. */
 export function associateWorkflowRun(
   projectId: string,
   sessionId: string,
@@ -341,10 +341,7 @@ export function associateWorkflowRun(
   if (chatRunId !== null && !CHAT_RUN_ID_RE.test(chatRunId)) {
     throw new Error(`Invalid chat run id: ${chatRunId}`);
   }
-  if (source === "typed-launch" && chatRunId !== null) {
-    throw new Error("Typed workflow launches cannot claim a chat turn.");
-  }
-  if (source !== "typed-launch" && chatRunId === null) {
+  if (source === "turn-index" && chatRunId === null) {
     throw new Error("Chat workflow associations require an indexed chat run id.");
   }
   const file = workflowAssociationsJsonlPath(projectId, sessionId);
@@ -381,8 +378,10 @@ export function latestWorkflowRunAssociation(
     latest.sessionId !== sessionId ||
     !WORKFLOW_RUN_ID_RE.test(latest.workflowRunId) ||
     (latest.chatRunId !== null && !CHAT_RUN_ID_RE.test(latest.chatRunId)) ||
-    (latest.source !== "turn-index" && latest.source !== "typed-launch") ||
-    (latest.source === "typed-launch") !== (latest.chatRunId === null) ||
+    (latest.source !== "turn-index" &&
+      latest.source !== "typed-launch" &&
+      latest.source !== "manual-rescue") ||
+    (latest.source === "turn-index" && latest.chatRunId === null) ||
     !Number.isSafeInteger(latest.associatedAt) ||
     latest.associatedAt < 0
   ) {

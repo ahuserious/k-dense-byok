@@ -371,17 +371,24 @@ interface PollingOptions {
   intervalMs?: number;
   awaitErrorRouting?: boolean;
   finalizationWindowMs?: number;
+  waitForReplacementOfRunId?: string;
+  launchWindowMs?: number;
 }
 
 /**
- * In-process timer polling. Interrupted runs remain resumable. When the chat
- * SSE has already failed, an error-less terminal snapshot is held briefly so
- * the durable runs-index terminal row can land before the UI trusts it.
+ * In-process timer polling. Interrupted runs remain resumable. A new chat turn
+ * can briefly retain the prior terminal association, so replacement polling is
+ * bounded while that post-admission write lands. When the chat SSE has already
+ * failed, an error-less terminal snapshot is held briefly so the durable
+ * runs-index terminal row can land before the UI trusts it.
  */
 export function startChatRunStatePolling(options: PollingOptions): () => void {
   let cancelled = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let finalizationStartedAt: number | null = null;
+  const replacementWindowStartedAt = options.waitForReplacementOfRunId
+    ? Date.now()
+    : null;
   const poll = async () => {
     let projection: RunStateV1Projection | null = null;
     let fetchSucceeded = false;
@@ -392,6 +399,14 @@ export function startChatRunStatePolling(options: PollingOptions): () => void {
       if (!cancelled) options.onProjection(null);
     }
     const terminal = projection ? isTerminalRunState(projection.status) : false;
+    const waitingForReplacement = Boolean(
+      projection &&
+      terminal &&
+      replacementWindowStartedAt !== null &&
+      projection.runId === options.waitForReplacementOfRunId &&
+      Date.now() - replacementWindowStartedAt <
+        (options.launchWindowMs ?? 5_000),
+    );
     const awaitingDurableError = Boolean(
       projection &&
       terminal &&
@@ -407,7 +422,7 @@ export function startChatRunStatePolling(options: PollingOptions): () => void {
       }
     }
     if (!cancelled && fetchSucceeded) options.onProjection(projection);
-    if (!cancelled && (!projection || !isTerminalRunState(projection.status))) {
+    if (!cancelled && (!projection || !terminal || waitingForReplacement)) {
       timer = setTimeout(poll, options.intervalMs ?? 1_500);
     }
   };
@@ -429,9 +444,14 @@ export function useChatLiveGraphProjection(options: {
     sessionId: string;
     projection: RunStateV1Projection | null;
   } | null>(null);
+  const snapshotRef = useRef(snapshot);
   useEffect(() => {
     if (!options.enabled || !options.sessionId) return;
     const sessionId = options.sessionId;
+    const previousProjection =
+      snapshotRef.current?.sessionId === sessionId
+        ? snapshotRef.current.projection
+        : null;
     return startChatRunStatePolling({
       fetchProjection: async () => {
         const response = await apiFetch(
@@ -446,8 +466,15 @@ export function useChatLiveGraphProjection(options: {
           ? null
           : parseRunStateV1Projection(body.state);
       },
-      onProjection: (projection) => setSnapshot({ sessionId, projection }),
+      onProjection: (projection) => {
+        const nextSnapshot = { sessionId, projection };
+        snapshotRef.current = nextSnapshot;
+        setSnapshot(nextSnapshot);
+      },
       awaitErrorRouting: options.awaitErrorRouting,
+      ...(previousProjection && isTerminalRunState(previousProjection.status)
+        ? { waitForReplacementOfRunId: previousProjection.runId }
+        : {}),
     });
   }, [
     options.enabled,

@@ -455,6 +455,82 @@ describe("chat-turn runs-index adapter", () => {
     }
   });
 
+  it("rebinds a failed source session to its successful manual rescue run", async () => {
+    const controller = new WorkflowRunController({
+      createExecutor: () => async (context) => {
+        context.recordModelResolution("agent", workflowReceipt());
+        return { output: { rescued: true } };
+      },
+    });
+    const app = await buildApp({ workflowController: controller });
+    try {
+      const createdSession = await app.inject({
+        method: "POST",
+        url: "/sessions",
+        headers: { "x-project-id": DEFAULT_PROJECT_ID },
+      });
+      expect(createdSession.statusCode).toBe(200);
+      const sessionId = createdSession.json<{ id: string }>().id;
+      const saved = await app.inject({
+        method: "PUT",
+        url: "/dag-workflows/indexed-workflow",
+        headers: { "x-project-id": DEFAULT_PROJECT_ID },
+        payload: storedGraph(),
+      });
+      expect(saved.statusCode).toBe(201);
+      const source = workflowStore.createRun(DEFAULT_PROJECT_ID, {
+        workflowId: "indexed-workflow",
+        requestId: "manual-rescue-source",
+        requestedBy: "user",
+        sessionId,
+      });
+      workflowStore.appendRunEvent(
+        DEFAULT_PROJECT_ID,
+        source.id,
+        { eventId: "manual_rescue_source_started", type: "run_started" },
+        1,
+      );
+      workflowStore.appendRunEvent(
+        DEFAULT_PROJECT_ID,
+        source.id,
+        {
+          eventId: "manual_rescue_source_failed",
+          type: "run_failed",
+          data: {
+            error: {
+              code: "SOURCE_FAILED",
+              message: "The source run failed.",
+              retryable: true,
+            },
+          },
+        },
+        2,
+      );
+
+      const rescued = await app.inject({
+        method: "POST",
+        url: `/dag-workflow-runs/${source.id}/rescue`,
+        headers: { "x-project-id": DEFAULT_PROJECT_ID },
+        payload: { requestId: "manual-rescue-replacement" },
+      });
+      expect(rescued.statusCode).toBe(202);
+      const rescueRunId = rescued.json<{
+        manifest: { id: string };
+      }>().manifest.id;
+      const projection = await app.inject({
+        method: "GET",
+        url: `/sessions/${encodeURIComponent(sessionId)}/workflow-run-state`,
+        headers: { "x-project-id": DEFAULT_PROJECT_ID },
+      });
+      expect(projection.statusCode).toBe(200);
+      expect(projection.json()).toMatchObject({
+        state: { schemaVersion: 1, runId: rescueRunId },
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
   it("starts a typed run with an unknown session without associating it", async () => {
     const controller = new WorkflowRunController({
       createExecutor: () => async (context) => {

@@ -119,18 +119,47 @@ export function latestChatTurnRun(
   );
 }
 
-/** Persist a validated typed launch that is not owned by any chat turn. */
+/** Active authoritative main-chat turn from the durable runs index, if any. */
+export function activeChatTurnRunId(
+  projectId: string,
+  sessionId: string,
+): string | null {
+  return (
+    listRunsForSession(projectId, sessionId).find(
+      (run) => run.role === "agent" && run.status === "running",
+    )?.id ?? null
+  );
+}
+
+/** Persist a validated typed launch and its active main turn when present. */
 export function associateTypedWorkflowLaunch(
   projectId: string,
   sessionId: string,
   workflowRunId: string,
+  chatRunId: string | null = null,
 ): void {
   associateWorkflowRun(
     projectId,
     sessionId,
     workflowRunId,
     "typed-launch",
-    null,
+    chatRunId,
+  );
+}
+
+/** Persist a validated manual rescue after the replacement run is admitted. */
+export function associateManualWorkflowRescue(
+  projectId: string,
+  sessionId: string,
+  workflowRunId: string,
+  chatRunId: string | null = null,
+): void {
+  associateWorkflowRun(
+    projectId,
+    sessionId,
+    workflowRunId,
+    "manual-rescue",
+    chatRunId,
   );
 }
 

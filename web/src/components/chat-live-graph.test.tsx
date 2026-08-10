@@ -253,6 +253,77 @@ describe("chat RunState polling", () => {
     stop();
   });
 
+  it("keeps polling past an old terminal association until a new run appears", async () => {
+    vi.useFakeTimers();
+    const oldTerminal = parseRunStateV1Projection(
+      validProjection({
+        status: "succeeded",
+        nodes: [
+          {
+            id: "prepare",
+            status: "succeeded",
+            progress: { completed: 1, total: 1 },
+          },
+          {
+            id: "analyze",
+            status: "succeeded",
+            progress: { completed: 1, total: 1 },
+          },
+        ],
+        backgroundAgentTrailingNode: undefined,
+      }),
+    );
+    const replacementRunId = "wrun_22222222222222222222222222222222";
+    const newRunning = parseRunStateV1Projection(
+      validProjection({ runId: replacementRunId }),
+    );
+    const newTerminal = parseRunStateV1Projection(
+      validProjection({
+        runId: replacementRunId,
+        status: "succeeded",
+        nodes: [
+          {
+            id: "prepare",
+            status: "succeeded",
+            progress: { completed: 1, total: 1 },
+          },
+          {
+            id: "analyze",
+            status: "succeeded",
+            progress: { completed: 1, total: 1 },
+          },
+        ],
+        backgroundAgentTrailingNode: undefined,
+      }),
+    );
+    const fetchProjection = vi
+      .fn()
+      .mockResolvedValueOnce(oldTerminal)
+      .mockResolvedValueOnce(oldTerminal)
+      .mockResolvedValueOnce(newRunning)
+      .mockResolvedValueOnce(newTerminal);
+    const onProjection = vi.fn();
+    const stop = startChatRunStatePolling({
+      fetchProjection,
+      onProjection,
+      intervalMs: 10,
+      launchWindowMs: 100,
+      waitForReplacementOfRunId: oldTerminal.runId,
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fetchProjection).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(fetchProjection).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(onProjection).toHaveBeenLastCalledWith(newRunning);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(onProjection).toHaveBeenLastCalledWith(newTerminal);
+    expect(fetchProjection).toHaveBeenCalledTimes(4);
+    stop();
+  });
+
   it("stops scheduling polls after a terminal projection", async () => {
     const terminal = parseRunStateV1Projection(
       validProjection({

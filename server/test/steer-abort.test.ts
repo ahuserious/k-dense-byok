@@ -26,6 +26,7 @@ class FakeSession {
   ];
   promptCalls: { text: string; options: unknown }[] = [];
   modelText: string | null = null;
+  promptError: Error | null = null;
   /** Called by steer(); lets a test flip isStreaming mid-call. */
   onSteer: (() => void) | null = null;
   private listeners = new Set<(event: any) => void>();
@@ -74,6 +75,7 @@ class FakeSession {
       });
     }
     await this.promptWait;
+    if (this.promptError) throw this.promptError;
     this.emit({ type: "agent_end" });
     this.isStreaming = false;
   }
@@ -158,6 +160,7 @@ import {
 import { latestWorkflowRunAssociation } from "../src/agent/runs-index.ts";
 
 const app = await buildApp();
+const associationApp = await buildApp({ workflowController: null });
 
 beforeEach(() => {
   fakeSessions.clear();
@@ -168,6 +171,7 @@ beforeEach(() => {
 
 afterAll(async () => {
   await app.close();
+  await associationApp.close();
   fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
 });
 
@@ -315,6 +319,52 @@ function sseFrames(body: string): Record<string, unknown>[] {
     .map((chunk) => JSON.parse(chunk.slice("data: ".length)) as Record<string, unknown>);
 }
 
+function activeTurnWorkflow() {
+  return {
+    schemaVersion: "1.0",
+    id: "active-turn-workflow",
+    name: "Active turn workflow",
+    entryNodeId: "start",
+    defaultModel: {
+      requested: {
+        source: "fixed",
+        provider: "ollama",
+        model: "qwen3:32b",
+        auth: { kind: "local" },
+        reasoning: "high",
+      },
+      resolution: { mode: "exact" },
+    },
+    limits: {
+      maxIterations: 2,
+      maxModelCalls: 2,
+      maxParallelism: 1,
+      maxSubagents: 1,
+      timeoutMs: 60_000,
+      maxTokens: 4_000,
+      maxCostUsd: 0,
+      maxRetries: 0,
+    },
+    evidence: {
+      enabled: false,
+      minimumIndependentSources: 0,
+      requireArtifactReferences: false,
+      onUnsupportedOutput: "fail",
+    },
+    nodes: [
+      {
+        id: "start",
+        name: "Start",
+        kind: "agent",
+        terminal: true,
+        workspace: { isolation: "read-only", writePaths: [] },
+        prompt: "Return one bounded result.",
+      },
+    ],
+    edges: [],
+  };
+}
+
 describe("persistent run routes", () => {
   it("reports running state and replays sequenced events through completion", async () => {
     const session = new FakeSession();
@@ -460,6 +510,74 @@ describe("persistent run routes", () => {
     expect(latestWorkflowRunAssociation("default", "s1")).toMatchObject({
       workflowRunId: authoritativeRunId,
       source: "typed-launch",
+    });
+  });
+
+  it("routes a real main-turn failure to the typed run launched during that turn", async () => {
+    ensureProjectExists("default");
+    const saved = await associationApp.inject({
+      method: "PUT",
+      url: "/dag-workflows/active-turn-workflow",
+      headers: { "x-project-id": "default", "content-type": "application/json" },
+      payload: activeTurnWorkflow(),
+    });
+    expect(saved.statusCode).toBe(201);
+
+    const session = new FakeSession();
+    session.isStreaming = false;
+    session.holdPrompt();
+    session.promptError = new Error("provider failed during the active turn");
+    fakeSessions.set("s1", session);
+    const postRun = associationApp.inject({
+      method: "POST",
+      url: "/sessions/s1/run",
+      headers: { "x-project-id": "default", "content-type": "application/json" },
+      payload: { message: "Launch and observe the typed workflow." },
+    });
+
+    let activeChatRunId = "";
+    await vi.waitFor(() => {
+      const activeTurn = latestChatTurnRun("default", "s1");
+      expect(activeTurn?.status).toBe("running");
+      activeChatRunId = activeTurn!.id;
+    });
+    const launched = await associationApp.inject({
+      method: "POST",
+      url: "/dag-workflows/active-turn-workflow/runs",
+      headers: { "x-project-id": "default", "content-type": "application/json" },
+      payload: {
+        requestId: "active-main-turn-launch",
+        sessionId: "s1",
+      },
+    });
+    expect(launched.statusCode).toBe(202);
+    const workflowRunId = launched.json().manifest.id as string;
+    expect(latestWorkflowRunAssociation("default", "s1")).toMatchObject({
+      workflowRunId,
+      chatRunId: activeChatRunId,
+      source: "typed-launch",
+    });
+
+    session.releasePrompt();
+    expect((await postRun).statusCode).toBe(200);
+    const projection = await associationApp.inject({
+      method: "GET",
+      url: "/sessions/s1/workflow-run-state",
+      headers: { "x-project-id": "default" },
+    });
+    expect(projection.statusCode).toBe(200);
+    expect(projection.json()).toMatchObject({
+      state: {
+        runId: workflowRunId,
+        errorRouting: {
+          source: "chat-stream",
+          surface: true,
+          error: {
+            code: "CHAT_STREAM_ERROR",
+            message: "provider failed during the active turn",
+          },
+        },
+      },
     });
   });
 

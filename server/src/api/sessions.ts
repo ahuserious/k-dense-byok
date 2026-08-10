@@ -57,6 +57,8 @@ import { MethodsDraftError, runMethodsDraft } from "../agent/methods-draft.ts";
 import { mintRunId, setSessionRunId } from "../agent/run-ids.ts";
 import { runBroker, type RunHandle } from "../agent/run-broker.ts";
 import {
+  activeChatTurnRunId,
+  associateManualWorkflowRescue,
   associateTypedWorkflowLaunch,
   backgroundAgentTrailingNodeForSession,
   chatStreamErrorForSession,
@@ -106,6 +108,7 @@ import {
 } from "../cost/billing.ts";
 
 const TYPED_WORKFLOW_RUN_ROUTE = "/dag-workflows/:workflowId/runs";
+const MANUAL_WORKFLOW_RESCUE_ROUTE = "/dag-workflow-runs/:runId/rescue";
 
 function objectRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -358,18 +361,50 @@ function streamRun(
 }
 
 export async function registerSessionRoutes(app: FastifyInstance): Promise<void> {
-  // The typed workflow route is S4-owned and registered after this S8 surface.
-  // Association is an enhancement after admission: validation or persistence
-  // failure must never change the typed route's contractual 202 response.
-  app.addHook("preSerialization", async (request, reply, payload) => {
+  const activeChatRunForTypedLaunch = new WeakMap<FastifyRequest, string>();
+  app.addHook("preHandler", async (request) => {
     if (
       request.method !== "POST" ||
-      request.routeOptions.url !== TYPED_WORKFLOW_RUN_ROUTE ||
+      request.routeOptions.url !== TYPED_WORKFLOW_RUN_ROUTE
+    ) {
+      return;
+    }
+    const sessionId = objectRecord(request.body)?.sessionId;
+    if (typeof sessionId !== "string") return;
+    try {
+      const projectId = currentProjectId();
+      const activeHandle = runBroker.get(projectId, sessionId);
+      if (!activeHandle || activeHandle.isComplete) return;
+      const indexedChatRunId = activeChatTurnRunId(projectId, sessionId);
+      if (indexedChatRunId) {
+        activeChatRunForTypedLaunch.set(request, indexedChatRunId);
+      }
+    } catch (error) {
+      request.log.warn(
+        { err: error, sessionId },
+        "failed to capture active chat turn for workflow association",
+      );
+    }
+  });
+
+  // These workflow routes are S4-owned and registered after this S8 surface.
+  // Association is an enhancement after admission: validation or persistence
+  // failure must never change either route's contractual 202 response.
+  app.addHook("preSerialization", async (request, reply, payload) => {
+    const route = request.routeOptions.url;
+    if (
+      request.method !== "POST" ||
+      (route !== TYPED_WORKFLOW_RUN_ROUTE &&
+        route !== MANUAL_WORKFLOW_RESCUE_ROUTE) ||
       reply.statusCode !== 202
     ) {
       return payload;
     }
-    const sessionId = objectRecord(request.body)?.sessionId;
+    const response = objectRecord(payload);
+    const manifest = objectRecord(response?.manifest);
+    const sessionId = route === TYPED_WORKFLOW_RUN_ROUTE
+      ? objectRecord(request.body)?.sessionId
+      : manifest?.sessionId;
     if (typeof sessionId !== "string") return payload;
     const projectId = currentProjectId();
     let binding: SessionProfileBinding;
@@ -378,35 +413,53 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
     } catch (error) {
       request.log.warn(
         { err: error, projectId, sessionId },
-        "skipped typed workflow chat association for an invalid session",
+        "skipped workflow chat association for an invalid session",
       );
       return payload;
     }
     if (binding.profile !== "main") {
       request.log.warn(
         { projectId, sessionId, profile: binding.profile },
-        "skipped typed workflow chat association for a helper session",
+        "skipped workflow chat association for a helper session",
       );
       return payload;
     }
-    const response = objectRecord(payload);
-    const manifest = objectRecord(response?.manifest);
     if (
       typeof manifest?.id !== "string" ||
       manifest.sessionId !== sessionId
     ) {
       request.log.warn(
         { projectId, sessionId },
-        "skipped typed workflow chat association for inconsistent run metadata",
+        "skipped workflow chat association for inconsistent run metadata",
       );
       return payload;
     }
     try {
-      associateTypedWorkflowLaunch(projectId, sessionId, manifest.id);
+      const activeHandle = runBroker.get(projectId, sessionId);
+      const indexedActiveChatRunId =
+        activeChatRunForTypedLaunch.get(request) ??
+        (activeHandle && !activeHandle.isComplete
+          ? activeChatTurnRunId(projectId, sessionId)
+          : null);
+      if (route === MANUAL_WORKFLOW_RESCUE_ROUTE) {
+        associateManualWorkflowRescue(
+          projectId,
+          sessionId,
+          manifest.id,
+          indexedActiveChatRunId,
+        );
+      } else {
+        associateTypedWorkflowLaunch(
+          projectId,
+          sessionId,
+          manifest.id,
+          indexedActiveChatRunId,
+        );
+      }
     } catch (error) {
       request.log.warn(
         { err: error, projectId, sessionId, workflowRunId: manifest.id },
-        "failed to persist typed workflow chat association",
+        "failed to persist workflow chat association",
       );
     }
     return payload;
