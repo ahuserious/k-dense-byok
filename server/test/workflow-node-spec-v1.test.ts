@@ -147,7 +147,9 @@ describe("NodeSpec v1 contract", () => {
     expect(validateWorkflowGraphDocument(emptyExists)).toMatchObject({ ok: true });
   });
 
-  it("rejects every nonempty frozen conditions field at semantic validation", () => {
+  it("accepts bound conditions at semantic validation and rejects sandbox escapes", () => {
+    // Post-integration: conditions are BOUND (S4) — enforced pre-dispatch in the
+    // runner, not rejected at validation. Safe entries validate; escapes reject.
     for (const conditions of [
       { when: "inputs.ready" },
       { exists: ["inputs/data.csv"] },
@@ -156,15 +158,16 @@ describe("NodeSpec v1 contract", () => {
       document.nodes[0].settings = { conditions };
       expect(Value.Check(NodeSpecV1Schema, document.nodes[0].settings)).toBe(true);
       const validation = validateWorkflowGraphDocument(document);
-      expect(validation).toMatchObject({ ok: false });
-      if (validation.ok) continue;
-      expect(validation.issues).toContainEqual(expect.objectContaining({
-        code: "node-conditions-enforcement-pending",
-        path: "/nodes/0/settings/conditions",
-        message: expect.stringContaining(
-          "frozen in the contract, but enforcement lands in the per-node-control unit (S4)",
-        ),
-      }));
+      expect(validation).toMatchObject({ ok: true });
+    }
+    const escaping = foundationFixture();
+    escaping.nodes[0].settings = { conditions: { exists: ["../../etc/passwd"] } };
+    const validation = validateWorkflowGraphDocument(escaping);
+    expect(validation).toMatchObject({ ok: false });
+    if (!validation.ok) {
+      expect(validation.issues.some((issue) =>
+        issue.path === "/nodes/0/settings/conditions/exists/0"
+      )).toBe(true);
     }
   });
 

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { s4NodeBindingIssues } from "../agent/workflow-delegation-session.ts";
 import path from "node:path";
 import { Value } from "typebox/value";
 import { isWithin } from "../sandbox-fs.ts";
@@ -620,6 +621,7 @@ function validateNode(
   issues: WorkflowValidationIssue[],
 ): void {
   if (node.limits) validateNodeLimits(node.limits, nodePath, document, issues);
+  issues.push(...s4NodeBindingIssues(resolveNodeSpecV1(document, node), `${nodePath}/settings`));
   for (const finding of pendingNodeSpecEnforcements(node.settings)) {
     if (finding.unit === "S5") continue;
     issues.push({

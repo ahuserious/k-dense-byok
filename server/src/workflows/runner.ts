@@ -36,7 +36,9 @@ import {
 import {
   DEFAULT_WORKFLOW_RESCUE_POLICY,
   normalizeWorkflowProjectPath,
+  resolveNodeSpecV1,
 } from "./validate.ts";
+import { assertS4NodeConditions } from "../agent/workflow-delegation-session.ts";
 import {
   buildWorkflowEvidenceSourceCatalog,
   effectiveWorkflowEvidencePolicy,
@@ -1153,6 +1155,13 @@ async function executeNodeLifecycle(
 
     let outcome: NodeOutcome;
     try {
+      const inbound = (activations.get(node.id) ?? []).map((item) => ({
+        ...item,
+        artifacts: item.artifacts.map((artifact) => ({ ...artifact })),
+        ...(item.output !== undefined ? { output: structuredClone(item.output) } : {}),
+        ...(item.error ? { error: { ...item.error } } : {}),
+      }));
+      assertS4NodeConditions(resolveNodeSpecV1(manifest.graph, node), { runInput: manifest.input, attempt, resumed: initialOutcome?.status === "interrupted" && attempt === initialOutcome.attempt, inbound }, resolvePaths(manifest.projectId).sandbox);
       const modelCalls = new ModelCallTracker(
         manifest,
         node,
@@ -1170,12 +1179,6 @@ async function executeNodeLifecycle(
         branchId,
         writer,
       );
-      const inbound = (activations.get(node.id) ?? []).map((item) => ({
-        ...item,
-        artifacts: item.artifacts.map((artifact) => ({ ...artifact })),
-        ...(item.output !== undefined ? { output: structuredClone(item.output) } : {}),
-        ...(item.error ? { error: { ...item.error } } : {}),
-      }));
       const result = await executeNode({
         projectId: manifest.projectId,
         runId: manifest.id,

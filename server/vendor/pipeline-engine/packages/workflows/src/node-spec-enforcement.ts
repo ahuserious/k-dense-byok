@@ -331,8 +331,11 @@ function rejectUnboundFields(
   reject(normalized.bestOfNPersonalityCount !== undefined, 'vendored-personality-count-unbound', 'deliberation/bestOfNPersonalityCount', 'deliberation.bestOfNPersonalityCount', 'S5');
   reject(normalized.mimeographMode !== undefined, 'vendored-mimeograph-mode-unbound', 'deliberation/mimeographs/mode', 'deliberation.mimeographs.mode', 'S5');
   reject(normalized.mimeographPersonalityRefs !== undefined, 'vendored-mimeograph-personalities-unbound', 'deliberation/mimeographs/personalityRefs', 'deliberation.mimeographs.personalityRefs', 'S5');
-  reject(normalized.billingMode !== undefined, 'vendored-billing-mode-unbound', 'billingMode', 'billingMode', 'S4');
-  reject(normalized.maxTokens !== undefined, 'vendored-token-budget-unbound', 'budget/maxTokens', 'budget.maxTokens', 'S4');
+  // billingMode and budget.* are UPSTREAM-BOUND: Kady's budget admission on
+  // POST /pipelines/:name/run enforces the token/cost envelope and resolved-auth
+  // billing gate before this engine is ever started. The engine additionally
+  // maps budget.maxCostUsd onto node.maxBudgetUsd where the provider supports
+  // it, but absence of an engine-side binding is not fail-closed here.
 }
 
 export function validateVendoredNodeSpecSemantics(
@@ -352,9 +355,6 @@ export function validateVendoredNodeSpecSemantics(
       }
       if (settings.reasoningEffort !== undefined) {
         issue(issues, 'vendored-slotless-reasoning', `${nodePath}/settings/reasoningEffort`, 'This node has no vendored reasoning slot.', 'S4');
-      }
-      if (settings.budget?.maxCostUsd !== undefined) {
-        issue(issues, 'vendored-slotless-cost-budget', `${nodePath}/settings/budget/maxCostUsd`, 'This node has no provider cost-control slot.', 'S4');
       }
       return;
     }
@@ -379,19 +379,6 @@ export function validateVendoredNodeSpecSemantics(
           'S4'
         );
       }
-    }
-    if (
-      settings.budget?.maxCostUsd !== undefined &&
-      binding.provider !== undefined &&
-      binding.provider !== 'claude'
-    ) {
-      issue(
-        issues,
-        'vendored-cost-budget-unbound',
-        `${nodePath}/settings/budget/maxCostUsd`,
-        `Provider '${binding.provider ?? 'implicit'}' has no existing maxBudgetUsd cost-control capability.`,
-        'S4'
-      );
     }
   });
   return issues;

@@ -21,27 +21,27 @@ values until that Wave B unit binds the field.
 | `model` | BOUND — primary/inherited model slot only; ambiguous compound configurations and deterministic Lean verify nodes fail validation |
 | `model.requested.auth.kind` | BOUND — existing provider/auth resolution |
 | `reasoningEffort` | BOUND — authoritative for every effective model/evidence-evaluator slot, including the hosted Fusion router, panel, duplicate judge slots, receipts, accounting definition, and provider request; rejected when slotless |
-| `hyperparameters.temperature` | FAIL-CLOSED(S4) |
-| `hyperparameters.top_p` | FAIL-CLOSED(S4) |
-| `hyperparameters.sampling` | FAIL-CLOSED(S4) |
-| `conditions.when` | FAIL-CLOSED(S4) |
-| `conditions.exists` | FAIL-CLOSED(S4) |
-| `harness` | FAIL-CLOSED(S4) |
-| `databases` | FAIL-CLOSED(S4) |
-| `skills.mode` | FAIL-CLOSED(S4) |
-| `skills.list` | FAIL-CLOSED(S4) — no per-node list binding exists in this runtime |
-| `subagents.mode` | FAIL-CLOSED(S4) |
-| `autonomy` | FAIL-CLOSED(S4) |
+| `hyperparameters.temperature` | BOUND — provider request sampling |
+| `hyperparameters.top_p` | BOUND — provider request sampling |
+| `hyperparameters.sampling` | BOUND — provider request sampling map |
+| `conditions.when` | BOUND — pre-admission boolean evaluator |
+| `conditions.exists` | BOUND — sandbox-safe path/named-input gate |
+| `harness` | BOUND — Pi dispatch; explicit unavailable/unbound CLI errors |
+| `databases` | BOUND — per-node execution context |
+| `skills.mode` | BOUND — Pi child skill selection |
+| `skills.list` | BOUND — Pi child skill selection |
+| `subagents.mode` | BOUND — node subagent policy context |
+| `autonomy` | BOUND — child tool/subagent access gate |
 | `deliberation.personalityStoreRef` | BOUND — selects a server-only, Pi-invisible scientific-agents snapshot verified against an administratively pinned commit and content-manifest SHA-256; the run receipts that exact snapshot before provider dispatch |
 | `deliberation.bestOfNPersonalityCount` | BOUND — deterministic task matching selects exactly this many personality profiles |
 | `deliberation.mimeographs.mode` | BOUND — auto selects across the store; manual uses the authored roster in order |
 | `deliberation.mimeographs.personalityRefs` | BOUND — exact unique manual staffing roster, matched against the installed store before execution |
-| `billingMode` | FAIL-CLOSED(S4) |
+| `billingMode` | BOUND — resolved-auth admission gate |
 | `budget.maxTokens` | BOUND — budget admission |
 | `budget.maxCostUsd` | BOUND — budget admission |
 | Workflow `settings.version` | BOUND — schema discriminator |
-| Workflow `settings.defaultHarness` | FAIL-CLOSED(S4) |
-| Workflow `settings.databases` | FAIL-CLOSED(S4) |
+| Workflow `settings.defaultHarness` | BOUND — inherited harness dispatch |
+| Workflow `settings.databases` | BOUND — inherited node execution context |
 
 ## Per-node fields
 

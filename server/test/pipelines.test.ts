@@ -46,6 +46,7 @@ function settingsWorkflow(settings: Record<string, unknown>) {
   return {
     workflow: {
       name: "research",
+      description: "Research",
       limits: { maxTokens: 10_000, maxCostUsd: 10 },
       nodes: [{ id: "search", prompt: "Search", settings }],
     },
@@ -247,7 +248,7 @@ describe("Tier A S4 dual-shape pipeline admission", () => {
   });
 });
 
-describe.skip("POST-INTEGRATION(S4) settings-bearing vendored loader", () => {
+describe("POST-INTEGRATION(S4) settings-bearing vendored loader", () => {
   it("round-trips S3 settings and admits every executable node", async () => {
     const { parseWorkflow } = await import("../vendor/pipeline-engine/packages/workflows/src/loader.ts");
     (globalThis as unknown as { Bun: { YAML: { parse: typeof JSON.parse } } }).Bun = {

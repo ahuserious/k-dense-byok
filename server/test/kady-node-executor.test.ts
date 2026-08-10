@@ -701,7 +701,7 @@ describe("production Kady DAG node executor", () => {
     });
   });
 
-  describe.skip("POST-INTEGRATION(S4) validation, persistence, and runner path", () => {
+  describe("POST-INTEGRATION(S4) validation, persistence, and runner path", () => {
     it("accepts, persists, and executes every S4 field through the validated graph", async () => {
       const node: WorkflowNode = {
         ...baseNode("agent"),
