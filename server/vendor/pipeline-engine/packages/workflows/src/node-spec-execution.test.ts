@@ -25,12 +25,20 @@ mock.module('@archon/paths', () => ({
   getArchonHome: () => '/nonexistent/home',
 }));
 
-import { clearRegistry, registerBuiltinProviders } from '@archon/providers';
+import {
+  clearRegistry,
+  registerBuiltinProviders,
+  registerCommunityProviders,
+} from '@archon/providers';
 import type { SendQueryOptions } from '@archon/providers/types';
-import { executeDagWorkflow } from './dag-executor';
+import { buildNodeAdapterConfig, executeDagWorkflow } from './dag-executor';
+import {
+  resolveVendoredNodeSpecRuntimeBinding,
+  validateVendoredNodeSpecSemantics,
+} from './node-spec-enforcement';
 import type { IWorkflowPlatform, WorkflowConfig, WorkflowDeps } from './deps';
 import type { IWorkflowStore } from './store';
-import type { WorkflowRun } from './schemas';
+import type { DagNode, NodeRequestedModel, WorkflowRun } from './schemas';
 
 function createStore(): IWorkflowStore {
   return {
@@ -94,12 +102,38 @@ const config: WorkflowConfig = {
   },
 };
 
+type FixedRequestedModel = Extract<NodeRequestedModel, { source: 'fixed' }>;
+
+function createOpenRouterNode(
+  reasoning: FixedRequestedModel['reasoning'],
+  authKind: FixedRequestedModel['auth']['kind'] = 'api-key'
+): DagNode {
+  return {
+    id: `openrouter-${reasoning}`,
+    prompt: 'Analyze.',
+    settings: {
+      version: 1,
+      model: {
+        requested: {
+          source: 'fixed',
+          provider: 'openrouter',
+          model: 'openai/gpt-4o-mini',
+          auth: { kind: authKind },
+          reasoning,
+        },
+        resolution: { mode: 'exact' },
+      },
+    },
+  };
+}
+
 describe('vendored NodeSpec execution bindings', () => {
   let runDir: string;
 
   beforeEach(async () => {
     clearRegistry();
     registerBuiltinProviders();
+    registerCommunityProviders();
     runDir = join(tmpdir(), `nodespec-execution-${crypto.randomUUID()}`);
     await mkdir(join(runDir, 'artifacts'), { recursive: true });
     await mkdir(join(runDir, 'logs'), { recursive: true });
@@ -209,6 +243,123 @@ describe('vendored NodeSpec execution bindings', () => {
     expect(capturedOptions?.env?.CLAUDE_CODE_OAUTH_TOKEN).toBe('oauth-token-must-remain');
     expect(capturedOptions?.nodeConfig?.auth).toEqual({ kind: 'oauth' });
     expect(capturedOptions?.nodeConfig?.effort).toBe('max');
+  });
+
+  test('OpenRouter NodeSpec maps exactly onto the Pi provider adapter', async () => {
+    const node = createOpenRouterNode('high');
+
+    expect(validateVendoredNodeSpecSemantics({ nodes: [node] })).toEqual([]);
+    const binding = resolveVendoredNodeSpecRuntimeBinding(node, 'claude');
+    expect(binding).toEqual({
+      provider: 'pi',
+      model: 'openrouter/openai/gpt-4o-mini',
+      auth: { kind: 'api-key' },
+      reasoning: 'high',
+    });
+    const nodeConfig = buildNodeAdapterConfig(node, {}, binding);
+    expect(nodeConfig.auth).toEqual({ kind: 'api-key' });
+    expect(nodeConfig.effort).toBe('high');
+
+    let capturedOptions: SendQueryOptions | undefined;
+    const sendQuery = mock(async function* (
+      _prompt: string,
+      _cwd: string,
+      _resumeSessionId?: string,
+      options?: SendQueryOptions
+    ) {
+      capturedOptions = options;
+      yield { type: 'assistant' as const, content: 'Mapped response.' };
+      yield { type: 'result' as const, sessionId: 'openrouter-session' };
+    });
+    const getAgentProvider = mock((provider: string) => ({
+      sendQuery,
+      getType: () => provider,
+      getCapabilities: () => ({
+        sessionResume: true,
+        mcp: false,
+        hooks: false,
+        skills: true,
+        agents: false,
+        toolRestrictions: true,
+        structuredOutput: 'best-effort' as const,
+        envInjection: true,
+        costControl: false,
+        effortControl: true,
+        thinkingControl: true,
+        fallbackModel: false,
+        sandbox: false,
+        nativeTools: true,
+      }),
+    }));
+    const openRouterConfig: WorkflowConfig = {
+      ...config,
+      assistants: { ...config.assistants, pi: {} },
+      envVars: { OPENROUTER_API_KEY: 'per-run-openrouter-key' },
+    };
+    const deps: WorkflowDeps = {
+      store: createStore(),
+      getAgentProvider,
+      loadConfig: mock(async () => openRouterConfig),
+    };
+
+    await executeDagWorkflow(
+      deps,
+      createPlatform(),
+      'conversation-id',
+      runDir,
+      { name: 'openrouter-mapping', nodes: [node] },
+      createWorkflowRun(),
+      'claude',
+      undefined,
+      join(runDir, 'artifacts'),
+      join(runDir, 'logs'),
+      'main',
+      'docs/',
+      openRouterConfig
+    );
+
+    expect(getAgentProvider.mock.calls[0]?.[0]).toBe('pi');
+    expect(capturedOptions?.model).toBe('openrouter/openai/gpt-4o-mini');
+    expect(capturedOptions?.env?.OPENROUTER_API_KEY).toBe('per-run-openrouter-key');
+    expect(capturedOptions?.nodeConfig?.auth).toEqual({ kind: 'api-key' });
+    expect(capturedOptions?.nodeConfig?.effort).toBe('high');
+  });
+
+  test('OpenRouter reasoning off omits the Pi effort override', () => {
+    const node: DagNode = { ...createOpenRouterNode('off'), effort: 'max' };
+
+    expect(validateVendoredNodeSpecSemantics({ nodes: [node] })).toEqual([]);
+    const binding = resolveVendoredNodeSpecRuntimeBinding(node, 'claude');
+    expect(binding.provider).toBe('pi');
+    expect(binding.model).toBe('openrouter/openai/gpt-4o-mini');
+    expect(buildNodeAdapterConfig(node, {}, binding).effort).toBeUndefined();
+  });
+
+  test('OpenRouter reasoning levels map onto Pi-native effort values', () => {
+    const cases = [
+      ['minimal', 'minimal'],
+      ['low', 'low'],
+      ['medium', 'medium'],
+      ['high', 'high'],
+      ['xhigh', 'xhigh'],
+      ['max', 'xhigh'],
+    ] as const;
+
+    for (const [reasoning, expectedEffort] of cases) {
+      const node = createOpenRouterNode(reasoning);
+
+      expect(validateVendoredNodeSpecSemantics({ nodes: [node] })).toEqual([]);
+      const binding = resolveVendoredNodeSpecRuntimeBinding(node, 'claude');
+      expect(buildNodeAdapterConfig(node, {}, binding).effort).toBe(expectedEffort);
+    }
+  });
+
+  test('OpenRouter validation rejects auth kinds its Pi backend cannot consume', () => {
+    const node = createOpenRouterNode('high', 'oauth');
+
+    expect(
+      validateVendoredNodeSpecSemantics({ nodes: [node] }).map(issue => issue.code)
+    ).toContain('vendored-openrouter-auth-unbound');
   });
 
   test('a zero NodeSpec USD ceiling stops before provider construction or spend', async () => {
