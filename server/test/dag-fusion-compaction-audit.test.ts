@@ -13,6 +13,7 @@ import {
   dagFusionCompactionAuditPath,
   installDagFusionCompactionAudit,
   readTrustedDagFusionCompactionAudit,
+  readTrustedDagFusionCompactionRecords,
 } from "../pi-packages/dag-fusion-drive/compaction-audit.ts";
 
 const temporaryRoots: string[] = [];
@@ -133,6 +134,27 @@ describe("dag-fusion-drive child compaction audit", () => {
     ]) {
       expect(raw).not.toContain(secret);
     }
+  });
+
+  it("persists a separate bounded semantic record for the production watcher feed", () => {
+    const root = temporaryRoot();
+    const audit = childAudit(root, "semantic-child-run");
+    audit.before(beforeEvent());
+    audit.after(afterEvent());
+
+    expect(readTrustedDagFusionCompactionRecords(root, audit.runId)).toEqual([
+      expect.objectContaining({
+        version: 1,
+        runId: audit.runId,
+        attempt: 1,
+        compactedSummary: "new-summary-top-secret",
+        userPrompt: "transcript-top-secret",
+        goal: "transcript-top-secret",
+        openTodos: [],
+      }),
+    ]);
+    expect(readTrustedDagFusionCompactionRecords(root, audit.runId)[0]
+      .preCompactionRecord).toContain("transcript-top-secret");
   });
 
   it("cancels and attests an invalid pre-compaction shape", () => {

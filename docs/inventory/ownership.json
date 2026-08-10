@@ -114,7 +114,11 @@
       "web/src/lib/prompt-opt*.ts"
     ],
     "S7": [
+      "server/src/index.ts",
+      "server/src/api/context-engineering.ts",
       "server/src/agent/dag-fusion-bridge.ts",
+      "server/src/agent/session-registry.ts",
+      "server/pi-packages/dag-fusion-drive/compaction-audit.ts",
       "web/src/components/context-usage-indicator.tsx",
       "server/src/workflows/context-watcher*.ts",
       "server/src/workflows/compaction-watcher*.ts",
