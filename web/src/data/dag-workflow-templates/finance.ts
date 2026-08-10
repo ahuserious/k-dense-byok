@@ -189,6 +189,6 @@ export const FINANCE_WORKFLOW_TEMPLATES = [
       ],
     },
     synthesisPrompt:
-      "Draft an educational deal-thesis analysis with a provisional recommendation framework, confidence drivers, terms considerations, missing diligence, risks, dissent, and limitations. Do not claim verified metrics or produced deliverables.",
+      "Draft an educational deal-thesis analysis with a provisional recommendation framework, confidence drivers, terms considerations, missing diligence, risks, dissent, and limitations. Do not claim independently confirmed metrics or produced deliverables.",
   },
 ] as const satisfies readonly ScientificWorkflowTemplateDefinition[];

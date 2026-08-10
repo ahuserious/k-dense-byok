@@ -269,8 +269,8 @@ function mathematicalResearchNodes(): WorkflowGraphNode[] {
     },
     {
       id: "report-mathematical-result",
-      name: "Report the Verified Result",
-      description: "Separate the machine-checked theorem from the broader research claim and remaining uncertainty.",
+      name: "Report the Proposed Formalization",
+      description: "Report the proposed, unverified formalization, its assumptions, and remaining review gaps.",
       kind: "agent",
       terminal: true,
       workspace: readOnlyWorkspace(),

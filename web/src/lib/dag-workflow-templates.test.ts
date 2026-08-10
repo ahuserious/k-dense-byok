@@ -11,6 +11,8 @@ import {
 
 const BANNED_UNAVAILABLE_CAPABILITY_VERBS =
   /\b(fetch|download|backtest|train|execute|write-file|query-database)\b/i;
+const FORMAL_VERIFICATION_CLAIM =
+  /\b(verified|machine-checked|proven|proof-checked)\b/i;
 
 function modelRequests(graph: WorkflowGraphDocument): WorkflowModelRequest[] {
   const requests = graph.defaultModel ? [graph.defaultModel] : [];
@@ -210,4 +212,27 @@ describe("native DAG workflow templates", () => {
     }
     expect(graph.nodes.some((node) => node.kind === "lean4")).toBe(false);
   });
+
+  it.each(DAG_WORKFLOW_TEMPLATES)(
+    "does not make formal-verification claims in $id metadata without a Lean 4 verifier",
+    (template) => {
+      const graph = createDagWorkflowTemplateGraph(
+        template.id,
+        template.suggestedWorkflowId,
+        template.name,
+      );
+      const hasLeanVerifier = graph.nodes.some((node) => node.kind === "lean4");
+      const metadata = [
+        template.name,
+        template.description,
+        graph.name,
+        graph.description ?? "",
+        ...graph.nodes.flatMap((node) => [node.name, node.description ?? ""]),
+      ].join("\n");
+
+      if (!hasLeanVerifier) {
+        expect(metadata).not.toMatch(FORMAL_VERIFICATION_CLAIM);
+      }
+    },
+  );
 });

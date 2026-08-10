@@ -20,7 +20,7 @@ export const LITERATURE_WORKFLOW_TEMPLATES = [
       "Every user-provided reference is labeled with available title, authors, year, venue, and identifier fields; missing fields remain unverified.",
     ],
     analysisPrompt:
-      "Design relevance-ranking, study-type classification, extraction, thematic clustering, consensus, controversy, conflict, and gap-analysis steps. Interpret user-provided references only, and keep proposed bibliography fields separate from verified material.",
+      "Design relevance-ranking, study-type classification, extraction, thematic clustering, consensus, controversy, conflict, and gap-analysis steps. Interpret user-provided references only, and keep proposed bibliography fields separate from independently confirmed material.",
     deliberation: {
       kind: "fusion",
       goal: "Fuse independent database and query-plan perspectives, propose deduplication rules, and identify likely coverage gaps without inventing references.",
@@ -162,7 +162,7 @@ export const LITERATURE_WORKFLOW_TEMPLATES = [
     suggestedWorkflowId: "citation-analysis",
     name: "Citation Analysis Plan",
     description:
-      "Plan bibliometric trajectory and network analysis without claiming database access or verified citation metrics.",
+      "Plan bibliometric trajectory and network analysis without claiming database access or independently confirmed citation metrics.",
     category: "literature",
     domain: "Literature & Research",
     requiredInputs: [{ key: "topic", label: "Research topic or set of papers" }],

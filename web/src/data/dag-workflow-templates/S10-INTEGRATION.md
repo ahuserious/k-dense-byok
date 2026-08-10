@@ -7,11 +7,17 @@ the validation logic into the server: import
 `web/src/data/dag-workflow-templates/types.ts` so client and server decisions
 remain identical.
 
+Merge-time edit anchors:
+
+- Schema — `server/src/workflows/schema.ts`: in `WorkflowGraphDocumentSchema`, immediately after `artifacts`, add `preconditions: Type.Optional(ScientificWorkflowPreconditionsSchema)`.
+- Admission — `server/src/api/dag-workflows.ts`: in `POST /dag-workflows/:workflowId/runs`, validate persisted preconditions immediately before `const manifest = workflowStore.createRun(currentProjectId(), {`.
+- Typed-run UI — `web/src/components/dag-workflows-panel.tsx`: immediately before `aria-label="Typed workflow run goal"`, render required variables/files and validate them before launch.
+
 ## 1. Persist one graph field
 
-In `server/src/workflows/schema.ts`, define schemas matching
-`ScientificWorkflowPreconditions` and add exactly one optional field to
-`WorkflowGraphDocumentSchema`:
+**Anchored edit:** in `server/src/workflows/schema.ts`, inside
+`WorkflowGraphDocumentSchema` immediately after its `artifacts` property, add
+exactly one graph-schema field:
 
 ```ts
 preconditions: Type.Optional(ScientificWorkflowPreconditionsSchema),
@@ -37,9 +43,9 @@ migrated.
 
 ## 2. Reject before `createRun`
 
-In `server/src/api/dag-workflows.ts`, insert one admission check in
-`POST /dag-workflows/:workflowId/runs` after request-body shape validation and
-before `workflowStore.createRun(...)`:
+**Anchored edit:** in `server/src/api/dag-workflows.ts`, inside
+`POST /dag-workflows/:workflowId/runs`, insert the admission check immediately
+before `const manifest = workflowStore.createRun(currentProjectId(), {`:
 
 1. Read the saved definition with `workflowStore.readDefinition(projectId,
    workflowId)` and use `definition.graph.preconditions` when present.
@@ -69,7 +75,16 @@ const issues = validateScientificWorkflowTemplatePreconditions(
 This ordering is the admission contract: empty goals, absent required uploads,
 and missing required variables fail before any run state exists.
 
-## 3. Post-integration tests
+## 3. Render required inputs in the typed-run panel
+
+**Anchored edit:** in `web/src/components/dag-workflows-panel.tsx`, immediately
+before the control with `aria-label="Typed workflow run goal"`, render the
+selected definition's `graph.preconditions.requiredInputs` and
+`graph.preconditions.requiredFiles`, collect required variables into
+`input.variables`, and block submission with the shared validator when any
+displayed requirement is absent.
+
+## 4. Post-integration tests
 
 `server/test/dag-workflow-templates.test.ts` contains the skipped suite
 `POST-INTEGRATION(S10)`. At merge,
