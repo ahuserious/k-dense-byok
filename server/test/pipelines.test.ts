@@ -251,6 +251,10 @@ describe("Tier A S4 dual-shape pipeline admission", () => {
 describe("POST-INTEGRATION(S4) settings-bearing vendored loader", () => {
   it("round-trips S3 settings and admits every executable node", async () => {
     const { parseWorkflow } = await import("../vendor/pipeline-engine/packages/workflows/src/loader.ts");
+    // Mirror engine boot: providers register before any workflow parses.
+    const { registerBuiltinProviders, registerCommunityProviders } = await import("../vendor/pipeline-engine/packages/providers/src/index.ts");
+    registerBuiltinProviders();
+    registerCommunityProviders();
     (globalThis as unknown as { Bun: { YAML: { parse: typeof JSON.parse } } }).Bun = {
       YAML: { parse: JSON.parse },
     };
