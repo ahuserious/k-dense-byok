@@ -58,7 +58,7 @@ function expectValidTemplateTopology(graph: WorkflowGraphDocument) {
 
 describe("native DAG workflow templates", () => {
   it("publishes explicit K-Dense domain and category metadata", () => {
-    expect(DAG_WORKFLOW_TEMPLATES).toEqual([
+    expect(DAG_WORKFLOW_TEMPLATES).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: "ml-model-selection-review",
         category: "ml",
@@ -74,7 +74,20 @@ describe("native DAG workflow templates", () => {
         category: "ml",
         domain: "Machine Learning & AI",
       }),
-    ]);
+    ]));
+  });
+
+  it("covers twenty source workflows across finance, ML, and literature", () => {
+    const sourceTemplates = DAG_WORKFLOW_TEMPLATES.filter(
+      (template) => "sourceWorkflowId" in template,
+    );
+    expect(sourceTemplates).toHaveLength(20);
+    expect(
+      sourceTemplates.reduce<Record<string, number>>((counts, template) => {
+        counts[template.category] = (counts[template.category] ?? 0) + 1;
+        return counts;
+      }, {}),
+    ).toEqual({ finance: 6, ml: 7, literature: 7 });
   });
 
   it.each(DAG_WORKFLOW_TEMPLATES)(
@@ -94,9 +107,13 @@ describe("native DAG workflow templates", () => {
         rescue: { enabled: true, maxAttempts: 2 },
         evidence: { enabled: true, onUnsupportedOutput: "rescue" },
       });
-      expect(graph.nodes.find((node) => node.kind === "best-of-n")).toMatchObject({
-        candidateCount: 2,
-      });
+      const deliberationNode = graph.nodes.find((node) =>
+        ["best-of-n", "council", "fusion"].includes(node.kind)
+      );
+      expect(deliberationNode).toBeDefined();
+      if (deliberationNode?.kind === "best-of-n") {
+        expect(deliberationNode).toMatchObject({ candidateCount: 2 });
+      }
       expect(graph.nodes.find((node) => node.kind === "evidence-gate")).toMatchObject({
         terminal: false,
         onUnsupportedOutput: "rescue",

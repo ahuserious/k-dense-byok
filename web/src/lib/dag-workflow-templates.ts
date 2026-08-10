@@ -4,16 +4,26 @@ import type {
   WorkflowGraphNode,
 } from "@/lib/dag-workflows";
 import {
+  SCIENTIFIC_WORKFLOW_TEMPLATES,
+  type ScientificWorkflowTemplateCategory,
+  type ScientificWorkflowTemplateDomain,
+} from "../data/dag-workflow-templates";
+import {
   LEAN4_PROOF_EVIDENCE,
   createDefaultWorkflowGraph,
   createKadyPanelFusionConfiguration,
   exactKadyCurrentModel,
-} from "@/lib/dag-workflow-builder";
+} from "./dag-workflow-builder";
+import { createScientificWorkflowTemplateNodes } from "./workflow-library-template-builder";
 
-export type DagWorkflowTemplateCategory = "ml" | "data";
+export type DagWorkflowTemplateCategory =
+  | "ml"
+  | "data"
+  | ScientificWorkflowTemplateCategory;
 export type DagWorkflowTemplateDomain =
   | "Machine Learning & AI"
-  | "Data & Analysis";
+  | "Data & Analysis"
+  | ScientificWorkflowTemplateDomain;
 
 export interface DagWorkflowTemplateMetadata {
   id: string;
@@ -22,6 +32,7 @@ export interface DagWorkflowTemplateMetadata {
   description: string;
   category: DagWorkflowTemplateCategory;
   domain: DagWorkflowTemplateDomain;
+  sourceWorkflowId?: string;
 }
 
 export const DAG_WORKFLOW_TEMPLATES = [
@@ -52,6 +63,7 @@ export const DAG_WORKFLOW_TEMPLATES = [
     category: "ml",
     domain: "Machine Learning & AI",
   },
+  ...SCIENTIFIC_WORKFLOW_TEMPLATES,
 ] as const satisfies readonly DagWorkflowTemplateMetadata[];
 
 export type DagWorkflowTemplateId = (typeof DAG_WORKFLOW_TEMPLATES)[number]["id"];
@@ -329,11 +341,16 @@ export function createDagWorkflowTemplateGraph(
     workflowName,
     description ?? template.description,
   );
-  const nodes = template.id === "ml-model-selection-review"
-    ? mlModelSelectionNodes()
-    : template.id === "reproducible-data-analysis"
-      ? reproducibleDataAnalysisNodes()
-      : mathematicalResearchNodes();
+  const scientificTemplate = SCIENTIFIC_WORKFLOW_TEMPLATES.find(
+    (candidate) => candidate.id === template.id,
+  );
+  const nodes = scientificTemplate
+    ? createScientificWorkflowTemplateNodes(scientificTemplate)
+    : template.id === "ml-model-selection-review"
+      ? mlModelSelectionNodes()
+      : template.id === "reproducible-data-analysis"
+        ? reproducibleDataAnalysisNodes()
+        : mathematicalResearchNodes();
 
   return {
     ...base,

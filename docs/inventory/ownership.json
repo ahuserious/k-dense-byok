@@ -150,7 +150,9 @@
     "S10": [
       "web/src/components/workflows-panel.tsx",
       "web/src/data/workflows.json",
+      "web/src/data/dag-workflow-templates/**",
       "web/src/lib/dag-workflow-templates.ts",
+      "server/test/dag-workflow-templates.test.ts",
       "web/src/components/workflow-library*.tsx",
       "web/src/lib/workflow-library*.ts"
     ],
