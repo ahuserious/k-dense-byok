@@ -13,9 +13,18 @@ function readOnlyWorkspace() {
   return { ...READ_ONLY_WORKSPACE, writePaths: [] };
 }
 
+function executionBoundary(
+  definition: ScientificWorkflowTemplateDefinition,
+): string {
+  return definition.executionMode === "prompt-analysis-only"
+    ? "Runtime boundary: perform prompt-driven analysis, planning, code generation for human review, or interpretation of user-supplied results only. Do not claim to execute training, evaluation, or other compute, and label generated code as unexecuted. "
+    : "";
+}
+
 function deliberationNode(
   definition: ScientificWorkflowTemplateDefinition,
 ): WorkflowGraphNode {
+  const boundedGoal = `${executionBoundary(definition)}${definition.deliberation.goal}`;
   const common = {
     id: "deliberate",
     name: "Deliberate and Challenge",
@@ -30,7 +39,7 @@ function deliberationNode(
     return {
       ...common,
       kind: "best-of-n",
-      goal: definition.deliberation.goal,
+      goal: boundedGoal,
       candidateCount: 2,
       model: exactKadyCurrentModel(),
       evaluator: exactKadyCurrentModel(),
@@ -47,7 +56,7 @@ function deliberationNode(
     return {
       ...common,
       kind: "council",
-      goal: definition.deliberation.goal,
+      goal: boundedGoal,
       members,
       chair: exactKadyCurrentModel(),
       rounds: 2,
@@ -58,7 +67,7 @@ function deliberationNode(
   return {
     ...common,
     kind: "fusion",
-    goal: definition.deliberation.goal,
+    goal: boundedGoal,
     fusion: {
       mode: "kady-panel",
       members,
@@ -72,6 +81,8 @@ function deliberationNode(
 export function createScientificWorkflowTemplateNodes(
   definition: ScientificWorkflowTemplateDefinition,
 ): WorkflowGraphNode[] {
+  const runtimeBoundary = executionBoundary(definition);
+
   return [
     {
       id: "research",
@@ -82,7 +93,7 @@ export function createScientificWorkflowTemplateNodes(
       terminal: false,
       workspace: readOnlyWorkspace(),
       position: { x: 80, y: 120 },
-      goal: definition.researchGoal,
+      goal: `${runtimeBoundary}${definition.researchGoal}`,
       completionCriteria: [...definition.completionCriteria],
       model: exactKadyCurrentModel(),
       limits: { maxIterations: 6, maxModelCalls: 7, maxSubagents: 4 },
@@ -96,7 +107,7 @@ export function createScientificWorkflowTemplateNodes(
       terminal: false,
       workspace: readOnlyWorkspace(),
       position: { x: 400, y: 120 },
-      prompt: definition.analysisPrompt,
+      prompt: `${runtimeBoundary}${definition.analysisPrompt}`,
       model: exactKadyCurrentModel(),
     },
     deliberationNode(definition),
@@ -109,34 +120,28 @@ export function createScientificWorkflowTemplateNodes(
       terminal: false,
       workspace: readOnlyWorkspace(),
       position: { x: 1040, y: 120 },
-      prompt: definition.synthesisPrompt,
+      prompt: `${runtimeBoundary}${definition.synthesisPrompt}`,
       model: exactKadyCurrentModel(),
-    },
-    {
-      id: "evidence-gate",
-      name: "Evidence Gate",
-      description:
-        "Reject unsupported claims, fabricated references, and unearned completion claims before reporting.",
-      kind: "evidence-gate",
-      terminal: false,
-      workspace: readOnlyWorkspace(),
-      position: { x: 1360, y: 120 },
-      checks: ["citations", "claim-support", "unsupported-output"],
-      artifactIds: [],
-      evaluator: exactKadyCurrentModel(),
-      onUnsupportedOutput: "rescue",
+      // Gate this payload in place so the final reporter receives the reviewed
+      // synthesis itself rather than a standalone gate node's decision record.
+      evidence: {
+        enabled: true,
+        minimumIndependentSources: 0,
+        requireArtifactReferences: false,
+        onUnsupportedOutput: "rescue",
+        evaluator: exactKadyCurrentModel(),
+      },
     },
     {
       id: "final-report",
       name: "Report Supported Result",
       description:
-        "Return only claims and deliverables that survived the evidence gate.",
+        "Consume the evidence-approved candidate result directly and report only supported conclusions.",
       kind: "agent",
       terminal: true,
       workspace: readOnlyWorkspace(),
-      position: { x: 1680, y: 120 },
-      prompt:
-        "Revise the candidate result using only evidence that passed the gate. Preserve material uncertainty and dissent, distinguish completed work from proposed work, name every verified artifact path, and state missing inputs and limitations.",
+      position: { x: 1360, y: 120 },
+      prompt: `${runtimeBoundary}Use the directly received evidence-approved candidate result as the report's substantive input. Preserve material uncertainty and dissent, distinguish completed work from proposed work, name only verified artifact paths, and state missing inputs and limitations.`,
       model: exactKadyCurrentModel(),
     },
   ];

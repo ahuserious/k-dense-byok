@@ -8,6 +8,7 @@ import {
   DAG_WORKFLOW_TEMPLATES,
   createDagWorkflowTemplateGraph,
 } from "./dag-workflow-templates";
+import { MACHINE_LEARNING_WORKFLOW_TEMPLATES } from "../data/dag-workflow-templates/machine-learning";
 
 function modelRequests(graph: WorkflowGraphDocument): WorkflowModelRequest[] {
   const requests = graph.defaultModel ? [graph.defaultModel] : [];
@@ -52,8 +53,20 @@ function expectValidTemplateTopology(graph: WorkflowGraphDocument) {
   expect(graph.nodes.filter((node) => node.terminal)).toHaveLength(1);
   expect(graph.nodes.at(-1)?.terminal).toBe(true);
   expect(graph.edges).toHaveLength(graph.nodes.length - 1);
-  expect(graph.edges.at(-1)?.condition).toBe("evidence-supported");
-  expect(nodeById.get(graph.edges.at(-1)!.from)?.kind).toBe("evidence-gate");
+  const finalNode = graph.nodes.at(-1)!;
+  const finalInputEdges = graph.edges.filter((edge) => edge.to === finalNode.id);
+  expect(finalInputEdges).toHaveLength(1);
+  expect(finalInputEdges[0].condition).toBe("always");
+  const evidenceReviewedNode = nodeById.get(finalInputEdges[0].from);
+  expect(evidenceReviewedNode?.evidence).toMatchObject({
+    enabled: true,
+    minimumIndependentSources: 0,
+    onUnsupportedOutput: "rescue",
+  });
+  expect(reachable.has(evidenceReviewedNode!.id)).toBe(true);
+  expect(graph.edges.some((edge) =>
+    edge.from === evidenceReviewedNode!.id && edge.to === finalNode.id
+  )).toBe(true);
 }
 
 describe("native DAG workflow templates", () => {
@@ -114,10 +127,8 @@ describe("native DAG workflow templates", () => {
       if (deliberationNode?.kind === "best-of-n") {
         expect(deliberationNode).toMatchObject({ candidateCount: 2 });
       }
-      expect(graph.nodes.find((node) => node.kind === "evidence-gate")).toMatchObject({
-        terminal: false,
-        onUnsupportedOutput: "rescue",
-      });
+      expect(graph.evidence.minimumIndependentSources).toBe(0);
+      expect(graph.nodes.some((node) => node.kind === "evidence-gate")).toBe(false);
       for (const node of graph.nodes) {
         if (node.kind === "research-until-goal") {
           expect(node.limits).toMatchObject({
@@ -151,6 +162,35 @@ describe("native DAG workflow templates", () => {
     expect(graph.description).toBe(template.description);
   });
 
+  it.each(MACHINE_LEARNING_WORKFLOW_TEMPLATES)(
+    "keeps $id within prompt-only runtime capabilities",
+    (template) => {
+      expect(template.executionMode).toBe("prompt-analysis-only");
+      const graph = createDagWorkflowTemplateGraph(
+        template.id,
+        template.suggestedWorkflowId,
+        template.name,
+      );
+      const modelInstructions = graph.nodes.flatMap((node) => {
+        if (node.kind === "agent") return [node.prompt];
+        if (
+          node.kind === "research-until-goal" ||
+          node.kind === "best-of-n" ||
+          node.kind === "council" ||
+          node.kind === "fusion"
+        ) {
+          return [node.goal];
+        }
+        return [];
+      });
+      expect(modelInstructions).not.toHaveLength(0);
+      for (const instruction of modelInstructions) {
+        expect(instruction).toContain("Runtime boundary:");
+        expect(instruction).toContain("Do not claim to execute training, evaluation, or other compute");
+      }
+    },
+  );
+
   it("ships a bounded byom-dag-fusion research path with trusted Lean verification", () => {
     const graph = createDagWorkflowTemplateGraph(
       "byom-dag-fusion-mathematical-research",
@@ -162,7 +202,6 @@ describe("native DAG workflow templates", () => {
       "research-until-goal",
       "best-of-n",
       "lean4",
-      "evidence-gate",
       "agent",
     ]);
     expect(graph.nodes.find((node) => node.kind === "lean4")).toMatchObject({

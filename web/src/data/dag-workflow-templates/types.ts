@@ -32,4 +32,5 @@ export interface ScientificWorkflowTemplateDefinition {
   analysisPrompt: string;
   deliberation: ScientificWorkflowDeliberation;
   synthesisPrompt: string;
+  executionMode?: "prompt-analysis-only";
 }
