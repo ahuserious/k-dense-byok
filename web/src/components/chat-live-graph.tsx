@@ -372,23 +372,22 @@ interface PollingOptions {
   awaitErrorRouting?: boolean;
   finalizationWindowMs?: number;
   waitForReplacementOfRunId?: string;
-  launchWindowMs?: number;
+  chatTurnActive?: boolean;
 }
 
 /**
  * In-process timer polling. Interrupted runs remain resumable. A new chat turn
- * can briefly retain the prior terminal association, so replacement polling is
- * bounded while that post-admission write lands. When the chat SSE has already
- * failed, an error-less terminal snapshot is held briefly so the durable
- * runs-index terminal row can land before the UI trusts it.
+ * can retain the prior terminal association throughout a long thinking/tooling
+ * phase, so replacement polling is bounded by the active chat-turn epoch. When
+ * the chat SSE has already failed, an error-less terminal snapshot is held
+ * briefly so the durable runs-index terminal row can land before the UI trusts
+ * it.
  */
 export function startChatRunStatePolling(options: PollingOptions): () => void {
   let cancelled = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let finalizationStartedAt: number | null = null;
-  const replacementWindowStartedAt = options.waitForReplacementOfRunId
-    ? Date.now()
-    : null;
+  let replacementRunId = options.waitForReplacementOfRunId;
   const poll = async () => {
     let projection: RunStateV1Projection | null = null;
     let fetchSucceeded = false;
@@ -399,13 +398,20 @@ export function startChatRunStatePolling(options: PollingOptions): () => void {
       if (!cancelled) options.onProjection(null);
     }
     const terminal = projection ? isTerminalRunState(projection.status) : false;
+    if (
+      options.chatTurnActive === true &&
+      terminal &&
+      projection &&
+      replacementRunId === undefined
+    ) {
+      replacementRunId = projection.runId;
+    }
     const waitingForReplacement = Boolean(
       projection &&
       terminal &&
-      replacementWindowStartedAt !== null &&
-      projection.runId === options.waitForReplacementOfRunId &&
-      Date.now() - replacementWindowStartedAt <
-        (options.launchWindowMs ?? 5_000),
+      options.chatTurnActive === true &&
+      replacementRunId !== undefined &&
+      projection.runId === replacementRunId,
     );
     const awaitingDurableError = Boolean(
       projection &&
@@ -438,6 +444,7 @@ export function useChatLiveGraphProjection(options: {
   sessionId: string | null;
   enabled: boolean;
   restartKey: string;
+  chatTurnActive: boolean;
   awaitErrorRouting: boolean;
 }): RunStateV1Projection | null {
   const [snapshot, setSnapshot] = useState<{
@@ -472,12 +479,16 @@ export function useChatLiveGraphProjection(options: {
         setSnapshot(nextSnapshot);
       },
       awaitErrorRouting: options.awaitErrorRouting,
-      ...(previousProjection && isTerminalRunState(previousProjection.status)
+      chatTurnActive: options.chatTurnActive,
+      ...(options.chatTurnActive &&
+      previousProjection &&
+      isTerminalRunState(previousProjection.status)
         ? { waitForReplacementOfRunId: previousProjection.runId }
         : {}),
     });
   }, [
     options.enabled,
+    options.chatTurnActive,
     options.awaitErrorRouting,
     options.projectId,
     options.restartKey,

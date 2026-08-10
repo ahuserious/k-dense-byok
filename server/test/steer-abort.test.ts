@@ -7,6 +7,16 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 
 const fakeSessions = new Map<string, FakeSession>();
+const fakeSessionBindings = new Map<
+  string,
+  {
+    version: 1;
+    projectId: string;
+    sessionId: string;
+    profile: "main" | "workflow-rescue";
+    source: null | { kind: "run"; id: string };
+  }
+>();
 
 class FakeSession {
   sessionId = "s1";
@@ -134,14 +144,16 @@ vi.mock("../src/agent/session-registry.ts", () => ({
   getSession: vi.fn(async (_projectId: string, _paths: unknown, id: string) =>
     fakeSessions.get(id) ?? null,
   ),
-  readSessionProfileBinding: vi.fn((paths: { id?: string }, sessionId: string) => ({
-    version: 1,
-    projectId: paths.id ?? "default",
-    sessionId,
-    profile: "main",
-    source: null,
-  })),
-  listSessions: vi.fn(async () => []),
+  readSessionProfileBinding: vi.fn((paths: { id?: string }, sessionId: string) =>
+    fakeSessionBindings.get(sessionId) ?? {
+      version: 1,
+      projectId: paths.id ?? "default",
+      sessionId,
+      profile: "main",
+      source: null,
+    }),
+  listSessions: vi.fn(async () =>
+    [...fakeSessionBindings.keys()].map((id) => ({ id }))),
   disposeSession: vi.fn(),
   pinSession: vi.fn(),
   unpinSession: vi.fn(),
@@ -158,12 +170,14 @@ import {
   latestChatTurnRun,
 } from "../src/agent/chat-turn-runs-adapter.ts";
 import { latestWorkflowRunAssociation } from "../src/agent/runs-index.ts";
+import { workflowStore } from "../src/workflows/index.ts";
 
 const app = await buildApp();
 const associationApp = await buildApp({ workflowController: null });
 
 beforeEach(() => {
   fakeSessions.clear();
+  fakeSessionBindings.clear();
   runBroker.clear();
   fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
   fs.mkdirSync(PROJECTS_ROOT, { recursive: true });
@@ -580,6 +594,96 @@ describe("persistent run routes", () => {
       },
     });
   });
+
+  it.each(["failed", "interrupted"] as const)(
+    "surfaces a running rescue companion for a %s parent projection",
+    async (parentStatus) => {
+      ensureProjectExists("default");
+      const saved = await associationApp.inject({
+        method: "PUT",
+        url: "/dag-workflows/active-turn-workflow",
+        headers: {
+          "x-project-id": "default",
+          "content-type": "application/json",
+        },
+        payload: activeTurnWorkflow(),
+      });
+      expect(saved.statusCode).toBe(201);
+      const source = workflowStore.createRun("default", {
+        workflowId: "active-turn-workflow",
+        requestId: `active-rescue-${parentStatus}`,
+        requestedBy: "user",
+        sessionId: "s1",
+      });
+      workflowStore.appendRunEvent(
+        "default",
+        source.id,
+        { eventId: `${parentStatus}_source_started`, type: "run_started" },
+        1,
+      );
+      workflowStore.appendRunEvent(
+        "default",
+        source.id,
+        parentStatus === "failed"
+          ? {
+              eventId: "failed_source_terminal",
+              type: "run_failed",
+              data: {
+                error: {
+                  code: "SOURCE_FAILED",
+                  message: "Source workflow failed.",
+                  retryable: true,
+                },
+              },
+            }
+          : {
+              eventId: "interrupted_source_terminal",
+              type: "run_interrupted",
+              data: {
+                previousStatus: "running",
+                error: {
+                  code: "SERVER_RESTART",
+                  message: "Source workflow was interrupted.",
+                  retryable: true,
+                },
+              },
+            },
+        2,
+      );
+      associateTypedWorkflowLaunch("default", "s1", source.id);
+      fakeSessionBindings.set("rescue-helper", {
+        version: 1,
+        projectId: "default",
+        sessionId: "rescue-helper",
+        profile: "workflow-rescue",
+        source: { kind: "run", id: source.id },
+      });
+      runBroker.start("default", "rescue-helper", {
+        runId: `active-rescue-chat-${parentStatus}`,
+        prompt: "Diagnose the source run.",
+        images: [],
+        baseline: { messages: [], contextUsage: null },
+      });
+
+      const response = await associationApp.inject({
+        method: "GET",
+        url: "/sessions/s1/workflow-run-state",
+        headers: { "x-project-id": "default" },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        state: {
+          runId: source.id,
+          status: "running",
+          backgroundAgentTrailingNode: {
+            slotId: "background-agent",
+            agentId: "workflow-rescue",
+            status: "running",
+          },
+        },
+      });
+    },
+  );
 
   it("persists explicit Stop as cancelled without surfacing a DAG error", async () => {
     ensureProjectExists("default");

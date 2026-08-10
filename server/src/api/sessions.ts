@@ -63,6 +63,7 @@ import {
   backgroundAgentTrailingNodeForSession,
   chatStreamErrorForSession,
   completeChatTurnRun,
+  currentRunOwnerEpoch,
   projectWorkflowRunStateV1,
   registerChatTurnRun,
   workflowRunForChatSession,
@@ -1096,6 +1097,9 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
           sessionId,
           prompt: body.message,
           model: modelReference(requestedModel),
+          ...(binding.profile === "main"
+            ? { ownerEpoch: currentRunOwnerEpoch() }
+            : {}),
           ...(binding.profile === "workflow-rescue" && binding.source?.kind === "run"
             ? {
                 workflowRunId: binding.source.id,

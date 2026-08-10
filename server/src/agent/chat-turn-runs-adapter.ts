@@ -1,5 +1,6 @@
 import {
   associateWorkflowRun,
+  currentRunOwnerEpoch,
   finishRun,
   latestWorkflowRunAssociation,
   listRunsForSession,
@@ -39,6 +40,7 @@ export interface RegisterChatTurnInput {
   model?: string;
   workflowRunId?: string;
   agentId?: string;
+  ownerEpoch?: string;
 }
 
 export interface CompleteChatTurnInput {
@@ -73,6 +75,9 @@ export interface ProjectWorkflowRunOptions {
 /** Register one accepted chat turn in the shared append-only runs index. */
 export function registerChatTurnRun(input: RegisterChatTurnInput): string {
   const workflowRunId = input.workflowRunId;
+  const ownerEpoch =
+    input.ownerEpoch ??
+    (input.agentId === undefined ? currentRunOwnerEpoch() : undefined);
   const indexRunId = startRun(input.projectId, {
     sessionId: input.sessionId,
     loopId: null,
@@ -82,6 +87,7 @@ export function registerChatTurnRun(input: RegisterChatTurnInput): string {
     ...(input.model ? { model: input.model } : {}),
     ...(workflowRunId ? { workflowRunId } : {}),
     ...(input.agentId ? { agentId: input.agentId } : {}),
+    ...(ownerEpoch ? { ownerEpoch } : {}),
   });
   if (workflowRunId) {
     associateWorkflowRun(
@@ -191,7 +197,12 @@ export function chatStreamErrorForSession(
   const chatTurn = listRunsForSession(projectId, sessionId).find(
     (run) => run.id === association.chatRunId && run.role === "agent",
   );
-  if (!chatTurn || chatTurn.status !== "failed") return undefined;
+  if (
+    !chatTurn ||
+    (chatTurn.status !== "failed" && chatTurn.status !== "interrupted")
+  ) {
+    return undefined;
+  }
   return {
     code: "CHAT_STREAM_ERROR",
     message:
@@ -201,12 +212,20 @@ export function chatStreamErrorForSession(
   };
 }
 
+export { currentRunOwnerEpoch };
+
 type ActiveBackgroundAgentState = "running" | "error" | "blocked";
 
 function trailingStatusAllowed(
   workflowRunStatus: RunStateV1["status"],
   trailingStatus: RunStateV1NodeStatus,
 ): boolean {
+  if (
+    (workflowRunStatus === "failed" || workflowRunStatus === "interrupted") &&
+    (trailingStatus === "running" || trailingStatus === "blocked")
+  ) {
+    return true;
+  }
   if (workflowRunStatus === "queued") return trailingStatus === "pending";
   if (
     workflowRunStatus === "running" ||
@@ -372,12 +391,21 @@ export function projectWorkflowRunStateV1(
         nodeId: requestedTrailingNode.nodeId ?? defaultAttachedNodeId(run),
       }
     : undefined;
+  const projectionStatus =
+    trailingNode &&
+    (run.state.status === "failed" || run.state.status === "interrupted") &&
+    (trailingNode.status === "running" || trailingNode.status === "blocked")
+      ? trailingNode.status
+      : run.state.status;
   const candidate: RunStateV1 = {
     schemaVersion: 1,
     runId: run.manifest.id,
     workflowId: run.manifest.workflowId,
     workflowRevision: run.manifest.workflowRevision,
-    status: run.state.status,
+    // The helper is a separate live lane. A terminal/interrupted main DAG can
+    // therefore produce a live composite projection without changing its
+    // durable node states or weakening RunState v1 coherence validation.
+    status: projectionStatus,
     nodes,
     topology: {
       nodes: graphNodes.map((node) => ({ id: node.id })),

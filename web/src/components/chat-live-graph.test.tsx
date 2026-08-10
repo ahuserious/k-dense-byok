@@ -68,6 +68,40 @@ describe("ChatLiveGraph", () => {
     ).toHaveAttribute("data-attached-to", "analyze");
   });
 
+  it.each(["failed", "interrupted"] as const)(
+    "renders a running rescue lane beside %s main DAG nodes",
+    (parentNodeStatus) => {
+      const projection = parseRunStateV1Projection(
+        validProjection({
+          status: "running",
+          nodes: [
+            {
+              id: "prepare",
+              status: "succeeded",
+              progress: { completed: 1, total: 1 },
+            },
+            {
+              id: "analyze",
+              status: parentNodeStatus,
+              progress: { completed: 1, total: 1 },
+            },
+          ],
+        }),
+      );
+      render(<ChatLiveGraph projection={projection} />);
+
+      const trailing = document.querySelector(
+        "[data-trailing-node='background-agent']",
+      );
+      expect(trailing).toBeInTheDocument();
+      expect(trailing).toHaveTextContent("rescue-agent");
+      expect(trailing).toHaveTextContent("running");
+      expect(document.querySelector("[data-node-id='analyze']")).toHaveTextContent(
+        parentNodeStatus,
+      );
+    },
+  );
+
   it("surfaces the Scientific DAG tab when RunState carries chat error routing", () => {
     const projection = validProjection({
       status: "failed",
@@ -253,8 +287,9 @@ describe("chat RunState polling", () => {
     stop();
   });
 
-  it("keeps polling past an old terminal association until a new run appears", async () => {
+  it("keeps polling past five seconds while the active turn waits for a replacement", async () => {
     vi.useFakeTimers();
+    vi.setSystemTime(0);
     const oldTerminal = parseRunStateV1Projection(
       validProjection({
         status: "succeeded",
@@ -296,31 +331,33 @@ describe("chat RunState polling", () => {
         backgroundAgentTrailingNode: undefined,
       }),
     );
-    const fetchProjection = vi
-      .fn()
-      .mockResolvedValueOnce(oldTerminal)
-      .mockResolvedValueOnce(oldTerminal)
-      .mockResolvedValueOnce(newRunning)
-      .mockResolvedValueOnce(newTerminal);
+    let deliveredRunningReplacement = false;
+    const fetchProjection = vi.fn(async () => {
+      if (Date.now() < 6_000) return oldTerminal;
+      if (!deliveredRunningReplacement) {
+        deliveredRunningReplacement = true;
+        return newRunning;
+      }
+      return newTerminal;
+    });
     const onProjection = vi.fn();
     const stop = startChatRunStatePolling({
       fetchProjection,
       onProjection,
-      intervalMs: 10,
-      launchWindowMs: 100,
+      intervalMs: 1_000,
+      chatTurnActive: true,
       waitForReplacementOfRunId: oldTerminal.runId,
     });
 
     await Promise.resolve();
     await Promise.resolve();
     expect(fetchProjection).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(10);
-    expect(fetchProjection).toHaveBeenCalledTimes(2);
-    await vi.advanceTimersByTimeAsync(10);
+    await vi.advanceTimersByTimeAsync(6_000);
     expect(onProjection).toHaveBeenLastCalledWith(newRunning);
-    await vi.advanceTimersByTimeAsync(10);
+    expect(fetchProjection).toHaveBeenCalledTimes(7);
+    await vi.advanceTimersByTimeAsync(1_000);
     expect(onProjection).toHaveBeenLastCalledWith(newTerminal);
-    expect(fetchProjection).toHaveBeenCalledTimes(4);
+    expect(fetchProjection).toHaveBeenCalledTimes(8);
     stop();
   });
 

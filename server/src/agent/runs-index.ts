@@ -10,8 +10,9 @@
  * Runs are append-only: startRun writes a 'running' row, finishRun appends a
  * terminal row with the SAME id. Readers fold to the LATEST row per id, so the
  * terminal write wins without ever rewriting an existing line (each append is
- * atomic at the line level via appendFileSync). This survives crashes mid-run —
- * a 'running' row with no terminal partner simply stays 'running'.
+ * atomic at the line level via appendFileSync). Main-chat rows carry a durable
+ * process owner epoch, so a prior process's unmatched 'running' row is appended
+ * as 'interrupted' on the next session/Console read.
  *
  * Loops are a single mutable JSON doc (read-modify-write). Concurrent writers to
  * one loop must be serialized by the CALLER; this module does not lock.
@@ -23,7 +24,12 @@ import { resolvePaths } from "../projects.ts";
 
 // ---- Types (file-backed port of db.ts Run + Loop) -------------------------
 
-export type RunStatus = "running" | "completed" | "failed" | "cancelled";
+export type RunStatus =
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
 export type RunRole =
   | "agent"
   | "subagent"
@@ -51,6 +57,7 @@ export interface RunRecord {
   numTurns?: number;
   workflowRunId?: string;
   agentId?: string;
+  ownerEpoch?: string;
 }
 
 export interface WorkflowRunAssociation {
@@ -91,6 +98,12 @@ export interface LoopRecord {
 const SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const WORKFLOW_RUN_ID_RE = /^wrun_[a-f0-9]{32}$/;
 const CHAT_RUN_ID_RE = /^[a-f0-9]{32}$/;
+const PROCESS_RUN_OWNER_EPOCH = crypto.randomUUID();
+
+/** Stable only for this server process; durable rows use it to detect restart. */
+export function currentRunOwnerEpoch(): string {
+  return PROCESS_RUN_OWNER_EPOCH;
+}
 
 function assertSafeSegment(value: string, kind: "session id" | "loop id"): void {
   if (!SEGMENT_RE.test(value)) {
@@ -150,7 +163,10 @@ export function startRun(
 }
 
 export interface FinishRunFields {
-  status: Extract<RunStatus, "completed" | "failed" | "cancelled">;
+  status: Extract<
+    RunStatus,
+    "completed" | "failed" | "cancelled" | "interrupted"
+  >;
   output?: string;
   reasoning?: string;
   costUsd?: number;
@@ -274,6 +290,39 @@ function latestById(rows: RunRecord[]): Map<string, RunRecord> {
   return byId;
 }
 
+const RESTART_INTERRUPTED_OUTPUT =
+  "Chat stream was interrupted by process restart.";
+
+function reconcileOrphanedMainChatRunsForSession(
+  projectId: string,
+  sessionId: string,
+  ownerEpoch: string,
+): number {
+  const records = latestById(
+    readJsonl<RunRecord>(runsJsonlPath(projectId, sessionId)),
+  );
+  let reconciled = 0;
+  for (const record of records.values()) {
+    if (
+      record.role !== "agent" ||
+      record.status !== "running" ||
+      record.agentId !== undefined ||
+      record.ownerEpoch === ownerEpoch
+    ) {
+      continue;
+    }
+    if (
+      finishRun(projectId, sessionId, record.id, {
+        status: "interrupted",
+        output: RESTART_INTERRUPTED_OUTPUT,
+      })
+    ) {
+      reconciled += 1;
+    }
+  }
+  return reconciled;
+}
+
 /** All sessionId dirs under the project's runsDir (skips non-dirs / missing). */
 function sessionDirs(projectId: string): string[] {
   const runsDir = resolvePaths(projectId).runsDir;
@@ -292,6 +341,7 @@ function sessionDirs(projectId: string): string[] {
  * newest first (by ts). Pass `limit` to cap the result after sorting.
  */
 export function listRuns(projectId: string, limit?: number): RunRecord[] {
+  reconcileOrphanedMainChatRuns(projectId);
   const all: RunRecord[] = [];
   for (const sessionId of sessionDirs(projectId)) {
     const file = path.join(
@@ -315,6 +365,11 @@ export function listRunsForSession(
   projectId: string,
   sessionId: string,
 ): RunRecord[] {
+  reconcileOrphanedMainChatRunsForSession(
+    projectId,
+    sessionId,
+    PROCESS_RUN_OWNER_EPOCH,
+  );
   const records = [
     ...latestById(
       readJsonl<RunRecord>(runsJsonlPath(projectId, sessionId)),
@@ -325,6 +380,23 @@ export function listRunsForSession(
       b.ts - a.ts || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0),
   );
   return records;
+}
+
+/** Reconcile main-chat rows owned by a prior process epoch, append-only. */
+export function reconcileOrphanedMainChatRuns(
+  projectId: string,
+  ownerEpoch = PROCESS_RUN_OWNER_EPOCH,
+): number {
+  return sessionDirs(projectId).reduce(
+    (count, sessionId) =>
+      count +
+      reconcileOrphanedMainChatRunsForSession(
+        projectId,
+        sessionId,
+        ownerEpoch,
+      ),
+    0,
+  );
 }
 
 /** Persist the latest chat-session → workflow-run association append-only. */

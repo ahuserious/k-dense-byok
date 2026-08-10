@@ -278,6 +278,57 @@ describe("chat-turn runs-index adapter", () => {
     ).toBeUndefined();
   });
 
+  it("reconciles a crashed main turn to interrupted for Console and error routing", async () => {
+    const workflowRunId = "wrun_11111111111111111111111111111111";
+    const indexRunId = registerChatTurnRun({
+      projectId: DEFAULT_PROJECT_ID,
+      sessionId: "crashed-main-session",
+      prompt: "Observe the workflow until the process restarts.",
+      workflowRunId,
+      ownerEpoch: "previous-server-process",
+    });
+    const app = await buildApp({ workflowController: null });
+    try {
+      const consoleRuns = await app.inject({
+        method: "GET",
+        url: "/console/runs",
+        headers: { "x-project-id": DEFAULT_PROJECT_ID },
+      });
+      expect(consoleRuns.statusCode).toBe(200);
+      expect(consoleRuns.json()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: indexRunId,
+            session_id: "crashed-main-session",
+            status: "interrupted",
+            output: "Chat stream was interrupted by process restart.",
+            completed_at: expect.any(String),
+          }),
+        ]),
+      );
+      expect(
+        latestChatTurnRun(DEFAULT_PROJECT_ID, "crashed-main-session"),
+      ).toMatchObject({
+        id: indexRunId,
+        status: "interrupted",
+        output: "Chat stream was interrupted by process restart.",
+      });
+      expect(
+        chatStreamErrorForSession(
+          DEFAULT_PROJECT_ID,
+          "crashed-main-session",
+          workflowRunId,
+        ),
+      ).toEqual({
+        code: "CHAT_STREAM_ERROR",
+        message: "Chat stream was interrupted by process restart.",
+        retryable: true,
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
   it("resolves an exact session association with 200+ newer unrelated runs", () => {
     workflowStore.saveDefinition(
       DEFAULT_PROJECT_ID,

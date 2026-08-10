@@ -1552,6 +1552,7 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
     sessionId: liveGraphSessionId,
     enabled: isActive,
     restartKey: `${runState}:${userMessageCount}`,
+    chatTurnActive: runState === "running",
     awaitErrorRouting: runState === "error",
   });
   useEffect(() => {
