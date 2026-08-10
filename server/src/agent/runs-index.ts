@@ -49,6 +49,16 @@ export interface RunRecord {
   tokensIn?: number;
   tokensOut?: number;
   numTurns?: number;
+  workflowRunId?: string;
+  agentId?: string;
+}
+
+export interface WorkflowRunAssociation {
+  schemaVersion: 1;
+  sessionId: string;
+  workflowRunId: string;
+  source: "chat-prompt" | "chat-event";
+  associatedAt: number;
 }
 
 export type LoopMode = "orchestrated" | "ralph";
@@ -78,6 +88,7 @@ export interface LoopRecord {
 // path segment, arrives raw from the URL, so reject anything that could traverse
 // (no leading dot, no slash, no '..'). loopId gets the same treatment.
 const SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const WORKFLOW_RUN_ID_RE = /^wrun_[a-f0-9]{32}$/;
 
 function assertSafeSegment(value: string, kind: "session id" | "loop id"): void {
   if (!SEGMENT_RE.test(value)) {
@@ -88,6 +99,18 @@ function assertSafeSegment(value: string, kind: "session id" | "loop id"): void 
 function runsJsonlPath(projectId: string, sessionId: string): string {
   assertSafeSegment(sessionId, "session id");
   return path.join(resolvePaths(projectId).runsDir, sessionId, "runs.jsonl");
+}
+
+function workflowAssociationsJsonlPath(
+  projectId: string,
+  sessionId: string,
+): string {
+  assertSafeSegment(sessionId, "session id");
+  return path.join(
+    resolvePaths(projectId).runsDir,
+    sessionId,
+    "workflow-associations.jsonl",
+  );
 }
 
 function loopJsonPath(projectId: string, loopId: string): string {
@@ -217,7 +240,11 @@ function sessionDirs(projectId: string): string[] {
 export function listRuns(projectId: string, limit?: number): RunRecord[] {
   const all: RunRecord[] = [];
   for (const sessionId of sessionDirs(projectId)) {
-    const file = path.join(resolvePaths(projectId).runsDir, sessionId, "runs.jsonl");
+    const file = path.join(
+      resolvePaths(projectId).runsDir,
+      sessionId,
+      "runs.jsonl",
+    );
     for (const record of latestById(readJsonl<RunRecord>(file)).values()) {
       all.push(record);
     }
@@ -227,6 +254,70 @@ export function listRuns(projectId: string, limit?: number): RunRecord[] {
   // by id so the order is stable across calls rather than dependent on readdir.
   all.sort((a, b) => b.ts - a.ts || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
   return limit !== undefined ? all.slice(0, limit) : all;
+}
+
+/** Latest row per run id for one exact session; never enumerates project runs. */
+export function listRunsForSession(
+  projectId: string,
+  sessionId: string,
+): RunRecord[] {
+  const records = [
+    ...latestById(
+      readJsonl<RunRecord>(runsJsonlPath(projectId, sessionId)),
+    ).values(),
+  ];
+  records.sort(
+    (a, b) =>
+      b.ts - a.ts || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0),
+  );
+  return records;
+}
+
+/** Persist the latest chat-session → typed workflow-run association append-only. */
+export function associateWorkflowRun(
+  projectId: string,
+  sessionId: string,
+  workflowRunId: string,
+  source: WorkflowRunAssociation["source"],
+): void {
+  if (!WORKFLOW_RUN_ID_RE.test(workflowRunId)) {
+    throw new Error(`Invalid workflow run id: ${workflowRunId}`);
+  }
+  const file = workflowAssociationsJsonlPath(projectId, sessionId);
+  const latest = readJsonl<WorkflowRunAssociation>(file).at(-1);
+  if (latest?.workflowRunId === workflowRunId) return;
+  const association: WorkflowRunAssociation = {
+    schemaVersion: 1,
+    sessionId,
+    workflowRunId,
+    source,
+    associatedAt: Date.now(),
+  };
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, JSON.stringify(association) + "\n", "utf-8");
+}
+
+/** Read only one session's association log; corrupt rows fail closed. */
+export function latestWorkflowRunAssociation(
+  projectId: string,
+  sessionId: string,
+): WorkflowRunAssociation | null {
+  const rows = readJsonl<WorkflowRunAssociation>(
+    workflowAssociationsJsonlPath(projectId, sessionId),
+  );
+  const latest = rows.at(-1);
+  if (
+    !latest ||
+    latest.schemaVersion !== 1 ||
+    latest.sessionId !== sessionId ||
+    !WORKFLOW_RUN_ID_RE.test(latest.workflowRunId) ||
+    (latest.source !== "chat-prompt" && latest.source !== "chat-event") ||
+    !Number.isSafeInteger(latest.associatedAt) ||
+    latest.associatedAt < 0
+  ) {
+    return null;
+  }
+  return { ...latest };
 }
 
 /** Runs belonging to one loop, newest first. */

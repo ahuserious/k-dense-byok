@@ -1,6 +1,8 @@
 import {
+  associateWorkflowRun,
   finishRun,
-  listRuns as listIndexedRuns,
+  latestWorkflowRunAssociation,
+  listRunsForSession,
   startRun,
   type FinishRunFields,
   type RunRecord,
@@ -36,6 +38,8 @@ export interface RegisterChatTurnInput {
   sessionId: string;
   prompt: string;
   model?: string;
+  workflowRunId?: string;
+  agentId?: string;
 }
 
 export interface CompleteChatTurnInput {
@@ -69,14 +73,27 @@ export interface ProjectWorkflowRunOptions {
 
 /** Register one accepted chat turn in the shared append-only runs index. */
 export function registerChatTurnRun(input: RegisterChatTurnInput): string {
-  return startRun(input.projectId, {
+  const workflowRunId =
+    input.workflowRunId ?? input.prompt.match(WORKFLOW_RUN_REFERENCE)?.[0];
+  const indexRunId = startRun(input.projectId, {
     sessionId: input.sessionId,
     loopId: null,
     iteration: 0,
     task: input.prompt,
     role: "agent",
     ...(input.model ? { model: input.model } : {}),
+    ...(workflowRunId ? { workflowRunId } : {}),
+    ...(input.agentId ? { agentId: input.agentId } : {}),
   });
+  if (workflowRunId) {
+    associateWorkflowRun(
+      input.projectId,
+      input.sessionId,
+      workflowRunId,
+      input.workflowRunId ? "chat-event" : "chat-prompt",
+    );
+  }
+  return indexRunId;
 }
 
 /** Append the terminal row for a previously registered chat turn. */
@@ -97,32 +114,62 @@ export function latestChatTurnRun(
   sessionId: string,
 ): RunRecord | null {
   return (
-    listIndexedRuns(projectId).find(
-      (run) => run.sessionId === sessionId && run.role === "agent",
+    listRunsForSession(projectId, sessionId).find(
+      (run) => run.role === "agent",
     ) ?? null
   );
 }
 
-/**
- * Resolve the DAG run represented by a chat session. An explicit wrun_* token
- * in the latest turn wins; otherwise use the newest typed run launched with
- * this session id. Both paths resolve through the durable workflow store.
- */
+function collectWorkflowRunReferences(
+  value: unknown,
+  output: Set<string>,
+  depth = 0,
+): void {
+  if (output.size >= 8 || depth > 8) return;
+  if (typeof value === "string") {
+    for (const match of value.matchAll(/\bwrun_[a-f0-9]{32}\b/g)) {
+      output.add(match[0]);
+      if (output.size >= 8) return;
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 256)) {
+      collectWorkflowRunReferences(item, output, depth + 1);
+    }
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, item] of Object.entries(value).slice(0, 256)) {
+    if (key === "data" && typeof item === "string" && item.length > 8_192)
+      continue;
+    collectWorkflowRunReferences(item, output, depth + 1);
+  }
+}
+
+/** Persist bounded workflow-run references observed in chat SSE frames. */
+export function indexWorkflowRunReferences(
+  projectId: string,
+  sessionId: string,
+  value: unknown,
+): string[] {
+  const references = new Set<string>();
+  collectWorkflowRunReferences(value, references);
+  for (const workflowRunId of references) {
+    associateWorkflowRun(projectId, sessionId, workflowRunId, "chat-event");
+  }
+  return [...references];
+}
+
+/** Resolve a chat session's indexed workflow run by its exact durable id. */
 export function workflowRunForChatSession(
   projectId: string,
   sessionId: string,
 ): WorkflowRunRecord | null {
-  const chatTurn = latestChatTurnRun(projectId, sessionId);
-  const referencedRunId = chatTurn?.task.match(WORKFLOW_RUN_REFERENCE)?.[0];
-  if (referencedRunId) {
-    const referenced = workflowStore.readRun(projectId, referencedRunId);
-    if (referenced) return referenced;
-  }
-  return (
-    workflowStore
-      .listRuns(projectId, 200)
-      .find((run) => run.manifest.sessionId === sessionId) ?? null
-  );
+  const association = latestWorkflowRunAssociation(projectId, sessionId);
+  return association
+    ? workflowStore.readRun(projectId, association.workflowRunId)
+    : null;
 }
 
 /** Error routing is driven only by a failed chat stream, never inferred from a DAG failure. */
@@ -138,6 +185,67 @@ export function chatStreamErrorForSession(
       chatTurn.output ||
       "The chat stream failed while observing this workflow run.",
     retryable: true,
+  };
+}
+
+type ActiveBackgroundAgentState = "running" | "error" | "blocked";
+
+function trailingStatusAllowed(
+  workflowRunStatus: RunStateV1["status"],
+  trailingStatus: RunStateV1NodeStatus,
+): boolean {
+  if (workflowRunStatus === "queued") return trailingStatus === "pending";
+  if (
+    workflowRunStatus === "running" ||
+    workflowRunStatus === "waiting" ||
+    workflowRunStatus === "blocked" ||
+    workflowRunStatus === "paused"
+  ) {
+    return true;
+  }
+  if (workflowRunStatus === "succeeded") {
+    return trailingStatus === "succeeded" || trailingStatus === "skipped";
+  }
+  return (
+    COMPLETED_NODE_STATUSES.has(trailingStatus) || trailingStatus === "pending"
+  );
+}
+
+/** Durable helper terminal state with an optional live-broker overlay. */
+export function backgroundAgentTrailingNodeForSession(input: {
+  projectId: string;
+  helperSessionId: string;
+  workflowRunId: string;
+  workflowRunStatus: RunStateV1["status"];
+  activeState?: ActiveBackgroundAgentState;
+}): BackgroundAgentTrailingNodeInput | undefined {
+  const durable = latestChatTurnRun(input.projectId, input.helperSessionId);
+  const durableStatus =
+    durable?.agentId === "workflow-rescue" &&
+    durable.workflowRunId === input.workflowRunId
+      ? durable.status === "completed"
+        ? "succeeded"
+        : durable.status === "failed"
+          ? "failed"
+          : undefined
+      : undefined;
+  const activeStatus = input.activeState
+    ? input.activeState === "error"
+      ? "failed"
+      : input.activeState
+    : undefined;
+  const status =
+    activeStatus && trailingStatusAllowed(input.workflowRunStatus, activeStatus)
+      ? activeStatus
+      : durableStatus &&
+          trailingStatusAllowed(input.workflowRunStatus, durableStatus)
+        ? durableStatus
+        : undefined;
+  if (!status) return undefined;
+  return {
+    slotId: "background-agent",
+    agentId: "workflow-rescue",
+    status,
   };
 }
 

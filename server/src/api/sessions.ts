@@ -57,8 +57,10 @@ import { MethodsDraftError, runMethodsDraft } from "../agent/methods-draft.ts";
 import { mintRunId, setSessionRunId } from "../agent/run-ids.ts";
 import { runBroker, type RunHandle } from "../agent/run-broker.ts";
 import {
+  backgroundAgentTrailingNodeForSession,
   chatStreamErrorForSession,
   completeChatTurnRun,
+  indexWorkflowRunReferences,
   projectWorkflowRunStateV1,
   registerChatTurnRun,
   workflowRunForChatSession,
@@ -114,24 +116,14 @@ function snapshot(session: { getSessionStats(): { cost: number; tokens: { input:
   };
 }
 
-const ACTIVE_WORKFLOW_RUN_STATUSES = new Set([
-  "running",
-  "waiting",
-  "blocked",
-  "paused",
-]);
-
 async function workflowRescueTrailingNode(
   projectId: string,
   paths: ReturnType<typeof activePaths>,
   workflowRunId: string,
-  workflowRunStatus: string,
+  workflowRunStatus: Parameters<
+    typeof backgroundAgentTrailingNodeForSession
+  >[0]["workflowRunStatus"],
 ): Promise<BackgroundAgentTrailingNodeInput | undefined> {
-  const activities = new Map(
-    runBroker
-      .activityForProject(projectId)
-      .map((activity) => [activity.sessionId, activity.state]),
-  );
   for (const info of await listSessions(paths)) {
     let binding: SessionProfileBinding;
     try {
@@ -147,41 +139,20 @@ async function workflowRescueTrailingNode(
     ) {
       continue;
     }
-    const activity = activities.get(binding.sessionId);
-    if (!activity) continue;
-
-    if (ACTIVE_WORKFLOW_RUN_STATUSES.has(workflowRunStatus)) {
-      return {
-        slotId: "background-agent",
-        agentId: "workflow-rescue",
-        status:
-          activity === "done"
-            ? "succeeded"
-            : activity === "error"
-              ? "failed"
-              : activity,
-      };
-    }
-    if (workflowRunStatus === "succeeded" && activity === "done") {
-      return {
-        slotId: "background-agent",
-        agentId: "workflow-rescue",
-        status: "succeeded",
-      };
-    }
-    if (
-      (workflowRunStatus === "failed" ||
-        workflowRunStatus === "cancelled" ||
-        workflowRunStatus === "interrupted") &&
-      (activity === "done" || activity === "error")
-    ) {
-      return {
-        slotId: "background-agent",
-        agentId: "workflow-rescue",
-        status: activity === "done" ? "succeeded" : "failed",
-      };
-    }
-    return undefined;
+    const handle = runBroker.get(projectId, binding.sessionId);
+    const activeState = handle && !handle.isComplete
+      ? handle.activityState === "done"
+        ? undefined
+        : handle.activityState
+      : undefined;
+    const trailingNode = backgroundAgentTrailingNodeForSession({
+      projectId,
+      helperSessionId: binding.sessionId,
+      workflowRunId,
+      workflowRunStatus,
+      ...(activeState ? { activeState } : {}),
+    });
+    if (trailingNode) return trailingNode;
   }
   return undefined;
 }
@@ -1005,6 +976,12 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
           sessionId,
           prompt: body.message,
           model: modelReference(requestedModel),
+          ...(binding.profile === "workflow-rescue" && binding.source?.kind === "run"
+            ? {
+                workflowRunId: binding.source.id,
+                agentId: "workflow-rescue",
+              }
+            : {}),
         });
       } catch (err) {
         // The claim is taken but nothing owns it yet: without this release the
@@ -1212,7 +1189,14 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
                 if (usage) addTurnUsage(turnTally, usage);
               }
               const frame = toClientFrame(ev, paths.sandbox);
-              if (frame) handle.publish(frame);
+              if (frame) {
+                try {
+                  indexWorkflowRunReferences(projectId, sessionId, frame);
+                } catch (error) {
+                  log.warn({ err: error }, "failed to index chat workflow-run reference");
+                }
+                handle.publish(frame);
+              }
               if (ev.type === "turn_end") publishContextUsage();
             });
 

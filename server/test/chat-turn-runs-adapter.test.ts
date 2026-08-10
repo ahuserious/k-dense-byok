@@ -1,21 +1,80 @@
 import fs from "node:fs";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_PROJECT_ID, PROJECTS_ROOT } from "../src/config.ts";
 import { ensureProjectExists } from "../src/projects.ts";
 import {
   chatStreamErrorForSession,
+  backgroundAgentTrailingNodeForSession,
   completeChatTurnRun,
+  indexWorkflowRunReferences,
   latestChatTurnRun,
   projectWorkflowRunStateV1,
   registerChatTurnRun,
+  workflowRunForChatSession,
 } from "../src/agent/chat-turn-runs-adapter.ts";
-import type { WorkflowRunRecord } from "../src/workflows/index.ts";
+import { RunBroker } from "../src/agent/run-broker.ts";
+import {
+  workflowStore,
+  type WorkflowGraphDocument,
+  type WorkflowRunRecord,
+} from "../src/workflows/index.ts";
 
 beforeEach(() => {
   fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
   fs.mkdirSync(PROJECTS_ROOT, { recursive: true });
   ensureProjectExists(DEFAULT_PROJECT_ID);
 });
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+function storedGraph(): WorkflowGraphDocument {
+  return {
+    schemaVersion: "1.0",
+    id: "indexed-workflow",
+    name: "Indexed workflow",
+    entryNodeId: "start",
+    defaultModel: {
+      requested: {
+        source: "fixed",
+        provider: "ollama",
+        model: "qwen3:32b",
+        auth: { kind: "local" },
+        reasoning: "high",
+      },
+      resolution: { mode: "exact" },
+    },
+    limits: {
+      maxIterations: 2,
+      maxModelCalls: 2,
+      maxParallelism: 1,
+      maxSubagents: 1,
+      timeoutMs: 60_000,
+      maxTokens: 4_000,
+      maxCostUsd: 0,
+      maxRetries: 0,
+    },
+    evidence: {
+      enabled: false,
+      minimumIndependentSources: 0,
+      requireArtifactReferences: false,
+      onUnsupportedOutput: "fail",
+    },
+    nodes: [
+      {
+        id: "start",
+        name: "Start",
+        kind: "agent",
+        terminal: true,
+        workspace: { isolation: "read-only", writePaths: [] },
+        prompt: "Return one bounded result.",
+      },
+    ],
+    edges: [],
+  };
+}
 
 function syntheticRun(
   status: "running" | "succeeded" = "running",
@@ -129,6 +188,110 @@ describe("chat-turn runs-index adapter", () => {
       message: "provider disconnected",
       retryable: true,
     });
+  });
+
+  it("resolves an exact session association with 200+ newer unrelated runs", () => {
+    workflowStore.saveDefinition(
+      DEFAULT_PROJECT_ID,
+      "indexed-workflow",
+      storedGraph(),
+    );
+    const target = workflowStore.createRun(DEFAULT_PROJECT_ID, {
+      workflowId: "indexed-workflow",
+      requestId: "target-request",
+      requestedBy: "user",
+      sessionId: "chat-session",
+    });
+    expect(
+      indexWorkflowRunReferences(DEFAULT_PROJECT_ID, "chat-session", {
+        type: "tool_end",
+        result: { workflowRunId: target.id },
+      }),
+    ).toEqual([target.id]);
+    const newerUnrelatedRuns = Array.from({ length: 201 }, (_, index) => {
+      const run = syntheticRun();
+      return {
+        ...run,
+        manifest: {
+          ...run.manifest,
+          id: `wrun_${index.toString(16).padStart(32, "0")}`,
+          sessionId: `other-session-${index}`,
+          createdAt: target.createdAt + index + 1,
+        },
+      } as WorkflowRunRecord;
+    });
+    const listRuns = vi
+      .spyOn(workflowStore, "listRuns")
+      .mockReturnValue(newerUnrelatedRuns);
+    const readdir = vi.spyOn(fs, "readdirSync");
+
+    expect(
+      workflowRunForChatSession(DEFAULT_PROJECT_ID, "chat-session")?.manifest
+        .id,
+    ).toBe(target.id);
+    expect(listRuns).not.toHaveBeenCalled();
+    expect(readdir).not.toHaveBeenCalled();
+  });
+});
+
+describe("durable background-agent trailing state", () => {
+  function persistHelperTerminal(status: "completed" | "failed") {
+    const indexRunId = registerChatTurnRun({
+      projectId: DEFAULT_PROJECT_ID,
+      sessionId: "rescue-session",
+      prompt: "Inspect the selected run.",
+      workflowRunId: "wrun_11111111111111111111111111111111",
+      agentId: "workflow-rescue",
+    });
+    completeChatTurnRun({
+      projectId: DEFAULT_PROJECT_ID,
+      sessionId: "rescue-session",
+      indexRunId,
+      status,
+      ...(status === "failed" ? { error: "rescue failed" } : {}),
+    });
+  }
+
+  it("survives broker retention expiry", () => {
+    vi.useFakeTimers();
+    persistHelperTerminal("completed");
+    const broker = new RunBroker({ completedRetentionMs: 10 });
+    const handle = broker.start("default", "rescue-session", {
+      runId: "chat-run",
+      prompt: "Inspect the selected run.",
+      images: [],
+      baseline: { messages: [], contextUsage: null },
+    });
+    handle.publish({ type: "done" });
+    handle.complete();
+    vi.advanceTimersByTime(11);
+    expect(broker.get("default", "rescue-session")).toBeUndefined();
+
+    expect(
+      backgroundAgentTrailingNodeForSession({
+        projectId: DEFAULT_PROJECT_ID,
+        helperSessionId: "rescue-session",
+        workflowRunId: "wrun_11111111111111111111111111111111",
+        workflowRunStatus: "failed",
+      }),
+    ).toMatchObject({ agentId: "workflow-rescue", status: "succeeded" });
+    broker.clear();
+  });
+
+  it("reconstructs a failed trailing node after process restart", () => {
+    persistHelperTerminal("failed");
+    const restartedBroker = new RunBroker();
+    expect(restartedBroker.get("default", "rescue-session")).toBeUndefined();
+
+    expect(
+      backgroundAgentTrailingNodeForSession({
+        projectId: DEFAULT_PROJECT_ID,
+        helperSessionId: "rescue-session",
+        workflowRunId: "wrun_11111111111111111111111111111111",
+        workflowRunStatus: "failed",
+      }),
+    ).toMatchObject({ agentId: "workflow-rescue", status: "failed" });
+    restartedBroker.clear();
   });
 });
 

@@ -103,7 +103,6 @@ const STATUS_COHERENCE: Record<
   cancelled: TERMINAL_NODE_STATUSES,
 };
 const TERMINAL_RUN_STATUSES = new Set<RunStateV1Status>([
-  "interrupted",
   "succeeded",
   "failed",
   "cancelled",
@@ -370,20 +369,44 @@ interface PollingOptions {
   fetchProjection: () => Promise<RunStateV1Projection | null>;
   onProjection: (projection: RunStateV1Projection | null) => void;
   intervalMs?: number;
+  awaitErrorRouting?: boolean;
+  finalizationWindowMs?: number;
 }
 
-/** In-process timer polling; terminal projections deliberately schedule no next poll. */
+/**
+ * In-process timer polling. Interrupted runs remain resumable. When the chat
+ * SSE has already failed, an error-less terminal snapshot is held briefly so
+ * the durable runs-index terminal row can land before the UI trusts it.
+ */
 export function startChatRunStatePolling(options: PollingOptions): () => void {
   let cancelled = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let finalizationStartedAt: number | null = null;
   const poll = async () => {
     let projection: RunStateV1Projection | null = null;
+    let fetchSucceeded = false;
     try {
       projection = await options.fetchProjection();
-      if (!cancelled) options.onProjection(projection);
+      fetchSucceeded = true;
     } catch {
       if (!cancelled) options.onProjection(null);
     }
+    const terminal = projection ? isTerminalRunState(projection.status) : false;
+    const awaitingDurableError = Boolean(
+      projection &&
+      terminal &&
+      options.awaitErrorRouting &&
+      !projection.errorRouting,
+    );
+    if (awaitingDurableError) {
+      finalizationStartedAt ??= Date.now();
+      const finalizationWindowMs = options.finalizationWindowMs ?? 5_000;
+      if (Date.now() - finalizationStartedAt < finalizationWindowMs) {
+        if (!cancelled) timer = setTimeout(poll, options.intervalMs ?? 1_500);
+        return;
+      }
+    }
+    if (!cancelled && fetchSucceeded) options.onProjection(projection);
     if (!cancelled && (!projection || !isTerminalRunState(projection.status))) {
       timer = setTimeout(poll, options.intervalMs ?? 1_500);
     }
@@ -400,6 +423,7 @@ export function useChatLiveGraphProjection(options: {
   sessionId: string | null;
   enabled: boolean;
   restartKey: string;
+  awaitErrorRouting: boolean;
 }): RunStateV1Projection | null {
   const [snapshot, setSnapshot] = useState<{
     sessionId: string;
@@ -423,9 +447,11 @@ export function useChatLiveGraphProjection(options: {
           : parseRunStateV1Projection(body.state);
       },
       onProjection: (projection) => setSnapshot({ sessionId, projection }),
+      awaitErrorRouting: options.awaitErrorRouting,
     });
   }, [
     options.enabled,
+    options.awaitErrorRouting,
     options.projectId,
     options.restartKey,
     options.sessionId,

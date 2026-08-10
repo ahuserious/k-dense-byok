@@ -47,6 +47,7 @@ function validProjection(
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -121,6 +122,137 @@ describe("ChatLiveGraph", () => {
 });
 
 describe("chat RunState polling", () => {
+  it("keeps polling an interrupted run and renders its resumed update", async () => {
+    vi.useFakeTimers();
+    const interrupted = parseRunStateV1Projection(
+      validProjection({
+        status: "interrupted",
+        nodes: [
+          {
+            id: "prepare",
+            status: "succeeded",
+            progress: { completed: 1, total: 1 },
+          },
+          {
+            id: "analyze",
+            status: "interrupted",
+            progress: { completed: 1, total: 1 },
+          },
+        ],
+        backgroundAgentTrailingNode: undefined,
+      }),
+    );
+    const resumed = parseRunStateV1Projection(validProjection());
+    const terminal = parseRunStateV1Projection(
+      validProjection({
+        status: "succeeded",
+        nodes: [
+          {
+            id: "prepare",
+            status: "succeeded",
+            progress: { completed: 1, total: 1 },
+          },
+          {
+            id: "analyze",
+            status: "succeeded",
+            progress: { completed: 1, total: 1 },
+          },
+        ],
+        backgroundAgentTrailingNode: undefined,
+      }),
+    );
+    const fetchProjection = vi
+      .fn()
+      .mockResolvedValueOnce(interrupted)
+      .mockResolvedValueOnce(resumed)
+      .mockResolvedValueOnce(terminal);
+    const onProjection = vi.fn();
+    const stop = startChatRunStatePolling({
+      fetchProjection,
+      onProjection,
+      intervalMs: 10,
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(onProjection).toHaveBeenLastCalledWith(interrupted);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(onProjection).toHaveBeenLastCalledWith(resumed);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(onProjection).toHaveBeenLastCalledWith(terminal);
+    expect(fetchProjection).toHaveBeenCalledTimes(3);
+    stop();
+  });
+
+  it("waits for durable error routing before surfacing a terminal DAG", async () => {
+    vi.useFakeTimers();
+    const terminalWithoutRouting = parseRunStateV1Projection(
+      validProjection({
+        status: "failed",
+        nodes: [
+          {
+            id: "prepare",
+            status: "succeeded",
+            progress: { completed: 1, total: 1 },
+          },
+          {
+            id: "analyze",
+            status: "failed",
+            progress: { completed: 1, total: 1 },
+          },
+        ],
+        backgroundAgentTrailingNode: undefined,
+      }),
+    );
+    const terminalWithRouting = parseRunStateV1Projection({
+      ...terminalWithoutRouting,
+      updatedAt: terminalWithoutRouting.updatedAt + 1,
+      errorRouting: {
+        source: "chat-stream",
+        surface: true,
+        nodeId: "analyze",
+        error: {
+          code: "CHAT_STREAM_ERROR",
+          message: "persisted provider failure",
+          retryable: true,
+        },
+      },
+    });
+    const fetchProjection = vi
+      .fn()
+      .mockResolvedValueOnce(terminalWithoutRouting)
+      .mockResolvedValueOnce(terminalWithRouting);
+    const onProjection = vi.fn();
+    const stop = startChatRunStatePolling({
+      fetchProjection,
+      onProjection,
+      intervalMs: 10,
+      awaitErrorRouting: true,
+      finalizationWindowMs: 100,
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(onProjection).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(onProjection).toHaveBeenCalledWith(terminalWithRouting);
+
+    render(
+      <ChatLiveGraphTabs
+        projection={onProjection.mock.calls[0][0]}
+        conversation={<div>Conversation transcript</div>}
+      />,
+    );
+    expect(screen.getByRole("tab", { name: "Scientific DAG" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "persisted provider failure",
+    );
+    stop();
+  });
+
   it("stops scheduling polls after a terminal projection", async () => {
     const terminal = parseRunStateV1Projection(
       validProjection({
