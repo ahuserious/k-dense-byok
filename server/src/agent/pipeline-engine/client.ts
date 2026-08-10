@@ -13,33 +13,80 @@
  */
 import { PIPELINE_ENGINE_BASE_URL } from "../../config.ts";
 
+export const PIPELINE_ENGINE_LIST_TIMEOUT_MS = 5_000;
+
+interface PipelineEngineRequestLifecycle {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
 // One request to Pipeline engine. Surfaces the body on failure (Pipeline engine puts the real reason there)
 // and tags errors so a sidecar-down case is recognisable upstream.
 async function pipelineEngineFetch(
   path: string,
   init?: RequestInit,
+  lifecycle?: PipelineEngineRequestLifecycle,
 ): Promise<unknown> {
-  let res: Response;
+  const controller = lifecycle ? new AbortController() : undefined;
+  let abortCause: "external" | "timeout" | undefined;
+  const abortRequest = (cause: "external" | "timeout"): void => {
+    if (!controller || controller.signal.aborted) return;
+    abortCause = cause;
+    controller.abort();
+  };
+  const externalSignal = lifecycle?.signal;
+  const onExternalAbort = (): void => abortRequest("external");
+  if (externalSignal?.aborted) onExternalAbort();
+  else externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
+  const timeout = lifecycle?.timeoutMs === undefined
+    ? undefined
+    : setTimeout(() => abortRequest("timeout"), lifecycle.timeoutMs);
+  let responseReceived = false;
   try {
-    res = await fetch(`${PIPELINE_ENGINE_BASE_URL}${path}`, {
+    const res = await fetch(`${PIPELINE_ENGINE_BASE_URL}${path}`, {
       ...init,
       headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+      ...(controller ? { signal: controller.signal } : {}),
     });
+    responseReceived = true;
+    if (!res.ok) {
+      const body = await res.text().catch((error) => {
+        if (abortCause) throw error;
+        return "";
+      });
+      throw new Error(`Pipeline engine ${res.status} ${path}: ${body.slice(0, 400)}`);
+    }
+    // Some endpoints (204) have no body.
+    const text = await res.text();
+    return text ? JSON.parse(text) : null;
   } catch (err) {
-    // Connection refused / DNS / abort — the sidecar is unreachable.
+    if (abortCause === "timeout") {
+      throw new PipelineEngineTimeoutError(
+        `Pipeline engine request ${path} timed out after ${lifecycle?.timeoutMs}ms.`,
+      );
+    }
+    if (abortCause === "external") {
+      throw new PipelineEngineRequestAbortedError(
+        `Pipeline engine request ${path} was aborted by its caller.`,
+      );
+    }
+    if (responseReceived) throw err;
+    // Connection refused / DNS — the sidecar is unreachable.
     throw new PipelineEngineUnavailableError(`Pipeline engine unreachable at ${PIPELINE_ENGINE_BASE_URL}: ${(err as Error).message}`);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+    externalSignal?.removeEventListener("abort", onExternalAbort);
   }
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Pipeline engine ${res.status} ${path}: ${body.slice(0, 400)}`);
-  }
-  // Some endpoints (204) have no body.
-  const text = await res.text();
-  return text ? JSON.parse(text) : null;
 }
 
 /** Distinct error type so the proxy can answer 503 (vs 500) when Pipeline engine is simply down. */
 export class PipelineEngineUnavailableError extends Error {}
+
+/** A bounded sidecar request exceeded its client-owned deadline. */
+export class PipelineEngineTimeoutError extends PipelineEngineUnavailableError {}
+
+/** The caller cancelled a sidecar request through its optional AbortSignal. */
+export class PipelineEngineRequestAbortedError extends PipelineEngineUnavailableError {}
 
 /** True when the sidecar answers /api/health — lets the UI degrade gracefully (item 94). */
 export async function pipelineEngineHealthy(): Promise<boolean> {
@@ -53,8 +100,11 @@ export async function pipelineEngineHealthy(): Promise<boolean> {
 
 // --- workflow CRUD ----------------------------------------------------------
 
-export async function listWorkflows(): Promise<unknown> {
-  return pipelineEngineFetch("/api/workflows");
+export async function listWorkflows(signal?: AbortSignal): Promise<unknown> {
+  return pipelineEngineFetch("/api/workflows", undefined, {
+    signal,
+    timeoutMs: PIPELINE_ENGINE_LIST_TIMEOUT_MS,
+  });
 }
 export async function getWorkflow(name: string): Promise<unknown> {
   return pipelineEngineFetch(`/api/workflows/${encodeURIComponent(name)}`);

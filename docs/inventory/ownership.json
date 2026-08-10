@@ -8,7 +8,6 @@
       "web/src/components/dag-builder.tsx",
       "web/src/components/dag-builder-canvas.tsx",
       "web/src/components/dag-builder-inspector.tsx",
-      "web/src/components/dag-workflows-panel.tsx",
       "web/src/components/dag-workflow-console.tsx",
       "web/src/components/helper-agent-chat.tsx",
       "web/src/components/console/console-panel.tsx",
@@ -18,6 +17,12 @@
       "web/src/lib/workspace-persistence.ts",
       "web/src/lib/dag-workflow-builder.ts",
       "web/src/lib/dag-workflows.ts"
+    ],
+    "S1b": [
+      "web/src/components/dag-workflows-panel.tsx",
+      "web/src/components/dag-workflows-panel.test.tsx",
+      "web/src/lib/scientific-pipeline-registry.ts",
+      "web/src/lib/scientific-pipeline-registry.test.ts"
     ],
     "S2": [
       "start.mjs",

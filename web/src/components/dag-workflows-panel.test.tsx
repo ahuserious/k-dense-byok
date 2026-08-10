@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -6,14 +6,26 @@ import { DagWorkflowsPanel } from "./dag-workflows-panel";
 import * as dagApi from "@/lib/dag-workflows";
 import * as pipelinesApi from "@/lib/pipelines";
 import { createDefaultWorkflowGraph } from "@/lib/dag-workflow-builder";
+import * as registryApi from "@/lib/scientific-pipeline-registry";
 
 beforeEach(() => {
   window.sessionStorage.clear();
-  vi.spyOn(pipelinesApi, "pipelineHealth").mockResolvedValue(true);
-  vi.spyOn(pipelinesApi, "listPipelines").mockResolvedValue([]);
+  vi.spyOn(registryApi, "vendoredPipelineEngineHealth").mockResolvedValue(true);
+  vi.spyOn(registryApi, "listVendoredWorkflowRegistrySources").mockResolvedValue([]);
 });
 
 afterEach(() => vi.restoreAllMocks());
+
+function mockVendoredWorkflows(
+  workflows: Array<{ name: string; description: string; nodes?: unknown[] }>,
+): void {
+  vi.mocked(registryApi.listVendoredWorkflowRegistrySources).mockResolvedValue(
+    workflows.map((workflow) => registryApi.vendoredWorkflowRegistrySource({
+      ...workflow,
+      nodes: workflow.nodes ?? [{ id: `${workflow.name}-node`, prompt: "Run workflow." }],
+    })!),
+  );
+}
 
 function renderPanel({
   activeSessionId = null,
@@ -38,8 +50,8 @@ function renderPanel({
 }
 
 describe("DagWorkflowsPanel", () => {
-  it("renders the vendored and typed-engine lists together with all vendored actions", async () => {
-    vi.mocked(pipelinesApi.listPipelines).mockResolvedValue([
+  it("renders one registry list with both engines and all backing actions", async () => {
+    mockVendoredWorkflows([
       { name: "microscopy-qc", description: "Inspect microscopy acquisition quality" },
     ]);
     vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([
@@ -76,15 +88,20 @@ describe("DagWorkflowsPanel", () => {
 
     expect(screen.getByRole("heading", { name: "Scientific Pipelines" })).toBeInTheDocument();
     expect(await screen.findByText("microscopy-qc")).toBeInTheDocument();
-    expect(screen.getByText("engine online")).toBeInTheDocument();
+    expect(screen.getByText("vendored engine online")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Open builder ↗" })).toBeInTheDocument();
     expect(await screen.findByText("Fusion review")).toBeInTheDocument();
+    expect(screen.getAllByRole("list")).toHaveLength(1);
     expect(screen.getByText("Revision 7")).toBeInTheDocument();
     expect(screen.getByText("4 nodes")).toBeInTheDocument();
     expect(screen.getByText("3 edges")).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
-    await userEvent.click(screen.getByRole("button", { name: "Run" }));
+    await userEvent.click(screen.getByRole("button", {
+      name: "Edit microscopy-qc with vendored engine",
+    }));
+    await userEvent.click(screen.getByRole("button", {
+      name: "Run microscopy-qc with vendored engine",
+    }));
     expect(onEditPipeline).toHaveBeenCalledWith("microscopy-qc");
     expect(onRunPipeline).toHaveBeenCalledWith("microscopy-qc");
 
@@ -104,8 +121,272 @@ describe("DagWorkflowsPanel", () => {
     });
   });
 
+  it("renders the same cross-engine workflow once when name and structure match", async () => {
+    const graph = createDefaultWorkflowGraph("shared-review", "Shared Review");
+    const selected: dagApi.VersionedDagWorkflowDefinition = {
+      etag: '"1"',
+      definition: {
+        storageVersion: 1,
+        id: "shared-review",
+        revision: 1,
+        createdAt: 1,
+        updatedAt: 1,
+        graphSha256: "shared-sha",
+        graph,
+      },
+    };
+    vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([{
+      id: "shared-review",
+      revision: 1,
+      createdAt: 1,
+      updatedAt: 1,
+      graphSha256: "shared-sha",
+      schemaVersion: graph.schemaVersion,
+      name: "Shared Review",
+      description: graph.description ?? null,
+      nodeCount: graph.nodes.length,
+      edgeCount: graph.edges.length,
+    }]);
+    vi.spyOn(dagApi, "readDagWorkflowDefinition").mockResolvedValue(selected);
+    mockVendoredWorkflows([{
+      name: "  shared   review ",
+      description: "The same workflow in the vendored engine",
+      nodes: graph.nodes.map((node) => ({
+        id: node.id,
+        prompt: "Run workflow.",
+        depends_on: graph.edges.filter((edge) => edge.to === node.id).map((edge) => edge.from),
+      })),
+    }]);
+
+    renderPanel();
+
+    const list = await screen.findByRole("list", { name: "Scientific pipeline workflows" });
+    await waitFor(() => expect(within(list).getByText("Vendored")).toBeInTheDocument());
+    expect(within(list).getAllByRole("listitem")).toHaveLength(1);
+    expect(within(list).getByText("Typed")).toBeInTheDocument();
+  });
+
+  it("publishes runnable typed rows while vendored loading hangs, then deduplicates late data", async () => {
+    const graph = createDefaultWorkflowGraph("late-shared-review", "Late Shared Review");
+    const selected: dagApi.VersionedDagWorkflowDefinition = {
+      etag: '"1"',
+      definition: {
+        storageVersion: 1,
+        id: "late-shared-review",
+        revision: 1,
+        createdAt: 1,
+        updatedAt: 1,
+        graphSha256: "late-shared-sha",
+        graph,
+      },
+    };
+    vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([{
+      id: "late-shared-review",
+      revision: 1,
+      createdAt: 1,
+      updatedAt: 1,
+      graphSha256: "late-shared-sha",
+      schemaVersion: graph.schemaVersion,
+      name: graph.name,
+      description: graph.description ?? null,
+      nodeCount: graph.nodes.length,
+      edgeCount: graph.edges.length,
+    }]);
+    vi.spyOn(dagApi, "readDagWorkflowDefinition").mockResolvedValue(selected);
+    const createRun = vi.spyOn(dagApi, "createDagWorkflowRun").mockResolvedValue({
+      manifest: { id: "late-typed-run" },
+      state: { status: "queued" },
+    } as dagApi.WorkflowRunRecord);
+    let resolveVendored!: (sources: registryApi.VendoredWorkflowRegistrySource[]) => void;
+    vi.mocked(registryApi.listVendoredWorkflowRegistrySources).mockReturnValue(
+      new Promise((resolve) => {
+        resolveVendored = resolve;
+      }),
+    );
+
+    renderPanel();
+
+    const list = await screen.findByRole("list", { name: "Scientific pipeline workflows" });
+    expect(within(list).getByText("Late Shared Review")).toBeInTheDocument();
+    expect(within(list).getByText("Typed")).toBeInTheDocument();
+    expect(within(list).queryByText("Vendored")).not.toBeInTheDocument();
+
+    await userEvent.click(within(list).getByRole("button", {
+      name: "Open Late Shared Review details",
+    }));
+    const runButton = await screen.findByRole("button", { name: "Run typed workflow" });
+    expect(runButton).toBeEnabled();
+    await userEvent.click(runButton);
+    await waitFor(() => expect(createRun).toHaveBeenCalledWith(
+      "project-a",
+      "late-shared-review",
+      expect.objectContaining({ expectedWorkflowRevision: 1 }),
+    ));
+
+    const vendored = registryApi.vendoredWorkflowRegistrySource({
+      name: " late shared review ",
+      description: "Late vendored alias",
+      nodes: graph.nodes.map((node) => ({
+        id: node.id,
+        prompt: "Run workflow.",
+        depends_on: graph.edges.filter((edge) => edge.to === node.id).map((edge) => edge.from),
+      })),
+    });
+    await act(async () => resolveVendored([vendored!]));
+
+    await waitFor(() => {
+      expect(within(list).getAllByRole("listitem")).toHaveLength(1);
+      expect(within(list).getByText("Typed")).toBeInTheDocument();
+      expect(within(list).getByText("Vendored")).toBeInTheDocument();
+    });
+  });
+
+  it("publishes vendored rows while the typed list remains pending", async () => {
+    vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockReturnValue(
+      new Promise<dagApi.DagWorkflowDefinitionSummary[]>(() => {}),
+    );
+    mockVendoredWorkflows([{
+      name: "vendored-first",
+      description: "Available before the typed API settles",
+    }]);
+
+    renderPanel();
+
+    const list = await screen.findByRole("list", { name: "Scientific pipeline workflows" });
+    expect(within(list).getByText("vendored-first")).toBeInTheDocument();
+    expect(within(list).getByText("Vendored")).toBeInTheDocument();
+    expect(within(list).queryByText("Typed")).not.toBeInTheDocument();
+    expect(within(list).getByRole("button", {
+      name: "Run vendored-first with vendored engine",
+    })).toBeEnabled();
+  });
+
+  it("publishes and runs vendored rows while the advisory health request hangs", async () => {
+    vi.mocked(registryApi.vendoredPipelineEngineHealth).mockReturnValue(
+      new Promise<boolean>(() => {}),
+    );
+    vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
+    mockVendoredWorkflows([{
+      name: "health-independent",
+      description: "Available without the advisory probe",
+    }]);
+    const onRunPipeline = vi.fn().mockResolvedValue({
+      accepted: true,
+      status: "started",
+    });
+
+    renderPanel({ onRunPipeline });
+
+    const runButton = await screen.findByRole("button", {
+      name: "Run health-independent with vendored engine",
+    });
+    expect(screen.getByText("checking vendored engine…")).toBeInTheDocument();
+    await userEvent.click(runButton);
+    await waitFor(() => expect(onRunPipeline).toHaveBeenCalledWith("health-independent"));
+  });
+
+  it("shows degraded health without clearing a successful vendored list", async () => {
+    vi.mocked(registryApi.vendoredPipelineEngineHealth).mockRejectedValue(
+      new Error("health probe timed out"),
+    );
+    vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
+    mockVendoredWorkflows([{
+      name: "degraded-health",
+      description: "List remains authoritative for presentation",
+    }]);
+
+    renderPanel();
+
+    expect(await screen.findByText("degraded-health")).toBeInTheDocument();
+    expect(await screen.findByText("vendored health degraded")).toBeInTheDocument();
+    expect(screen.getByText(/health probe timed out/)).toHaveTextContent(
+      "Workflows returned by the list request remain available.",
+    );
+  });
+
+  it("shows duplicate vendored names as scope-unverified and non-routable", async () => {
+    vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
+    vi.mocked(registryApi.listVendoredWorkflowRegistrySources).mockResolvedValue([
+      registryApi.vendoredWorkflowRegistrySource({
+        name: "duplicate-name",
+        description: "First record",
+        nodes: [{ id: "collect" }],
+      }, { origin: "project" })!,
+      registryApi.vendoredWorkflowRegistrySource({
+        name: "duplicate-name",
+        description: "Second record",
+        nodes: [{ id: "collect" }],
+      }, { origin: "project" })!,
+    ]);
+    const onEditPipeline = vi.fn();
+    const onRunPipeline = vi.fn();
+
+    renderPanel({ onEditPipeline, onRunPipeline });
+
+    const list = await screen.findByRole("list", { name: "Scientific pipeline workflows" });
+    expect(within(list).getAllByRole("listitem")).toHaveLength(2);
+    expect(within(list).getAllByText("Project scope unverified")).toHaveLength(2);
+    expect(within(list).getAllByText("Not routable")).toHaveLength(2);
+    expect(within(list).getAllByText(
+      registryApi.AMBIGUOUS_VENDORED_WORKFLOW_NAME_REASON,
+    )).toHaveLength(2);
+
+    const editButtons = within(list).getAllByRole("button", {
+      name: "Edit duplicate-name with vendored engine",
+    });
+    const runButtons = within(list).getAllByRole("button", {
+      name: "Run duplicate-name with vendored engine",
+    });
+    for (const button of [...editButtons, ...runButtons]) {
+      expect(button).toBeDisabled();
+      await userEvent.click(button);
+    }
+    expect(onEditPipeline).not.toHaveBeenCalled();
+    expect(onRunPipeline).not.toHaveBeenCalled();
+  });
+
+  it("routes normalized-name collisions with exact identifiers and surfaces ambiguity", async () => {
+    vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
+    vi.mocked(registryApi.listVendoredWorkflowRegistrySources).mockResolvedValue([
+      registryApi.vendoredWorkflowRegistrySource({
+        name: " foo ",
+        nodes: [{ id: "collect", prompt: "Collect evidence." }],
+      }, { origin: "project", filename: "padded.yaml" })!,
+      registryApi.vendoredWorkflowRegistrySource({
+        name: "foo",
+        nodes: [{ id: "collect", prompt: "Collect evidence." }],
+      }, { origin: "catalogue", filename: "plain.yaml" })!,
+    ]);
+    const onEditPipeline = vi.fn();
+    const onRunPipeline = vi.fn().mockResolvedValue({ accepted: true, status: "started" });
+
+    renderPanel({ onEditPipeline, onRunPipeline });
+
+    const list = await screen.findByRole("list", { name: "Scientific pipeline workflows" });
+    const editButtons = within(list).getAllByRole("button", {
+      name: "Edit foo with vendored engine",
+    });
+    const runButtons = within(list).getAllByRole("button", {
+      name: "Run foo with vendored engine",
+    });
+    expect(within(list).getAllByRole("listitem")).toHaveLength(2);
+    expect(within(list).getAllByRole("alert")[0]).toHaveTextContent(
+      "Ambiguous vendored routes",
+    );
+
+    await userEvent.click(editButtons[0]);
+    await userEvent.click(editButtons[1]);
+    await userEvent.click(runButtons[0]);
+    await userEvent.click(runButtons[1]);
+
+    expect(onEditPipeline.mock.calls.map(([identifier]) => identifier))
+      .toEqual([" foo ", "foo"]);
+    await waitFor(() => expect(onRunPipeline.mock.calls.map(([identifier]) => identifier))
+      .toEqual([" foo ", "foo"]));
+  });
+
   it("routes the selected vendored pipeline directly without invoking typed admission or Builder", async () => {
-    vi.mocked(pipelinesApi.listPipelines).mockResolvedValue([
+    mockVendoredWorkflows([
       { name: "microscopy-qc", description: "Inspect microscopy acquisition quality" },
     ]);
     vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
@@ -130,7 +411,9 @@ describe("DagWorkflowsPanel", () => {
       }),
     });
 
-    await userEvent.click(await screen.findByRole("button", { name: "Run" }));
+    await userEvent.click(await screen.findByRole("button", {
+      name: "Run microscopy-qc with vendored engine",
+    }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     const [url, init] = fetchMock.mock.calls[0];
@@ -148,7 +431,7 @@ describe("DagWorkflowsPanel", () => {
   });
 
   it("blocks vendored pipeline submission when the project budget is exhausted", async () => {
-    vi.mocked(pipelinesApi.listPipelines).mockResolvedValue([
+    mockVendoredWorkflows([
       { name: "microscopy-qc", description: "Inspect microscopy acquisition quality" },
     ]);
     vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
@@ -162,7 +445,9 @@ describe("DagWorkflowsPanel", () => {
     expect(await screen.findByText(
       "Vendored pipeline runs are disabled because the project spend limit is reached.",
     )).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Run" }));
+    await userEvent.click(screen.getByRole("button", {
+      name: "Run microscopy-qc with vendored engine",
+    }));
 
     expect(onRunPipeline).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(
@@ -188,7 +473,7 @@ describe("DagWorkflowsPanel", () => {
     },
     { httpStatus: 200, body: { status: "started" }, detail: "Vendored pipeline response did not confirm acceptance." },
   ])("renders HTTP $httpStatus non-success or unknown shapes as failures", async ({ httpStatus, body, detail }) => {
-    vi.mocked(pipelinesApi.listPipelines).mockResolvedValue([
+    mockVendoredWorkflows([
       { name: "microscopy-qc", description: "Inspect microscopy acquisition quality" },
     ]);
     vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
@@ -210,7 +495,9 @@ describe("DagWorkflowsPanel", () => {
       }),
     });
 
-    await userEvent.click(await screen.findByRole("button", { name: "Run" }));
+    await userEvent.click(await screen.findByRole("button", {
+      name: "Run microscopy-qc with vendored engine",
+    }));
 
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(
       `Run failed: ${detail}`,
@@ -497,7 +784,7 @@ describe("DagWorkflowsPanel", () => {
     vi.spyOn(dagApi, "saveDagWorkflowDefinition").mockResolvedValue(created);
     renderPanel();
 
-    await screen.findByText("No typed workflows yet");
+    await screen.findByText("No workflows yet");
     await userEvent.click(screen.getByRole("button", { name: "New typed workflow" }));
     await userEvent.type(screen.getByLabelText("New workflow id"), "new-research");
     await userEvent.type(screen.getByLabelText("New workflow name"), "New research");
@@ -543,7 +830,7 @@ describe("DagWorkflowsPanel", () => {
     vi.spyOn(dagApi, "saveDagWorkflowDefinition").mockResolvedValue(created);
     renderPanel();
 
-    await screen.findByText("No typed workflows yet");
+    await screen.findByText("No workflows yet");
     await userEvent.click(screen.getByRole("button", { name: "New typed workflow" }));
     await userEvent.selectOptions(
       screen.getByLabelText("Workflow template"),
