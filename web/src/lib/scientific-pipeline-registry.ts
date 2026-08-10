@@ -8,6 +8,8 @@ import { apiFetch } from "@/lib/projects";
 
 export type ScientificPipelineEngine = "typed" | "vendored";
 
+export const PIPELINE_ENGINE_REQUEST_TIMEOUT_MS = 5_000;
+
 export interface TypedWorkflowRegistrySource {
   engine: "typed";
   sourceId: string;
@@ -222,14 +224,62 @@ export function workflowRouteForEngine(
   return route;
 }
 
+async function pipelineEngineRequest(
+  path: string,
+  projectId: string,
+  operation: string,
+  timeoutMs = PIPELINE_ENGINE_REQUEST_TIMEOUT_MS,
+): Promise<{ response: Response; body: unknown }> {
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutFailure = new Promise<{ response: Response; body: unknown }>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`${operation} timed out after ${timeoutMs}ms.`));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([
+      apiFetch(path, { signal: controller.signal }, projectId).then(async (response) => ({
+        response,
+        body: response.ok ? await response.json() as unknown : null,
+      })),
+      timeoutFailure,
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
+export async function vendoredPipelineEngineHealth(
+  projectId: string,
+  timeoutMs = PIPELINE_ENGINE_REQUEST_TIMEOUT_MS,
+): Promise<boolean> {
+  const { response, body } = await pipelineEngineRequest(
+    "/pipelines/health",
+    projectId,
+    "Vendored workflow health check",
+    timeoutMs,
+  );
+  if (!response.ok) {
+    throw new Error(`Vendored workflow health check failed (${response.status}).`);
+  }
+  return recordOf(body)?.healthy === true;
+}
+
 export async function listVendoredWorkflowRegistrySources(
   projectId: string,
+  timeoutMs = PIPELINE_ENGINE_REQUEST_TIMEOUT_MS,
 ): Promise<VendoredWorkflowRegistrySource[]> {
-  const response = await apiFetch("/pipelines", {}, projectId);
+  const { response, body } = await pipelineEngineRequest(
+    "/pipelines",
+    projectId,
+    "Vendored workflow list",
+    timeoutMs,
+  );
   if (!response.ok) {
     throw new Error(`Vendored workflow list failed (${response.status}).`);
   }
-  const body = await response.json() as unknown;
   const workflows = recordOf(body)?.workflows;
   if (!Array.isArray(workflows)) return [];
   return workflows.flatMap((candidate) => {

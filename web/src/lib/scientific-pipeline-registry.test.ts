@@ -1,12 +1,23 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DagWorkflowDefinitionSummary, WorkflowGraphDocument } from "./dag-workflows";
+import { apiFetch } from "./projects";
 import {
   buildScientificPipelineRegistry,
+  listVendoredWorkflowRegistrySources,
   typedWorkflowRegistrySource,
+  vendoredPipelineEngineHealth,
   vendoredWorkflowRegistrySource,
   workflowRouteForEngine,
 } from "./scientific-pipeline-registry";
+
+vi.mock("./projects", () => ({ apiFetch: vi.fn() }));
+
+const apiFetchMock = vi.mocked(apiFetch);
+
+beforeEach(() => {
+  apiFetchMock.mockReset();
+});
 
 function typedSummary(
   id: string,
@@ -167,5 +178,43 @@ describe("scientific pipeline registry", () => {
     expect(registry).toHaveLength(2);
     expect(registry.map((entry) => workflowRouteForEngine(entry, "typed").workflowId))
       .toEqual(["shared-workflow-a", "shared-workflow-b"]);
+  });
+
+  it.each([
+    {
+      operation: "health check",
+      path: "/pipelines/health",
+      invoke: () => vendoredPipelineEngineHealth("project-a", 25),
+    },
+    {
+      operation: "list",
+      path: "/pipelines",
+      invoke: () => listVendoredWorkflowRegistrySources("project-a", 25),
+    },
+  ])("bounds and aborts a hung vendored workflow $operation", async ({ path, invoke }) => {
+    apiFetchMock.mockReturnValue(new Promise<Response>(() => {}));
+
+    await expect(invoke()).rejects.toThrow("timed out after 25ms");
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      path,
+      { signal: expect.any(AbortSignal) },
+      "project-a",
+    );
+    const signal = apiFetchMock.mock.calls[0]?.[1]?.signal;
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it("keeps the timeout active while a vendored response body is stalled", async () => {
+    apiFetchMock.mockResolvedValue({
+      ok: true,
+      json: () => new Promise<unknown>(() => {}),
+    } as Response);
+
+    await expect(listVendoredWorkflowRegistrySources("project-a", 25))
+      .rejects.toThrow("timed out after 25ms");
+
+    const signal = apiFetchMock.mock.calls[0]?.[1]?.signal;
+    expect(signal?.aborted).toBe(true);
   });
 });

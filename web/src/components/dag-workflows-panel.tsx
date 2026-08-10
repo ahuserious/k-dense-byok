@@ -30,12 +30,12 @@ import {
   findDagWorkflowTemplate,
 } from "@/lib/dag-workflow-templates";
 import { PIPELINE_ENGINE_URL } from "@/lib/embed-config";
-import { pipelineHealth } from "@/lib/pipelines";
 import {
   buildScientificPipelineRegistry,
   listVendoredWorkflowRegistrySources,
   normalizeWorkflowName,
   typedWorkflowRegistrySource,
+  vendoredPipelineEngineHealth,
   workflowRouteForEngine,
   type ScientificPipelineRegistryEntry,
   type TypedWorkflowRegistrySource,
@@ -559,70 +559,53 @@ export function DagWorkflowsPanel({
   const [vendoredRunReceipts, setVendoredRunReceipts] = useState<Record<string, VendoredRunReceipt & { error?: string }>>({});
   const launchingVendoredRuns = useRef(new Set<string>());
   const loadGeneration = useRef(0);
+  const structureComparisonFailures = useRef(new Set<string>());
   const selectedTemplate = findDagWorkflowTemplate(newWorkflowTemplateId);
   const registryEntries = useMemo(
-    () => typedSources && vendoredSources
-      ? buildScientificPipelineRegistry(typedSources, vendoredSources)
-      : null,
+    () => typedSources === null && vendoredSources === null
+      ? null
+      : buildScientificPipelineRegistry(typedSources ?? [], vendoredSources ?? []),
     [typedSources, vendoredSources],
   );
 
-  const refreshRegistry = useCallback(async () => {
+  const refreshRegistry = useCallback(() => {
     const generation = loadGeneration.current + 1;
     loadGeneration.current = generation;
+    structureComparisonFailures.current.clear();
     setTypedSources(null);
     setVendoredSources(null);
     setVendoredHealthy(null);
     setSelectedDefinition(null);
     setError(null);
 
-    const [typedResult, vendoredResult] = await Promise.allSettled([
-      listDagWorkflowDefinitions(projectId),
-      pipelineHealth().then(async (healthy) => ({
-        healthy,
-        sources: healthy ? await listVendoredWorkflowRegistrySources(projectId) : [],
-      })),
-    ]);
-    if (loadGeneration.current !== generation) return;
+    void listDagWorkflowDefinitions(projectId)
+      .then((summaries) => {
+        if (loadGeneration.current !== generation) return;
+        setTypedSources(summaries.map((summary) => typedWorkflowRegistrySource(summary)));
+      })
+      .catch((caught) => {
+        if (loadGeneration.current !== generation) return;
+        setTypedSources([]);
+        setError(errorMessage(caught));
+      });
 
-    const summaries = typedResult.status === "fulfilled" ? typedResult.value : [];
-    const nextVendoredSources = vendoredResult.status === "fulfilled"
-      ? vendoredResult.value.sources
-      : [];
-    setVendoredSources(nextVendoredSources);
-    setVendoredHealthy(
-      vendoredResult.status === "fulfilled" ? vendoredResult.value.healthy : false,
-    );
-
-    if (typedResult.status === "rejected") {
-      setTypedSources([]);
-      setError(errorMessage(typedResult.reason));
-      return;
-    }
-
-    const vendoredNames = new Set(
-      nextVendoredSources.map((source) => normalizeWorkflowName(source.workflowName)),
-    );
-    const comparisonFailures: string[] = [];
-    const nextTypedSources = await Promise.all(summaries.map(async (summary) => {
-      if (!vendoredNames.has(normalizeWorkflowName(summary.name))) {
-        return typedWorkflowRegistrySource(summary);
-      }
-      try {
-        const definition = await readDagWorkflowDefinition(projectId, summary.id);
-        return typedWorkflowRegistrySource(summary, definition.definition.graph);
-      } catch {
-        comparisonFailures.push(summary.name);
-        return typedWorkflowRegistrySource(summary);
-      }
-    }));
-    if (loadGeneration.current !== generation) return;
-    setTypedSources(nextTypedSources);
-    if (comparisonFailures.length > 0) {
-      setError(
-        `Could not verify structure for ${comparisonFailures.join(", ")}; its engine entries remain separate.`,
-      );
-    }
+    void vendoredPipelineEngineHealth(projectId)
+      .then(async (healthy) => {
+        if (loadGeneration.current !== generation) return;
+        setVendoredHealthy(healthy);
+        if (!healthy) {
+          setVendoredSources([]);
+          return;
+        }
+        const sources = await listVendoredWorkflowRegistrySources(projectId);
+        if (loadGeneration.current !== generation) return;
+        setVendoredSources(sources);
+      })
+      .catch(() => {
+        if (loadGeneration.current !== generation) return;
+        setVendoredHealthy(false);
+        setVendoredSources([]);
+      });
   }, [projectId]);
 
   useEffect(() => {
@@ -632,13 +615,68 @@ export function DagWorkflowsPanel({
     };
   }, [refreshRegistry]);
 
+  useEffect(() => {
+    if (typedSources === null || vendoredSources === null) return;
+    const vendoredNames = new Set(
+      vendoredSources.map((source) => normalizeWorkflowName(source.workflowName)),
+    );
+    const candidates = typedSources.filter((source) =>
+      !source.graph &&
+      !structureComparisonFailures.current.has(source.sourceId) &&
+      vendoredNames.has(normalizeWorkflowName(source.summary.name))
+    );
+    if (candidates.length === 0) return;
+
+    const generation = loadGeneration.current;
+    let cancelled = false;
+    void Promise.all(candidates.map(async (source) => {
+      try {
+        const definition = await readDagWorkflowDefinition(projectId, source.workflowId);
+        return { source, graph: definition.definition.graph } as const;
+      } catch {
+        return { source, graph: null } as const;
+      }
+    })).then((results) => {
+      if (cancelled || loadGeneration.current !== generation) return;
+      const graphs = new Map(
+        results.flatMap(({ source, graph }) => graph ? [[source.sourceId, graph] as const] : []),
+      );
+      const failures = results
+        .filter(({ graph }) => graph === null)
+        .map(({ source }) => source);
+      for (const source of failures) {
+        structureComparisonFailures.current.add(source.sourceId);
+      }
+      if (graphs.size > 0) {
+        setTypedSources((current) => current?.map((source) => {
+          const graph = graphs.get(source.sourceId);
+          return graph ? { ...source, graph } : source;
+        }) ?? null);
+      }
+      if (failures.length > 0) {
+        setError(
+          `Could not verify structure for ${failures.map((source) => source.summary.name).join(", ")}; its engine entries remain separate.`,
+        );
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, typedSources, vendoredSources]);
+
   const openDefinition = async (entry: ScientificPipelineRegistryEntry) => {
     if (openingId) return;
     const route = workflowRouteForEngine(entry, "typed");
     setOpeningId(route.sourceId);
     setError(null);
     try {
-      setSelectedDefinition(await readDagWorkflowDefinition(projectId, route.workflowId));
+      const selected = await readDagWorkflowDefinition(projectId, route.workflowId);
+      setSelectedDefinition(selected);
+      setTypedSources((current) => current?.map((source) =>
+        source.sourceId === route.sourceId
+          ? { ...source, graph: selected.definition.graph }
+          : source
+      ) ?? null);
     } catch (caught) {
       setError(errorMessage(caught));
     } finally {
