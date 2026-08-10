@@ -37,6 +37,7 @@ export function reactFlowToDagNodes(rfNodes: DagFlowNode[], rfEdges: Edge[]): Da
       depends_on: deps.length > 0 ? deps : undefined,
       when: node.data.when || undefined,
       trigger_rule: node.data.trigger_rule || undefined,
+      settings: node.data.settings,
     };
 
     if (node.data.nodeType === 'bash') {

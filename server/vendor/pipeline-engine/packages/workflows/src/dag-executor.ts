@@ -98,6 +98,14 @@ import {
   type ModelAliasPreset,
   type ResolvedAiProfile,
 } from './model-validation';
+import {
+  applyVendoredNodeAuthSelection,
+  assertVendoredNodeSpecSemantics,
+  createVendoredNodeCostBudgetState,
+  optionsWithRemainingVendoredNodeBudget,
+  recordVendoredNodeSpend,
+  resolveVendoredNodeSpecRuntimeBinding,
+} from './node-spec-enforcement';
 
 export {
   FUSION_TOPOLOGY_KINDS,
@@ -600,12 +608,47 @@ export async function loadConfiguredMcpServerNames(
 }
 
 /** Workflow-level Claude SDK options — per-node overrides take precedence via ?? */
-interface WorkflowLevelOptions {
+export interface WorkflowLevelOptions {
   effort?: EffortLevel;
   thinking?: ThinkingConfig;
   fallbackModel?: string;
   betas?: string[];
   sandbox?: SandboxSettings;
+}
+
+/**
+ * Build the provider-facing raw node configuration.
+ *
+ * The canonical settings payload is still forwarded for adapter observability,
+ * while the explicitly supported fields are projected onto the adapter's
+ * existing provider options. Semantic validation rejects every other field.
+ */
+export function buildNodeAdapterConfig(
+  node: DagNode,
+  workflowLevelOptions: WorkflowLevelOptions,
+  runtimeBinding = resolveVendoredNodeSpecRuntimeBinding(node, undefined)
+): NodeConfig {
+  const fallbackModel =
+    runtimeBinding.fallbackModel ?? node.fallbackModel ?? workflowLevelOptions.fallbackModel;
+  return {
+    nodeId: node.id,
+    ...(node.settings !== undefined ? { settings: node.settings } : {}),
+    ...(runtimeBinding.auth !== undefined ? { auth: runtimeBinding.auth } : {}),
+    mcp: node.mcp,
+    hooks: node.hooks,
+    skills: node.skills,
+    agents: node.agents,
+    allowed_tools: node.allowed_tools,
+    denied_tools: node.denied_tools,
+    effort: node.effort ?? workflowLevelOptions.effort,
+    thinking: node.thinking ?? workflowLevelOptions.thinking,
+    sandbox: node.sandbox ?? workflowLevelOptions.sandbox,
+    betas: node.betas ?? workflowLevelOptions.betas,
+    output_format: node.output_format,
+    maxBudgetUsd: runtimeBinding.maxBudgetUsd,
+    systemPrompt: node.systemPrompt,
+    fallbackModel,
+  };
 }
 
 /** Internal node execution result — extends NodeOutput with cost data for aggregation. */
@@ -805,12 +848,13 @@ async function resolveNodeProviderAndModel(
   model: string | undefined;
   options: SendQueryOptions | undefined;
 }> {
-  const configuredProvider: string = node.provider ?? workflowProvider;
+  const runtimeBinding = resolveVendoredNodeSpecRuntimeBinding(node, workflowProvider);
+  const configuredProvider: string = runtimeBinding.provider ?? node.provider ?? workflowProvider;
   let provider: string = configuredProvider;
   let preset: ModelAliasPreset | undefined;
-  let model: string | undefined;
+  let model: string | undefined = runtimeBinding.model;
 
-  if (node.model) {
+  if (runtimeBinding.model === undefined && node.model) {
     if (aiProfile) {
       const modelSpec = resolveModelSpec(aiProfile, node.model);
       if (isLiteralSpec(modelSpec)) {
@@ -863,7 +907,10 @@ async function resolveNodeProviderAndModel(
       ? workflowModel
       : (providerAssistantConfig?.model as string | undefined);
   const effectivePreset =
-    preset ?? (!node.model && provider === workflowProvider ? workflowPreset : undefined);
+    preset ??
+    (runtimeBinding.model === undefined && !node.model && provider === workflowProvider
+      ? workflowPreset
+      : undefined);
 
   // Get provider capabilities for capability warnings (static lookup, no instantiation)
   const caps = getProviderCapabilities(provider);
@@ -879,13 +926,19 @@ async function resolveNodeProviderAndModel(
     ['mcp', 'mcp', node.mcp !== undefined],
     ['skills', 'skills', node.skills !== undefined && node.skills.length > 0],
     ['agents', 'agents', node.agents !== undefined],
-    ['effort', 'effortControl', (node.effort ?? workflowLevelOptions.effort) !== undefined],
+    [
+      'effort',
+      'effortControl',
+      runtimeBinding.reasoning !== undefined ||
+        (node.effort ?? workflowLevelOptions.effort) !== undefined,
+    ],
     ['thinking', 'thinkingControl', (node.thinking ?? workflowLevelOptions.thinking) !== undefined],
-    ['maxBudgetUsd', 'costControl', node.maxBudgetUsd !== undefined],
+    ['maxBudgetUsd', 'costControl', runtimeBinding.maxBudgetUsd !== undefined],
     [
       'fallbackModel',
       'fallbackModel',
-      (node.fallbackModel ?? workflowLevelOptions.fallbackModel) !== undefined,
+      (runtimeBinding.fallbackModel ?? node.fallbackModel ?? workflowLevelOptions.fallbackModel) !==
+        undefined,
     ],
     ['sandbox', 'sandbox', (node.sandbox ?? workflowLevelOptions.sandbox) !== undefined],
     ['env', 'envInjection', (config.envVars && Object.keys(config.envVars).length > 0) === true],
@@ -931,35 +984,28 @@ async function resolveNodeProviderAndModel(
   // Build universal base options
   const baseOptions: SendQueryOptions = {};
   if (model) baseOptions.model = model;
-  if (config.envVars && Object.keys(config.envVars).length > 0) {
-    baseOptions.env = config.envVars;
+  const selectedAuthEnv = applyVendoredNodeAuthSelection(
+    config.envVars,
+    provider,
+    runtimeBinding.auth,
+    node.id
+  );
+  if (selectedAuthEnv && Object.keys(selectedAuthEnv).length > 0) {
+    baseOptions.env = selectedAuthEnv;
   }
   if (node.systemPrompt !== undefined) baseOptions.systemPrompt = node.systemPrompt;
-  if (node.maxBudgetUsd !== undefined) baseOptions.maxBudgetUsd = node.maxBudgetUsd;
-  const fb = node.fallbackModel ?? workflowLevelOptions.fallbackModel;
+  if (runtimeBinding.maxBudgetUsd !== undefined) {
+    baseOptions.maxBudgetUsd = runtimeBinding.maxBudgetUsd;
+  }
+  const fb =
+    runtimeBinding.fallbackModel ?? node.fallbackModel ?? workflowLevelOptions.fallbackModel;
   if (fb) baseOptions.fallbackModel = fb;
   if (node.output_format) {
     baseOptions.outputFormat = { type: 'json_schema', schema: node.output_format };
   }
 
   // Build raw nodeConfig — provider translates internally
-  const nodeConfig: NodeConfig = {
-    nodeId: node.id,
-    mcp: node.mcp,
-    hooks: node.hooks,
-    skills: node.skills,
-    agents: node.agents,
-    allowed_tools: node.allowed_tools,
-    denied_tools: node.denied_tools,
-    effort: node.effort ?? workflowLevelOptions.effort,
-    thinking: node.thinking ?? workflowLevelOptions.thinking,
-    sandbox: node.sandbox ?? workflowLevelOptions.sandbox,
-    betas: node.betas ?? workflowLevelOptions.betas,
-    output_format: node.output_format,
-    maxBudgetUsd: node.maxBudgetUsd,
-    systemPrompt: node.systemPrompt,
-    fallbackModel: fb,
-  };
+  const nodeConfig = buildNodeAdapterConfig(node, workflowLevelOptions, runtimeBinding);
 
   // Pass assistantConfig from config — provider parses internally
   const assistantConfig: Record<string, unknown> = { ...(config.assistants[provider] ?? {}) };
@@ -971,12 +1017,33 @@ async function resolveNodeProviderAndModel(
     nodeConfig,
     assistantConfig
   );
+  if (runtimeBinding.reasoning !== undefined) {
+    const routedReasoning = routePresetEffort(provider, runtimeBinding.reasoning);
+    if (!routedReasoning) {
+      throw new Error(
+        `Node '${node.id}': reasoning '${runtimeBinding.reasoning}' is not supported by provider '${provider}'.`
+      );
+    }
+    if (routedReasoning.field === 'effort') {
+      nodeConfig.effort = routedReasoning.value;
+    } else {
+      assistantConfig.modelReasoningEffort = routedReasoning.value;
+    }
+  }
 
   const options: SendQueryOptions = {
     ...baseOptions,
     nodeConfig,
     assistantConfig,
   };
+
+  if (options.maxBudgetUsd === 0) {
+    // Kady performs a separate outer admission check before a hosted run starts.
+    // This vendored guard is the inner layer: a zero node ceiling must stop
+    // before getAgentProvider/sendQuery can initiate billable work. Positive
+    // ceilings continue through the provider's existing maxBudgetUsd control.
+    throw new Error(`Node '${node.id}': maxBudgetUsd ceiling is $0; execution blocked before spend.`);
+  }
 
   return { provider, model, options };
 }
@@ -1086,7 +1153,8 @@ async function executeNodeInternal(
   nodeOutputs: Map<string, NodeOutput>,
   resumeSessionId: string | undefined,
   configuredCommandFolder?: string,
-  issueContext?: string
+  issueContext?: string,
+  nodeCostBudget = createVendoredNodeCostBudgetState(nodeOptions?.maxBudgetUsd)
 ): Promise<NodeExecutionResult> {
   const nodeStartTime = Date.now();
   const nodeContext: SendMessageContext = { workflowId: workflowRun.id, nodeName: node.id };
@@ -1189,7 +1257,8 @@ async function executeNodeInternal(
   let structuredOutput: unknown;
   let newSessionId: string | undefined;
   let nodeTokens: TokenUsage | undefined;
-  let nodeCostUsd: number | undefined;
+  let nodeCostUsd: number | undefined =
+    nodeCostBudget.spentUsd > 0 ? nodeCostBudget.spentUsd : undefined;
   let nodeStopReason: string | undefined;
   let nodeNumTurns: number | undefined;
   let nodeModelUsage: Record<string, unknown> | undefined;
@@ -1219,13 +1288,8 @@ async function executeNodeInternal(
     nodeOptions?.outputFormat
       ? STRUCTURED_OUTPUT_MAX_REASKS
       : 0;
-  let accumulatedCostUsd: number | undefined;
-
-  // One sendQuery stream pass. Resets the per-attempt accumulators it mutates
-  // (output text, structured output, the batched-message buffer, per-pass cost,
-  // idle-timeout flag) so a prior reask attempt's state never leaks into this one,
-  // then streams. Throws on SDK error / budget cap (propagates to the outer catch
-  // — those failures are never reasked).
+  // One sendQuery stream pass. Resets response-shaped state while preserving
+  // nodeCostBudget across reasks and caller-level retries.
   const runStreamPass = async (
     attemptPrompt: string,
     attemptResumeId: string | undefined
@@ -1233,10 +1297,14 @@ async function executeNodeInternal(
     nodeOutputText = '';
     structuredOutput = undefined;
     batchMessages.length = 0; // else a failed attempt's prose flushes during reask
-    nodeCostUsd = undefined;
     nodeIdleTimedOut = false;
+    const passOptions = optionsWithRemainingVendoredNodeBudget(
+      nodeOptionsWithAbort,
+      nodeCostBudget,
+      node.id
+    );
     for await (const msg of withIdleTimeout(
-      aiClient.sendQuery(attemptPrompt, cwd, attemptResumeId, nodeOptionsWithAbort),
+      aiClient.sendQuery(attemptPrompt, cwd, attemptResumeId, passOptions),
       effectiveIdleTimeout,
       () => {
         nodeIdleTimedOut = true;
@@ -1416,7 +1484,13 @@ async function executeNodeInternal(
         }
         if (msg.sessionId) newSessionId = msg.sessionId;
         if (msg.tokens) nodeTokens = msg.tokens;
-        if (msg.cost !== undefined) nodeCostUsd = msg.cost;
+        if (msg.cost !== undefined) {
+          try {
+            recordVendoredNodeSpend(nodeCostBudget, msg.cost, node.id);
+          } finally {
+            nodeCostUsd = nodeCostBudget.spentUsd;
+          }
+        }
         if (msg.stopReason !== undefined) nodeStopReason = msg.stopReason;
         if (msg.numTurns !== undefined) nodeNumTurns = msg.numTurns;
         if (msg.modelUsage) nodeModelUsage = msg.modelUsage;
@@ -1565,13 +1639,6 @@ async function executeNodeInternal(
       // Fresh session per reask attempt (resume only the original session on the
       // first pass) so a prior invalid turn isn't carried forward.
       await runStreamPass(reaskPrompt, reaskAttempt === 0 ? resumeSessionId : undefined);
-      if (nodeCostUsd !== undefined) {
-        accumulatedCostUsd = (accumulatedCostUsd ?? 0) + nodeCostUsd;
-      }
-      // Carry the running total onto nodeCostUsd every pass so the exhaustion throw
-      // paths (which jump straight to the outer catch) report cost across ALL reask
-      // attempts, not just the last pass. runStreamPass clears it next iteration.
-      nodeCostUsd = accumulatedCostUsd;
 
       // When output_format is set and the provider returned structured_output, use
       // it instead of the concatenated assistant text. Each provider normalizes its
@@ -2420,6 +2487,7 @@ async function executeLoopNode(
   let loopFinalStopReason: string | undefined;
   let loopTotalNumTurns: number | undefined;
   let loopTotalTokens: TokenUsage | undefined;
+  const nodeCostBudget = createVendoredNodeCostBudgetState(resolvedOptions?.maxBudgetUsd);
   // Helper to log event store errors consistently
   const logEventStoreError = (err: Error, iteration: number): void => {
     getLog().error({ err, nodeId: node.id, iteration }, 'loop_node.iteration_event_failed');
@@ -2506,10 +2574,14 @@ async function executeLoopNode(
       );
       const finalPrompt = substituteNodeOutputRefs(substitutedPrompt, nodeOutputs);
 
-      const iterationOptions: SendQueryOptions | undefined = {
-        ...resolvedOptions,
-        abortSignal: iterationAbortController.signal,
-      };
+      const iterationOptions = optionsWithRemainingVendoredNodeBudget<SendQueryOptions>(
+        {
+          ...resolvedOptions,
+          abortSignal: iterationAbortController.signal,
+        },
+        nodeCostBudget,
+        node.id
+      );
 
       const generator = aiClient.sendQuery(finalPrompt, cwd, resumeSessionId, iterationOptions);
       let lastToolStartedAt: { toolName: string; startedAt: number } | null = null;
@@ -2560,7 +2632,11 @@ async function executeLoopNode(
           }
           if (msg.sessionId) currentSessionId = msg.sessionId;
           if (msg.cost !== undefined) {
-            loopTotalCostUsd = (loopTotalCostUsd ?? 0) + msg.cost;
+            try {
+              recordVendoredNodeSpend(nodeCostBudget, msg.cost, node.id);
+            } finally {
+              loopTotalCostUsd = nodeCostBudget.spentUsd;
+            }
           }
           if (msg.tokens !== undefined) {
             // Provider-supplied numbers — see the NaN guard rationale at the
@@ -3231,6 +3307,10 @@ export async function executeDagWorkflow(
   aiProfile?: ResolvedAiProfile,
   workflowPreset?: ModelAliasPreset
 ): Promise<string | undefined> {
+  // executeDagWorkflow is exported and can be called without parseWorkflow.
+  // Re-run the authoritative semantic gate here so programmatic run paths fail
+  // before any provider resolution or spend.
+  assertVendoredNodeSpecSemantics({ nodes: workflow.nodes, provider: workflowProvider });
   const dagStartTime = Date.now();
   const workflowLevelOptions = {
     effort: workflow.effort,
@@ -3757,6 +3837,7 @@ export async function executeDagWorkflow(
 
           // 6. Execute with retry for transient failures
           const retryConfig = getEffectiveNodeRetryConfig(node);
+          const nodeCostBudget = createVendoredNodeCostBudgetState(nodeOptions?.maxBudgetUsd);
           let output: NodeExecutionResult = {
             state: 'failed',
             output: '',
@@ -3782,7 +3863,8 @@ export async function executeDagWorkflow(
               // ensures the source is never mutated, so retries can safely resume from it.
               resumeSessionId,
               configuredCommandFolder,
-              issueContext
+              issueContext,
+              nodeCostBudget
             );
 
             if (output.state !== 'failed') break;

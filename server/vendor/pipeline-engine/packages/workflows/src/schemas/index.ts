@@ -57,6 +57,9 @@ export {
   thinkingConfigSchema,
   sandboxSettingsSchema,
   agentDefinitionSchema,
+  nodeRequestedModelSchema,
+  nodeModelRequestSchema,
+  nodeSpecV1Schema,
 } from './dag-node';
 export type {
   TriggerRule,
@@ -75,6 +78,9 @@ export type {
   ThinkingConfig,
   SandboxSettings,
   AgentDefinition,
+  NodeRequestedModel,
+  NodeModelRequest,
+  NodeSpecV1,
 } from './dag-node';
 
 // Workflow definition

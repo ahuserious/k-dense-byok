@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import type { DagFlowNode } from '@/components/workflows/DagNodeComponent';
 import type { Edge } from '@xyflow/react';
 import { hasCycle } from '@/lib/dag-layout';
+import { nodeSpecV1InlineErrors } from '@/components/workflows/NodeInspector';
 
 export interface ValidationIssue {
   severity: 'error' | 'warning' | 'info';
@@ -64,6 +65,15 @@ function getInstantIssues(
         nodeId: node.data.id,
         field: 'promptText',
         suggestion: 'Enter a prompt for this node',
+      });
+    }
+    for (const message of nodeSpecV1InlineErrors(node.data.settings)) {
+      issues.push({
+        severity: 'error',
+        message: `Node "${node.data.id}": ${message}`,
+        nodeId: node.data.id,
+        field: 'settings',
+        suggestion: 'Correct the NodeSpec value or restore its currently enforced default.',
       });
     }
   }

@@ -2883,8 +2883,116 @@ export interface components {
       requires?: 'github'[];
       nodes: components['schemas']['DagNode'][];
     };
+    NodeSpecV1: {
+      /** @enum {number} */
+      version?: 1;
+      model?: {
+        requested:
+          | {
+              /** @enum {string} */
+              source: 'fixed';
+              provider: string;
+              model: string;
+              auth: {
+                /** @enum {string} */
+                kind: 'api-key' | 'oauth' | 'local' | 'custom';
+                profile?: string;
+              };
+              /** @enum {string} */
+              reasoning: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+            }
+          | {
+              /** @enum {string} */
+              source: 'kady-current';
+              auth: {
+                /** @enum {string} */
+                kind: 'kady-current';
+              };
+              /** @enum {string} */
+              reasoning: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+            };
+        resolution:
+          | {
+              /** @enum {string} */
+              mode: 'exact';
+            }
+          | {
+              /** @enum {string} */
+              mode: 'explicit-fallback';
+              alternatives: (
+                | {
+                    /** @enum {string} */
+                    source: 'fixed';
+                    provider: string;
+                    model: string;
+                    auth: {
+                      /** @enum {string} */
+                      kind: 'api-key' | 'oauth' | 'local' | 'custom';
+                      profile?: string;
+                    };
+                    /** @enum {string} */
+                    reasoning: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+                  }
+                | {
+                    /** @enum {string} */
+                    source: 'kady-current';
+                    auth: {
+                      /** @enum {string} */
+                      kind: 'kady-current';
+                    };
+                    /** @enum {string} */
+                    reasoning: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+                  }
+              )[];
+              reason: string;
+            };
+      };
+      /** @enum {string} */
+      reasoningEffort?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+      hyperparameters?: {
+        temperature?: number;
+        top_p?: number;
+        sampling?: {
+          [key: string]: number | string | boolean;
+        };
+      };
+      conditions?: {
+        when?: string;
+        exists?: string[];
+      };
+      /** @enum {string} */
+      harness?: 'pi' | 'claude-code' | 'codex' | 'opencode' | 'copilot';
+      databases?: string[];
+      skills?: {
+        /** @enum {string} */
+        mode?: 'auto' | 'auto-manual' | 'manual';
+        list?: string[];
+      };
+      subagents?: {
+        /** @enum {string} */
+        mode?: 'auto' | 'auto-manual';
+      };
+      /** @enum {string} */
+      autonomy?: 'strict' | 'loose';
+      deliberation?: {
+        personalityStoreRef?: string;
+        bestOfNPersonalityCount?: number;
+        mimeographs?: {
+          /** @enum {string} */
+          mode?: 'auto' | 'manual';
+          personalityRefs?: string[];
+        };
+      };
+      /** @enum {string} */
+      billingMode?: 'inherit' | 'api' | 'subscription';
+      budget?: {
+        maxTokens?: number;
+        maxCostUsd?: number;
+      };
+    };
     DagNode: {
       id: string;
+      settings?: components['schemas']['NodeSpecV1'];
       depends_on?: string[];
       when?: string;
       /** @enum {string} */

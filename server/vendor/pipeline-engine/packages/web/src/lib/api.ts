@@ -6,8 +6,57 @@
 import type { WorkflowRunStatus } from '@/lib/types';
 import type { components } from '@/lib/api.generated';
 
-export type WorkflowDefinition = components['schemas']['WorkflowDefinition'];
-export type DagNode = components['schemas']['DagNode'];
+export type NodeReasoningLevel =
+  | 'off'
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max';
+
+export type NodeAuthKind = 'api-key' | 'oauth' | 'local' | 'custom';
+export type NodeHarness = 'pi' | 'claude-code' | 'codex' | 'opencode' | 'copilot';
+export type NodeSkillsMode = 'auto' | 'auto-manual' | 'manual';
+export type NodeSubagentMode = 'auto' | 'auto-manual';
+
+export interface FixedNodeRequestedModel {
+  source: 'fixed';
+  provider: string;
+  model: string;
+  auth: { kind: NodeAuthKind; profile?: string };
+  reasoning: NodeReasoningLevel;
+}
+
+export interface KadyCurrentNodeRequestedModel {
+  source: 'kady-current';
+  auth: { kind: 'kady-current' };
+  reasoning: NodeReasoningLevel;
+}
+
+export type NodeRequestedModel = FixedNodeRequestedModel | KadyCurrentNodeRequestedModel;
+
+export interface NodeModelRequest {
+  requested: NodeRequestedModel;
+  resolution:
+    | { mode: 'exact' }
+    | {
+        mode: 'explicit-fallback';
+        alternatives: NodeRequestedModel[];
+        reason: string;
+      };
+}
+
+export type NodeSamplingValue = number | string | boolean;
+
+/** Frozen NodeSpec v1 payload generated from the vendored server contract. */
+export type NodeSpecV1 = components['schemas']['NodeSpecV1'];
+
+type GeneratedDagNode = components['schemas']['DagNode'];
+type GeneratedWorkflowDefinition = components['schemas']['WorkflowDefinition'];
+
+export type DagNode = GeneratedDagNode;
+export type WorkflowDefinition = GeneratedWorkflowDefinition;
 
 /**
  * Base URL for SSE streams. In dev, bypasses Vite proxy by connecting directly
@@ -225,7 +274,10 @@ export async function deleteCodebase(id: string): Promise<{ success: boolean }> 
 export type WorkflowRunResponse = components['schemas']['WorkflowRun'];
 export type WorkflowEventResponse = components['schemas']['WorkflowEvent'];
 
-export type WorkflowListEntry = components['schemas']['WorkflowListEntry'];
+type GeneratedWorkflowListEntry = components['schemas']['WorkflowListEntry'];
+export type WorkflowListEntry = Omit<GeneratedWorkflowListEntry, 'workflow'> & {
+  workflow: WorkflowDefinition;
+};
 
 export interface WorkflowListResult {
   workflows: WorkflowListEntry[];
