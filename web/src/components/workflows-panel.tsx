@@ -107,6 +107,10 @@ import {
 } from "@/components/model-selector";
 import { useModels } from "@/lib/use-models";
 import workflowsData from "@/data/workflows.json";
+import {
+  SCIENTIFIC_WORKFLOW_TEMPLATES,
+  validateScientificWorkflowTemplatePreconditions,
+} from "@/data/dag-workflow-templates";
 
 export type Workflow = {
   id: string;
@@ -339,21 +343,36 @@ function LaunchDialog({
     }
     return prompt;
   }, [workflow, placeholderValues]);
-
-  const canLaunch = workflow.placeholders
-    .filter((ph) => ph.required)
-    .every((ph) => placeholderValues[ph.key]?.trim());
-
   const finalPrompt = editedPrompt ?? assembledPrompt;
+  const migratedTemplate = SCIENTIFIC_WORKFLOW_TEMPLATES.find(
+    (template) => template.sourceWorkflowId === workflow.id,
+  );
+  const preconditionIssues = migratedTemplate
+    ? validateScientificWorkflowTemplatePreconditions(migratedTemplate, {
+        goal: finalPrompt,
+        variables: placeholderValues,
+        files: uploadedFiles,
+        capabilities: [
+          "prompt-analysis",
+          ...(onUploadFiles ? ["read-uploaded-files"] : []),
+        ],
+      })
+    : [];
+  const canLaunch = migratedTemplate
+    ? preconditionIssues.length === 0
+    : workflow.placeholders
+        .filter((ph) => ph.required)
+        .every((ph) => placeholderValues[ph.key]?.trim());
 
   const handleLaunch = useCallback(() => {
+    if (!canLaunch) return;
     onLaunch(finalPrompt, model, workflow.suggestedSkills, uploadedFiles);
     onOpenChange(false);
     setPlaceholderValues({});
     setUploadedFiles([]);
     setEditedPrompt(null);
     setIsEditingPrompt(false);
-  }, [finalPrompt, model, workflow.suggestedSkills, uploadedFiles, onLaunch, onOpenChange]);
+  }, [canLaunch, finalPrompt, model, workflow.suggestedSkills, uploadedFiles, onLaunch, onOpenChange]);
 
   const iconColor = CATEGORY_ICON_COLOR[workflow.category] ?? "text-muted-foreground";
 
@@ -486,6 +505,17 @@ function LaunchDialog({
               </div>
             )}
           </div>
+
+          {preconditionIssues.length > 0 && (
+            <div role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+              <p className="font-medium">Required before launch:</p>
+              <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                {preconditionIssues.map((issue) => (
+                  <li key={`${issue.kind}:${issue.key}`}>{issue.message}</li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {workflow.suggestedSkills.length > 0 && (
             <div>

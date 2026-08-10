@@ -3,6 +3,7 @@ import { LITERATURE_WORKFLOW_TEMPLATES } from "./literature";
 import { MACHINE_LEARNING_WORKFLOW_TEMPLATES } from "./machine-learning";
 
 import type { ScientificWorkflowTemplateDefinition } from "./types";
+export { validateScientificWorkflowTemplatePreconditions } from "./types";
 
 export const SCIENTIFIC_WORKFLOW_TEMPLATES = [
   ...FINANCE_WORKFLOW_TEMPLATES,
@@ -15,6 +16,12 @@ export type ScientificWorkflowTemplate =
 
 export type {
   ScientificWorkflowDeliberation,
+  ScientificWorkflowPreconditionContext,
+  ScientificWorkflowPreconditionIssue,
+  ScientificWorkflowPreconditions,
+  ScientificWorkflowRequiredCapability,
+  ScientificWorkflowRequiredFile,
+  ScientificWorkflowRequiredInput,
   ScientificWorkflowTemplateCategory,
   ScientificWorkflowTemplateDefinition,
   ScientificWorkflowTemplateDomain,

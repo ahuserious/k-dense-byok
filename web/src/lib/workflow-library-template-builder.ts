@@ -9,22 +9,21 @@ const READ_ONLY_WORKSPACE = {
   writePaths: [] as string[],
 };
 
-function readOnlyWorkspace() {
-  return { ...READ_ONLY_WORKSPACE, writePaths: [] };
+export const PROMPT_ANALYSIS_ONLY_BOUNDARY =
+  "Runtime boundary: this workflow performs prompt-only model reasoning over user-provided text and readable project files. It has no web, computation, database, or file-writing capability. Treat calculations, source searches, code, and deliverables as proposed analysis steps only; never claim that work ran or that an artifact exists. ";
+
+export function promptAnalysisOnlyInstruction(instruction: string): string {
+  return `${PROMPT_ANALYSIS_ONLY_BOUNDARY}${instruction}`;
 }
 
-function executionBoundary(
-  definition: ScientificWorkflowTemplateDefinition,
-): string {
-  return definition.executionMode === "prompt-analysis-only"
-    ? "Runtime boundary: perform prompt-driven analysis, planning, code generation for human review, or interpretation of user-supplied results only. Do not claim to execute training, evaluation, or other compute, and label generated code as unexecuted. "
-    : "";
+function readOnlyWorkspace() {
+  return { ...READ_ONLY_WORKSPACE, writePaths: [] };
 }
 
 function deliberationNode(
   definition: ScientificWorkflowTemplateDefinition,
 ): WorkflowGraphNode {
-  const boundedGoal = `${executionBoundary(definition)}${definition.deliberation.goal}`;
+  const boundedGoal = promptAnalysisOnlyInstruction(definition.deliberation.goal);
   const common = {
     id: "deliberate",
     name: "Deliberate and Challenge",
@@ -81,19 +80,17 @@ function deliberationNode(
 export function createScientificWorkflowTemplateNodes(
   definition: ScientificWorkflowTemplateDefinition,
 ): WorkflowGraphNode[] {
-  const runtimeBoundary = executionBoundary(definition);
-
   return [
     {
       id: "research",
-      name: "Research Inputs and Evidence",
+      name: "Review Provided Context",
       description:
-        "Resolve material inputs and establish traceable evidence before analysis.",
+        "Inventory user-provided material and identify missing context before analysis planning.",
       kind: "research-until-goal",
       terminal: false,
       workspace: readOnlyWorkspace(),
       position: { x: 80, y: 120 },
-      goal: `${runtimeBoundary}${definition.researchGoal}`,
+      goal: promptAnalysisOnlyInstruction(definition.researchGoal),
       completionCriteria: [...definition.completionCriteria],
       model: exactKadyCurrentModel(),
       limits: { maxIterations: 6, maxModelCalls: 7, maxSubagents: 4 },
@@ -107,7 +104,7 @@ export function createScientificWorkflowTemplateNodes(
       terminal: false,
       workspace: readOnlyWorkspace(),
       position: { x: 400, y: 120 },
-      prompt: `${runtimeBoundary}${definition.analysisPrompt}`,
+      prompt: promptAnalysisOnlyInstruction(definition.analysisPrompt),
       model: exactKadyCurrentModel(),
     },
     deliberationNode(definition),
@@ -115,33 +112,26 @@ export function createScientificWorkflowTemplateNodes(
       id: "draft-synthesis",
       name: "Synthesize Candidate Result",
       description:
-        "Integrate the research, analysis, and preserved deliberation into a result for evidence review.",
+        "Integrate provided context, model reasoning, and preserved deliberation into an analysis draft.",
       kind: "agent",
       terminal: false,
       workspace: readOnlyWorkspace(),
       position: { x: 1040, y: 120 },
-      prompt: `${runtimeBoundary}${definition.synthesisPrompt}`,
+      prompt: promptAnalysisOnlyInstruction(definition.synthesisPrompt),
       model: exactKadyCurrentModel(),
-      // Gate this payload in place so the final reporter receives the reviewed
-      // synthesis itself rather than a standalone gate node's decision record.
-      evidence: {
-        enabled: true,
-        minimumIndependentSources: 0,
-        requireArtifactReferences: false,
-        onUnsupportedOutput: "rescue",
-        evaluator: exactKadyCurrentModel(),
-      },
     },
     {
       id: "final-report",
-      name: "Report Supported Result",
+      name: "Report Analysis Plan",
       description:
-        "Consume the evidence-approved candidate result directly and report only supported conclusions.",
+        "Report model reasoning as analysis or planning, clearly separated from observed results.",
       kind: "agent",
       terminal: true,
       workspace: readOnlyWorkspace(),
       position: { x: 1360, y: 120 },
-      prompt: `${runtimeBoundary}Use the directly received evidence-approved candidate result as the report's substantive input. Preserve material uncertainty and dissent, distinguish completed work from proposed work, name only verified artifact paths, and state missing inputs and limitations.`,
+      prompt: promptAnalysisOnlyInstruction(
+        "Use the directly received candidate reasoning as the report input. Preserve material uncertainty and dissent, distinguish user-provided observations from proposed work, do not claim external verification or created artifacts, and state missing inputs and limitations.",
+      ),
       model: exactKadyCurrentModel(),
     },
   ];

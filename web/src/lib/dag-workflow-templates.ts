@@ -9,12 +9,14 @@ import {
   type ScientificWorkflowTemplateDomain,
 } from "../data/dag-workflow-templates";
 import {
-  LEAN4_PROOF_EVIDENCE,
   createDefaultWorkflowGraph,
   createKadyPanelFusionConfiguration,
   exactKadyCurrentModel,
 } from "./dag-workflow-builder";
-import { createScientificWorkflowTemplateNodes } from "./workflow-library-template-builder";
+import {
+  createScientificWorkflowTemplateNodes,
+  promptAnalysisOnlyInstruction,
+} from "./workflow-library-template-builder";
 
 export type DagWorkflowTemplateCategory =
   | "ml"
@@ -41,7 +43,7 @@ export const DAG_WORKFLOW_TEMPLATES = [
     suggestedWorkflowId: "ml-model-selection-review",
     name: "ML Model Selection Review",
     description:
-      "Research the task, compare two independent modeling paths, convene a council, and require evidence before reporting.",
+      "Plan a model-selection analysis, compare two reasoning paths, and preserve a council's limitations and dissent.",
     category: "ml",
     domain: "Machine Learning & AI",
   },
@@ -50,16 +52,16 @@ export const DAG_WORKFLOW_TEMPLATES = [
     suggestedWorkflowId: "reproducible-data-analysis",
     name: "Reproducible Data Analysis",
     description:
-      "Scope the data, compare two analysis paths, fuse independent reviews, and verify support before reporting.",
+      "Plan a reproducible analysis over user-provided material and fuse independent methodological reviews.",
     category: "data",
     domain: "Data & Analysis",
   },
   {
     id: "byom-dag-fusion-mathematical-research",
     suggestedWorkflowId: "byom-dag-fusion-mathematical-research",
-    name: "Mathematical Research with Lean 4",
+    name: "Mathematical Formalization Plan",
     description:
-      "Research a mathematical claim, compare two formalization paths, machine-check the selected theorem with Lean 4 and Mathlib, and gate the final report on observed support.",
+      "Clarify a mathematical claim, compare formalization paths, and draft a Lean-oriented proof plan without claiming verification ran.",
     category: "ml",
     domain: "Machine Learning & AI",
   },
@@ -88,7 +90,9 @@ function mlModelSelectionNodes(): WorkflowGraphNode[] {
       terminal: false,
       workspace: readOnlyWorkspace(),
       position: { x: 80, y: 120 },
-      goal: "Define a supported machine-learning problem statement and evaluation plan.",
+      goal: promptAnalysisOnlyInstruction(
+        "Define a machine-learning problem statement and evaluation plan from user-provided context.",
+      ),
       completionCriteria: [
         "The target, available evidence, and leakage risks are explicit.",
         "Success metrics and validation constraints are justified.",
@@ -104,7 +108,9 @@ function mlModelSelectionNodes(): WorkflowGraphNode[] {
       terminal: false,
       workspace: readOnlyWorkspace(),
       position: { x: 400, y: 120 },
-      goal: "Propose two independently reasoned modeling and feature-engineering paths, then select the stronger supported path.",
+      goal: promptAnalysisOnlyInstruction(
+        "Propose two independently reasoned modeling and feature-engineering plans, then compare their assumptions.",
+      ),
       candidateCount: 2,
       model: exactKadyCurrentModel(),
       evaluator: exactKadyCurrentModel(),
@@ -117,7 +123,9 @@ function mlModelSelectionNodes(): WorkflowGraphNode[] {
       terminal: false,
       workspace: readOnlyWorkspace(),
       position: { x: 720, y: 120 },
-      goal: "Reach a transparent recommendation on the selected modeling path and preserve material objections.",
+      goal: promptAnalysisOnlyInstruction(
+        "Reach a transparent planning recommendation and preserve material objections without claiming model evaluation occurred.",
+      ),
       members: [
         {
           id: "methodologist",
@@ -133,13 +141,6 @@ function mlModelSelectionNodes(): WorkflowGraphNode[] {
       chair: exactKadyCurrentModel(),
       rounds: 2,
       preserveMinorityReports: true,
-      evidence: {
-        enabled: true,
-        minimumIndependentSources: 0,
-        requireArtifactReferences: false,
-        onUnsupportedOutput: "rescue",
-        evaluator: exactKadyCurrentModel(),
-      },
     },
     {
       id: "final-recommendation",
@@ -149,7 +150,9 @@ function mlModelSelectionNodes(): WorkflowGraphNode[] {
       terminal: true,
       workspace: readOnlyWorkspace(),
       position: { x: 1040, y: 120 },
-      prompt: "Use the directly received evidence-approved council result to produce a prompt-driven model-selection plan for review. Include validation steps, limitations, and preserved council dissent; do not claim that training or evaluation ran.",
+      prompt: promptAnalysisOnlyInstruction(
+        "Use the directly received council reasoning to produce a model-selection plan for review. Include proposed validation steps, limitations, and preserved dissent.",
+      ),
       model: exactKadyCurrentModel(),
     },
   ];
@@ -165,7 +168,9 @@ function reproducibleDataAnalysisNodes(): WorkflowGraphNode[] {
       terminal: false,
       workspace: readOnlyWorkspace(),
       position: { x: 80, y: 120 },
-      prompt: "Inspect the available project context and define a reproducible analysis plan, including missing-data checks, assumptions, and suitable evaluation criteria.",
+      prompt: promptAnalysisOnlyInstruction(
+        "Review the available project context and define a reproducible analysis plan, including missing-data checks, assumptions, and suitable evaluation criteria.",
+      ),
       model: exactKadyCurrentModel(),
     },
     {
@@ -176,7 +181,9 @@ function reproducibleDataAnalysisNodes(): WorkflowGraphNode[] {
       terminal: false,
       workspace: readOnlyWorkspace(),
       position: { x: 400, y: 120 },
-      goal: "Generate two reproducible analysis paths with explicit assumptions, diagnostics, and failure conditions, then choose the stronger supported path.",
+      goal: promptAnalysisOnlyInstruction(
+        "Generate two reproducible analysis plans with explicit assumptions, diagnostics, and failure conditions, then compare them.",
+      ),
       candidateCount: 2,
       model: exactKadyCurrentModel(),
       evaluator: exactKadyCurrentModel(),
@@ -189,16 +196,11 @@ function reproducibleDataAnalysisNodes(): WorkflowGraphNode[] {
       terminal: false,
       workspace: readOnlyWorkspace(),
       position: { x: 720, y: 120 },
-      goal: "Fuse methodological and domain reviews of the selected analysis path into one traceable recommendation.",
+      goal: promptAnalysisOnlyInstruction(
+        "Fuse methodological and domain reviews of the selected analysis plan into one traceable recommendation.",
+      ),
       fusion: createKadyPanelFusionConfiguration(),
       preserveMinorityReports: true,
-      evidence: {
-        enabled: true,
-        minimumIndependentSources: 0,
-        requireArtifactReferences: false,
-        onUnsupportedOutput: "rescue",
-        evaluator: exactKadyCurrentModel(),
-      },
     },
     {
       id: "final-analysis",
@@ -208,7 +210,9 @@ function reproducibleDataAnalysisNodes(): WorkflowGraphNode[] {
       terminal: true,
       workspace: readOnlyWorkspace(),
       position: { x: 1040, y: 120 },
-      prompt: "Use the directly received evidence-approved fused review to report only supported analysis. Include assumptions, diagnostics, reproducibility steps, limitations, and any unresolved disagreement.",
+      prompt: promptAnalysisOnlyInstruction(
+        "Use the directly received fused reasoning to report an analysis plan. Include assumptions, proposed diagnostics, reproducibility steps, limitations, and unresolved disagreement.",
+      ),
       model: exactKadyCurrentModel(),
     },
   ];
@@ -224,7 +228,9 @@ function mathematicalResearchNodes(): WorkflowGraphNode[] {
       terminal: false,
       workspace: readOnlyWorkspace(),
       position: { x: 80, y: 120 },
-      goal: "State a precise mathematical claim with explicit assumptions and enough evidence to formalize it.",
+      goal: promptAnalysisOnlyInstruction(
+        "State a precise mathematical claim from user-provided context with explicit assumptions and enough detail to plan a formalization.",
+      ),
       completionCriteria: [
         "Every symbol, domain, hypothesis, and target conclusion is explicit.",
         "The informal claim is supported by traceable mathematical sources or a complete derivation.",
@@ -241,26 +247,25 @@ function mathematicalResearchNodes(): WorkflowGraphNode[] {
       terminal: false,
       workspace: readOnlyWorkspace(),
       position: { x: 400, y: 120 },
-      goal: "Produce two independent Lean 4 formalization strategies, compare their assumptions and Mathlib dependencies, and select the best-supported path.",
+      goal: promptAnalysisOnlyInstruction(
+        "Produce two independent Lean 4 formalization strategies, compare their assumptions and possible Mathlib dependencies, and recommend a review path.",
+      ),
       candidateCount: 2,
       model: exactKadyCurrentModel(),
       evaluator: exactKadyCurrentModel(),
     },
     {
-      id: "lean-proof",
-      name: "Lean 4 Proof",
-      description: "Use byom-dag-fusion to propose a proof body for an exact host-owned proposition, then machine-check it.",
-      kind: "lean4",
+      id: "formal-proof-plan",
+      name: "Lean 4 Proof Plan",
+      description: "Draft a Lean-oriented formalization for human review without claiming local verification.",
+      kind: "agent",
       terminal: false,
       workspace: readOnlyWorkspace(),
       position: { x: 720, y: 120 },
-      goal: "Translate the selected formalization into Lean 4 and accept it only after the trusted local verifier succeeds.",
-      theorem: "∀ n : Nat, n + 0 = n",
-      mode: "solve",
-      solverModel: exactKadyCurrentModel(),
-      mathlib: true,
-      skill: "byom-dag-fusion",
-      evidence: { ...LEAN4_PROOF_EVIDENCE, minimumIndependentSources: 0 },
+      prompt: promptAnalysisOnlyInstruction(
+        "Draft a Lean 4 statement and proof strategy for `∀ n : Nat, n + 0 = n`, list possible Mathlib dependencies, and label all code as unverified until a human runs an authorized verifier.",
+      ),
+      model: exactKadyCurrentModel(),
     },
     {
       id: "report-mathematical-result",
@@ -270,7 +275,9 @@ function mathematicalResearchNodes(): WorkflowGraphNode[] {
       terminal: true,
       workspace: readOnlyWorkspace(),
       position: { x: 1040, y: 120 },
-      prompt: "Use the directly received evidence-approved Lean result to report exactly what Lean checked, all assumptions and Mathlib dependencies, any gap between the formal theorem and the research claim, citations, and unresolved uncertainty.",
+      prompt: promptAnalysisOnlyInstruction(
+        "Use the directly received formalization reasoning to report the proposed theorem, assumptions, possible Mathlib dependencies, gaps from the informal claim, and unresolved uncertainty. State explicitly that no Lean verification occurred.",
+      ),
       model: exactKadyCurrentModel(),
     },
   ];
@@ -331,7 +338,7 @@ export function createDagWorkflowTemplateGraph(
     ...base,
     evidence: {
       ...base.evidence,
-      minimumIndependentSources: 0,
+      enabled: false,
     },
     entryNodeId: nodes[0].id,
     nodes,

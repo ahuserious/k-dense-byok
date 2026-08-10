@@ -5,22 +5,25 @@ export const LITERATURE_WORKFLOW_TEMPLATES = [
     id: "literature-search",
     sourceWorkflowId: "literature-search",
     suggestedWorkflowId: "literature-search",
-    name: "Literature Search",
+    name: "Literature Review Scope (Planning)",
     description:
-      "Scope a multi-database search, analyze primary and secondary evidence, reconcile independent search paths, and gate the bibliography and synthesis.",
+      "Design a multi-database review strategy and reason over user-provided references without claiming a search occurred.",
     category: "literature",
     domain: "Literature & Research",
+    requiredInputs: [{ key: "topic", label: "Search topic" }],
+    requiredFiles: [],
+    requiredCapabilities: ["prompt-analysis"],
     researchGoal:
-      "Define the topic, scope, date window, disciplines, databases, query terms, inclusion logic, search date, and verifiable citation fields before synthesizing findings.",
+      "Define the topic, scope, date window, disciplines, proposed databases, query terms, inclusion logic, and citation fields; inventory any user-provided references before analysis.",
     completionCriteria: [
-      "Multiple real literature sources are searched with a reproducible scope and date.",
-      "Every retained reference has a verifiable title, authors, year, venue, and DOI or URL, with unverified items flagged.",
+      "The proposed literature-review scope, databases, and query logic are reproducible.",
+      "Every user-provided reference is labeled with available title, authors, year, venue, and identifier fields; missing fields remain unverified.",
     ],
     analysisPrompt:
-      "Rank relevant recent and landmark work without using citation count as a substitute for quality; distinguish primary research from reviews; extract key findings; cluster themes; identify consensus, controversies, conflicts, and knowledge gaps; and maintain a structured bibliography with explicit verification status.",
+      "Design relevance-ranking, study-type classification, extraction, thematic clustering, consensus, controversy, conflict, and gap-analysis steps. Interpret user-provided references only, and keep proposed bibliography fields separate from verified material.",
     deliberation: {
       kind: "fusion",
-      goal: "Fuse independent database and query perspectives, deduplicate records, and reconcile coverage gaps and conflicting evidence without inventing references.",
+      goal: "Fuse independent database and query-plan perspectives, propose deduplication rules, and identify likely coverage gaps without inventing references.",
       perspectives: [
         "Biomedical and domain-indexed database search",
         "Cross-disciplinary scholarly graph and preprint search",
@@ -28,17 +31,20 @@ export const LITERATURE_WORKFLOW_TEMPLATES = [
       ],
     },
     synthesisPrompt:
-      "Produce an evidence-gated literature synthesis and structured Markdown bibliography. Report databases, queries or scope, search date, study types, themes, consensus, controversies, gaps, unverifiable items, limitations, and the intended saved path.",
+      "Produce a literature-review plan and, where references were supplied, a bounded synthesis. Report proposed databases and queries, scope, study types, themes, controversies, gaps, unverifiable items, limitations, and human verification steps.",
   },
   {
     id: "summarize-paper",
     sourceWorkflowId: "summarize-paper",
     suggestedWorkflowId: "summarize-paper",
-    name: "Summarize a Paper",
+    name: "Paper Summary Analysis",
     description:
-      "Inspect paper completeness, analyze methods and results faithfully, compare independent readings, and gate the structured summary.",
+      "Analyze an uploaded paper faithfully through independent readings and clearly bounded model reasoning.",
     category: "literature",
     domain: "Literature & Research",
+    requiredInputs: [],
+    requiredFiles: [{ key: "paper", label: "Uploaded paper", minimumCount: 1 }],
+    requiredCapabilities: ["prompt-analysis", "read-uploaded-files"],
     researchGoal:
       "Confirm that the uploaded paper is readable and complete, identify its bibliographic identity and structure, and locate the objective, methods, quantitative results, limitations, and conclusions in the source text.",
     completionCriteria: [
@@ -52,17 +58,20 @@ export const LITERATURE_WORKFLOW_TEMPLATES = [
       goal: "Compare independent methods-first and results-first readings, then select the summary that is most faithful, traceable, concise, and complete.",
     },
     synthesisPrompt:
-      "Write an evidence-gated structured paper summary with traceable quantitative outcomes, faithful conclusions, author and reviewer limitations, under-supported claims, broader-field context limited to supported evidence, and the intended Markdown path. Never guess through unreadable or missing content.",
+      "Write a structured analysis of the uploaded paper with traceable quantitative outcomes, faithful conclusions, author and reviewer limitations, and under-supported claims. Never guess through unreadable content or claim external context was checked.",
   },
   {
     id: "compare-papers",
     sourceWorkflowId: "compare-papers",
     suggestedWorkflowId: "compare-papers",
-    name: "Compare Papers",
+    name: "Comparative Paper Analysis",
     description:
-      "Ground each uploaded paper independently, normalize comparison axes, convene a methods-and-evidence council, and gate the comparative judgment.",
+      "Analyze uploaded papers independently, normalize comparison axes, and preserve a methods council's dissent.",
     category: "literature",
     domain: "Literature & Research",
+    requiredInputs: [],
+    requiredFiles: [{ key: "papers", label: "At least two uploaded papers", minimumCount: 2 }],
+    requiredCapabilities: ["prompt-analysis", "read-uploaded-files"],
     researchGoal:
       "Identify the uploaded papers, their research questions, populations, endpoints, methods, sample sizes, source sections and figures, and the comparison axis; flag incompleteness and non-comparability.",
     completionCriteria: [
@@ -81,25 +90,28 @@ export const LITERATURE_WORKFLOW_TEMPLATES = [
       ],
     },
     synthesisPrompt:
-      "Produce an evidence-gated comparison with a clear table, traceable paper-specific claims, agreements, contradictions, non-comparable dimensions, evidence-strength rationale, preserved dissent, limitations, and the intended Markdown path.",
+      "Produce a model-reasoned comparison with a clear table, traceable paper-specific claims, agreements, contradictions, non-comparable dimensions, evidence-strength rationale, preserved dissent, and limitations.",
   },
   {
     id: "research-landscape",
     sourceWorkflowId: "research-landscape",
     suggestedWorkflowId: "research-landscape",
-    name: "Research Landscape Map",
+    name: "Research Landscape Analysis (Planning)",
     description:
-      "Scope a field, map themes and actors from verifiable sources, fuse independent landscape views, and gate the map and referenced narrative.",
+      "Plan a field-landscape review and reason over user-provided references without claiming bibliometric collection occurred.",
     category: "literature",
     domain: "Literature & Research",
+    requiredInputs: [{ key: "topic", label: "Research field or topic" }],
+    requiredFiles: [],
+    requiredCapabilities: ["prompt-analysis"],
     researchGoal:
-      "Define the field boundary, time window, databases, search date, theme and actor inclusion rules, funding-source coverage, and citation and affiliation verification requirements.",
+      "Define the field boundary, time window, proposed databases, theme and actor inclusion rules, funding-source coverage, and citation and affiliation verification requirements.",
     completionCriteria: [
-      "Themes, groups, papers, affiliations, trends, and funding claims have verifiable sources.",
+      "Themes, groups, papers, affiliations, trends, and funding claims are treated as hypotheses unless present in user-provided material.",
       "Established findings, open debates, speculative directions, search gaps, and geographic or database bias are distinguished.",
     ],
     analysisPrompt:
-      "Identify major themes and subfields, key groups and labs, landmark papers, current trends, emerging directions, funding patterns, open debates, and gaps. Build traceable nodes and relationships for a concept map while flagging unverified affiliations or claims.",
+      "Design how to identify themes, subfields, groups, landmark papers, trends, directions, funding patterns, debates, and gaps. Interpret supplied references and propose traceable concept-map nodes while flagging every unverified affiliation or claim.",
     deliberation: {
       kind: "fusion",
       goal: "Fuse bibliometric, thematic, institutional, and funding perspectives into a coherent landscape without hiding sparse or contested regions.",
@@ -110,22 +122,25 @@ export const LITERATURE_WORKFLOW_TEMPLATES = [
       ],
     },
     synthesisPrompt:
-      "Deliver an evidence-gated landscape specification for a structured diagram plus referenced narrative. Include scope and date, themes, groups, papers, trends, funding, debates, speculative areas, gaps, unverified claims, limitations, and intended image and Markdown paths.",
+      "Deliver a landscape-analysis specification, not a completed bibliometric map. Include scope, proposed sources, candidate themes and relationships, debates, speculative areas, gaps, unverified claims, limitations, and human review steps.",
   },
   {
     id: "systematic-review",
     sourceWorkflowId: "systematic-review",
     suggestedWorkflowId: "systematic-review",
-    name: "Systematic Review Protocol",
+    name: "Systematic Review Protocol Design",
     description:
-      "Research applicable standards, design a reproducible protocol, convene methodological reviewers, and gate the PRISMA-aligned output.",
+      "Design a reproducible PRISMA-oriented protocol from user-provided scope and methodological context.",
     category: "literature",
     domain: "Literature & Research",
+    requiredInputs: [{ key: "question", label: "Research question" }],
+    requiredFiles: [],
+    requiredCapabilities: ["prompt-analysis"],
     researchGoal:
       "Clarify the review question and PICO or other suitable framework, eligibility scope, study designs, outcomes, databases, methodological guidance, reporting standard, and need for pilot searches.",
     completionCriteria: [
       "Population, intervention or exposure, comparator, outcomes, and eligible designs are explicit or justified as not applicable.",
-      "Real PRISMA and risk-of-bias guidance is verified, and database-specific pilot needs are flagged.",
+      "PRISMA and risk-of-bias guidance that needs human verification is identified, and database-specific pilot needs are flagged.",
     ],
     analysisPrompt:
       "Define inclusion and exclusion criteria; draft reproducible database-specific Boolean searches; specify dual-reviewer title, abstract, and full-text screening; define extraction and conflict resolution; select suitable risk-of-bias tools; and plan synthesis, meta-analysis, heterogeneity, sensitivity, and reporting where applicable.",
@@ -139,25 +154,28 @@ export const LITERATURE_WORKFLOW_TEMPLATES = [
       ],
     },
     synthesisPrompt:
-      "Write an evidence-gated PRISMA-aligned protocol with the question framework, eligibility, full draft searches, dual-reviewer procedures, extraction, bias tools, synthesis plan, pilot-search needs, verified methodological references, limitations, and intended Markdown path.",
+      "Write a PRISMA-oriented protocol plan with the question framework, eligibility, draft query strategies, dual-reviewer procedures, extraction, bias tools, synthesis plan, pilot needs, references requiring verification, and limitations.",
   },
   {
     id: "citation-analysis",
     sourceWorkflowId: "citation-analysis",
     suggestedWorkflowId: "citation-analysis",
-    name: "Citation Analysis",
+    name: "Citation Analysis Plan",
     description:
-      "Scope verifiable bibliometric sources, analyze citation trajectories and networks, fuse database perspectives, and gate all metrics and visualizations.",
+      "Plan bibliometric trajectory and network analysis without claiming database access or verified citation metrics.",
     category: "literature",
     domain: "Literature & Research",
+    requiredInputs: [{ key: "topic", label: "Research topic or set of papers" }],
+    requiredFiles: [],
+    requiredCapabilities: ["prompt-analysis"],
     researchGoal:
       "Define the topic or paper set, bibliometric databases, search and snapshot dates, identity resolution, citation-count comparability rules, author disambiguation, and reproducible network scope.",
     completionCriteria: [
-      "Every paper, author, DOI or URL, citation count, and author metric has a named source and snapshot date.",
+      "Every user-provided paper, author, identifier, count, and metric retains its stated source and snapshot date.",
       "Database coverage differences, author ambiguity, self-citation policy, and unverifiable counts are explicit.",
     ],
     analysisPrompt:
-      "Identify highly cited papers and time trajectories; construct a cited-to-citing network; detect and cautiously interpret citation bursts; report source-dated author metrics; resolve duplicate works and author identities; and specify a reproducible network visualization without presenting database-specific counts as universal facts.",
+      "Design procedures for citation trajectories, cited-to-citing networks, burst detection, source-dated author metrics, duplicate resolution, identity resolution, and reproducible visualization. Interpret only user-provided counts and never present proposed metrics as observed facts.",
     deliberation: {
       kind: "fusion",
       goal: "Reconcile bibliometric databases, identity resolution, network structure, and trend interpretations while preserving count discrepancies.",
@@ -168,25 +186,28 @@ export const LITERATURE_WORKFLOW_TEMPLATES = [
       ],
     },
     synthesisPrompt:
-      "Produce an evidence-gated citation analysis with source-dated counts and metrics, citation trajectories, network findings, burst caveats, database discrepancies, unverifiable figures, limitations, and intended analysis and visualization paths. Do not fabricate citations or identifiers.",
+      "Produce a citation-analysis plan and bounded interpretation of supplied metrics, including proposed trajectories, network checks, burst caveats, likely database discrepancies, unverifiable figures, limitations, and human review steps.",
   },
   {
     id: "methods-comparison",
     sourceWorkflowId: "methods-comparison",
     suggestedWorkflowId: "methods-comparison",
-    name: "Compare Methods",
+    name: "Methods Comparison Analysis (Planning)",
     description:
-      "Research competing methods across multiple sources, normalize evidence and task constraints, convene a comparison council, and gate recommendations.",
+      "Plan a conditional methods comparison and reason over user-provided method evidence and task constraints.",
     category: "literature",
     domain: "Literature & Research",
+    requiredInputs: [{ key: "task", label: "Task or problem to solve" }],
+    requiredFiles: [],
+    requiredCapabilities: ["prompt-analysis"],
     researchGoal:
       "Define the task, data type, scale, goals, constraints, comparison criteria, literature databases, search date, benchmark contexts, and citation verification requirements.",
     completionCriteria: [
-      "Established and recent methods are covered through a reproducible multi-source search.",
+      "The proposed method-coverage and source-review strategy is reproducible.",
       "Performance, cost, ease, assumptions, sample-size needs, and interpretability claims are tied to comparable contexts or marked context-dependent.",
     ],
     analysisPrompt:
-      "Identify the main methods; compare performance, computational cost, usability, assumptions, data and sample requirements, and interpretability; separate benchmark evidence from author claims; normalize incompatible evaluation settings; and construct a comparison table showing when each method is appropriate and where evidence is thin.",
+      "Design a comparison of methods, performance criteria, computational cost, usability, assumptions, data needs, and interpretability. Interpret supplied benchmark evidence, separate it from author claims, normalize settings conceptually, and specify a conditional comparison-table structure.",
     deliberation: {
       kind: "council",
       goal: "Recommend methods under explicit operating conditions after challenging benchmark comparability, implementation cost, evidence quality, and domain fit.",
@@ -197,6 +218,6 @@ export const LITERATURE_WORKFLOW_TEMPLATES = [
       ],
     },
     synthesisPrompt:
-      "Write an evidence-gated methods comparison with a traceable table, conditional recommendations, tradeoffs, benchmark-versus-author-claim labels, thin-evidence flags, scope and search date, verified references, limitations, and the intended Markdown path.",
+      "Write a methods-comparison plan or bounded analysis of supplied evidence with a traceable table, conditional recommendations, tradeoffs, benchmark-versus-author-claim labels, thin-evidence flags, reference-verification needs, and limitations.",
   },
 ] as const satisfies readonly ScientificWorkflowTemplateDefinition[];

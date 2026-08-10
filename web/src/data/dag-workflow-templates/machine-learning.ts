@@ -7,10 +7,12 @@ export const MACHINE_LEARNING_WORKFLOW_TEMPLATES = [
     suggestedWorkflowId: "classification-model",
     name: "Classifier Analysis Plan",
     description:
-      "Research the prediction task, design a leakage-safe comparison, generate reviewable analysis code, and gate the final execution plan.",
+      "Design a leakage-safe classifier analysis and reviewable pseudocode from uploaded data context.",
     category: "ml",
     domain: "Machine Learning & AI",
-    executionMode: "prompt-analysis-only",
+    requiredInputs: [{ key: "target", label: "Target class variable" }],
+    requiredFiles: [{ key: "dataset", label: "Uploaded classification dataset", minimumCount: 1 }],
+    requiredCapabilities: ["prompt-analysis", "read-uploaded-files"],
     researchGoal:
       "Establish the target, positive class, priority metric, class balance, feature provenance, grouping constraints, leakage risks, and compute limits.",
     completionCriteria: [
@@ -18,24 +20,26 @@ export const MACHINE_LEARNING_WORKFLOW_TEMPLATES = [
       "Class imbalance, missingness, resource limits, random seed, and required package versions are recorded.",
     ],
     analysisPrompt:
-      "Design EDA and a stratified leakage-safe train, validation, and test protocol. Generate clearly labeled unexecuted reference code for fold-local preprocessing, imbalance handling, baseline and candidate comparisons, discrimination, calibration, confusion matrices, SHAP explanations, and held-out uncertainty. If the user supplies real results, interpret them without inventing missing measurements.",
+      "Design EDA and a stratified leakage-safe development, validation, and test protocol. Generate clearly labeled pseudocode for fold-local preprocessing, imbalance handling, baseline and candidate comparisons, discrimination, calibration, confusion matrices, SHAP explanations, and held-out uncertainty. Interpret only measurements the user supplies.",
     deliberation: {
       kind: "best-of-n",
       goal: "Develop independent simple and flexible classifier paths, compare generalization, calibration, interpretability, and cost, then select the best-supported path.",
     },
     synthesisPrompt:
-      "Deliver an evidence-gated classifier analysis plan and code-review package. Separate proposed metrics and artifacts from user-supplied results, include split and seed requirements, leakage controls, model-selection criteria, limitations, and never claim that a model, prediction, or figure was produced.",
+      "Deliver a classifier analysis and code-review plan. Separate proposed metrics and outputs from user-supplied results, include split and seed requirements, leakage controls, model-selection criteria, and limitations, and never claim that a model, prediction, or figure was produced.",
   },
   {
     id: "anomaly-detection",
     sourceWorkflowId: "anomaly-detection",
     suggestedWorkflowId: "anomaly-detection",
-    name: "Anomaly Detection",
+    name: "Anomaly Detection Analysis (Planning)",
     description:
-      "Research anomaly semantics and data quality, design detector comparisons, generate reviewable code, and gate the analysis plan or interpretation of supplied results.",
+      "Clarify anomaly semantics, design detector comparisons, and generate a reviewable plan or interpretation of supplied results.",
     category: "ml",
     domain: "Machine Learning & AI",
-    executionMode: "prompt-analysis-only",
+    requiredInputs: [],
+    requiredFiles: [{ key: "dataset", label: "Uploaded anomaly-analysis dataset", minimumCount: 1 }],
+    requiredCapabilities: ["prompt-analysis", "read-uploaded-files"],
     researchGoal:
       "Establish the data schema, missingness, scales, known labels, anomaly definition, expected prevalence or false-positive tolerance, grouping, and reproducibility constraints.",
     completionCriteria: [
@@ -49,18 +53,20 @@ export const MACHINE_LEARNING_WORKFLOW_TEMPLATES = [
       goal: "Compare density, isolation, reconstruction, and consensus detector paths and select a thresholded system whose errors match the stated operational constraint.",
     },
     synthesisPrompt:
-      "Produce an evidence-gated anomaly-analysis plan or interpretation of user-supplied results, with score semantics, detector-agreement checks, threshold rationale, expected metrics, uncertainty, and limitations. List proposed CSV, figure, and detector outputs without claiming they were created.",
+      "Produce an anomaly-analysis plan or interpretation of user-supplied results, with score semantics, detector-agreement checks, threshold rationale, expected metrics, uncertainty, and limitations. List outputs as proposals only.",
   },
   {
     id: "hyperparameter-tuning",
     sourceWorkflowId: "hyperparameter-tuning",
     suggestedWorkflowId: "hyperparameter-tuning",
-    name: "Hyperparameter Tuning",
+    name: "Hyperparameter Search Design (Planning)",
     description:
-      "Research the tuning objective and budget, compare search designs, generate reviewable search code, and gate the execution plan or interpretation of supplied trials.",
+      "Compare search designs and generate a reviewable optimization plan or interpretation of supplied trials.",
     category: "ml",
     domain: "Machine Learning & AI",
-    executionMode: "prompt-analysis-only",
+    requiredInputs: [{ key: "model", label: "Model type" }],
+    requiredFiles: [{ key: "dataset", label: "Uploaded model-development dataset", minimumCount: 1 }],
+    requiredCapabilities: ["prompt-analysis", "read-uploaded-files"],
     researchGoal:
       "Establish the model, objective metric, held-out test set, grouping and leakage constraints, justified search space, method, trial and fold budgets, seed, and compute availability.",
     completionCriteria: [
@@ -74,18 +80,20 @@ export const MACHINE_LEARNING_WORKFLOW_TEMPLATES = [
       goal: "Compare independent search-space and optimization designs, then select the design with the strongest information gain, fairness, and compute discipline.",
     },
     synthesisPrompt:
-      "Deliver an evidence-gated tuning protocol and code-review package, or interpret user-supplied trials. Distinguish proposed settings from observed results, include budget, leakage controls, seed, versions, stopping policy, and limitations, and never claim a best configuration, trained model, or untouched-test result without supplied evidence.",
+      "Deliver a tuning protocol and code-review plan, or interpret user-supplied trials. Distinguish proposed settings from observed results, include budget, leakage controls, seed, versions, stopping policy, and limitations, and never claim a best configuration or untouched-test result without supplied evidence.",
   },
   {
     id: "model-interpretability",
     sourceWorkflowId: "model-interpretability",
     suggestedWorkflowId: "model-interpretability",
-    name: "Model Interpretability",
+    name: "Model Interpretability Analysis (Planning)",
     description:
       "Research the model and explanation population, design complementary explanation analyses, generate reviewable code, and gate interpretations of supplied outputs.",
     category: "ml",
     domain: "Machine Learning & AI",
-    executionMode: "prompt-analysis-only",
+    requiredInputs: [],
+    requiredFiles: [{ key: "model-material", label: "Uploaded model and explanation material", minimumCount: 1 }],
+    requiredCapabilities: ["prompt-analysis", "read-uploaded-files"],
     researchGoal:
       "Confirm the trained model type, feature schema, preprocessing, prediction population, background/reference data, sampled cases, known limitations, and explanation seed.",
     completionCriteria: [
@@ -104,23 +112,28 @@ export const MACHINE_LEARNING_WORKFLOW_TEMPLATES = [
       ],
     },
     synthesisPrompt:
-      "Write an evidence-gated interpretability plan or an interpretation of user-supplied outputs, separating robust patterns from unstable or method-dependent explanations. Include proposed cases and cross-checks, possible bias, non-causal limitations, seed and versions, and label figures and attribution tables as proposed unless supplied.",
+      "Write an interpretability plan or an interpretation of user-supplied outputs, separating robust patterns from unstable or method-dependent explanations. Include proposed cases and cross-checks, possible bias, non-causal limitations, seed and versions, and label figures and attribution tables as proposed unless supplied.",
   },
   {
     id: "transfer-learning",
     sourceWorkflowId: "transfer-learning",
     suggestedWorkflowId: "transfer-learning",
-    name: "Transfer Learning",
+    name: "Transfer Learning Design (Planning)",
     description:
-      "Research source-target compatibility and compute constraints, compare adaptation plans, generate reviewable code, and gate the recommendation or interpretation of supplied results.",
+      "Assess source-target compatibility, compare adaptation plans, and generate reviewable reasoning over supplied context.",
     category: "ml",
     domain: "Machine Learning & AI",
-    executionMode: "prompt-analysis-only",
+    requiredInputs: [
+      { key: "task", label: "Target task" },
+      { key: "source_model", label: "Pretrained source model" },
+    ],
+    requiredFiles: [],
+    requiredCapabilities: ["prompt-analysis"],
     researchGoal:
-      "Establish the target task, source model and license, input and preprocessing compatibility, train-validation-test split, leakage controls, baseline, seed, package versions, and authorized compute envelope.",
+      "Establish the target task, source model and license, input and preprocessing compatibility, development-validation-test split, leakage controls, baseline, seed, package versions, and resource envelope.",
     completionCriteria: [
       "Source and target representations, licenses, preprocessing, labels, and split units are compatible or their gaps are explicit.",
-      "Local resources and any remote-compute authorization are checked before proposing expensive execution.",
+      "Resource assumptions and any work requiring capabilities outside this prompt-only runtime are explicitly marked for later human action.",
     ],
     analysisPrompt:
       "Assess source-target representation compatibility and design a leakage-safe target split. Compare planned fixed-feature, partial-unfreezing, and full-fine-tuning protocols with task heads, warmup, decay, early stopping, held-out uncertainty, and baseline checks; generate clearly labeled unexecuted reference code. Interpret transfer effects only from user-supplied results.",
@@ -129,18 +142,23 @@ export const MACHINE_LEARNING_WORKFLOW_TEMPLATES = [
       goal: "Compare feature-extraction and fine-tuning paths under the actual data and compute envelope, then select the best-supported adaptation strategy.",
     },
     synthesisPrompt:
-      "Report an evidence-gated transfer-learning execution plan or interpretation of user-supplied results. Include compatibility, planned baselines and uncertainty, compute requirements, seed and versions, and limitations; list model, prediction, and learning-curve outputs as proposed and never imply that training ran.",
+      "Report a transfer-learning review plan or interpretation of user-supplied results. Include compatibility, planned baselines and uncertainty, resource requirements, seed and versions, and limitations; list model, prediction, and learning-curve outputs as proposals and never imply that fitting occurred.",
   },
   {
     id: "model-comparison",
     sourceWorkflowId: "model-comparison",
     suggestedWorkflowId: "model-comparison",
-    name: "Model Comparison & Selection",
+    name: "Model Comparison Design (Planning)",
     description:
-      "Research a fair comparison protocol, design identical-fold analyses, generate reviewable code, and gate the selection plan or interpretation of supplied results.",
+      "Design a fair identical-fold comparison and generate reviewable selection reasoning or interpretation of supplied results.",
     category: "ml",
     domain: "Machine Learning & AI",
-    executionMode: "prompt-analysis-only",
+    requiredInputs: [
+      { key: "target", label: "Target variable" },
+      { key: "models", label: "Models to compare" },
+    ],
+    requiredFiles: [{ key: "dataset", label: "Uploaded comparison dataset", minimumCount: 1 }],
+    requiredCapabilities: ["prompt-analysis", "read-uploaded-files"],
     researchGoal:
       "Establish the target, candidate models, task metrics, data grouping, class balance, common preprocessing, leakage controls, nested evaluation design, seed, and compute measures.",
     completionCriteria: [
@@ -159,18 +177,20 @@ export const MACHINE_LEARNING_WORKFLOW_TEMPLATES = [
       ],
     },
     synthesisPrompt:
-      "Produce an evidence-gated model-comparison protocol or interpretation of user-supplied results. Separate planned from observed metrics, include uncertainty, statistical and practical significance, compute tradeoffs, rationale, dissent, seed, versions, and limitations, and do not claim comparison artifacts were generated.",
+      "Produce a model-comparison protocol or interpretation of user-supplied results. Separate planned from observed metrics, include uncertainty, statistical and practical significance, resource tradeoffs, rationale, dissent, seed, versions, and limitations, and do not claim comparison outputs were generated.",
   },
   {
     id: "dataset-bias-audit",
     sourceWorkflowId: "dataset-bias-audit",
     suggestedWorkflowId: "dataset-bias-audit",
-    name: "Dataset & Model Bias Audit",
+    name: "Dataset & Model Bias Audit (Planning)",
     description:
       "Research protected-group context and data limits, design a fairness audit, generate reviewable code, and gate interpretations of supplied metrics and mitigation evidence.",
     category: "ml",
     domain: "Machine Learning & AI",
-    executionMode: "prompt-analysis-only",
+    requiredInputs: [{ key: "attributes", label: "Protected attributes" }],
+    requiredFiles: [{ key: "audit-material", label: "Uploaded dataset or model-audit material", minimumCount: 1 }],
+    requiredCapabilities: ["prompt-analysis", "read-uploaded-files"],
     researchGoal:
       "Establish the decision context, protected attributes, intersectional groups, missingness, sample sizes, model and threshold, applicable fairness concepts, legal and domain boundaries, seed, and uncertainty plan.",
     completionCriteria: [
@@ -189,6 +209,6 @@ export const MACHINE_LEARNING_WORKFLOW_TEMPLATES = [
       ],
     },
     synthesisPrompt:
-      "Write an evidence-gated bias-audit plan or interpretation of user-supplied results that distinguishes observed disparities from causal claims, preserves dissent, and states privacy and sample-size limits. Label metrics, figures, and before-and-after comparisons as proposed unless real outputs were supplied.",
+      "Write a bias-audit plan or interpretation of user-supplied results that distinguishes observed disparities from causal claims, preserves dissent, and states privacy and sample-size limits. Label metrics, figures, and before-and-after comparisons as proposed unless real outputs were supplied.",
   },
 ] as const satisfies readonly ScientificWorkflowTemplateDefinition[];
