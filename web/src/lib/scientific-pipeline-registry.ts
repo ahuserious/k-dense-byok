@@ -21,9 +21,20 @@ export interface TypedWorkflowRegistrySource {
 export interface VendoredWorkflowRegistrySource {
   engine: "vendored";
   sourceId: string;
+  /** Exact engine identifier. Never normalize this value before routing. */
   workflowName: string;
+  displayName: string;
+  origin?: string;
+  filename?: string;
   description: string;
   workflow: Record<string, unknown>;
+}
+
+export interface ScientificPipelineRoutingAmbiguity {
+  engine: ScientificPipelineEngine;
+  sourceIds: string[];
+  identifiers: string[];
+  message: string;
 }
 
 export interface ScientificPipelineRegistryEntry {
@@ -34,6 +45,7 @@ export interface ScientificPipelineRegistryEntry {
   description: string;
   typed?: TypedWorkflowRegistrySource;
   vendored?: VendoredWorkflowRegistrySource;
+  routingAmbiguities?: ScientificPipelineRoutingAmbiguity[];
 }
 
 type RegistrySource = TypedWorkflowRegistrySource | VendoredWorkflowRegistrySource;
@@ -123,23 +135,35 @@ export function typedWorkflowRegistrySource(
 
 export function vendoredWorkflowRegistrySource(
   workflow: Record<string, unknown>,
+  identity: { origin?: string; filename?: string } = {},
 ): VendoredWorkflowRegistrySource | null {
-  const name = typeof workflow.name === "string" ? workflow.name.trim() : "";
-  if (!name) return null;
+  const workflowName = typeof workflow.name === "string" ? workflow.name : "";
+  const displayName = workflowName.trim().replace(/\s+/g, " ");
+  if (!displayName) return null;
   const description = typeof workflow.description === "string"
     ? workflow.description.split("\n")[0] ?? ""
     : "";
+  const identityParts = [encodeURIComponent(workflowName)];
+  if (identity.origin !== undefined) {
+    identityParts.push(`origin=${encodeURIComponent(identity.origin)}`);
+  }
+  if (identity.filename !== undefined) {
+    identityParts.push(`filename=${encodeURIComponent(identity.filename)}`);
+  }
   return {
     engine: "vendored",
-    sourceId: `vendored:${encodeURIComponent(name)}`,
-    workflowName: name,
+    sourceId: `vendored:${identityParts.join(":")}`,
+    workflowName,
+    displayName,
+    ...(identity.origin !== undefined ? { origin: identity.origin } : {}),
+    ...(identity.filename !== undefined ? { filename: identity.filename } : {}),
     description,
     workflow,
   };
 }
 
 function sourceName(source: RegistrySource): string {
-  return source.engine === "typed" ? source.summary.name : source.workflowName;
+  return source.engine === "typed" ? source.summary.name : source.displayName;
 }
 
 function sourceDescription(source: RegistrySource): string {
@@ -158,6 +182,42 @@ function sourceStructureHash(source: RegistrySource): string {
   return source.engine === "typed"
     ? `typed-graph-${source.summary.graphSha256}`
     : `vendored-source-${stableHash(JSON.stringify(source.workflow))}`;
+}
+
+function sourceRouteIdentifier(source: RegistrySource): string {
+  return source.engine === "typed" ? source.workflowId : source.workflowName;
+}
+
+function flagSameEngineRoutingAmbiguity(
+  entries: Map<string, ScientificPipelineRegistryEntry>,
+  normalizedName: string,
+  structureHash: string,
+  engine: ScientificPipelineEngine,
+): void {
+  const matchingEntries = [...entries.values()].filter((entry) =>
+    entry.normalizedName === normalizedName &&
+    entry.structureHash === structureHash &&
+    (engine === "typed" ? entry.typed !== undefined : entry.vendored !== undefined)
+  );
+  const routes = matchingEntries.map((entry) =>
+    engine === "typed" ? entry.typed! : entry.vendored!
+  );
+  if (routes.length < 2) return;
+
+  const sourceIds = routes.map((route) => route.sourceId);
+  const identifiers = routes.map(sourceRouteIdentifier);
+  const ambiguity: ScientificPipelineRoutingAmbiguity = {
+    engine,
+    sourceIds,
+    identifiers,
+    message: `Ambiguous ${engine} routes share the same normalized name and structure: ${identifiers.map((identifier) => JSON.stringify(identifier)).join(", ")}. Exact identifiers remain separately routable.`,
+  };
+  for (const entry of matchingEntries) {
+    entry.routingAmbiguities = [
+      ...(entry.routingAmbiguities ?? []).filter((candidate) => candidate.engine !== engine),
+      ambiguity,
+    ];
+  }
 }
 
 export function buildScientificPipelineRegistry(
@@ -197,6 +257,12 @@ export function buildScientificPipelineRegistry(
       if (!next.description) next.description = source.description;
     }
     entries.set(id, next);
+    flagSameEngineRoutingAmbiguity(
+      entries,
+      normalizedName,
+      structureHash,
+      source.engine,
+    );
   }
 
   return [...entries.values()].sort((left, right) =>
@@ -283,8 +349,14 @@ export async function listVendoredWorkflowRegistrySources(
   const workflows = recordOf(body)?.workflows;
   if (!Array.isArray(workflows)) return [];
   return workflows.flatMap((candidate) => {
-    const workflow = recordOf(recordOf(candidate)?.workflow);
-    const source = workflow ? vendoredWorkflowRegistrySource(workflow) : null;
+    const candidateRecord = recordOf(candidate);
+    const workflow = recordOf(candidateRecord?.workflow);
+    const origin = candidateRecord?.source ?? workflow?.origin;
+    const filename = candidateRecord?.filename ?? workflow?.filename;
+    const source = workflow ? vendoredWorkflowRegistrySource(workflow, {
+      ...(typeof origin === "string" ? { origin } : {}),
+      ...(typeof filename === "string" ? { filename } : {}),
+    }) : null;
     return source ? [source] : [];
   });
 }

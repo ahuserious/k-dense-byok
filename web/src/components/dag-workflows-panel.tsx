@@ -238,6 +238,15 @@ function WorkflowRegistryRow({
           <p className="mt-1 truncate text-xs text-muted-foreground">
             {entry.description || typed?.workflowId || vendored?.workflowName}
           </p>
+          {entry.routingAmbiguities?.map((ambiguity) => (
+            <p
+              key={ambiguity.engine}
+              role="alert"
+              className="mt-2 text-xs text-amber-700 dark:text-amber-300"
+            >
+              {ambiguity.message}
+            </p>
+          ))}
           {typed ? (
             <p className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
               <span>Revision {typed.summary.revision}</span>
@@ -547,6 +556,8 @@ export function DagWorkflowsPanel({
   const [typedSources, setTypedSources] = useState<TypedWorkflowRegistrySource[] | null>(null);
   const [vendoredSources, setVendoredSources] = useState<VendoredWorkflowRegistrySource[] | null>(null);
   const [vendoredHealthy, setVendoredHealthy] = useState<boolean | null>(null);
+  const [vendoredHealthError, setVendoredHealthError] = useState<string | null>(null);
+  const [vendoredListError, setVendoredListError] = useState<string | null>(null);
   const [selectedDefinition, setSelectedDefinition] = useState<VersionedDagWorkflowDefinition | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [openingId, setOpeningId] = useState<string | null>(null);
@@ -575,6 +586,8 @@ export function DagWorkflowsPanel({
     setTypedSources(null);
     setVendoredSources(null);
     setVendoredHealthy(null);
+    setVendoredHealthError(null);
+    setVendoredListError(null);
     setSelectedDefinition(null);
     setError(null);
 
@@ -590,20 +603,28 @@ export function DagWorkflowsPanel({
       });
 
     void vendoredPipelineEngineHealth(projectId)
-      .then(async (healthy) => {
+      .then((healthy) => {
         if (loadGeneration.current !== generation) return;
         setVendoredHealthy(healthy);
-        if (!healthy) {
-          setVendoredSources([]);
-          return;
-        }
-        const sources = await listVendoredWorkflowRegistrySources(projectId);
-        if (loadGeneration.current !== generation) return;
-        setVendoredSources(sources);
+        setVendoredHealthError(
+          healthy ? null : "The advisory health probe did not report a healthy engine.",
+        );
       })
-      .catch(() => {
+      .catch((caught) => {
         if (loadGeneration.current !== generation) return;
         setVendoredHealthy(false);
+        setVendoredHealthError(errorMessage(caught));
+      });
+
+    void listVendoredWorkflowRegistrySources(projectId)
+      .then((sources) => {
+        if (loadGeneration.current !== generation) return;
+        setVendoredListError(null);
+        setVendoredSources(sources);
+      })
+      .catch((caught) => {
+        if (loadGeneration.current !== generation) return;
+        setVendoredListError(errorMessage(caught));
         setVendoredSources([]);
       });
   }, [projectId]);
@@ -793,14 +814,14 @@ export function DagWorkflowsPanel({
                         ? "bg-muted text-muted-foreground"
                         : vendoredHealthy
                           ? "bg-emerald-500/15 text-emerald-600"
-                          : "bg-red-500/15 text-red-600")
+                          : "bg-amber-500/15 text-amber-700 dark:text-amber-300")
                     }
                   >
                     {vendoredHealthy === null
                       ? "checking vendored engine…"
                       : vendoredHealthy
                         ? "vendored engine online"
-                        : "vendored engine offline"}
+                        : "vendored health degraded"}
                   </span>
                 </div>
                 <p className="mt-1 text-xs text-muted-foreground">
@@ -837,9 +858,14 @@ export function DagWorkflowsPanel({
             </div>
           </header>
 
-          {vendoredHealthy === false ? (
+          {vendoredHealthError ? (
             <p className="border-b px-4 py-2 text-xs text-muted-foreground">
-              The Scientific DAG Workflow Designer isn&apos;t reachable. Typed workflows remain available.
+              Vendored health is degraded: {vendoredHealthError} Workflows returned by the list request remain available.
+            </p>
+          ) : null}
+          {vendoredListError ? (
+            <p role="alert" className="border-b border-destructive/30 bg-destructive/5 px-4 py-2 text-xs text-destructive">
+              Could not load vendored workflows: {vendoredListError}
             </p>
           ) : null}
           {budgetBlocked ? (

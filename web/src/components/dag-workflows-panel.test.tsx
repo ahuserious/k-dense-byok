@@ -261,6 +261,89 @@ describe("DagWorkflowsPanel", () => {
     })).toBeEnabled();
   });
 
+  it("publishes and runs vendored rows while the advisory health request hangs", async () => {
+    vi.mocked(registryApi.vendoredPipelineEngineHealth).mockReturnValue(
+      new Promise<boolean>(() => {}),
+    );
+    vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
+    mockVendoredWorkflows([{
+      name: "health-independent",
+      description: "Available without the advisory probe",
+    }]);
+    const onRunPipeline = vi.fn().mockResolvedValue({
+      accepted: true,
+      status: "started",
+    });
+
+    renderPanel({ onRunPipeline });
+
+    const runButton = await screen.findByRole("button", {
+      name: "Run health-independent with vendored engine",
+    });
+    expect(screen.getByText("checking vendored engine…")).toBeInTheDocument();
+    await userEvent.click(runButton);
+    await waitFor(() => expect(onRunPipeline).toHaveBeenCalledWith("health-independent"));
+  });
+
+  it("shows degraded health without clearing a successful vendored list", async () => {
+    vi.mocked(registryApi.vendoredPipelineEngineHealth).mockRejectedValue(
+      new Error("health probe timed out"),
+    );
+    vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
+    mockVendoredWorkflows([{
+      name: "degraded-health",
+      description: "List remains authoritative for presentation",
+    }]);
+
+    renderPanel();
+
+    expect(await screen.findByText("degraded-health")).toBeInTheDocument();
+    expect(await screen.findByText("vendored health degraded")).toBeInTheDocument();
+    expect(screen.getByText(/health probe timed out/)).toHaveTextContent(
+      "Workflows returned by the list request remain available.",
+    );
+  });
+
+  it("routes normalized-name collisions with exact identifiers and surfaces ambiguity", async () => {
+    vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
+    vi.mocked(registryApi.listVendoredWorkflowRegistrySources).mockResolvedValue([
+      registryApi.vendoredWorkflowRegistrySource({
+        name: " foo ",
+        nodes: [{ id: "collect", prompt: "Collect evidence." }],
+      }, { origin: "project", filename: "padded.yaml" })!,
+      registryApi.vendoredWorkflowRegistrySource({
+        name: "foo",
+        nodes: [{ id: "collect", prompt: "Collect evidence." }],
+      }, { origin: "catalogue", filename: "plain.yaml" })!,
+    ]);
+    const onEditPipeline = vi.fn();
+    const onRunPipeline = vi.fn().mockResolvedValue({ accepted: true, status: "started" });
+
+    renderPanel({ onEditPipeline, onRunPipeline });
+
+    const list = await screen.findByRole("list", { name: "Scientific pipeline workflows" });
+    const editButtons = within(list).getAllByRole("button", {
+      name: "Edit foo with vendored engine",
+    });
+    const runButtons = within(list).getAllByRole("button", {
+      name: "Run foo with vendored engine",
+    });
+    expect(within(list).getAllByRole("listitem")).toHaveLength(2);
+    expect(within(list).getAllByRole("alert")[0]).toHaveTextContent(
+      "Ambiguous vendored routes",
+    );
+
+    await userEvent.click(editButtons[0]);
+    await userEvent.click(editButtons[1]);
+    await userEvent.click(runButtons[0]);
+    await userEvent.click(runButtons[1]);
+
+    expect(onEditPipeline.mock.calls.map(([identifier]) => identifier))
+      .toEqual([" foo ", "foo"]);
+    await waitFor(() => expect(onRunPipeline.mock.calls.map(([identifier]) => identifier))
+      .toEqual([" foo ", "foo"]));
+  });
+
   it("routes the selected vendored pipeline directly without invoking typed admission or Builder", async () => {
     mockVendoredWorkflows([
       { name: "microscopy-qc", description: "Inspect microscopy acquisition quality" },

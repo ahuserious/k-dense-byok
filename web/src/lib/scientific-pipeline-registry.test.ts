@@ -163,6 +163,34 @@ describe("scientific pipeline registry", () => {
     });
   });
 
+  it("keeps distinct whitespace-bearing engine identifiers exact and flags their normalized route ambiguity", () => {
+    const padded = vendoredWorkflowRegistrySource({
+      name: " foo ",
+      nodes: [{ id: "collect", prompt: "Collect evidence." }],
+    }, { origin: "project", filename: "padded.yaml" });
+    const plain = vendoredWorkflowRegistrySource({
+      name: "foo",
+      nodes: [{ id: "collect", prompt: "Collect evidence." }],
+    }, { origin: "catalogue", filename: "plain.yaml" });
+
+    const registry = buildScientificPipelineRegistry([], [padded!, plain!]);
+
+    expect(registry).toHaveLength(2);
+    expect(registry.map((entry) => workflowRouteForEngine(entry, "vendored").workflowName))
+      .toEqual([" foo ", "foo"]);
+    expect(padded?.sourceId).toContain("origin=project");
+    expect(padded?.sourceId).toContain("filename=padded.yaml");
+    expect(plain?.sourceId).toContain("origin=catalogue");
+    for (const entry of registry) {
+      expect(entry.routingAmbiguities).toEqual([
+        expect.objectContaining({
+          engine: "vendored",
+          identifiers: [" foo ", "foo"],
+        }),
+      ]);
+    }
+  });
+
   it("keeps same-engine identifier collisions independently runnable", () => {
     const registry = buildScientificPipelineRegistry([
       typedWorkflowRegistrySource(
@@ -203,6 +231,27 @@ describe("scientific pipeline registry", () => {
     );
     const signal = apiFetchMock.mock.calls[0]?.[1]?.signal;
     expect(signal?.aborted).toBe(true);
+  });
+
+  it("includes list origin and filename metadata in vendored source identity", async () => {
+    apiFetchMock.mockResolvedValue(new Response(JSON.stringify({
+      workflows: [{
+        workflow: { name: "source-aware", nodes: [{ id: "collect" }] },
+        source: "project",
+        filename: "source-aware.yaml",
+      }],
+    }), { status: 200 }));
+
+    const [source] = await listVendoredWorkflowRegistrySources("project-a");
+
+    expect(source).toMatchObject({
+      workflowName: "source-aware",
+      displayName: "source-aware",
+      origin: "project",
+      filename: "source-aware.yaml",
+    });
+    expect(source.sourceId).toContain("origin=project");
+    expect(source.sourceId).toContain("filename=source-aware.yaml");
   });
 
   it("keeps the timeout active while a vendored response body is stalled", async () => {
