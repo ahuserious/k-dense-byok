@@ -61,7 +61,6 @@ import {
   backgroundAgentTrailingNodeForSession,
   chatStreamErrorForSession,
   completeChatTurnRun,
-  indexWorkflowRunReferences,
   projectWorkflowRunStateV1,
   registerChatTurnRun,
   workflowRunForChatSession,
@@ -159,6 +158,7 @@ async function workflowRescueTrailingNode(
       helperSessionId: binding.sessionId,
       workflowRunId,
       workflowRunStatus,
+      brokerHandlePresent: Boolean(handle),
       ...(activeState ? { activeState } : {}),
     });
     if (trailingNode) return trailingNode;
@@ -1084,15 +1084,19 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
               .reverse()
               .find((frame) => frame.type === "error");
             const failed =
-              handle.isAbortRequested ||
               handle.activityState === "error" ||
               handle.activityState === "blocked";
+            const status = handle.isAbortRequested
+              ? "cancelled"
+              : failed
+                ? "failed"
+                : "completed";
             const finished = completeChatTurnRun({
               projectId,
               sessionId,
               indexRunId: indexedChatRunId,
-              status: failed ? "failed" : "completed",
-              ...(errorFrame?.type === "error"
+              status,
+              ...(status === "failed" && errorFrame?.type === "error"
                 ? { error: String(errorFrame.message) }
                 : {}),
               ...indexedUsage,
@@ -1257,18 +1261,6 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
               }
               const frame = toClientFrame(ev, paths.sandbox);
               if (frame) {
-                try {
-                  if (indexedChatRunId) {
-                    indexWorkflowRunReferences(
-                      projectId,
-                      sessionId,
-                      indexedChatRunId,
-                      frame,
-                    );
-                  }
-                } catch (error) {
-                  log.warn({ err: error }, "failed to index chat workflow-run reference");
-                }
                 handle.publish(frame);
               }
               if (ev.type === "turn_end") publishContextUsage();

@@ -29,6 +29,7 @@ const STATUS_STYLE: Record<string, string> = {
   running: "text-amber-300",
   completed: "text-emerald-400",
   failed: "text-red-400",
+  cancelled: "text-zinc-400",
 };
 
 function ago(iso: string): string {

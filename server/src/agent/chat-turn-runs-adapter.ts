@@ -14,7 +14,6 @@ import {
   type WorkflowRunRecord,
 } from "../workflows/index.ts";
 
-const WORKFLOW_RUN_REFERENCE = /\bwrun_[a-f0-9]{32}\b/;
 type RunStateV1NodeStatus =
   | "pending"
   | "running"
@@ -73,8 +72,7 @@ export interface ProjectWorkflowRunOptions {
 
 /** Register one accepted chat turn in the shared append-only runs index. */
 export function registerChatTurnRun(input: RegisterChatTurnInput): string {
-  const workflowRunId =
-    input.workflowRunId ?? input.prompt.match(WORKFLOW_RUN_REFERENCE)?.[0];
+  const workflowRunId = input.workflowRunId;
   const indexRunId = startRun(input.projectId, {
     sessionId: input.sessionId,
     loopId: null,
@@ -90,7 +88,7 @@ export function registerChatTurnRun(input: RegisterChatTurnInput): string {
       input.projectId,
       input.sessionId,
       workflowRunId,
-      input.workflowRunId ? "chat-event" : "chat-prompt",
+      "turn-index",
       indexRunId,
     );
   }
@@ -119,54 +117,6 @@ export function latestChatTurnRun(
       (run) => run.role === "agent",
     ) ?? null
   );
-}
-
-function collectWorkflowRunReferences(
-  value: unknown,
-  output: Set<string>,
-  depth = 0,
-): void {
-  if (output.size >= 8 || depth > 8) return;
-  if (typeof value === "string") {
-    for (const match of value.matchAll(/\bwrun_[a-f0-9]{32}\b/g)) {
-      output.add(match[0]);
-      if (output.size >= 8) return;
-    }
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value.slice(0, 256)) {
-      collectWorkflowRunReferences(item, output, depth + 1);
-    }
-    return;
-  }
-  if (!value || typeof value !== "object") return;
-  for (const [key, item] of Object.entries(value).slice(0, 256)) {
-    if (key === "data" && typeof item === "string" && item.length > 8_192)
-      continue;
-    collectWorkflowRunReferences(item, output, depth + 1);
-  }
-}
-
-/** Persist bounded workflow-run references observed in chat SSE frames. */
-export function indexWorkflowRunReferences(
-  projectId: string,
-  sessionId: string,
-  chatRunId: string,
-  value: unknown,
-): string[] {
-  const references = new Set<string>();
-  collectWorkflowRunReferences(value, references);
-  for (const workflowRunId of references) {
-    associateWorkflowRun(
-      projectId,
-      sessionId,
-      workflowRunId,
-      "chat-event",
-      chatRunId,
-    );
-  }
-  return [...references];
 }
 
 /** Persist a validated typed launch that is not owned by any chat turn. */
@@ -251,9 +201,26 @@ export function backgroundAgentTrailingNodeForSession(input: {
   helperSessionId: string;
   workflowRunId: string;
   workflowRunStatus: RunStateV1["status"];
+  brokerHandlePresent?: boolean;
   activeState?: ActiveBackgroundAgentState;
 }): BackgroundAgentTrailingNodeInput | undefined {
-  const durable = latestChatTurnRun(input.projectId, input.helperSessionId);
+  let durable = latestChatTurnRun(input.projectId, input.helperSessionId);
+  // A retained completed handle covers the narrow complete→durable-finalize
+  // window; only a total absence after restart proves this row is orphaned.
+  const brokerHandlePresent =
+    input.brokerHandlePresent ?? input.activeState !== undefined;
+  if (
+    durable?.agentId === "workflow-rescue" &&
+    durable.workflowRunId === input.workflowRunId &&
+    durable.status === "running" &&
+    !brokerHandlePresent
+  ) {
+    finishRun(input.projectId, input.helperSessionId, durable.id, {
+      status: "failed",
+      output: "Background rescue agent was interrupted by process restart.",
+    });
+    durable = latestChatTurnRun(input.projectId, input.helperSessionId);
+  }
   const durableStatus =
     durable?.agentId === "workflow-rescue" &&
     durable.workflowRunId === input.workflowRunId
@@ -261,7 +228,9 @@ export function backgroundAgentTrailingNodeForSession(input: {
         ? "succeeded"
         : durable.status === "failed"
           ? "failed"
-          : undefined
+          : durable.status === "cancelled"
+            ? "cancelled"
+            : undefined
       : undefined;
   const activeStatus = input.activeState
     ? input.activeState === "error"

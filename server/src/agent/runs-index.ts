@@ -23,7 +23,7 @@ import { resolvePaths } from "../projects.ts";
 
 // ---- Types (file-backed port of db.ts Run + Loop) -------------------------
 
-export type RunStatus = "running" | "completed" | "failed";
+export type RunStatus = "running" | "completed" | "failed" | "cancelled";
 export type RunRole =
   | "agent"
   | "subagent"
@@ -58,7 +58,7 @@ export interface WorkflowRunAssociation {
   sessionId: string;
   workflowRunId: string;
   chatRunId: string | null;
-  source: "chat-prompt" | "chat-event" | "typed-launch";
+  source: "turn-index" | "typed-launch";
   associatedAt: number;
 }
 
@@ -150,7 +150,7 @@ export function startRun(
 }
 
 export interface FinishRunFields {
-  status: Extract<RunStatus, "completed" | "failed">;
+  status: Extract<RunStatus, "completed" | "failed" | "cancelled">;
   output?: string;
   reasoning?: string;
   costUsd?: number;
@@ -177,7 +177,7 @@ export function finishRun(
 ): boolean {
   const file = runsJsonlPath(projectId, sessionId);
   const existing = latestById(readJsonl<RunRecord>(file)).get(runId);
-  if (!existing) return false;
+  if (!existing || existing.status !== "running") return false;
 
   const terminal: RunRecord = {
     ...existing,
@@ -381,9 +381,7 @@ export function latestWorkflowRunAssociation(
     latest.sessionId !== sessionId ||
     !WORKFLOW_RUN_ID_RE.test(latest.workflowRunId) ||
     (latest.chatRunId !== null && !CHAT_RUN_ID_RE.test(latest.chatRunId)) ||
-    (latest.source !== "chat-prompt" &&
-      latest.source !== "chat-event" &&
-      latest.source !== "typed-launch") ||
+    (latest.source !== "turn-index" && latest.source !== "typed-launch") ||
     (latest.source === "typed-launch") !== (latest.chatRunId === null) ||
     !Number.isSafeInteger(latest.associatedAt) ||
     latest.associatedAt < 0

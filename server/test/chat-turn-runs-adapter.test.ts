@@ -9,7 +9,6 @@ import {
   chatStreamErrorForSession,
   backgroundAgentTrailingNodeForSession,
   completeChatTurnRun,
-  indexWorkflowRunReferences,
   latestChatTurnRun,
   projectWorkflowRunStateV1,
   registerChatTurnRun,
@@ -188,10 +187,12 @@ describe("chat-turn runs-index adapter", () => {
   });
 
   it("retains failed chat-stream errors for RunState error routing", () => {
+    const workflowRunId = "wrun_11111111111111111111111111111111";
     const indexRunId = registerChatTurnRun({
       projectId: DEFAULT_PROJECT_ID,
       sessionId: "chat-session",
-      prompt: "Inspect wrun_11111111111111111111111111111111",
+      prompt: "Inspect the selected workflow run.",
+      workflowRunId,
     });
     completeChatTurnRun({
       projectId: DEFAULT_PROJECT_ID,
@@ -204,7 +205,7 @@ describe("chat-turn runs-index adapter", () => {
       chatStreamErrorForSession(
         DEFAULT_PROJECT_ID,
         "chat-session",
-        "wrun_11111111111111111111111111111111",
+        workflowRunId,
       ),
     ).toEqual({
       code: "CHAT_STREAM_ERROR",
@@ -219,6 +220,7 @@ describe("chat-turn runs-index adapter", () => {
       projectId: DEFAULT_PROJECT_ID,
       sessionId: "chat-session",
       prompt: `Inspect ${workflowRunId}`,
+      workflowRunId,
     });
     completeChatTurnRun({
       projectId: DEFAULT_PROJECT_ID,
@@ -248,6 +250,34 @@ describe("chat-turn runs-index adapter", () => {
     ).toBeUndefined();
   });
 
+  it("persists explicit Stop as cancelled without chat error routing", () => {
+    const workflowRunId = "wrun_11111111111111111111111111111111";
+    const indexRunId = registerChatTurnRun({
+      projectId: DEFAULT_PROJECT_ID,
+      sessionId: "chat-session",
+      prompt: "Inspect the selected workflow run.",
+      workflowRunId,
+    });
+    expect(
+      completeChatTurnRun({
+        projectId: DEFAULT_PROJECT_ID,
+        sessionId: "chat-session",
+        indexRunId,
+        status: "cancelled",
+      }),
+    ).toBe(true);
+    expect(latestChatTurnRun(DEFAULT_PROJECT_ID, "chat-session")).toMatchObject(
+      { id: indexRunId, status: "cancelled" },
+    );
+    expect(
+      chatStreamErrorForSession(
+        DEFAULT_PROJECT_ID,
+        "chat-session",
+        workflowRunId,
+      ),
+    ).toBeUndefined();
+  });
+
   it("resolves an exact session association with 200+ newer unrelated runs", () => {
     workflowStore.saveDefinition(
       DEFAULT_PROJECT_ID,
@@ -260,21 +290,11 @@ describe("chat-turn runs-index adapter", () => {
       requestedBy: "user",
       sessionId: "chat-session",
     });
-    expect(
-      indexWorkflowRunReferences(
-        DEFAULT_PROJECT_ID,
-        "chat-session",
-        registerChatTurnRun({
-          projectId: DEFAULT_PROJECT_ID,
-          sessionId: "chat-session",
-          prompt: "Launch a typed workflow.",
-        }),
-        {
-          type: "tool_end",
-          result: { workflowRunId: target.id },
-        },
-      ),
-    ).toEqual([target.id]);
+    associateTypedWorkflowLaunch(
+      DEFAULT_PROJECT_ID,
+      "chat-session",
+      target.id,
+    );
     const newerUnrelatedRuns = Array.from({ length: 201 }, (_, index) => {
       const run = syntheticRun();
       return {
@@ -312,11 +332,11 @@ describe("chat-turn runs-index adapter", () => {
       requestedBy: "user",
       sessionId: "chat-session",
     });
-    registerChatTurnRun({
-      projectId: DEFAULT_PROJECT_ID,
-      sessionId: "chat-session",
-      prompt: `Inspect ${first.id}`,
-    });
+    associateTypedWorkflowLaunch(
+      DEFAULT_PROJECT_ID,
+      "chat-session",
+      first.id,
+    );
     const associationFile = path.join(
       resolvePaths(DEFAULT_PROJECT_ID).runsDir,
       "chat-session",
@@ -540,6 +560,37 @@ describe("durable background-agent trailing state", () => {
         workflowRunStatus: "failed",
       }),
     ).toMatchObject({ agentId: "workflow-rescue", status: "failed" });
+    restartedBroker.clear();
+  });
+
+  it("reconciles an orphaned in-flight rescue to failed after restart", () => {
+    const workflowRunId = "wrun_11111111111111111111111111111111";
+    const indexRunId = registerChatTurnRun({
+      projectId: DEFAULT_PROJECT_ID,
+      sessionId: "rescue-session",
+      prompt: "Inspect the selected run.",
+      workflowRunId,
+      agentId: "workflow-rescue",
+    });
+    const restartedBroker = new RunBroker();
+    expect(restartedBroker.get("default", "rescue-session")).toBeUndefined();
+
+    expect(
+      backgroundAgentTrailingNodeForSession({
+        projectId: DEFAULT_PROJECT_ID,
+        helperSessionId: "rescue-session",
+        workflowRunId,
+        workflowRunStatus: "failed",
+        brokerHandlePresent: false,
+      }),
+    ).toMatchObject({ agentId: "workflow-rescue", status: "failed" });
+    expect(latestChatTurnRun(DEFAULT_PROJECT_ID, "rescue-session")).toMatchObject(
+      {
+        id: indexRunId,
+        status: "failed",
+        output: "Background rescue agent was interrupted by process restart.",
+      },
+    );
     restartedBroker.clear();
   });
 });

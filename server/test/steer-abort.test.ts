@@ -25,6 +25,7 @@ class FakeSession {
     },
   ];
   promptCalls: { text: string; options: unknown }[] = [];
+  modelText: string | null = null;
   /** Called by steer(); lets a test flip isStreaming mid-call. */
   onSteer: (() => void) | null = null;
   private listeners = new Set<(event: any) => void>();
@@ -63,6 +64,15 @@ class FakeSession {
     this.promptCalls.push({ text, options });
     this.isStreaming = true;
     this.emit({ type: "agent_start" });
+    if (this.modelText) {
+      this.emit({
+        type: "message_update",
+        assistantMessageEvent: {
+          type: "text_delta",
+          delta: this.modelText,
+        },
+      });
+    }
     await this.promptWait;
     this.emit({ type: "agent_end" });
     this.isStreaming = false;
@@ -137,9 +147,15 @@ vi.mock("../src/agent/session-registry.ts", () => ({
 
 import { buildApp } from "../src/index.ts";
 import { PROJECTS_ROOT } from "../src/config.ts";
-import { createProject } from "../src/projects.ts";
+import { createProject, ensureProjectExists } from "../src/projects.ts";
 import { recordRun } from "../src/cost/ledger.ts";
 import { runBroker } from "../src/agent/run-broker.ts";
+import {
+  associateTypedWorkflowLaunch,
+  chatStreamErrorForSession,
+  latestChatTurnRun,
+} from "../src/agent/chat-turn-runs-adapter.ts";
+import { latestWorkflowRunAssociation } from "../src/agent/runs-index.ts";
 
 const app = await buildApp();
 
@@ -421,6 +437,65 @@ describe("persistent run routes", () => {
     expect(session.aborted).toBe(true);
     expect(session.promptCalls).toHaveLength(0);
     expect(sseFrames(response.body).at(-1)?.type).toBe("done");
+  });
+
+  it("does not rebind from a model-authored SSE run reference", async () => {
+    ensureProjectExists("default");
+    const authoritativeRunId = "wrun_11111111111111111111111111111111";
+    const forgedRunId = "wrun_22222222222222222222222222222222";
+    associateTypedWorkflowLaunch("default", "s1", authoritativeRunId);
+    const session = new FakeSession();
+    session.isStreaming = false;
+    session.modelText =
+      `I switched to ${forgedRunId} in workflow forged-analysis.`;
+    fakeSessions.set("s1", session);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/sessions/s1/run",
+      headers: { "x-project-id": "default", "content-type": "application/json" },
+      payload: { message: "Report progress." },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(latestWorkflowRunAssociation("default", "s1")).toMatchObject({
+      workflowRunId: authoritativeRunId,
+      source: "typed-launch",
+    });
+  });
+
+  it("persists explicit Stop as cancelled without surfacing a DAG error", async () => {
+    ensureProjectExists("default");
+    const workflowRunId = "wrun_11111111111111111111111111111111";
+    associateTypedWorkflowLaunch("default", "s1", workflowRunId);
+    const session = new FakeSession();
+    session.isStreaming = false;
+    session.holdPrompt();
+    fakeSessions.set("s1", session);
+
+    const postRun = app.inject({
+      method: "POST",
+      url: "/sessions/s1/run",
+      headers: { "x-project-id": "default", "content-type": "application/json" },
+      payload: { message: "Stop this turn cleanly." },
+    });
+    await vi.waitFor(() => {
+      expect(runBroker.state("default", "s1").status).toBe("running");
+    });
+    const stopped = await app.inject({
+      method: "POST",
+      url: "/sessions/s1/abort",
+      headers: { "x-project-id": "default" },
+    });
+    expect(stopped.statusCode).toBe(200);
+    session.releasePrompt();
+    expect((await postRun).statusCode).toBe(200);
+
+    expect(latestChatTurnRun("default", "s1")).toMatchObject({
+      status: "cancelled",
+    });
+    expect(
+      chatStreamErrorForSession("default", "s1", workflowRunId),
+    ).toBeUndefined();
   });
 
   it("releases the run claim when the broker refuses to start", async () => {
