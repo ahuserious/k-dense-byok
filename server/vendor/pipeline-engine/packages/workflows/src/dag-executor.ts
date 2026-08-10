@@ -105,6 +105,7 @@ import {
   optionsWithRemainingVendoredNodeBudget,
   recordVendoredNodeSpend,
   resolveVendoredNodeSpecRuntimeBinding,
+  routeVendoredNodeSpecReasoning,
 } from './node-spec-enforcement';
 
 export {
@@ -630,6 +631,10 @@ export function buildNodeAdapterConfig(
 ): NodeConfig {
   const fallbackModel =
     runtimeBinding.fallbackModel ?? node.fallbackModel ?? workflowLevelOptions.fallbackModel;
+  const routedPiReasoning =
+    runtimeBinding.provider === 'pi' && runtimeBinding.reasoning !== undefined
+      ? routeVendoredNodeSpecReasoning('pi', runtimeBinding.reasoning)
+      : undefined;
   return {
     nodeId: node.id,
     ...(node.settings !== undefined ? { settings: node.settings } : {}),
@@ -640,7 +645,12 @@ export function buildNodeAdapterConfig(
     agents: node.agents,
     allowed_tools: node.allowed_tools,
     denied_tools: node.denied_tools,
-    effort: node.effort ?? workflowLevelOptions.effort,
+    effort:
+      runtimeBinding.provider === 'pi' && runtimeBinding.reasoning !== undefined
+        ? routedPiReasoning?.field === 'effort'
+          ? routedPiReasoning.value
+          : undefined
+        : node.effort ?? workflowLevelOptions.effort,
     thinking: node.thinking ?? workflowLevelOptions.thinking,
     sandbox: node.sandbox ?? workflowLevelOptions.sandbox,
     betas: node.betas ?? workflowLevelOptions.betas,
@@ -1018,7 +1028,7 @@ async function resolveNodeProviderAndModel(
     assistantConfig
   );
   if (runtimeBinding.reasoning !== undefined) {
-    const routedReasoning = routePresetEffort(provider, runtimeBinding.reasoning);
+    const routedReasoning = routeVendoredNodeSpecReasoning(provider, runtimeBinding.reasoning);
     if (!routedReasoning) {
       throw new Error(
         `Node '${node.id}': reasoning '${runtimeBinding.reasoning}' is not supported by provider '${provider}'.`
@@ -1026,8 +1036,10 @@ async function resolveNodeProviderAndModel(
     }
     if (routedReasoning.field === 'effort') {
       nodeConfig.effort = routedReasoning.value;
-    } else {
+    } else if (routedReasoning.field === 'modelReasoningEffort') {
       assistantConfig.modelReasoningEffort = routedReasoning.value;
+    } else {
+      delete nodeConfig.effort;
     }
   }
 

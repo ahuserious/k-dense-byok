@@ -8,7 +8,7 @@
  * | NodeSpec field | Vendored status |
  * | --- | --- |
  * | `version` | BOUND (schema discriminator) |
- * | fixed `model.requested` + `auth.kind` | BOUND for Claude/Codex API-key or OAuth selection |
+ * | fixed `model.requested` + `auth.kind` | BOUND for Claude/Codex and OpenRouter-through-Pi selection |
  * | `model.resolution` | BOUND for exact or one same-provider/auth fallback model |
  * | `reasoningEffort` / requested reasoning | BOUND when the selected provider supports the value |
  * | `budget.maxCostUsd` | BOUND through Claude's existing `maxBudgetUsd` cost control |
@@ -20,7 +20,7 @@
  */
 import { isRegisteredProvider } from '@archon/providers';
 import type { DagNode, NodeRequestedModel, NodeSpecV1 } from './schemas/dag-node';
-import { routePresetEffort } from './model-validation';
+import { routePresetEffort, type EffortRouting } from './model-validation';
 
 export type VendoredNodeSpecPendingUnit = 'S4' | 'S5';
 
@@ -47,6 +47,32 @@ export interface VendoredNodeCostBudgetState {
 }
 
 const SUPPORTED_AUTH_KINDS = new Set(['api-key', 'oauth']);
+const PI_REASONING_LEVELS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh']);
+
+type VendoredNodeReasoningRouting = EffortRouting | { field: 'none' };
+
+function mapVendoredProvider(provider: string): string {
+  return provider === 'openrouter' ? 'pi' : provider;
+}
+
+function mapVendoredModel(provider: string, model: string): string {
+  return provider === 'openrouter' ? `openrouter/${model}` : model;
+}
+
+/** Route canonical NodeSpec reasoning onto the selected vendored adapter. */
+export function routeVendoredNodeSpecReasoning(
+  provider: string,
+  reasoning: string
+): VendoredNodeReasoningRouting | null {
+  if (provider === 'pi') {
+    if (reasoning === 'off') return { field: 'none' };
+    if (reasoning === 'max') return { field: 'effort', value: 'xhigh' };
+    return PI_REASONING_LEVELS.has(reasoning)
+      ? { field: 'effort', value: reasoning }
+      : null;
+  }
+  return routePresetEffort(provider, reasoning);
+}
 
 function issue(
   issues: VendoredNodeSpecIssue[],
@@ -97,14 +123,25 @@ function validateRequestedModelBinding(
     return;
   }
 
-  if (!isRegisteredProvider(requested.provider)) {
+  const vendoredProvider = mapVendoredProvider(requested.provider);
+  if (!isRegisteredProvider(vendoredProvider)) {
     issue(
       issues,
       'vendored-model-provider-unregistered',
       `${path}/provider`,
-      `Provider '${requested.provider}' is not registered in the vendored engine.`,
+      `Provider '${requested.provider}' maps to unregistered vendored provider '${vendoredProvider}'.`,
       'S4'
     );
+  } else if (requested.provider === 'openrouter') {
+    if (requested.auth.kind !== 'api-key') {
+      issue(
+        issues,
+        'vendored-openrouter-auth-unbound',
+        `${path}/auth/kind`,
+        `OpenRouter through Pi supports NodeSpec auth kind 'api-key', not '${requested.auth.kind}'.`,
+        'S4'
+      );
+    }
   } else if (requested.provider !== 'claude' && requested.provider !== 'codex') {
     issue(
       issues,
@@ -370,7 +407,7 @@ export function validateVendoredNodeSpecSemantics(
 
     const binding = resolveVendoredNodeSpecRuntimeBinding(node, workflow.provider);
     if (binding.reasoning !== undefined && binding.provider !== undefined) {
-      if (routePresetEffort(binding.provider, binding.reasoning) === null) {
+      if (routeVendoredNodeSpecReasoning(binding.provider, binding.reasoning) === null) {
         issue(
           issues,
           'vendored-reasoning-effort-unbound',
@@ -409,7 +446,10 @@ export function resolveVendoredNodeSpecRuntimeBinding(
   const settings = node.settings;
   const requested = settings?.model?.requested;
   const fixedRequested = requested?.source === 'fixed' ? requested : undefined;
-  const provider = fixedRequested?.provider ?? node.provider ?? workflowProvider;
+  const provider =
+    fixedRequested !== undefined
+      ? mapVendoredProvider(fixedRequested.provider)
+      : node.provider ?? workflowProvider;
   const fallback =
     settings?.model?.resolution.mode === 'explicit-fallback'
       ? settings.model.resolution.alternatives[0]
@@ -427,7 +467,7 @@ export function resolveVendoredNodeSpecRuntimeBinding(
     ...(provider !== undefined ? { provider } : {}),
     ...(fixedRequested !== undefined
       ? {
-          model: fixedRequested.model,
+          model: mapVendoredModel(fixedRequested.provider, fixedRequested.model),
           auth: fixedRequested.auth,
           reasoning: settings?.reasoningEffort ?? fixedRequested.reasoning,
         }
@@ -435,7 +475,9 @@ export function resolveVendoredNodeSpecRuntimeBinding(
         ? { reasoning: settings.reasoningEffort }
         : {}),
     ...(maxBudgetUsd !== undefined ? { maxBudgetUsd } : {}),
-    ...(fallback?.source === 'fixed' ? { fallbackModel: fallback.model } : {}),
+    ...(fallback?.source === 'fixed'
+      ? { fallbackModel: mapVendoredModel(fallback.provider, fallback.model) }
+      : {}),
   };
 }
 
@@ -524,6 +566,17 @@ export function applyVendoredNodeAuthSelection(
       selectedEnv.OPENAI_API_KEY = '';
     } else {
       throw new Error(`Node '${nodeId}' requested unsupported Codex auth kind '${auth.kind}'.`);
+    }
+  } else if (provider === 'pi') {
+    if (auth.kind !== 'api-key') {
+      throw new Error(
+        `Node '${nodeId}' requested unsupported OpenRouter-through-Pi auth kind '${auth.kind}'.`
+      );
+    }
+    if (!selectedEnv.OPENROUTER_API_KEY) {
+      throw new Error(
+        `Node '${nodeId}' requested OpenRouter API-key auth, but no per-run OpenRouter API key was resolved; operator/global credentials are disabled for explicit NodeSpec auth.`
+      );
     }
   }
   return selectedEnv;
