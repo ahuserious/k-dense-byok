@@ -52,6 +52,10 @@ export interface FusionTopologyInvocation {
   task: string;
   inputs: ReadonlyArray<{ agentId: string; output: string }>;
   round: number;
+  /** One signal shared by every invocation in this topology attempt. */
+  signal: AbortSignal;
+  /** Stable metadata for atomically sharing a phase budget across siblings. */
+  batch: { id: string; index: number; size: number };
 }
 
 export interface FusionTopologyProvider {
@@ -156,12 +160,19 @@ export async function executeFusionTopology(
 ): Promise<FusionTopologyResult> {
   validateNode(node);
   const trace: FusionTopologyTraceEntry[] = [];
+  const topologyAbort = new AbortController();
   const invoke = async (
     phase: FusionTopologyPhase,
     agent: FusionTopologyAgent,
     inputs: ReadonlyArray<{ agentId: string; output: string }> = [],
-    round = 1
+    round = 1,
+    batch = { id: `${phase}:${String(round)}`, index: 0, size: 1 }
   ): Promise<{ agentId: string; output: string }> => {
+    if (topologyAbort.signal.aborted) {
+      throw topologyAbort.signal.reason instanceof Error
+        ? topologyAbort.signal.reason
+        : new Error('Fusion topology invocation aborted.');
+    }
     const invocation: FusionTopologyInvocation = {
       nodeId: node.id,
       topology: node.kind,
@@ -170,6 +181,8 @@ export async function executeFusionTopology(
       task: node.task,
       inputs: inputs.map(input => ({ ...input })),
       round,
+      signal: topologyAbort.signal,
+      batch,
     };
     const traceEntry: FusionTopologyTraceEntry = {
       phase,
@@ -180,16 +193,34 @@ export async function executeFusionTopology(
     // Reserve authored order before provider work completes; parallel provider
     // latency must not make the execution trace nondeterministic.
     trace.push(traceEntry);
-    const output = boundedOutput(await provider.run(invocation), invocation);
-    traceEntry.output = output;
-    return { agentId: agent.id, output };
+    try {
+      const output = boundedOutput(await provider.run(invocation), invocation);
+      traceEntry.output = output;
+      return { agentId: agent.id, output };
+    } catch (error) {
+      if (!topologyAbort.signal.aborted) topologyAbort.abort(error);
+      throw error;
+    }
   };
-  const parallel = (
+  const parallel = async (
     phase: FusionTopologyPhase,
     agents = node.agents,
     inputs: ReadonlyArray<{ agentId: string; output: string }> = [],
     round = 1
-  ) => Promise.all(agents.map(agent => invoke(phase, agent, inputs, round)));
+  ): Promise<Array<{ agentId: string; output: string }>> => {
+    const batchId = `${phase}:${String(round)}`;
+    const settled = await Promise.allSettled(agents.map((agent, index) =>
+      invoke(phase, agent, inputs, round, { id: batchId, index, size: agents.length })
+    ));
+    const failed = settled.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected'
+    );
+    if (failed) throw failed.reason;
+    return settled.map(result => (result as PromiseFulfilledResult<{
+      agentId: string;
+      output: string;
+    }>).value);
+  };
   const lead = node.agents[0];
 
   switch (node.kind) {

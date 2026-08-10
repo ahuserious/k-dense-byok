@@ -72,6 +72,54 @@ describe('fusion topology executor semantics', () => {
     expect(result.trace.map(entry => entry.agentId)).toEqual(['alpha', 'beta', 'gamma']);
   });
 
+  it('aborts and settles every sibling before a failed topology attempt can be retried', async () => {
+    let active = 0;
+    let calls = 0;
+    let abortedSiblingSettlements = 0;
+    let settledUsageUsd = 0;
+    const provider = {
+      run: mock(async (invocation: FusionTopologyInvocation) => {
+        calls += 1;
+        const attempt = calls <= agents.length ? 1 : 2;
+        active += 1;
+        try {
+          if (attempt === 2) return `${invocation.agent.id}:retry`;
+          if (invocation.agent.id === 'alpha') {
+            await Promise.resolve();
+            settledUsageUsd += 0.2;
+            throw new Error('lead failed');
+          }
+          await new Promise<void>(resolve => {
+            if (invocation.signal.aborted) {
+              resolve();
+              return;
+            }
+            invocation.signal.addEventListener('abort', () => resolve(), { once: true });
+          });
+          abortedSiblingSettlements += 1;
+          settledUsageUsd += invocation.agent.id === 'beta' ? 0.3 : 0.4;
+          return `${invocation.agent.id}:settled-after-abort`;
+        } finally {
+          active -= 1;
+        }
+      }),
+    };
+
+    await expect(executeFusionTopology(topology('parallel'), provider))
+      .rejects.toThrow('lead failed');
+    expect(active).toBe(0);
+    expect(abortedSiblingSettlements).toBe(2);
+    expect(settledUsageUsd).toBeCloseTo(0.9);
+
+    const retry = await executeFusionTopology(topology('parallel'), provider);
+    expect(active).toBe(0);
+    expect(retry.outputs.map(output => output.output)).toEqual([
+      'alpha:retry',
+      'beta:retry',
+      'gamma:retry',
+    ]);
+  });
+
   it('repairs an invalid draft and returns only after a validator passes it', async () => {
     let checks = 0;
     const provider = {

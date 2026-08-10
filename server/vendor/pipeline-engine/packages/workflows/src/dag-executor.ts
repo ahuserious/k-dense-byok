@@ -128,6 +128,146 @@ function fusionTopologyPrompt(invocation: FusionTopologyInvocation): string {
   ].filter((line): line is string => line !== undefined).join('\n\n');
 }
 
+const AUTO_VALIDATE_VERDICT_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['passed', 'findings'],
+  properties: {
+    passed: { type: 'boolean' },
+    findings: { type: 'array', maxItems: 64, items: { type: 'string', minLength: 1 } },
+  },
+};
+
+interface TopologyBudgetReservation {
+  allowanceUsd?: number;
+}
+
+class TopologyBudgetTracker {
+  private spentUsd = 0;
+  private reservedUsd = 0;
+  private readonly groups = new Map<
+    string,
+    { allowanceUsd: number; size: number; claimedIndexes: Set<number> }
+  >();
+  readonly abortController = new AbortController();
+
+  constructor(private readonly capUsd: number | undefined) {}
+
+  get costUsd(): number {
+    return this.spentUsd;
+  }
+
+  reserve(invocation: FusionTopologyInvocation): TopologyBudgetReservation {
+    if (this.capUsd === undefined) return {};
+    if (this.abortController.signal.aborted || invocation.signal.aborted) {
+      throw new Error(`Topology node '${invocation.nodeId}' is aborted; no further calls may start.`);
+    }
+    let group = this.groups.get(invocation.batch.id);
+    if (!group) {
+      const remainingUsd = this.capUsd - this.spentUsd - this.reservedUsd;
+      if (remainingUsd <= Number.EPSILON) {
+        const error = new Error(
+          `Topology node '${invocation.nodeId}' exhausted its aggregate cost cap of $${this.capUsd.toFixed(2)}.`
+        );
+        this.abortController.abort(error);
+        throw error;
+      }
+      group = {
+        allowanceUsd: remainingUsd / invocation.batch.size,
+        size: invocation.batch.size,
+        claimedIndexes: new Set<number>(),
+      };
+      this.groups.set(invocation.batch.id, group);
+    }
+    if (
+      group.size !== invocation.batch.size ||
+      invocation.batch.index < 0 ||
+      invocation.batch.index >= group.size ||
+      group.claimedIndexes.has(invocation.batch.index)
+    ) {
+      throw new Error(`Topology node '${invocation.nodeId}' has invalid budget batch metadata.`);
+    }
+    group.claimedIndexes.add(invocation.batch.index);
+    this.reservedUsd += group.allowanceUsd;
+    return { allowanceUsd: group.allowanceUsd };
+  }
+
+  settle(
+    invocation: FusionTopologyInvocation,
+    reservation: TopologyBudgetReservation,
+    reportedCostUsd: number | undefined
+  ): void {
+    const allowanceUsd = reservation.allowanceUsd;
+    if (allowanceUsd !== undefined) this.reservedUsd -= allowanceUsd;
+    if (reportedCostUsd === undefined) {
+      if (this.capUsd === undefined) return;
+      const error = new Error(
+        `Topology invocation ${invocation.phase}/${invocation.agent.id} returned no cost settlement under an aggregate cap.`
+      );
+      this.abortController.abort(error);
+      throw error;
+    }
+    if (!Number.isFinite(reportedCostUsd) || reportedCostUsd < 0) {
+      const error = new Error(
+        `Topology invocation ${invocation.phase}/${invocation.agent.id} returned invalid cost usage.`
+      );
+      this.abortController.abort(error);
+      throw error;
+    }
+    this.spentUsd += reportedCostUsd;
+    if (
+      allowanceUsd !== undefined && reportedCostUsd > allowanceUsd + Number.EPSILON ||
+      this.capUsd !== undefined && this.spentUsd > this.capUsd + Number.EPSILON
+    ) {
+      const error = new Error(
+        `Topology node '${invocation.nodeId}' exceeded its aggregate cost cap of $${this.capUsd?.toFixed(2)}.`
+      );
+      this.abortController.abort(error);
+      throw error;
+    }
+    if (this.capUsd !== undefined && this.spentUsd >= this.capUsd - Number.EPSILON) {
+      this.abortController.abort(new Error(
+        `Topology node '${invocation.nodeId}' exhausted its aggregate cost cap of $${this.capUsd.toFixed(2)}.`
+      ));
+    }
+  }
+}
+
+function topologyInvocationOptions(
+  baseOptions: SendQueryOptions | undefined,
+  promptNodeId: string,
+  signal: AbortSignal,
+  allowanceUsd: number | undefined,
+  outputSchema: Record<string, unknown> | undefined
+): SendQueryOptions {
+  const {
+    abortSignal: _abortSignal,
+    maxBudgetUsd: _maxBudgetUsd,
+    outputFormat: _outputFormat,
+    nodeConfig,
+    ...base
+  } = baseOptions ?? {};
+  const {
+    maxBudgetUsd: _nodeMaxBudgetUsd,
+    output_format: _nodeOutputFormat,
+    ...baseNodeConfig
+  } = nodeConfig ?? {};
+  return {
+    ...base,
+    abortSignal: signal,
+    ...(allowanceUsd !== undefined ? { maxBudgetUsd: allowanceUsd } : {}),
+    ...(outputSchema !== undefined
+      ? { outputFormat: { type: 'json_schema' as const, schema: outputSchema } }
+      : {}),
+    nodeConfig: {
+      ...baseNodeConfig,
+      nodeId: promptNodeId,
+      ...(allowanceUsd !== undefined ? { maxBudgetUsd: allowanceUsd } : {}),
+      ...(outputSchema !== undefined ? { output_format: outputSchema } : {}),
+    },
+  };
+}
+
 async function executeFusionTopologyDagNode(
   deps: WorkflowDeps,
   platform: IWorkflowPlatform,
@@ -145,19 +285,43 @@ async function executeFusionTopologyDagNode(
   configuredCommandFolder?: string,
   issueContext?: string
 ): Promise<NodeExecutionResult> {
-  let costUsd = 0;
+  if (node.maxBudgetUsd !== undefined && !deps.getAgentProvider(provider).getCapabilities().costControl) {
+    return {
+      state: 'failed',
+      output: '',
+      error: `Topology node '${node.id}' requires aggregate cost control, but provider '${provider}' cannot enforce it.`,
+    };
+  }
+  const budget = new TopologyBudgetTracker(node.maxBudgetUsd);
   let tokenInput = 0;
   let tokenOutput = 0;
   const topologyProvider: FusionTopologyProvider = {
     async run(invocation) {
-      const { kind: _kind, task: _task, topology_agents: _agents, max_rounds: _rounds, ...base } = node;
+      const {
+        kind: _kind,
+        task: _task,
+        topology_agents: _agents,
+        max_rounds: _rounds,
+        output_format: _outputFormat,
+        maxBudgetUsd: _maxBudgetUsd,
+        ...base
+      } = node;
+      const reservation = budget.reserve(invocation);
+      const outputSchema = invocation.phase === 'auto-validate-check'
+        ? AUTO_VALIDATE_VERDICT_SCHEMA
+        : undefined;
       const promptNode: PromptNode = {
         ...base,
         id: `${node.id}-${invocation.phase}-${invocation.agent.id}-${String(invocation.round)}`,
         prompt: fusionTopologyPrompt(invocation),
         context: 'fresh',
         persist_session: false,
+        ...(outputSchema !== undefined ? { output_format: outputSchema } : {}),
       };
+      const sharedSignal = AbortSignal.any([
+        invocation.signal,
+        budget.abortController.signal,
+      ]);
       const output = await executeNodeInternal(
         deps,
         platform,
@@ -166,7 +330,13 @@ async function executeFusionTopologyDagNode(
         workflowRun,
         promptNode,
         provider,
-        nodeOptions,
+        topologyInvocationOptions(
+          nodeOptions,
+          promptNode.id,
+          sharedSignal,
+          reservation.allowanceUsd,
+          outputSchema
+        ),
         artifactsDir,
         logDir,
         baseBranch,
@@ -176,15 +346,15 @@ async function executeFusionTopologyDagNode(
         configuredCommandFolder,
         issueContext
       );
+      budget.settle(invocation, reservation, output.costUsd);
+      tokenInput += output.tokens?.input ?? 0;
+      tokenOutput += output.tokens?.output ?? 0;
       if (output.state !== 'completed') {
         throw new Error(
           ('error' in output ? output.error : undefined) ??
             `Topology invocation ${invocation.phase} failed.`
         );
       }
-      costUsd += output.costUsd ?? 0;
-      tokenInput += output.tokens?.input ?? 0;
-      tokenOutput += output.tokens?.output ?? 0;
       return output.output;
     },
   };
@@ -196,10 +366,48 @@ async function executeFusionTopologyDagNode(
       agents: node.topology_agents,
       ...(node.max_rounds !== undefined ? { maxRounds: node.max_rounds } : {}),
     }, topologyProvider);
+    let assembledOutput = result.output;
+    let assembledStructuredOutput: unknown;
+    let assembledDeclaredFields: string[] | undefined;
+    if (node.output_format !== undefined) {
+      try {
+        assembledStructuredOutput = JSON.parse(result.output);
+      } catch {
+        throw new Error(
+          `Topology node '${node.id}' assembled output is not valid JSON for its output_format.`
+        );
+      }
+      let schemaCompileError: string | undefined;
+      const validation = validateStructuredOutput(
+        assembledStructuredOutput,
+        node.output_format,
+        message => {
+          schemaCompileError = message;
+        }
+      );
+      if (schemaCompileError !== undefined) {
+        throw new Error(
+          `Topology node '${node.id}' output_format could not be compiled: ${schemaCompileError}`
+        );
+      }
+      if (!validation.valid) {
+        throw new Error(
+          `Topology node '${node.id}' assembled output failed output_format validation: ${validation.errors.join('; ')}`
+        );
+      }
+      assembledOutput = JSON.stringify(assembledStructuredOutput);
+      assembledDeclaredFields = declaredFieldsFromSchema(node.output_format);
+    }
     return {
       state: 'completed',
-      output: result.output,
-      ...(costUsd > 0 ? { costUsd } : {}),
+      output: assembledOutput,
+      ...(assembledStructuredOutput !== undefined
+        ? { structuredOutput: assembledStructuredOutput }
+        : {}),
+      ...(assembledDeclaredFields !== undefined
+        ? { declaredFields: assembledDeclaredFields }
+        : {}),
+      ...(budget.costUsd > 0 ? { costUsd: budget.costUsd } : {}),
       ...(tokenInput > 0 || tokenOutput > 0
         ? { tokens: { input: tokenInput, output: tokenOutput, total: tokenInput + tokenOutput } }
         : {}),
@@ -209,7 +417,7 @@ async function executeFusionTopologyDagNode(
       state: 'failed',
       output: '',
       error: error instanceof Error ? error.message : String(error),
-      ...(costUsd > 0 ? { costUsd } : {}),
+      ...(budget.costUsd > 0 ? { costUsd: budget.costUsd } : {}),
       ...(tokenInput > 0 || tokenOutput > 0
         ? { tokens: { input: tokenInput, output: tokenOutput, total: tokenInput + tokenOutput } }
         : {}),
@@ -989,11 +1197,14 @@ async function executeNodeInternal(
 
   // Create per-node abort controller for idle timeout cleanup
   const nodeAbortController = new AbortController();
+  const nodeAbortSignal = nodeOptions?.abortSignal
+    ? AbortSignal.any([nodeOptions.abortSignal, nodeAbortController.signal])
+    : nodeAbortController.signal;
   // Fork when resuming — leaves the source session untouched so retries are safe.
   const shouldForkSession = resumeSessionId !== undefined;
   const nodeOptionsWithAbort: SendQueryOptions | undefined = {
     ...nodeOptions,
-    abortSignal: nodeAbortController.signal,
+    abortSignal: nodeAbortSignal,
     ...(shouldForkSession ? { forkSession: true } : {}),
   };
   let nodeIdleTimedOut = false;
@@ -1370,7 +1581,7 @@ async function executeNodeInternal(
       // Don't reask after an idle-timeout/abort — those are genuine failures, not
       // validation misses; they fall through to a cause-specific throw below.
       const canReask =
-        reaskAttempt < maxReasks && !nodeIdleTimedOut && !nodeAbortController.signal.aborted;
+        reaskAttempt < maxReasks && !nodeIdleTimedOut && !nodeAbortSignal.aborted;
 
       if (structuredOutput !== undefined) {
         // Validate against the declared schema for EVERY provider — SDK-enforced
@@ -1462,7 +1673,7 @@ async function executeNodeInternal(
     }
 
     // If cancelled during streaming (not idle timeout), return as failed with cancel reason
-    if (nodeAbortController.signal.aborted && !nodeIdleTimedOut) {
+    if (nodeAbortSignal.aborted && !nodeIdleTimedOut) {
       const duration = Date.now() - nodeStartTime;
       getLog().info(
         { nodeId: node.id, durationMs: duration },
@@ -1495,7 +1706,13 @@ async function executeNodeInternal(
       lastNodeCancelCheck.delete(`${workflowRun.id}:${node.id}`);
       lastNodeActivityUpdate.delete(`${workflowRun.id}:${node.id}`);
 
-      return { state: 'failed', output: nodeOutputText, error: 'Cancelled by user' };
+      return {
+        state: 'failed',
+        output: nodeOutputText,
+        error: 'Cancelled by user',
+        costUsd: nodeCostUsd,
+        ...(nodeTokens !== undefined ? { tokens: nodeTokens } : {}),
+      };
     }
 
     if (streamingMode === 'batch' && batchMessages.length > 0) {
@@ -1644,7 +1861,7 @@ async function executeNodeInternal(
     lastNodeActivityUpdate.delete(`${workflowRun.id}:${node.id}`);
 
     // If the abort was triggered by user cancel (not idle timeout), classify as cancel
-    if (nodeAbortController.signal.aborted && !nodeIdleTimedOut) {
+    if (nodeAbortSignal.aborted && !nodeIdleTimedOut) {
       getLog().info({ nodeId: node.id }, 'dag_node_cancelled_via_abort');
       return {
         state: 'failed',
