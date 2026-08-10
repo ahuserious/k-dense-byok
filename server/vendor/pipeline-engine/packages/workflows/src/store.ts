@@ -87,7 +87,12 @@ export interface IWorkflowStore {
   resumeWorkflowRun(id: string): Promise<WorkflowRun>;
   updateWorkflowRun(
     id: string,
-    updates: Partial<Pick<WorkflowRun, 'status' | 'metadata'>>
+    updates: Partial<
+      Pick<
+        WorkflowRun,
+        'status' | 'metadata' | 'conversation_id' | 'working_path' | 'parent_conversation_id'
+      >
+    >
   ): Promise<void>;
   updateWorkflowActivity(id: string): Promise<void>;
   getWorkflowRunStatus(id: string): Promise<WorkflowRunStatus | null>;

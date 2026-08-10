@@ -317,6 +317,7 @@ export interface WorkflowRunManifest {
   input: {
     goal?: string;
     variables?: Record<string, unknown>;
+    files?: Record<string, string[]>;
   };
   effectiveLimits: Record<string, unknown>;
   graph: WorkflowGraphDocument;
@@ -395,6 +396,7 @@ export interface CreateWorkflowRunInput {
   input?: {
     goal?: string;
     variables?: Record<string, unknown>;
+    files?: Record<string, string[]>;
   };
 }
 

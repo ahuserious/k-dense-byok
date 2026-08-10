@@ -681,7 +681,6 @@ async function resolveProjectWorkflowScope(
 ): Promise<pipelineEngine.PipelineWorkflowScope> {
   const cwd = resolvePaths(projectId).sandbox;
   const registered = recordOf(await pipelineEngine.registerCodebase(cwd, {
-    registrationMode: "workspace",
     name: `kady/${projectId}`,
   }));
   const codebaseId = registered?.id;

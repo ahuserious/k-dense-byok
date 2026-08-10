@@ -89,7 +89,6 @@ describe("pipelines proxy (engine up)", () => {
     const resolvedCwd = (JSON.parse(registration?.body ?? "{}") as { path?: string }).path;
     expect(resolvedCwd).toMatch(/\/default\/sandbox$/);
     expect(JSON.parse(registration?.body ?? "{}")).toMatchObject({
-      registrationMode: "workspace",
       name: "kady/default",
     });
     expect(workflowUrl.searchParams.get("cwd")).toBe(resolvedCwd);

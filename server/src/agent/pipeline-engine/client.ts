@@ -183,7 +183,7 @@ export async function listCodebases(): Promise<unknown> {
  */
 export async function registerCodebase(
   localPath: string,
-  options: { registrationMode?: "git" | "workspace"; name?: string } = {},
+  options: { name?: string } = {},
 ): Promise<unknown> {
   const existing = await listCodebases();
   if (Array.isArray(existing)) {

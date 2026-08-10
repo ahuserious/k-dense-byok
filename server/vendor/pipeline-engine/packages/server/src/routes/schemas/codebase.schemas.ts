@@ -23,7 +23,7 @@ export const addCodebaseBodySchema = z
   .object({
     url: z.string().min(1).optional(),
     path: z.string().min(1).optional(),
-    registrationMode: z.enum(['git', 'workspace']).optional(),
+    registrationMode: z.literal('git').optional(),
     name: z.string().min(1).max(255).optional(),
   })
   .superRefine((body, ctx) => {
@@ -33,16 +33,10 @@ export const addCodebaseBodySchema = z
         message: 'Provide either "url" or "path", not both and not neither',
       });
     }
-    if (body.registrationMode === 'workspace' && body.path === undefined) {
+    if (body.name !== undefined && body.path === undefined) {
       ctx.addIssue({
         code: 'custom',
-        message: 'Workspace registration requires path',
-      });
-    }
-    if (body.name !== undefined && body.registrationMode !== 'workspace') {
-      ctx.addIssue({
-        code: 'custom',
-        message: 'name is only supported for workspace registration',
+        message: 'name is only supported for local path registration',
       });
     }
   })

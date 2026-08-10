@@ -589,7 +589,12 @@ export async function getWorkflowRunByWorkerPlatformId(
  */
 export async function updateWorkflowRun(
   id: string,
-  updates: Partial<Pick<WorkflowRun, 'status' | 'metadata'>>
+  updates: Partial<
+    Pick<
+      WorkflowRun,
+      'status' | 'metadata' | 'conversation_id' | 'working_path' | 'parent_conversation_id'
+    >
+  >
 ): Promise<void> {
   const dialect = getDialect();
   const setClauses: string[] = [];
@@ -618,6 +623,18 @@ export async function updateWorkflowRun(
     const paramIndex = values.length + 1;
     values.push(JSON.stringify(updates.metadata));
     setClauses.push(`metadata = ${dialect.jsonMerge('metadata', paramIndex)}`);
+  }
+  if (updates.conversation_id !== undefined) {
+    values.push(updates.conversation_id);
+    setClauses.push(`conversation_id = $${values.length}`);
+  }
+  if (updates.working_path !== undefined) {
+    values.push(updates.working_path);
+    setClauses.push(`working_path = $${values.length}`);
+  }
+  if (updates.parent_conversation_id !== undefined) {
+    values.push(updates.parent_conversation_id);
+    setClauses.push(`parent_conversation_id = $${values.length}`);
   }
 
   if (setClauses.length === 0) return;

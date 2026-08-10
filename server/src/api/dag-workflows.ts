@@ -364,6 +364,7 @@ export async function registerDagWorkflowRoutes(
               input: body.input as {
                 goal?: string;
                 variables?: Record<string, unknown>;
+                files?: Record<string, string[]>;
               },
             }
           : {}),
@@ -569,6 +570,9 @@ export async function registerDagWorkflowRoutes(
               error: source.state.lastError ?? null,
             },
           },
+          ...(source.manifest.input.files
+            ? { files: source.manifest.input.files }
+            : {}),
         },
       });
       options.controller.start(projectId, manifest.id);

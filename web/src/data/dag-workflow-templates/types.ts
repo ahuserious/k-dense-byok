@@ -32,7 +32,7 @@ export interface ScientificWorkflowPreconditions {
 export interface ScientificWorkflowPreconditionContext {
   goal?: unknown;
   variables?: Readonly<Record<string, unknown>>;
-  files?: readonly string[];
+  files?: Readonly<Record<string, readonly string[]>>;
   capabilities?: readonly string[];
 }
 
@@ -94,8 +94,10 @@ export function validateScientificWorkflowTemplatePreconditions(
     }
   }
 
-  const readableFiles = (context.files ?? []).filter((path) => path.trim().length > 0);
   for (const file of preconditions.requiredFiles) {
+    const readableFiles = (context.files?.[file.key] ?? []).filter(
+      (path) => path.trim().length > 0,
+    );
     if (readableFiles.length < file.minimumCount) {
       issues.push({ kind: "file", key: file.key, message: `${file.label} is required.` });
     }

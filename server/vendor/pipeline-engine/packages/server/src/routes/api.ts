@@ -3013,11 +3013,8 @@ export function registerApiRoutes(
       // .refine() guarantees exactly one of url/path is present
       const result = body.url
         ? await cloneRepository(body.url)
-        : body.registrationMode === 'workspace'
-          ? await registerRepository(body.path ?? '', {
-              allowNonGit: true,
-              ...(body.name ? { name: body.name } : {}),
-            })
+        : body.name
+          ? await registerRepository(body.path ?? '', { name: body.name })
           : await registerRepository(body.path ?? '');
 
       // Fetch the full codebase record for a consistent response
@@ -3233,9 +3230,11 @@ export function registerApiRoutes(
 
     let workflowEntry: WorkflowWithSource | undefined;
     let scopedCodebaseId: string | undefined;
+    let scopedWorkingDir: string | undefined;
     try {
       const scope = await resolveWorkflowWorkingDir(c);
       scopedCodebaseId = scope.codebaseId;
+      scopedWorkingDir = scope.workingDir;
       workflowEntry = await resolveWorkflowEntry(workflowIdentifier, scope.workingDir);
       if (!workflowEntry) {
         return apiError(c, 404, `Workflow not found: ${workflowIdentifier}`);
@@ -3326,6 +3325,15 @@ export function registerApiRoutes(
       let conv: Awaited<ReturnType<typeof conversationDb.findConversationByPlatformId>> = null;
       try {
         conv = await conversationDb.findConversationByPlatformId(conversationId);
+        if (!conv && runMetadata) {
+          conv = await conversationDb.getOrCreateConversation(
+            'web',
+            conversationId,
+            scopedCodebaseId,
+            scopedWorkingDir,
+            userId
+          );
+        }
       } catch (e: unknown) {
         getLog().error({ err: e, conversationId }, 'conversation_lookup_failed');
       }
@@ -3358,6 +3366,25 @@ export function registerApiRoutes(
       }
 
       const fullMessage = `/workflow run ${workflowName} ${message}`;
+      let preCreatedRun: Awaited<ReturnType<typeof workflowDb.createWorkflowRun>> | undefined;
+      if (runMetadata) {
+        if (!conv || !scopedCodebaseId || !scopedWorkingDir) {
+          throw new Error('Unable to establish durable workflow admission scope');
+        }
+        preCreatedRun = await workflowDb.createWorkflowRun({
+          workflow_name: workflowName,
+          conversation_id: conv.id,
+          codebase_id: scopedCodebaseId,
+          user_message: message,
+          working_path: scopedWorkingDir,
+          metadata: runMetadata,
+          parent_conversation_id: conv.id,
+          user_id: userId,
+        });
+        if (preCreatedRun.idempotency_replayed) {
+          return c.json({ accepted: true, status: preCreatedRun.status });
+        }
+      }
       const extraContext: Omit<HandleMessageContext, 'isolationHints'> = {
         userId,
         ...(savedFiles.length > 0 ? { attachedFiles: savedFiles } : {}),
@@ -3369,6 +3396,7 @@ export function registerApiRoutes(
                 args: message,
                 source: workflowEntry.source,
                 runMetadata,
+                preCreatedRun,
               },
             }
           : {}),

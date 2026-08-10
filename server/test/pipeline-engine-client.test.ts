@@ -37,7 +37,7 @@ afterEach(() => {
 });
 
 describe("pipeline engine workflow-list cancellation", () => {
-  it("registers a Kady sandbox through the explicit non-git workspace mode", async () => {
+  it("registers a Kady sandbox as a normal named git codebase", async () => {
     const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(
       new Response(JSON.stringify({
         id: "codebase-a",
@@ -47,7 +47,6 @@ describe("pipeline engine workflow-list cancellation", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await registerCodebase("/projects/a/sandbox", {
-      registrationMode: "workspace",
       name: "kady/project-a",
     });
 
@@ -55,7 +54,6 @@ describe("pipeline engine workflow-list cancellation", () => {
     expect(new URL(String(fetchMock.mock.calls[1]?.[0])).pathname).toBe("/api/codebases");
     expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
       path: "/projects/a/sandbox",
-      registrationMode: "workspace",
       name: "kady/project-a",
     });
   });

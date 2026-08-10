@@ -65,7 +65,7 @@ import * as messageDb from '../db/messages';
 import * as workflowDb from '../db/workflows';
 import * as workflowEventDb from '../db/workflow-events';
 import { getCodebaseEnvVars } from '../db/env-vars';
-import type { ApprovalContext } from '@archon/workflows/schemas/workflow-run';
+import type { ApprovalContext, WorkflowRun } from '@archon/workflows/schemas/workflow-run';
 import {
   buildAiProfile,
   isLiteralSpec,
@@ -499,7 +499,8 @@ async function dispatchOrchestratorWorkflow(
    * that don't have it readily in scope omit it and the run reports "custom".
    */
   source?: WorkflowSource,
-  runMetadata?: Record<string, unknown>
+  runMetadata?: Record<string, unknown>,
+  preCreatedRun?: WorkflowRun
 ): Promise<void> {
   // Capability gate: hard-fail before any worktree/clone/AI cost if the
   // workflow declares `requires: [github]` and the originating user hasn't
@@ -672,6 +673,7 @@ async function dispatchOrchestratorWorkflow(
         userId,
         source,
         runMetadata,
+        preCreatedRun,
       },
       workflow
     );
@@ -691,6 +693,7 @@ async function dispatchOrchestratorWorkflow(
         userId,
         source,
         runMetadata,
+        preCreatedRun,
       }
     );
   }
@@ -1065,7 +1068,8 @@ export async function handleMessage(
             isolationHints,
             userId,
             workflowOverride.source,
-            workflowOverride.runMetadata
+            workflowOverride.runMetadata,
+            workflowOverride.preCreatedRun
           );
           return;
         }

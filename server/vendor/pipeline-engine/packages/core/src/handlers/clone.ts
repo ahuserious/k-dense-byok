@@ -2,7 +2,7 @@
  * Standalone repository clone/register logic.
  * Extracted from command-handler.ts for reuse by REST endpoints.
  */
-import { access, rm, stat } from 'fs/promises';
+import { access, rm } from 'fs/promises';
 import { join, basename, resolve } from 'path';
 import * as codebaseDb from '../db/codebases';
 import { sanitizeError } from '../utils/credential-sanitizer';
@@ -133,8 +133,6 @@ export interface RegisterResult {
 }
 
 export interface RegisterRepositoryOptions {
-  /** Explicit Kady workspace mode. Ordinary local registration remains git-only. */
-  allowNonGit?: boolean;
   /** Stable caller-owned identity used instead of the sandbox directory basename. */
   name?: string;
 }
@@ -412,19 +410,10 @@ export async function registerRepository(
   localPath: string,
   options: RegisterRepositoryOptions = {}
 ): Promise<RegisterResult> {
-  if (options.allowNonGit) {
-    const pathStat = await stat(localPath).catch(() => null);
-    if (!pathStat?.isDirectory()) {
-      throw new Error(`Workspace path is not a directory: ${localPath}`);
-    }
-  } else {
-    // Default registration remains git-only. Non-git admission is available
-    // solely through the explicit workspace mode used by Kady.
-    try {
-      await execFileAsync('git', ['-C', localPath, 'rev-parse', '--git-dir']);
-    } catch (error) {
-      throw new Error(`Path is not a git repository: ${localPath} (${(error as Error).message})`);
-    }
+  try {
+    await execFileAsync('git', ['-C', localPath, 'rev-parse', '--git-dir']);
+  } catch (error) {
+    throw new Error(`Path is not a git repository: ${localPath} (${(error as Error).message})`);
   }
 
   // Check if already registered by path
@@ -441,13 +430,6 @@ export async function registerRepository(
     };
   }
 
-  if (options.allowNonGit) {
-    return registerRepoAtPath(localPath, options.name ?? basename(localPath), null, {
-      detectGitMetadata: false,
-      dedupeByName: false,
-    });
-  }
-
   // Get remote URL (optional — local-only repos may not have one)
   let remoteUrl: string | null = null;
   try {
@@ -461,7 +443,7 @@ export async function registerRepository(
   }
 
   // Extract repo name from directory name
-  const repoName = basename(localPath);
+  const repoName = options.name ?? basename(localPath);
 
   // Try to build owner/repo name from remote URL
   let name = repoName;

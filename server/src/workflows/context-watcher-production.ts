@@ -324,6 +324,7 @@ class ProjectContextEngineeringRuntime {
       ...(source.manifest.sessionId ? { sessionId: source.manifest.sessionId } : {}),
       input: {
         ...(source.manifest.input.goal ? { goal: source.manifest.input.goal } : {}),
+        ...(source.manifest.input.files ? { files: source.manifest.input.files } : {}),
         variables: {
           ...(source.manifest.input.variables ?? {}),
           _kadyContextRepair: {

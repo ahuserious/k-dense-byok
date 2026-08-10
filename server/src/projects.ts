@@ -20,6 +20,7 @@
  *         .kady/workflows/budget/reservations/ durable DAG budget records
  */
 import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { DEFAULT_PROJECT_ID, PROJECTS_ROOT } from "./config.ts";
@@ -262,6 +263,22 @@ export interface CreateProjectInput {
   spendLimitUsd?: number | null;
 }
 
+function initializeProjectRepository(sandbox: string): void {
+  execFileSync("git", ["init", "--quiet", sandbox], { stdio: "ignore" });
+  execFileSync("git", ["-C", sandbox, "config", "user.name", "Kady"], { stdio: "ignore" });
+  execFileSync(
+    "git",
+    ["-C", sandbox, "config", "user.email", "kady@localhost"],
+    { stdio: "ignore" },
+  );
+  execFileSync("git", ["-C", sandbox, "add", "--all"], { stdio: "ignore" });
+  execFileSync(
+    "git",
+    ["-C", sandbox, "commit", "--quiet", "--allow-empty", "-m", "Initialize Kady project"],
+    { stdio: "ignore" },
+  );
+}
+
 export function createProject(input: CreateProjectInput): ProjectMeta {
   const name = (input.name || "").trim() || "Untitled project";
   const projectId = input.projectId ?? mintProjectId(name);
@@ -291,9 +308,15 @@ export function createProject(input: CreateProjectInput): ProjectMeta {
     archived: false,
     spendLimitUsd: limit,
   };
-  fs.mkdirSync(paths.sandbox, { recursive: true });
-  seedSandboxFiles(paths);
-  writeProjectJson(paths, meta);
+  try {
+    fs.mkdirSync(paths.sandbox, { recursive: true });
+    seedSandboxFiles(paths);
+    initializeProjectRepository(paths.sandbox);
+    writeProjectJson(paths, meta);
+  } catch (error) {
+    fs.rmSync(paths.root, { recursive: true, force: true });
+    throw error;
+  }
 
   const index = loadIndex();
   index.projects[meta.id] = meta as unknown as Record<string, unknown>;

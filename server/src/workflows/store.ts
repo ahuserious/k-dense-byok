@@ -129,6 +129,7 @@ export interface CreateWorkflowRunInput {
   input?: {
     goal?: string;
     variables?: Record<string, unknown>;
+    files?: Record<string, string[]>;
   };
 }
 
@@ -375,31 +376,56 @@ function projectPaths(projectId: string): ProjectPaths {
   return resolvePaths(projectId);
 }
 
-function observedUploadFiles(uploadRoot: string): string[] {
-  let rootStat: fs.Stats;
-  try {
-    rootStat = fs.lstatSync(uploadRoot);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
-  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) return [];
+function validateRunFileSelections(
+  projectId: string,
+  selections: Record<string, string[]> | undefined,
+): {
+  files: Record<string, string[]>;
+  issues: ScientificWorkflowPreconditionIssue[];
+} {
+  const sandbox = path.resolve(projectPaths(projectId).sandbox);
+  const realSandbox = fs.realpathSync(sandbox);
+  const claimedPaths = new Set<string>();
+  const files: Record<string, string[]> = {};
+  const issues: ScientificWorkflowPreconditionIssue[] = [];
 
-  const files: string[] = [];
-  const walk = (directory: string): void => {
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-      const absolutePath = path.join(directory, entry.name);
-      const stat = fs.lstatSync(absolutePath);
-      if (stat.isSymbolicLink()) continue;
-      if (stat.isDirectory()) {
-        walk(absolutePath);
-      } else if (stat.isFile()) {
-        files.push(`user_data/${apiRelative(uploadRoot, absolutePath)}`);
+  for (const [key, selectedPaths] of Object.entries(selections ?? {})) {
+    const validPaths: string[] = [];
+    for (const selectedPath of selectedPaths) {
+      const absolutePath = path.resolve(sandbox, selectedPath);
+      let valid = !path.isAbsolute(selectedPath) && isWithin(sandbox, absolutePath);
+      try {
+        const stat = fs.lstatSync(absolutePath);
+        valid = valid && stat.isFile() && !stat.isSymbolicLink();
+        const realPath = fs.realpathSync(absolutePath);
+        valid = valid && isWithin(realSandbox, realPath);
+        fs.accessSync(realPath, fs.constants.R_OK);
+      } catch {
+        valid = false;
       }
+      const canonicalPath = valid ? apiRelative(sandbox, absolutePath) : selectedPath;
+      if (!valid) {
+        issues.push({
+          kind: "file",
+          key,
+          message: `Selected file for ${key} is not a readable regular sandbox file: ${selectedPath}.`,
+        });
+        continue;
+      }
+      if (claimedPaths.has(canonicalPath)) {
+        issues.push({
+          kind: "file",
+          key,
+          message: `Selected file ${canonicalPath} is already bound to another required input.`,
+        });
+        continue;
+      }
+      claimedPaths.add(canonicalPath);
+      validPaths.push(canonicalPath);
     }
-  };
-  walk(uploadRoot);
-  return files.sort();
+    files[key] = validPaths;
+  }
+  return { files, issues };
 }
 
 function ensureManagedDirectory(paths: ProjectPaths, directory: string): void {
@@ -1212,7 +1238,7 @@ function validateCreateRunInput(input: CreateWorkflowRunInput): void {
   if (input.input !== undefined && !isRecord(input.input)) {
     throw new WorkflowStoreError("CORRUPT", "Workflow run input must be an object.");
   }
-  if (input.input && !hasOnlyObjectKeys(input.input, ["goal", "variables"])) {
+  if (input.input && !hasOnlyObjectKeys(input.input, ["goal", "variables", "files"])) {
     throw new WorkflowStoreError("CORRUPT", "Workflow run input has unsupported fields.");
   }
   if (input.input?.goal !== undefined && (
@@ -1222,6 +1248,21 @@ function validateCreateRunInput(input: CreateWorkflowRunInput): void {
   }
   if (input.input?.variables !== undefined && !isRecord(input.input.variables)) {
     throw new WorkflowStoreError("CORRUPT", "Workflow run variables must be an object.");
+  }
+  if (input.input?.files !== undefined) {
+    if (!isRecord(input.input.files)) {
+      throw new WorkflowStoreError("CORRUPT", "Workflow run files must be keyed by required input.");
+    }
+    for (const [key, selectedPaths] of Object.entries(input.input.files)) {
+      if (!key || !Array.isArray(selectedPaths) || selectedPaths.length > 100) {
+        throw new WorkflowStoreError("CORRUPT", "Workflow run file selections are invalid.");
+      }
+      if (selectedPaths.some((selectedPath) =>
+        typeof selectedPath !== "string" || !selectedPath || selectedPath.length > 1_024
+      )) {
+        throw new WorkflowStoreError("CORRUPT", "Workflow run file paths are invalid.");
+      }
+    }
   }
   assertByteLimit(
     canonicalJson(input.input ?? {}),
@@ -1274,11 +1315,17 @@ function parseRunManifest(
   }
   const storedInput = value.input as Record<string, unknown>;
   if (
-    !hasOnlyObjectKeys(storedInput, ["goal", "variables"]) ||
+    !hasOnlyObjectKeys(storedInput, ["goal", "variables", "files"]) ||
     (storedInput.goal !== undefined && (
       typeof storedInput.goal !== "string" || storedInput.goal.length > 32_768
     )) ||
-    (storedInput.variables !== undefined && !isRecord(storedInput.variables))
+    (storedInput.variables !== undefined && !isRecord(storedInput.variables)) ||
+    (storedInput.files !== undefined && (
+      !isRecord(storedInput.files) ||
+      Object.values(storedInput.files).some((selectedPaths) =>
+        !Array.isArray(selectedPaths) || selectedPaths.some((selectedPath) => typeof selectedPath !== "string")
+      )
+    ))
   ) {
     throw new WorkflowStoreError("CORRUPT", `Workflow run ${runId} has invalid input.`);
   }
@@ -2242,13 +2289,17 @@ export class WorkflowStore {
       );
     }
 
+    const selectedFiles = validateRunFileSelections(projectId, input.input?.files);
+    if (selectedFiles.issues.length > 0) {
+      throw new WorkflowPreconditionError(selectedFiles.issues);
+    }
     if (definition.graph.preconditions) {
       const issues = validateScientificWorkflowTemplatePreconditions(
         definition.graph.preconditions,
         {
           goal: input.input?.goal,
           variables: input.input?.variables,
-          files: observedUploadFiles(projectPaths(projectId).uploadDir),
+          files: selectedFiles.files,
           capabilities: ["prompt-analysis", "read-uploaded-files"],
         },
       );

@@ -812,6 +812,29 @@ export class WorktreeProvider implements IIsolationProvider {
       const isManagedClone = repoPath
         .replace(/\\/g, '/')
         .startsWith(getArchonWorkspacesPath().replace(/\\/g, '/'));
+      if (!isManagedClone) {
+        const remotes = (
+          await execFileAsync('git', ['-C', repoPath, 'remote'], { timeout: 10_000 })
+        ).stdout.split(/\r?\n/);
+        if (!remotes.includes('origin')) {
+          const branch = configuredBaseBranch
+            ? toBranchName(configuredBaseBranch)
+            : toBranchName(
+                (
+                  await execFileAsync('git', ['-C', repoPath, 'symbolic-ref', '--short', 'HEAD'], {
+                    timeout: 10_000,
+                  })
+                ).stdout.trim()
+              );
+          await execFileAsync(
+            'git',
+            ['-C', repoPath, 'rev-parse', '--verify', `refs/heads/${branch}`],
+            { timeout: 10_000 }
+          );
+          getLog().debug({ repoPath, branch }, 'workspace_local_only_branch_selected');
+          return branch;
+        }
+      }
       const { branch } = await syncWorkspace(
         repoPath,
         configuredBaseBranch ? toBranchName(configuredBaseBranch) : undefined,
@@ -1083,10 +1106,15 @@ export class WorktreeProvider implements IIsolationProvider {
     await this.cleanOrphanDirectoryIfExists(worktreePath);
 
     // Determine start-point: explicit fromBranch overrides base branch
+    const remotes = (
+      await execFileAsync('git', ['-C', repoPath, 'remote'], { timeout: 10_000 })
+    ).stdout.split(/\r?\n/);
     const startPoint =
       request.workflowType === 'task' && request.fromBranch
         ? request.fromBranch
-        : `origin/${baseBranch}`;
+        : remotes.includes('origin')
+          ? `origin/${baseBranch}`
+          : baseBranch;
 
     try {
       // Try to create with new branch

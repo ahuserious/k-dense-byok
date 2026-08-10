@@ -75,6 +75,7 @@ interface StoredRunRequest {
   sessionId: string | null;
   goal: string;
   variables?: Record<string, string>;
+  files?: Record<string, string[]>;
   requestId: string;
   savedAt: number;
 }
@@ -96,6 +97,13 @@ function isStoredRunRequest(value: unknown): value is StoredRunRequest {
         typeof request.variables === "object" &&
         !Array.isArray(request.variables) &&
         Object.values(request.variables).every((value) => typeof value === "string"))) &&
+    (request.files === undefined ||
+      (request.files !== null &&
+        typeof request.files === "object" &&
+        !Array.isArray(request.files) &&
+        Object.values(request.files).every((value) =>
+          Array.isArray(value) && value.every((path) => typeof path === "string")
+        ))) &&
     typeof request.requestId === "string" &&
     typeof request.savedAt === "number"
   );
@@ -342,6 +350,7 @@ function DefinitionDetails({
   const { graph } = definition;
   const [runGoal, setRunGoal] = useState("");
   const [runVariables, setRunVariables] = useState<Record<string, string>>({});
+  const [runFiles, setRunFiles] = useState<Record<string, string[]>>({});
   const [launching, setLaunching] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [runNotice, setRunNotice] = useState<string | null>(null);
@@ -355,17 +364,18 @@ function DefinitionDetails({
     activeSessionId,
     runGoal.trim(),
     runVariables,
+    runFiles,
   ]);
   const preconditionIssues = useMemo(
     () => graph.preconditions
       ? validateScientificWorkflowTemplatePreconditions(graph.preconditions, {
           goal: runGoal,
           variables: runVariables,
-          files: uploadedFiles,
+          files: runFiles,
           capabilities: ["prompt-analysis", "read-uploaded-files"],
         })
       : [],
-    [graph.preconditions, runGoal, runVariables, uploadedFiles],
+    [graph.preconditions, runGoal, runVariables, runFiles],
   );
 
   useEffect(() => {
@@ -392,6 +402,7 @@ function DefinitionDetails({
         };
         setRunGoal(request.goal);
         setRunVariables(request.variables ?? {});
+        setRunFiles(request.files ?? {});
         return;
       }
     }
@@ -425,6 +436,7 @@ function DefinitionDetails({
       sessionId: activeSessionId,
       goal,
       variables: runVariables,
+      files: runFiles,
       requestId: request.requestId,
       savedAt: Date.now(),
     });
@@ -436,13 +448,14 @@ function DefinitionDetails({
         requestId: request.requestId,
         expectedWorkflowRevision: definition.revision,
         ...(activeSessionId ? { sessionId: activeSessionId } : {}),
-        ...(goal || Object.keys(runVariables).length > 0
+        ...(goal || Object.keys(runVariables).length > 0 || Object.keys(runFiles).length > 0
           ? {
               input: {
                 ...(goal ? { goal } : {}),
                 ...(Object.keys(runVariables).length > 0
                   ? { variables: runVariables }
                   : {}),
+                ...(Object.keys(runFiles).length > 0 ? { files: runFiles } : {}),
               },
             }
           : {}),
@@ -520,10 +533,36 @@ function DefinitionDetails({
               {graph.preconditions.requiredFiles.length > 0 ? (
                 <div className="min-w-48 text-[10px] text-muted-foreground">
                   <p className="font-medium text-foreground">Required uploads</p>
-                  <ul className="mt-1 list-disc pl-4">
+                  <ul className="mt-1 space-y-2">
                     {graph.preconditions.requiredFiles.map((file) => (
                       <li key={file.key}>
-                        {file.label} ({file.minimumCount} minimum)
+                        <p>{file.label} ({file.minimumCount} minimum)</p>
+                        <div className="mt-1 flex max-h-24 flex-col gap-1 overflow-auto">
+                          {uploadedFiles.map((uploadedFile) => (
+                            <label key={uploadedFile} className="flex items-center gap-1">
+                              <input
+                                type="checkbox"
+                                aria-label={`${file.label}: ${uploadedFile}`}
+                                checked={(runFiles[file.key] ?? []).includes(uploadedFile)}
+                                disabled={launching}
+                                onChange={(event) => setRunFiles((current) => {
+                                  const next = Object.fromEntries(
+                                    Object.entries(current).map(([key, paths]) => [
+                                      key,
+                                      paths.filter((path) => path !== uploadedFile),
+                                    ]),
+                                  );
+                                  if (event.target.checked) {
+                                    next[file.key] = [...(next[file.key] ?? []), uploadedFile];
+                                  }
+                                  return next;
+                                })}
+                              />
+                              <span className="truncate">{uploadedFile}</span>
+                            </label>
+                          ))}
+                          {uploadedFiles.length === 0 ? <span>No uploaded files available.</span> : null}
+                        </div>
                       </li>
                     ))}
                   </ul>

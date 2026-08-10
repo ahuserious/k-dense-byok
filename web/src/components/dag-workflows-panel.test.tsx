@@ -31,11 +31,13 @@ function mockVendoredWorkflows(
 function renderPanel({
   activeSessionId = null,
   budgetBlocked = false,
+  uploadedFiles = [],
   onRunPipeline = vi.fn(),
   onEditPipeline = vi.fn(),
 }: {
   activeSessionId?: string | null;
   budgetBlocked?: boolean;
+  uploadedFiles?: readonly string[];
   onRunPipeline?: (name: string) => Promise<unknown>;
   onEditPipeline?: (target: registryApi.VendoredPipelineEditTarget) => void;
 } = {}) {
@@ -44,6 +46,7 @@ function renderPanel({
       projectId="project-a"
       activeSessionId={activeSessionId}
       budgetBlocked={budgetBlocked}
+      uploadedFiles={uploadedFiles}
       onRunPipeline={onRunPipeline}
       onEditPipeline={onEditPipeline}
     />,
@@ -615,6 +618,65 @@ describe("DagWorkflowsPanel", () => {
     expect(await screen.findByRole("status")).toHaveTextContent(
       "Created run wrun_created with status queued",
     );
+  });
+
+  it("binds distinct uploaded files to each named required-file input", async () => {
+    const graph = {
+      ...createDefaultWorkflowGraph("file-review", "File review"),
+      preconditions: {
+        requiredInputs: [],
+        requiredFiles: [
+          { key: "dataset", label: "Dataset", minimumCount: 1 },
+          { key: "protocol", label: "Protocol", minimumCount: 1 },
+        ],
+        requiredCapabilities: ["prompt-analysis", "read-uploaded-files"],
+      },
+    } satisfies dagApi.WorkflowGraphDocument;
+    vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([{
+      id: graph.id,
+      revision: 1,
+      createdAt: 1,
+      updatedAt: 1,
+      graphSha256: "file-sha",
+      schemaVersion: graph.schemaVersion,
+      name: graph.name,
+      description: graph.description ?? null,
+      nodeCount: graph.nodes.length,
+      edgeCount: graph.edges.length,
+    }]);
+    vi.spyOn(dagApi, "readDagWorkflowDefinition").mockResolvedValue({
+      etag: '"1"',
+      definition: {
+        storageVersion: 1,
+        id: graph.id,
+        revision: 1,
+        createdAt: 1,
+        updatedAt: 1,
+        graphSha256: "file-sha",
+        graph,
+      },
+    });
+    const createRun = vi.spyOn(dagApi, "createDagWorkflowRun")
+      .mockImplementation(() => new Promise<dagApi.WorkflowRunRecord>(() => undefined));
+
+    renderPanel({
+      uploadedFiles: ["user_data/dataset.csv", "user_data/protocol.md"],
+    });
+    await userEvent.click(await screen.findByRole("button", { name: "Open File review details" }));
+    await userEvent.type(screen.getByLabelText("Typed workflow run goal"), "Review inputs");
+    await userEvent.click(screen.getByLabelText("Dataset: user_data/dataset.csv"));
+    await userEvent.click(screen.getByLabelText("Protocol: user_data/protocol.md"));
+    await userEvent.click(screen.getByRole("button", { name: "Run typed workflow" }));
+
+    expect(createRun).toHaveBeenCalledWith("project-a", graph.id, expect.objectContaining({
+      input: {
+        goal: "Review inputs",
+        files: {
+          dataset: ["user_data/dataset.csv"],
+          protocol: ["user_data/protocol.md"],
+        },
+      },
+    }));
   });
 
   it("reuses an ambiguous admission request id after remount until the run intent changes", async () => {

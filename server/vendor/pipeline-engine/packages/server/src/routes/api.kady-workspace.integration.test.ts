@@ -10,13 +10,15 @@ afterEach(() => {
   testRoot = undefined;
 });
 
-describe('Kady non-git workspace integration', () => {
-  test('createProject sandbox lists and launches a scoped workflow without git init', async () => {
+describe('Kady git workspace integration', () => {
+  test('createProject retains a lost-response pending admission and completes through the real lock', async () => {
     testRoot = mkdtempSync(join(tmpdir(), 'pipeline-kady-workspace-'));
     const childEnvironment = { ...process.env };
     childEnvironment.ARCHON_HOME = join(testRoot, 'engine-home');
     childEnvironment.KADY_PROJECTS_ROOT = join(testRoot, 'projects');
     delete childEnvironment.DATABASE_URL;
+    delete childEnvironment.FORCE_COLOR;
+    delete childEnvironment.NO_COLOR;
 
     // Route-unit tests use process-global Bun module mocks. Run this real-engine
     // proof in a clean child process so those mocks cannot replace the database,
@@ -42,19 +44,35 @@ describe('Kady non-git workspace integration', () => {
     expect(resultLine).toBeDefined();
     const result = JSON.parse(resultLine!.slice('KADY_WORKSPACE_RESULT='.length)) as {
       hasGitDirectory: boolean;
+      initialCommitAuthor: string;
+      initialCommitCount: number;
+      seededContentsCommitted: boolean;
+      finalCommitCount: number;
       registrationStatus: number;
+      saveStatus: number;
       listStatus: number;
       workflowId: string;
       launchStatus: number;
-      launchBody: unknown;
+      pendingAuthoritative: boolean;
+      pendingStatus: string;
+      terminalStatus: string;
+      terminalWorkingPath: string;
     };
     expect(result).toEqual({
-      hasGitDirectory: false,
+      hasGitDirectory: true,
+      initialCommitAuthor: 'Kady <kady@localhost>',
+      initialCommitCount: 1,
+      seededContentsCommitted: true,
+      finalCommitCount: 1,
       registrationStatus: 201,
+      saveStatus: 200,
       listStatus: 200,
       workflowId: expect.stringMatching(/^workflow_[a-f0-9]{32}$/),
       launchStatus: 200,
-      launchBody: { accepted: true, status: 'started' },
+      pendingAuthoritative: true,
+      pendingStatus: 'pending',
+      terminalStatus: 'completed',
+      terminalWorkingPath: expect.stringContaining('worktrees'),
     });
-  });
+  }, 30_000);
 });

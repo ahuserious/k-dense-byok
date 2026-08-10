@@ -109,16 +109,14 @@ describe("POST-INTEGRATION(S10)", () => {
 
     try {
       if (scenario !== "missing-file") {
-        const minimumFiles = Math.max(
-          0,
-          ...template.requiredFiles.map((file) => file.minimumCount),
-        );
         fs.mkdirSync(paths.uploadDir, { recursive: true });
-        for (let index = 0; index < minimumFiles; index += 1) {
-          fs.writeFileSync(
-            path.join(paths.uploadDir, `input-${index + 1}.dat`),
-            "user supplied\n",
-          );
+        for (const requirement of template.requiredFiles) {
+          for (let index = 0; index < requirement.minimumCount; index += 1) {
+            fs.writeFileSync(
+              path.join(paths.uploadDir, `${requirement.key}-${index + 1}.dat`),
+              "user supplied\n",
+            );
+          }
         }
       }
 
@@ -159,6 +157,15 @@ describe("POST-INTEGRATION(S10)", () => {
           input: {
             goal: scenario === "empty-goal" ? "" : "Bounded analysis goal",
             variables,
+            files: scenario === "missing-file"
+              ? {}
+              : Object.fromEntries(template.requiredFiles.map((requirement) => [
+                  requirement.key,
+                  Array.from(
+                    { length: requirement.minimumCount },
+                    (_, index) => `user_data/${requirement.key}-${index + 1}.dat`,
+                  ),
+                ])),
           },
         },
       });
@@ -331,6 +338,94 @@ describe("POST-INTEGRATION(S10)", () => {
           graph: { name: "Old admissible graph" },
         });
       }
+    } finally {
+      fs.rmSync(paths.root, { recursive: true, force: true });
+    }
+  });
+
+  it("requires readable run-scoped files independently for every required-file key", async () => {
+    const [{ WorkflowStore, WorkflowPreconditionError }, { ensureProjectExists, resolvePaths }] = await Promise.all([
+      import("../src/workflows/store.ts"),
+      import("../src/projects.ts"),
+    ]);
+    projectSequence += 1;
+    const projectId = `s10-file-bindings-${projectSequence}`;
+    ensureProjectExists(projectId);
+    const paths = resolvePaths(projectId);
+    const store = new WorkflowStore();
+    const template = SCIENTIFIC_WORKFLOW_TEMPLATES[0];
+    const graph = {
+      ...createDagWorkflowTemplateGraph(
+        template.id,
+        `scientific-file-bindings-${projectSequence}`,
+        "Independent file bindings",
+        template.description,
+      ),
+      preconditions: {
+        requiredInputs: [],
+        requiredFiles: [
+          { key: "dataset", label: "Dataset", minimumCount: 1 },
+          { key: "specification", label: "Specification", minimumCount: 1 },
+        ],
+        requiredCapabilities: [],
+      },
+    };
+    fs.mkdirSync(paths.uploadDir, { recursive: true });
+    fs.writeFileSync(path.join(paths.uploadDir, "stale.dat"), "stale\n");
+    fs.writeFileSync(path.join(paths.uploadDir, "dataset.dat"), "dataset\n");
+    fs.writeFileSync(path.join(paths.uploadDir, "specification.dat"), "specification\n");
+    store.saveDefinition(projectId, graph.id, graph);
+
+    try {
+      expect(() => store.createRun(projectId, {
+        workflowId: graph.id,
+        requestId: "unbound-stale-upload",
+        requestedBy: "user",
+        input: { goal: "Analyze", files: {} },
+      })).toThrow(WorkflowPreconditionError);
+
+      expect(() => store.createRun(projectId, {
+        workflowId: graph.id,
+        requestId: "same-file-two-keys",
+        requestedBy: "user",
+        input: {
+          goal: "Analyze",
+          files: {
+            dataset: ["user_data/dataset.dat"],
+            specification: ["user_data/dataset.dat"],
+          },
+        },
+      })).toThrow(WorkflowPreconditionError);
+
+      expect(() => store.createRun(projectId, {
+        workflowId: graph.id,
+        requestId: "directory-is-not-a-file",
+        requestedBy: "user",
+        input: {
+          goal: "Analyze",
+          files: {
+            dataset: ["user_data"],
+            specification: ["user_data/specification.dat"],
+          },
+        },
+      })).toThrow(WorkflowPreconditionError);
+
+      const admitted = store.createRun(projectId, {
+        workflowId: graph.id,
+        requestId: "distinct-file-bindings",
+        requestedBy: "user",
+        input: {
+          goal: "Analyze",
+          files: {
+            dataset: ["user_data/dataset.dat"],
+            specification: ["user_data/specification.dat"],
+          },
+        },
+      });
+      expect(admitted.input.files).toEqual({
+        dataset: ["user_data/dataset.dat"],
+        specification: ["user_data/specification.dat"],
+      });
     } finally {
       fs.rmSync(paths.root, { recursive: true, force: true });
     }

@@ -824,6 +824,23 @@ branch refs/heads/feature/auth
       expect(result).toBe('main');
     });
 
+    test('falls back to the checked-out branch for a local repository without origin', async () => {
+      execSpy.mockImplementation(async (_cmd: string, args: string[]) => {
+        if (args.includes('refs/remotes/origin/HEAD')) {
+          throw new Error('fatal: ref refs/remotes/origin/HEAD is not a symbolic ref');
+        }
+        if (args.includes('origin/main')) {
+          throw new Error('fatal: Not a valid object name');
+        }
+        if (args.includes('HEAD') && args.includes('--short')) {
+          return { stdout: 'master\n', stderr: '' };
+        }
+        return { stdout: '', stderr: '' };
+      });
+
+      await expect(git.getDefaultBranch('/workspace/repo')).resolves.toBe('master');
+    });
+
     test('throws when symbolic-ref fails and origin/main does not exist', async () => {
       execSpy.mockImplementation(async (_cmd: string, args: string[]) => {
         if (args.includes('symbolic-ref')) {

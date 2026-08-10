@@ -17,18 +17,17 @@ const templatesRequiringVariables = SCIENTIFIC_WORKFLOW_TEMPLATES.filter(
 );
 
 function validContext(template: (typeof SCIENTIFIC_WORKFLOW_TEMPLATES)[number]) {
-  const minimumFiles = Math.max(
-    0,
-    ...template.requiredFiles.map((file) => file.minimumCount),
-  );
   return {
     goal: "Analyze the supplied material and return a bounded planning result.",
     variables: Object.fromEntries(
       template.requiredInputs.map((input) => [input.key, `provided-${input.key}`]),
     ),
-    files: Array.from({ length: minimumFiles }, (_, index) =>
-      `user_data/input-${index + 1}.dat`
-    ),
+    files: Object.fromEntries(template.requiredFiles.map((file) => [
+      file.key,
+      Array.from({ length: file.minimumCount }, (_, index) =>
+        `user_data/${file.key}-${index + 1}.dat`
+      ),
+    ])),
     capabilities: ["prompt-analysis", "read-uploaded-files"],
   };
 }
@@ -70,7 +69,7 @@ describe("Scientific workflow template preconditions (Tier A)", () => {
     (template) => {
       const issues = validateScientificWorkflowTemplatePreconditions(template, {
         ...validContext(template),
-        files: [],
+        files: {},
       });
       expect(issues).toContainEqual(expect.objectContaining({ kind: "file" }));
     },

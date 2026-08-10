@@ -2,6 +2,7 @@
  * Core type definitions for the Remote Coding Agent platform
  */
 import type { WorkflowDefinition, WorkflowSource } from '@archon/workflows/schemas/workflow';
+import type { WorkflowRun } from '@archon/workflows/schemas/workflow-run';
 
 // MessageChunk + TokenUsage are used by IPlatformAdapter below.
 import type { MessageChunk, TokenUsage } from '@archon/providers/types';
@@ -54,6 +55,8 @@ export interface HandleMessageContext {
     source?: WorkflowSource;
     /** Validated server-owned admission metadata persisted with the run. */
     runMetadata?: Record<string, unknown>;
+    /** Durable admission row created before the request is accepted. */
+    preCreatedRun?: WorkflowRun;
   };
   /**
    * Pipeline Engine user UUID resolved from the inbound platform user identifier.

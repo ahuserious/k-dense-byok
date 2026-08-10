@@ -351,7 +351,9 @@ function LaunchDialog({
     ? validateScientificWorkflowTemplatePreconditions(migratedTemplate, {
         goal: finalPrompt,
         variables: placeholderValues,
-        files: uploadedFiles,
+        files: Object.fromEntries(
+          migratedTemplate.requiredFiles.map((file) => [file.key, uploadedFiles]),
+        ),
         capabilities: [
           "prompt-analysis",
           ...(onUploadFiles ? ["read-uploaded-files"] : []),
