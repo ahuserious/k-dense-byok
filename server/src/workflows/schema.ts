@@ -1,4 +1,5 @@
 import { Type, type Static } from "typebox";
+import { PromptOptimizationNodeSchema } from "./prompt-opt-schema.ts";
 
 export const WORKFLOW_GRAPH_SCHEMA_VERSION = "1.0" as const;
 export const NODE_SPEC_V1_VERSION = 1 as const;
@@ -479,6 +480,7 @@ export const WorkflowNodeSchema = Type.Union([
   ResearchUntilGoalNodeSchema,
   CouncilNodeSchema,
   FusionNodeSchema,
+  PromptOptimizationNodeSchema,
   BestOfNNodeSchema,
   EvidenceGateNodeSchema,
   Lean4NodeSchema,

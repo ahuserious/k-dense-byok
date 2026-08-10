@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { promptOptimizationNodeDemand, validatePromptOptimizationNode } from "./prompt-opt-node.ts";
 import { s4NodeBindingIssues } from "../agent/workflow-delegation-session.ts";
 import path from "node:path";
 import { Value } from "typebox/value";
@@ -478,6 +479,7 @@ export function deriveWorkflowNodeDemand(
         preferredParallelism = node.fusion.members.length;
       }
       break;
+    case "prompt-optimization": ({ minimumModelCalls, maximumModelCalls, maximumIterations, preferredParallelism } = promptOptimizationNodeDemand(node)); break;
     case "best-of-n": {
       const candidateCount =
         node.candidateCount ?? node.candidateModels?.length ?? 2;
@@ -597,6 +599,7 @@ function nodeHasModelOrEvidenceEvaluatorSlot(
     case "council":
     case "fusion":
       return true;
+    case "prompt-optimization": return true;
     case "best-of-n":
       return node.candidateModels !== undefined || node.settings?.model !== undefined ||
         node.model !== undefined || node.evaluator !== undefined ||
@@ -753,6 +756,7 @@ function validateNode(
       validateInheritedModel(model, nodePath, document, issues);
       break;
     }
+    case "prompt-optimization": validatePromptOptimizationNode(node, nodePath, document, issues); break;
     case "best-of-n":
       if (
         (node.settings?.model !== undefined || node.model !== undefined) &&

@@ -21,6 +21,12 @@ values until that Wave B unit binds the field.
 | `model` | BOUND — primary/inherited model slot only; ambiguous compound configurations and deterministic Lean verify nodes fail validation |
 | `model.requested.auth.kind` | BOUND — existing provider/auth resolution |
 | `reasoningEffort` | BOUND — authoritative for every effective model/evidence-evaluator slot, including the hosted Fusion router, panel, duplicate judge slots, receipts, accounting definition, and provider request; rejected when slotless |
+| Prompt optimization node `interviewUser` | BOUND — revisioned compare-and-swap makes submitted answers terminal and idempotent, occurrence-aware run+node state hashes the question set, reuses matching answered state across retries, durably writes fresh valid run_waiting/run_resumed transitions after recovery, folds answers into every iteration, and rejects placement downstream of concurrent fan-out while waiting remains run-scoped |
+| Prompt optimization node `fusionDeliberation.enabled` | BOUND — false dispatches typed council deliberation; true requires and dispatches the typed Fusion configuration; configured council/Kady-panel child rounds execute independently inside the outer optimization-iteration cap |
+| Prompt optimization model-call receipts | BOUND — every synthetic call has a stable iteration-prefixed outer slot and persisted declared/resolved receipt retaining requested provider, resolved provider, fallback, reasoning, auth, and compound runtime evidence |
+| Prompt optimization cumulative envelope | BOUND — one deadline, token cap, and cost cap spans interview plus every iteration; each synthetic deliberation receives only its remaining bounded share and inherits resolved NodeSpec/rescue/evidence policy |
+| Prompt optimization evidence policy | FAIL-CLOSED(S6) — node overrides or enabled workflow evidence are rejected before provider calls pending full evaluator support |
+| Prompt optimization `artifactId` / artifact v1 | BOUND — the graph-declared owned path is a namespace; the host atomically writes a unique run+node+attempt child path and returns a checksummed runner-normalized receipt containing original prompt, iterations, winner, rationale, and cumulative usage |
 | `hyperparameters.temperature` | BOUND — provider request sampling |
 | `hyperparameters.top_p` | BOUND — provider request sampling |
 | `hyperparameters.sampling` | BOUND — provider request sampling map |

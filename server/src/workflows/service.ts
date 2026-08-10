@@ -1,3 +1,4 @@
+import { withPromptOptimizationNodeExecutor } from "./prompt-opt-node.ts";
 import {
   billingCountsTowardBudget,
   billingForProvider,
@@ -149,7 +150,7 @@ export function createProductionWorkflowController(
   const reserveUsage = createProductionWorkflowUsageReserver({
     reserveBudget: options.reserveBudget,
   });
-  const nodeExecutorFactory = options.nodeExecutorFactory ?? createKadyWorkflowNodeExecutor;
+  const nodeExecutorFactory = options.nodeExecutorFactory ?? ((executorOptions) => withPromptOptimizationNodeExecutor(createKadyWorkflowNodeExecutor(executorOptions)));
   const kadyExecutor = nodeExecutorFactory({
     reserveUsage,
     verifyLean: options.leanVerifier ?? createTrustedLeanVerifier(),

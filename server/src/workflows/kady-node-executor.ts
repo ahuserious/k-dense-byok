@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { promptOptimizationModelCallSlots } from "./prompt-opt-model-slots.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -923,6 +924,9 @@ function maximumModelCalls(
       break;
     case "agent":
       coreCalls = 1;
+      break;
+    case "prompt-optimization":
+      coreCalls = promptOptimizationModelCallSlots(node).length;
       break;
   }
   return coreCalls + (requiresWorkflowEvidencePolicyEvaluation(context.graph, node) ? 1 : 0);

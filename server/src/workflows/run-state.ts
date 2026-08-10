@@ -1,3 +1,4 @@
+import { promptOptimizationAllowsCompoundRuntime, promptOptimizationModelCallSlots, promptOptimizationModelRequests } from "./prompt-opt-model-slots.ts";
 import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 import type {
@@ -799,6 +800,7 @@ function modelRequestsForNode(
         add(node.fusion.synthesizer, false);
       }
       break;
+    case "prompt-optimization": requests.push(...promptOptimizationModelRequests(node)); break;
     case "best-of-n":
       if (node.candidateModels) {
         node.candidateModels.forEach((candidate) => add(candidate, false));
@@ -933,6 +935,7 @@ export function workflowModelCallSlotsForNode(
       });
       return withEvidencePolicySlot(graph, node, slots);
     }
+    case "prompt-optimization": return promptOptimizationModelCallSlots(node);
     case "best-of-n": {
       const candidateCount = node.candidateCount ?? node.candidateModels?.length ?? 2;
       const repeatedRequest = resolvedNodeSlotModel(
@@ -1053,10 +1056,10 @@ function receiptMatchesNode(
       : selected.auth.kind === "custom"
         ? "custom"
         : "pi";
-    const compoundRuntimeAllowed = node.kind === "fusion" && (
+    const compoundRuntimeAllowed = (node.kind === "fusion" && (
       (node.fusion.mode === "openrouter-router" && receipt.resolved.runtime === "openrouter-fusion") ||
       (node.fusion.mode === "kady-panel" && receipt.resolved.runtime === "kady-fusion")
-    );
+    )) || (node.kind === "prompt-optimization" && promptOptimizationAllowsCompoundRuntime(node, receipt.resolved.runtime));
     if (receipt.resolved.runtime !== expectedRuntime && !compoundRuntimeAllowed) return false;
   }
   return true;

@@ -39,6 +39,7 @@ import {
   resolveNodeSpecV1,
 } from "./validate.ts";
 import { assertS4NodeConditions } from "../agent/workflow-delegation-session.ts";
+import { promptOptimizationArtifactPath } from "./prompt-opt-artifact-path.ts";
 import {
   buildWorkflowEvidenceSourceCatalog,
   effectiveWorkflowEvidencePolicy,
@@ -554,6 +555,7 @@ function normalizeArtifacts(
   projectId: string,
   runId: string,
   executionId: string,
+  attempt: number,
   node: WorkflowNode,
   declaredArtifacts: WorkflowGraphDocument["artifacts"],
   artifacts: WorkflowArtifactReference[] | undefined,
@@ -585,7 +587,7 @@ function normalizeArtifacts(
       );
     }
     const declaredForNode = declaredArtifacts?.some(
-      (declared) => declared.writerNodeId === node.id && declared.path === artifact.path,
+      (declared) => declared.writerNodeId === node.id && (declared.path === artifact.path || (node.kind === "prompt-optimization" && declared.path !== undefined && promptOptimizationArtifactPath({ declaredPath: declared.path, runId, nodeId: node.id, attempt }) === artifact.path)),
     ) ?? false;
     const trustedLeanArtifact = node.kind === "lean4" &&
       isTrustedLeanArtifactPath(runId, executionId, artifact.path);
@@ -1130,8 +1132,8 @@ async function executeNodeLifecycle(
       writer.append("rescue_started", [node.id, attempt], {
         type: "rescue_started",
         executionId,
-        nodeId: node.id,
         attempt,
+        nodeId: node.id,
         ...(parentExecutionId ? { parentExecutionId } : {}),
         branchId,
         data: {
@@ -1237,6 +1239,7 @@ async function executeNodeLifecycle(
             },
           });
         },
+        ...(node.kind === "prompt-optimization" ? { writeDurableEvent: ({ eventId, ...event }: WorkflowRunEventInput) => { writer.append("prompt-optimization-event", [node.id, attempt, eventId], event); } } : {}),
         signal,
       });
       if (signal.aborted) return { kind: "cancelled" };
@@ -1253,6 +1256,7 @@ async function executeNodeLifecycle(
         manifest.projectId,
         manifest.id,
         executionId,
+        attempt,
         node,
         manifest.graph.artifacts,
         result.artifacts,

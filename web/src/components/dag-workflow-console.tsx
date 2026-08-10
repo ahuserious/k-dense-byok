@@ -15,6 +15,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { HelperAgentChat } from "@/components/helper-agent-chat";
+import { PromptOptimizationConsoleSurface } from "@/components/prompt-opt-console";
 import {
   cancelDagWorkflowRun,
   DagWorkflowApiError,
@@ -686,6 +687,7 @@ export function DagWorkflowConsole({
               </div>
               {selectedRunBudget ? <RunBudgetStrip budget={selectedRunBudget} /> : null}
               <RunDiagnostics diagnostics={diagnostics} />
+              <PromptOptimizationConsoleSurface projectId={projectId} runId={selectedRun.manifest.id} nodes={selectedRun.manifest.graph.nodes} runStatus={selectedRun.state.status} />
               <div className={cn(
                 "grid min-h-0 flex-1 overflow-hidden",
                 rescueHelperReference && "grid-cols-[minmax(0,1fr)_minmax(300px,40%)]",

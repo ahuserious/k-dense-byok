@@ -6,6 +6,7 @@
  * ?project query / kady-project cookie), and registers the route plugins.
  */
 import "./env.ts";
+import { registerPromptOptimizationInterviewRoutes } from "./workflows/prompt-opt-interview-api.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -195,6 +196,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await registerDagWorkflowRoutes(app, {
     controller: workflowController ?? undefined,
   });
+  await registerPromptOptimizationInterviewRoutes(app);
   await registerPipelineRoutes(app);
   await registerConsoleRoutes(app);
   await registerRaindropRoutes(app);
