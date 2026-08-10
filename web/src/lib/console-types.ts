@@ -59,7 +59,7 @@ export interface Run {
   role: RunRole;
   parent_run_id: string | null;
   reasoning: string | null;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "cancelled" | "interrupted";
   output: string | null;
   model: string | null;
   cost_usd: number | null;

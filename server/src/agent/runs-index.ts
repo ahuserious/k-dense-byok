@@ -10,8 +10,9 @@
  * Runs are append-only: startRun writes a 'running' row, finishRun appends a
  * terminal row with the SAME id. Readers fold to the LATEST row per id, so the
  * terminal write wins without ever rewriting an existing line (each append is
- * atomic at the line level via appendFileSync). This survives crashes mid-run —
- * a 'running' row with no terminal partner simply stays 'running'.
+ * atomic at the line level via appendFileSync). Main-chat rows carry a durable
+ * process owner epoch, so a prior process's unmatched 'running' row is appended
+ * as 'interrupted' on the next session/Console read.
  *
  * Loops are a single mutable JSON doc (read-modify-write). Concurrent writers to
  * one loop must be serialized by the CALLER; this module does not lock.
@@ -23,7 +24,12 @@ import { resolvePaths } from "../projects.ts";
 
 // ---- Types (file-backed port of db.ts Run + Loop) -------------------------
 
-export type RunStatus = "running" | "completed" | "failed";
+export type RunStatus =
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
 export type RunRole =
   | "agent"
   | "subagent"
@@ -49,6 +55,18 @@ export interface RunRecord {
   tokensIn?: number;
   tokensOut?: number;
   numTurns?: number;
+  workflowRunId?: string;
+  agentId?: string;
+  ownerEpoch?: string;
+}
+
+export interface WorkflowRunAssociation {
+  schemaVersion: 1;
+  sessionId: string;
+  workflowRunId: string;
+  chatRunId: string | null;
+  source: "turn-index" | "typed-launch" | "manual-rescue";
+  associatedAt: number;
 }
 
 export type LoopMode = "orchestrated" | "ralph";
@@ -78,6 +96,14 @@ export interface LoopRecord {
 // path segment, arrives raw from the URL, so reject anything that could traverse
 // (no leading dot, no slash, no '..'). loopId gets the same treatment.
 const SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const WORKFLOW_RUN_ID_RE = /^wrun_[a-f0-9]{32}$/;
+const CHAT_RUN_ID_RE = /^[a-f0-9]{32}$/;
+const PROCESS_RUN_OWNER_EPOCH = crypto.randomUUID();
+
+/** Stable only for this server process; durable rows use it to detect restart. */
+export function currentRunOwnerEpoch(): string {
+  return PROCESS_RUN_OWNER_EPOCH;
+}
 
 function assertSafeSegment(value: string, kind: "session id" | "loop id"): void {
   if (!SEGMENT_RE.test(value)) {
@@ -88,6 +114,18 @@ function assertSafeSegment(value: string, kind: "session id" | "loop id"): void 
 function runsJsonlPath(projectId: string, sessionId: string): string {
   assertSafeSegment(sessionId, "session id");
   return path.join(resolvePaths(projectId).runsDir, sessionId, "runs.jsonl");
+}
+
+function workflowAssociationsJsonlPath(
+  projectId: string,
+  sessionId: string,
+): string {
+  assertSafeSegment(sessionId, "session id");
+  return path.join(
+    resolvePaths(projectId).runsDir,
+    sessionId,
+    "workflow-associations.jsonl",
+  );
 }
 
 function loopJsonPath(projectId: string, loopId: string): string {
@@ -120,13 +158,15 @@ export function startRun(
     status: partial.status ?? "running",
   };
   const file = runsJsonlPath(projectId, record.sessionId);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.appendFileSync(file, JSON.stringify(record) + "\n", "utf-8");
+  appendJsonl(file, record);
   return id;
 }
 
 export interface FinishRunFields {
-  status: Extract<RunStatus, "completed" | "failed">;
+  status: Extract<
+    RunStatus,
+    "completed" | "failed" | "cancelled" | "interrupted"
+  >;
   output?: string;
   reasoning?: string;
   costUsd?: number;
@@ -153,7 +193,7 @@ export function finishRun(
 ): boolean {
   const file = runsJsonlPath(projectId, sessionId);
   const existing = latestById(readJsonl<RunRecord>(file)).get(runId);
-  if (!existing) return false;
+  if (!existing || existing.status !== "running") return false;
 
   const terminal: RunRecord = {
     ...existing,
@@ -168,24 +208,77 @@ export function finishRun(
     ...(fields.tokensOut !== undefined ? { tokensOut: fields.tokensOut } : {}),
     ...(fields.numTurns !== undefined ? { numTurns: fields.numTurns } : {}),
   };
-  fs.appendFileSync(file, JSON.stringify(terminal) + "\n", "utf-8");
+  appendJsonl(file, terminal);
   return true;
 }
 
 function readJsonl<T>(file: string): T[] {
+  let contents: Buffer;
   try {
-    return fs
-      .readFileSync(file, "utf-8")
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as T);
+    contents = fs.readFileSync(file);
   } catch {
-    // Missing file or a torn final line → treat as empty. A partial last line
-    // (crash mid-append) is the only realistic JSON.parse failure; dropping the
-    // whole file on that is too aggressive, but appendFileSync writes one line
-    // atomically per call, so a torn line is unlikely. We accept the simple path.
     return [];
   }
+  const rows: T[] = [];
+  forEachJsonlRow(contents, (line) => {
+    if (!line.trim()) return;
+    try {
+      rows.push(JSON.parse(line) as T);
+    } catch {
+      // A bad row cannot erase intact history. Append repair is deliberately
+      // narrower: only the final malformed row may be truncated.
+    }
+  });
+  return rows;
+}
+
+function forEachJsonlRow(
+  contents: Buffer,
+  visit: (line: string, start: number) => void,
+): void {
+  let start = 0;
+  for (let index = 0; index <= contents.length; index += 1) {
+    if (index !== contents.length && contents[index] !== 0x0a) continue;
+    let end = index;
+    if (end > start && contents[end - 1] === 0x0d) end -= 1;
+    visit(contents.subarray(start, end).toString("utf-8"), start);
+    start = index + 1;
+  }
+}
+
+/** Make one append safe without rewriting any intact or non-final row. */
+function repairJsonlTailForAppend(file: string): void {
+  let contents: Buffer;
+  try {
+    contents = fs.readFileSync(file);
+  } catch {
+    return;
+  }
+  let finalRowStart: number | null = null;
+  let finalRowIsValid = true;
+  forEachJsonlRow(contents, (line, start) => {
+    if (!line.trim()) return;
+    finalRowStart = start;
+    try {
+      JSON.parse(line);
+      finalRowIsValid = true;
+    } catch {
+      finalRowIsValid = false;
+    }
+  });
+  if (finalRowStart !== null && !finalRowIsValid) {
+    fs.truncateSync(file, finalRowStart);
+    return;
+  }
+  if (contents.length > 0 && contents[contents.length - 1] !== 0x0a) {
+    fs.appendFileSync(file, "\n", "utf-8");
+  }
+}
+
+function appendJsonl(file: string, value: unknown): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  repairJsonlTailForAppend(file);
+  fs.appendFileSync(file, JSON.stringify(value) + "\n", "utf-8");
 }
 
 /** Fold rows to the latest occurrence per id, preserving first-seen order. */
@@ -195,6 +288,39 @@ function latestById(rows: RunRecord[]): Map<string, RunRecord> {
     byId.set(row.id, row); // later rows overwrite earlier ones
   }
   return byId;
+}
+
+const RESTART_INTERRUPTED_OUTPUT =
+  "Chat stream was interrupted by process restart.";
+
+function reconcileOrphanedMainChatRunsForSession(
+  projectId: string,
+  sessionId: string,
+  ownerEpoch: string,
+): number {
+  const records = latestById(
+    readJsonl<RunRecord>(runsJsonlPath(projectId, sessionId)),
+  );
+  let reconciled = 0;
+  for (const record of records.values()) {
+    if (
+      record.role !== "agent" ||
+      record.status !== "running" ||
+      record.agentId !== undefined ||
+      record.ownerEpoch === ownerEpoch
+    ) {
+      continue;
+    }
+    if (
+      finishRun(projectId, sessionId, record.id, {
+        status: "interrupted",
+        output: RESTART_INTERRUPTED_OUTPUT,
+      })
+    ) {
+      reconciled += 1;
+    }
+  }
+  return reconciled;
 }
 
 /** All sessionId dirs under the project's runsDir (skips non-dirs / missing). */
@@ -215,9 +341,14 @@ function sessionDirs(projectId: string): string[] {
  * newest first (by ts). Pass `limit` to cap the result after sorting.
  */
 export function listRuns(projectId: string, limit?: number): RunRecord[] {
+  reconcileOrphanedMainChatRuns(projectId);
   const all: RunRecord[] = [];
   for (const sessionId of sessionDirs(projectId)) {
-    const file = path.join(resolvePaths(projectId).runsDir, sessionId, "runs.jsonl");
+    const file = path.join(
+      resolvePaths(projectId).runsDir,
+      sessionId,
+      "runs.jsonl",
+    );
     for (const record of latestById(readJsonl<RunRecord>(file)).values()) {
       all.push(record);
     }
@@ -227,6 +358,108 @@ export function listRuns(projectId: string, limit?: number): RunRecord[] {
   // by id so the order is stable across calls rather than dependent on readdir.
   all.sort((a, b) => b.ts - a.ts || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
   return limit !== undefined ? all.slice(0, limit) : all;
+}
+
+/** Latest row per run id for one exact session; never enumerates project runs. */
+export function listRunsForSession(
+  projectId: string,
+  sessionId: string,
+): RunRecord[] {
+  reconcileOrphanedMainChatRunsForSession(
+    projectId,
+    sessionId,
+    PROCESS_RUN_OWNER_EPOCH,
+  );
+  const records = [
+    ...latestById(
+      readJsonl<RunRecord>(runsJsonlPath(projectId, sessionId)),
+    ).values(),
+  ];
+  records.sort(
+    (a, b) =>
+      b.ts - a.ts || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0),
+  );
+  return records;
+}
+
+/** Reconcile main-chat rows owned by a prior process epoch, append-only. */
+export function reconcileOrphanedMainChatRuns(
+  projectId: string,
+  ownerEpoch = PROCESS_RUN_OWNER_EPOCH,
+): number {
+  return sessionDirs(projectId).reduce(
+    (count, sessionId) =>
+      count +
+      reconcileOrphanedMainChatRunsForSession(
+        projectId,
+        sessionId,
+        ownerEpoch,
+      ),
+    0,
+  );
+}
+
+/** Persist the latest chat-session → workflow-run association append-only. */
+export function associateWorkflowRun(
+  projectId: string,
+  sessionId: string,
+  workflowRunId: string,
+  source: WorkflowRunAssociation["source"],
+  chatRunId: string | null,
+): void {
+  if (!WORKFLOW_RUN_ID_RE.test(workflowRunId)) {
+    throw new Error(`Invalid workflow run id: ${workflowRunId}`);
+  }
+  if (chatRunId !== null && !CHAT_RUN_ID_RE.test(chatRunId)) {
+    throw new Error(`Invalid chat run id: ${chatRunId}`);
+  }
+  if (source === "turn-index" && chatRunId === null) {
+    throw new Error("Chat workflow associations require an indexed chat run id.");
+  }
+  const file = workflowAssociationsJsonlPath(projectId, sessionId);
+  const latest = readJsonl<WorkflowRunAssociation>(file).at(-1);
+  if (
+    latest?.workflowRunId === workflowRunId &&
+    latest.chatRunId === chatRunId
+  ) {
+    return;
+  }
+  const association: WorkflowRunAssociation = {
+    schemaVersion: 1,
+    sessionId,
+    workflowRunId,
+    chatRunId,
+    source,
+    associatedAt: Date.now(),
+  };
+  appendJsonl(file, association);
+}
+
+/** Read only one session's association log; corrupt rows fail closed. */
+export function latestWorkflowRunAssociation(
+  projectId: string,
+  sessionId: string,
+): WorkflowRunAssociation | null {
+  const rows = readJsonl<WorkflowRunAssociation>(
+    workflowAssociationsJsonlPath(projectId, sessionId),
+  );
+  const latest = rows.at(-1);
+  if (
+    !latest ||
+    latest.schemaVersion !== 1 ||
+    latest.sessionId !== sessionId ||
+    !WORKFLOW_RUN_ID_RE.test(latest.workflowRunId) ||
+    (latest.chatRunId !== null && !CHAT_RUN_ID_RE.test(latest.chatRunId)) ||
+    (latest.source !== "turn-index" &&
+      latest.source !== "typed-launch" &&
+      latest.source !== "manual-rescue") ||
+    (latest.source === "turn-index" && latest.chatRunId === null) ||
+    !Number.isSafeInteger(latest.associatedAt) ||
+    latest.associatedAt < 0
+  ) {
+    return null;
+  }
+  return { ...latest };
 }
 
 /** Runs belonging to one loop, newest first. */

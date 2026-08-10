@@ -56,6 +56,19 @@ import {
 import { MethodsDraftError, runMethodsDraft } from "../agent/methods-draft.ts";
 import { mintRunId, setSessionRunId } from "../agent/run-ids.ts";
 import { runBroker, type RunHandle } from "../agent/run-broker.ts";
+import {
+  activeChatTurnRunId,
+  associateManualWorkflowRescue,
+  associateTypedWorkflowLaunch,
+  backgroundAgentTrailingNodeForSession,
+  chatStreamErrorForSession,
+  completeChatTurnRun,
+  currentRunOwnerEpoch,
+  projectWorkflowRunStateV1,
+  registerChatTurnRun,
+  workflowRunForChatSession,
+  type BackgroundAgentTrailingNodeInput,
+} from "../agent/chat-turn-runs-adapter.ts";
 import { ProvenanceRecorder } from "../provenance/recorder.ts";
 import { SandboxError } from "../sandbox-fs.ts";
 import { toNotebook, toShellScript } from "../agent/session-export.ts";
@@ -95,6 +108,15 @@ import {
   type BillingContext,
 } from "../cost/billing.ts";
 
+const TYPED_WORKFLOW_RUN_ROUTE = "/dag-workflows/:workflowId/runs";
+const MANUAL_WORKFLOW_RESCUE_ROUTE = "/dag-workflow-runs/:runId/rescue";
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
 function snapshot(session: { getSessionStats(): { cost: number; tokens: { input: number; output: number; cacheRead: number; total: number } } }): CostSnapshot {
   const s = session.getSessionStats();
   return {
@@ -104,6 +126,48 @@ function snapshot(session: { getSessionStats(): { cost: number; tokens: { input:
     cacheRead: s.tokens.cacheRead,
     total: s.tokens.total,
   };
+}
+
+async function workflowRescueTrailingNode(
+  projectId: string,
+  paths: ReturnType<typeof activePaths>,
+  workflowRunId: string,
+  workflowRunStatus: Parameters<
+    typeof backgroundAgentTrailingNodeForSession
+  >[0]["workflowRunStatus"],
+): Promise<BackgroundAgentTrailingNodeInput | undefined> {
+  for (const info of await listSessions(paths)) {
+    let binding: SessionProfileBinding;
+    try {
+      binding = readSessionProfileBinding(paths, info.id);
+    } catch (error) {
+      if (error instanceof SessionProfileBindingError) continue;
+      throw error;
+    }
+    if (
+      binding.profile !== "workflow-rescue" ||
+      binding.source?.kind !== "run" ||
+      binding.source.id !== workflowRunId
+    ) {
+      continue;
+    }
+    const handle = runBroker.get(projectId, binding.sessionId);
+    const activeState = handle && !handle.isComplete
+      ? handle.activityState === "done"
+        ? undefined
+        : handle.activityState
+      : undefined;
+    const trailingNode = backgroundAgentTrailingNodeForSession({
+      projectId,
+      helperSessionId: binding.sessionId,
+      workflowRunId,
+      workflowRunStatus,
+      brokerHandlePresent: Boolean(handle),
+      ...(activeState ? { activeState } : {}),
+    });
+    if (trailingNode) return trailingNode;
+  }
+  return undefined;
 }
 
 interface RunBody {
@@ -298,6 +362,110 @@ function streamRun(
 }
 
 export async function registerSessionRoutes(app: FastifyInstance): Promise<void> {
+  const activeChatRunForTypedLaunch = new WeakMap<FastifyRequest, string>();
+  app.addHook("preHandler", async (request) => {
+    if (
+      request.method !== "POST" ||
+      request.routeOptions.url !== TYPED_WORKFLOW_RUN_ROUTE
+    ) {
+      return;
+    }
+    const sessionId = objectRecord(request.body)?.sessionId;
+    if (typeof sessionId !== "string") return;
+    try {
+      const projectId = currentProjectId();
+      const activeHandle = runBroker.get(projectId, sessionId);
+      if (!activeHandle || activeHandle.isComplete) return;
+      const indexedChatRunId = activeChatTurnRunId(projectId, sessionId);
+      if (indexedChatRunId) {
+        activeChatRunForTypedLaunch.set(request, indexedChatRunId);
+      }
+    } catch (error) {
+      request.log.warn(
+        { err: error, sessionId },
+        "failed to capture active chat turn for workflow association",
+      );
+    }
+  });
+
+  // These workflow routes are S4-owned and registered after this S8 surface.
+  // Association is an enhancement after admission: validation or persistence
+  // failure must never change either route's contractual 202 response.
+  app.addHook("preSerialization", async (request, reply, payload) => {
+    const route = request.routeOptions.url;
+    if (
+      request.method !== "POST" ||
+      (route !== TYPED_WORKFLOW_RUN_ROUTE &&
+        route !== MANUAL_WORKFLOW_RESCUE_ROUTE) ||
+      reply.statusCode !== 202
+    ) {
+      return payload;
+    }
+    const response = objectRecord(payload);
+    const manifest = objectRecord(response?.manifest);
+    const sessionId = route === TYPED_WORKFLOW_RUN_ROUTE
+      ? objectRecord(request.body)?.sessionId
+      : manifest?.sessionId;
+    if (typeof sessionId !== "string") return payload;
+    const projectId = currentProjectId();
+    let binding: SessionProfileBinding;
+    try {
+      binding = readSessionProfileBinding(activePaths(), sessionId);
+    } catch (error) {
+      request.log.warn(
+        { err: error, projectId, sessionId },
+        "skipped workflow chat association for an invalid session",
+      );
+      return payload;
+    }
+    if (binding.profile !== "main") {
+      request.log.warn(
+        { projectId, sessionId, profile: binding.profile },
+        "skipped workflow chat association for a helper session",
+      );
+      return payload;
+    }
+    if (
+      typeof manifest?.id !== "string" ||
+      manifest.sessionId !== sessionId
+    ) {
+      request.log.warn(
+        { projectId, sessionId },
+        "skipped workflow chat association for inconsistent run metadata",
+      );
+      return payload;
+    }
+    try {
+      const activeHandle = runBroker.get(projectId, sessionId);
+      const indexedActiveChatRunId =
+        activeChatRunForTypedLaunch.get(request) ??
+        (activeHandle && !activeHandle.isComplete
+          ? activeChatTurnRunId(projectId, sessionId)
+          : null);
+      if (route === MANUAL_WORKFLOW_RESCUE_ROUTE) {
+        associateManualWorkflowRescue(
+          projectId,
+          sessionId,
+          manifest.id,
+          indexedActiveChatRunId,
+        );
+      } else {
+        associateTypedWorkflowLaunch(
+          projectId,
+          sessionId,
+          manifest.id,
+          indexedActiveChatRunId,
+        );
+      }
+    } catch (error) {
+      request.log.warn(
+        { err: error, projectId, sessionId, workflowRunId: manifest.id },
+        "failed to persist workflow chat association",
+      );
+    }
+    return payload;
+  });
+
   app.post("/sessions", async () => {
     const session = await createSession(currentProjectId(), activePaths());
     return { id: session.sessionId, sessionFile: session.sessionFile };
@@ -656,6 +824,48 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
     return runBroker.state(currentProjectId(), req.params.id);
   });
 
+  app.get<{ Params: { id: string } }>(
+    "/sessions/:id/workflow-run-state",
+    async (req, reply) => {
+      const projectId = currentProjectId();
+      const paths = activePaths();
+      reply.header("Cache-Control", "no-store");
+      if (!(await requireMainSession(projectId, paths, req.params.id, reply))) {
+        return { detail: "Workflow run state is unavailable for helper sessions." };
+      }
+      const workflowRun = workflowRunForChatSession(projectId, req.params.id);
+      if (!workflowRun) return { state: null };
+      try {
+        const backgroundAgentTrailingNode = await workflowRescueTrailingNode(
+          projectId,
+          paths,
+          workflowRun.manifest.id,
+          workflowRun.state.status,
+        );
+        const chatStreamError = chatStreamErrorForSession(
+          projectId,
+          req.params.id,
+          workflowRun.manifest.id,
+        );
+        const state = projectWorkflowRunStateV1(workflowRun, {
+          ...(backgroundAgentTrailingNode ? { backgroundAgentTrailingNode } : {}),
+          ...(chatStreamError ? { chatStreamError } : {}),
+        });
+        return { state };
+      } catch (error) {
+        req.log.warn(
+          { err: error, workflowRunId: workflowRun.manifest.id },
+          "rejected invalid RunState v1 chat projection",
+        );
+        reply.code(422);
+        return {
+          detail: "The workflow run projection failed RunState v1 validation.",
+          code: "INVALID_RUN_STATE_PROJECTION",
+        };
+      }
+    },
+  );
+
   app.get<{ Params: { id: string }; Querystring: { after?: string } }>(
     "/sessions/:id/run/events",
     async (req, reply) => {
@@ -868,6 +1078,7 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
       // owner cleanup so it covers every exit path.
       const runId = mintRunId();
       let handle: RunHandle;
+      let indexedChatRunId: string | null = null;
       try {
         setSessionRunId(projectId, session.sessionId, runId);
         handle = runBroker.start(projectId, sessionId, {
@@ -881,9 +1092,30 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
         // Publish immediately, before any awaited model setup, so refresh recovery
         // can discover the accepted run during that setup window.
         handle.publish({ type: "run_start", runId });
+        indexedChatRunId = registerChatTurnRun({
+          projectId,
+          sessionId,
+          prompt: body.message,
+          model: modelReference(requestedModel),
+          ...(binding.profile === "main"
+            ? { ownerEpoch: currentRunOwnerEpoch() }
+            : {}),
+          ...(binding.profile === "workflow-rescue" && binding.source?.kind === "run"
+            ? {
+                workflowRunId: binding.source.id,
+                agentId: "workflow-rescue",
+              }
+            : {}),
+        });
       } catch (err) {
         // The claim is taken but nothing owns it yet: without this release the
         // tab stays permanently 409-locked until the process restarts.
+        const startedHandle = runBroker.get(projectId, sessionId);
+        if (startedHandle && !startedHandle.isComplete) {
+          startedHandle.publish({ type: "error", message: (err as Error).message });
+          startedHandle.publish({ type: "done" });
+          startedHandle.complete();
+        }
         setSessionRunId(projectId, session.sessionId, null);
         unpinSession(projectId, session.sessionId);
         activeRuns.delete(runKey);
@@ -894,9 +1126,51 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
       // Remember the real active set so we can restore it in the finally; `null`
       // means "not a fusion run, nothing to restore".
       let savedToolNames: string[] | null = null;
+      let indexedUsage: Pick<
+        Parameters<typeof completeChatTurnRun>[0],
+        "costUsd" | "tokensIn" | "tokensOut"
+      > = {};
+      let indexFinalized = false;
       let detachedOwner = false;
       const log = req.log;
       const cleanup = () => {
+        if (!indexFinalized && indexedChatRunId) {
+          indexFinalized = true;
+          try {
+            const errorFrame = [...(handle.state().run?.frames ?? [])]
+              .reverse()
+              .find((frame) => frame.type === "error");
+            const failed =
+              handle.activityState === "error" ||
+              handle.activityState === "blocked";
+            const status = handle.isAbortRequested
+              ? "cancelled"
+              : failed
+                ? "failed"
+                : "completed";
+            const finished = completeChatTurnRun({
+              projectId,
+              sessionId,
+              indexRunId: indexedChatRunId,
+              status,
+              ...(status === "failed" && errorFrame?.type === "error"
+                ? { error: String(errorFrame.message) }
+                : {}),
+              ...indexedUsage,
+            });
+            if (!finished) {
+              log.warn(
+                { indexedChatRunId },
+                "chat turn runs-index terminal row was not written",
+              );
+            }
+          } catch (error) {
+            log.warn(
+              { err: error, indexedChatRunId },
+              "failed to finalize chat turn runs-index row",
+            );
+          }
+        }
         // Restore the local tool set disabled for a fusion run. No-op for
         // non-fusion runs (savedToolNames stays null).
         if (savedToolNames !== null) {
@@ -1043,7 +1317,9 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
                 if (usage) addTurnUsage(turnTally, usage);
               }
               const frame = toClientFrame(ev, paths.sandbox);
-              if (frame) handle.publish(frame);
+              if (frame) {
+                handle.publish(frame);
+              }
               if (ev.type === "turn_end") publishContextUsage();
             });
 
@@ -1096,6 +1372,11 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
                   after: run,
                   billing: runBilling,
                 });
+                indexedUsage = {
+                  costUsd: entry?.costUsd ?? 0,
+                  tokensIn: run.input,
+                  tokensOut: run.output,
+                };
                 const stats = session.getSessionStats();
                 // `cost` is the session's full ledgered spend (subagents included,
                 // restart/compaction-proof); `tokens` is Pi's in-context cumulative;

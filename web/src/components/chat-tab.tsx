@@ -54,6 +54,10 @@ import {
 import { InterviewCard } from "@/components/interview-form";
 import { KadyFileIcon } from "@/components/file-icon";
 import { ScientificResultCard } from "@/components/scientific-result-card";
+import {
+  ChatLiveGraphTabs,
+  useChatLiveGraphProjection,
+} from "@/components/chat-live-graph";
 import { hasDirectoryEntries, traverseDroppedEntries } from "@/lib/directory-upload";
 import {
   INLINE_IMAGE_ACCEPT,
@@ -1266,6 +1270,7 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
     contextUsage,
     status,
     runState,
+    sessionId: liveGraphSessionId,
     send,
     stop,
     steer,
@@ -1542,6 +1547,14 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
     () => messages.filter((m) => m.role === "user").length,
     [messages],
   );
+  const liveGraphProjection = useChatLiveGraphProjection({
+    projectId,
+    sessionId: liveGraphSessionId,
+    enabled: isActive,
+    restartKey: `${runState}:${userMessageCount}`,
+    chatTurnActive: runState === "running",
+    awaitErrorRouting: runState === "error",
+  });
   useEffect(() => {
     onMetaChange(tabId, {
       sessionId,
@@ -1813,7 +1826,10 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
         !isActive && "hidden",
       )}
     >
-      <Conversation className="flex-1">
+      <ChatLiveGraphTabs
+        projection={liveGraphProjection}
+        conversation={(
+          <Conversation className="flex-1">
         <ConversationContent className="mx-auto w-full max-w-full px-4">
           {messages.length === 0 ? (
             <ConversationEmptyState
@@ -1916,7 +1932,9 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
           )}
         </ConversationContent>
         <ConversationScrollButton />
-      </Conversation>
+          </Conversation>
+        )}
+      />
 
       <div className="px-4 pb-6 pt-2">
         <PromptInputProvider

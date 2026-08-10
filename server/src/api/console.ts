@@ -55,11 +55,11 @@ function clampInt(value: unknown, min: number, max: number, fallback: number): n
 
 // ---- Storage → wire mapping -----------------------------------------------
 
-// runs-index RunStatus is a subset of the wire status union; both are the same
-// three strings, so this is a straight pass-through kept explicit for clarity.
+// runs-index RunStatus is a subset of the wire status union; this is a straight
+// pass-through kept explicit for clarity.
 function toClientRun(record: RunRecord): Record<string, unknown> {
   const startedAtIso = new Date(record.ts * 1000).toISOString();
-  // A terminal row (completed/failed) carries the finish ts; a still-running row
+  // A terminal row carries the finish ts; a still-running row
   // has no completion. We only persist a single ts per row, so for terminal rows
   // we report it as both started_at and completed_at (the original start ts is
   // not retained after finishRun folds to the latest row). Loop iterations that
