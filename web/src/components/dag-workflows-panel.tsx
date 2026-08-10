@@ -8,9 +8,8 @@ import {
   PlayIcon,
   PlusIcon,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { PipelinesPanel } from "@/components/pipelines-panel";
 import {
   createDagWorkflowRun,
   DagWorkflowApiError,
@@ -30,6 +29,20 @@ import {
   createDagWorkflowTemplateGraph,
   findDagWorkflowTemplate,
 } from "@/lib/dag-workflow-templates";
+import { PIPELINE_ENGINE_URL } from "@/lib/embed-config";
+import { pipelineHealth } from "@/lib/pipelines";
+import {
+  buildScientificPipelineRegistry,
+  listVendoredWorkflowRegistrySources,
+  normalizeWorkflowName,
+  typedWorkflowRegistrySource,
+  workflowRouteForEngine,
+  type ScientificPipelineRegistryEntry,
+  type TypedWorkflowRegistrySource,
+  type VendoredWorkflowRegistrySource,
+} from "@/lib/scientific-pipeline-registry";
+
+const VENDORED_BUILDER_URL = `${PIPELINE_ENGINE_URL}/legacy/workflows/builder`;
 
 function errorMessage(error: unknown): string {
   if (error instanceof DagWorkflowApiError) {
@@ -183,43 +196,105 @@ function vendoredRunReceipt(value: unknown): VendoredRunReceipt {
   return { receiptId, runId, status: response.status };
 }
 
-function WorkflowDefinitionRow({
-  definition,
+function WorkflowRegistryRow({
+  entry,
   opening,
-  onOpen,
+  budgetBlocked,
+  receipt,
+  onOpenTyped,
+  onEditVendored,
+  onRunVendored,
 }: {
-  definition: DagWorkflowDefinitionSummary;
+  entry: ScientificPipelineRegistryEntry;
   opening: boolean;
-  onOpen: () => void;
+  budgetBlocked: boolean;
+  receipt?: VendoredRunReceipt & { error?: string };
+  onOpenTyped: () => void;
+  onEditVendored: () => void;
+  onRunVendored: () => void;
 }) {
+  const typed = entry.typed;
+  const vendored = entry.vendored;
   return (
-    <button
-      type="button"
-      onClick={onOpen}
-      disabled={opening}
-      aria-label={`Open ${definition.name} details`}
-      className="group grid w-full grid-cols-[minmax(0,1fr)_auto] gap-3 border-b px-4 py-3 text-left transition-colors last:border-b-0 hover:bg-muted/40 disabled:cursor-wait"
+    <li
+      data-workflow-registry-id={entry.id}
+      className="border-b px-4 py-3 last:border-b-0"
     >
-      <span className="min-w-0">
-        <span className="block truncate text-sm font-medium">{definition.name}</span>
-        <span className="mt-1 block truncate text-xs text-muted-foreground">
-          {definition.description || definition.id}
-        </span>
-        <span className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-          <span>Revision {definition.revision}</span>
-          <span>{definition.nodeCount} node{definition.nodeCount === 1 ? "" : "s"}</span>
-          <span>{definition.edgeCount} edge{definition.edgeCount === 1 ? "" : "s"}</span>
-          <span>Schema {definition.schemaVersion}</span>
-        </span>
-      </span>
-      <span className="self-center text-muted-foreground transition-colors group-hover:text-foreground">
-        {opening ? (
-          <LoaderCircleIcon className="size-4 animate-spin" aria-hidden />
-        ) : (
-          <ChevronRightIcon className="size-4" aria-hidden />
-        )}
-      </span>
-    </button>
+      <div className="flex flex-wrap items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="truncate text-sm font-medium">{entry.name}</span>
+            {typed ? (
+              <span className="rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:text-sky-300">
+                Typed
+              </span>
+            ) : null}
+            {vendored ? (
+              <span className="rounded bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:text-violet-300">
+                Vendored
+              </span>
+            ) : null}
+          </div>
+          <p className="mt-1 truncate text-xs text-muted-foreground">
+            {entry.description || typed?.workflowId || vendored?.workflowName}
+          </p>
+          {typed ? (
+            <p className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+              <span>Revision {typed.summary.revision}</span>
+              <span>{typed.summary.nodeCount} node{typed.summary.nodeCount === 1 ? "" : "s"}</span>
+              <span>{typed.summary.edgeCount} edge{typed.summary.edgeCount === 1 ? "" : "s"}</span>
+              <span>Schema {typed.summary.schemaVersion}</span>
+            </p>
+          ) : null}
+          {receipt ? (
+            <p role="status" className={`mt-2 text-xs ${receipt.error ? "text-destructive" : "text-muted-foreground"}`}>
+              {receipt.error
+                ? `Run failed: ${receipt.error}`
+                : receipt.runId
+                  ? `Run ${receipt.runId} · ${receipt.status}`
+                  : receipt.receiptId
+                    ? `Dispatch ${receipt.receiptId} · ${receipt.status}`
+                    : receipt.status}
+            </p>
+          ) : null}
+        </div>
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          {typed ? (
+            <button
+              type="button"
+              onClick={onOpenTyped}
+              disabled={opening}
+              aria-label={`Open ${entry.name} details`}
+              className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs hover:bg-muted/50 disabled:cursor-wait"
+            >
+              {opening ? <LoaderCircleIcon className="size-3 animate-spin" /> : <ChevronRightIcon className="size-3" />}
+              Details &amp; run
+            </button>
+          ) : null}
+          {vendored ? (
+            <>
+              <button
+                type="button"
+                onClick={onEditVendored}
+                aria-label={`Edit ${entry.name} with vendored engine`}
+                className="rounded-md border px-2.5 py-1 text-xs hover:bg-muted/50"
+              >
+                Edit
+              </button>
+              <button
+                type="button"
+                onClick={onRunVendored}
+                aria-label={`Run ${entry.name} with vendored engine`}
+                title={budgetBlocked ? "Project spend limit reached" : undefined}
+                className="rounded-md border px-2.5 py-1 text-xs hover:bg-muted/50"
+              >
+                Run
+              </button>
+            </>
+          ) : null}
+        </div>
+      </div>
+    </li>
   );
 }
 
@@ -469,7 +544,9 @@ export function DagWorkflowsPanel({
   onRunPipeline: (name: string) => Promise<unknown>;
   onEditPipeline: (name: string) => void;
 }) {
-  const [definitions, setDefinitions] = useState<DagWorkflowDefinitionSummary[] | null>(null);
+  const [typedSources, setTypedSources] = useState<TypedWorkflowRegistrySource[] | null>(null);
+  const [vendoredSources, setVendoredSources] = useState<VendoredWorkflowRegistrySource[] | null>(null);
+  const [vendoredHealthy, setVendoredHealthy] = useState<boolean | null>(null);
   const [selectedDefinition, setSelectedDefinition] = useState<VersionedDagWorkflowDefinition | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [openingId, setOpeningId] = useState<string | null>(null);
@@ -481,34 +558,87 @@ export function DagWorkflowsPanel({
   const [creating, setCreating] = useState(false);
   const [vendoredRunReceipts, setVendoredRunReceipts] = useState<Record<string, VendoredRunReceipt & { error?: string }>>({});
   const launchingVendoredRuns = useRef(new Set<string>());
+  const loadGeneration = useRef(0);
   const selectedTemplate = findDagWorkflowTemplate(newWorkflowTemplateId);
+  const registryEntries = useMemo(
+    () => typedSources && vendoredSources
+      ? buildScientificPipelineRegistry(typedSources, vendoredSources)
+      : null,
+    [typedSources, vendoredSources],
+  );
 
-  useEffect(() => {
-    let cancelled = false;
-    setDefinitions(null);
+  const refreshRegistry = useCallback(async () => {
+    const generation = loadGeneration.current + 1;
+    loadGeneration.current = generation;
+    setTypedSources(null);
+    setVendoredSources(null);
+    setVendoredHealthy(null);
     setSelectedDefinition(null);
     setError(null);
-    void listDagWorkflowDefinitions(projectId)
-      .then((items) => {
-        if (!cancelled) setDefinitions(items);
-      })
-      .catch((caught) => {
-        if (!cancelled) {
-          setDefinitions([]);
-          setError(errorMessage(caught));
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
+
+    const [typedResult, vendoredResult] = await Promise.allSettled([
+      listDagWorkflowDefinitions(projectId),
+      pipelineHealth().then(async (healthy) => ({
+        healthy,
+        sources: healthy ? await listVendoredWorkflowRegistrySources(projectId) : [],
+      })),
+    ]);
+    if (loadGeneration.current !== generation) return;
+
+    const summaries = typedResult.status === "fulfilled" ? typedResult.value : [];
+    const nextVendoredSources = vendoredResult.status === "fulfilled"
+      ? vendoredResult.value.sources
+      : [];
+    setVendoredSources(nextVendoredSources);
+    setVendoredHealthy(
+      vendoredResult.status === "fulfilled" ? vendoredResult.value.healthy : false,
+    );
+
+    if (typedResult.status === "rejected") {
+      setTypedSources([]);
+      setError(errorMessage(typedResult.reason));
+      return;
+    }
+
+    const vendoredNames = new Set(
+      nextVendoredSources.map((source) => normalizeWorkflowName(source.workflowName)),
+    );
+    const comparisonFailures: string[] = [];
+    const nextTypedSources = await Promise.all(summaries.map(async (summary) => {
+      if (!vendoredNames.has(normalizeWorkflowName(summary.name))) {
+        return typedWorkflowRegistrySource(summary);
+      }
+      try {
+        const definition = await readDagWorkflowDefinition(projectId, summary.id);
+        return typedWorkflowRegistrySource(summary, definition.definition.graph);
+      } catch {
+        comparisonFailures.push(summary.name);
+        return typedWorkflowRegistrySource(summary);
+      }
+    }));
+    if (loadGeneration.current !== generation) return;
+    setTypedSources(nextTypedSources);
+    if (comparisonFailures.length > 0) {
+      setError(
+        `Could not verify structure for ${comparisonFailures.join(", ")}; its engine entries remain separate.`,
+      );
+    }
   }, [projectId]);
 
-  const openDefinition = async (definition: DagWorkflowDefinitionSummary) => {
+  useEffect(() => {
+    void refreshRegistry();
+    return () => {
+      loadGeneration.current += 1;
+    };
+  }, [refreshRegistry]);
+
+  const openDefinition = async (entry: ScientificPipelineRegistryEntry) => {
     if (openingId) return;
-    setOpeningId(definition.id);
+    const route = workflowRouteForEngine(entry, "typed");
+    setOpeningId(route.sourceId);
     setError(null);
     try {
-      setSelectedDefinition(await readDagWorkflowDefinition(projectId, definition.id));
+      setSelectedDefinition(await readDagWorkflowDefinition(projectId, route.workflowId));
     } catch (caught) {
       setError(errorMessage(caught));
     } finally {
@@ -545,9 +675,9 @@ export function DagWorkflowsPanel({
           );
       const saved = await saveDagWorkflowDefinition(projectId, workflowId, graph);
       const savedSummary = summaryFromDefinition(saved);
-      setDefinitions((current) => [
-        savedSummary,
-        ...(current ?? []).filter((item) => item.id !== savedSummary.id),
+      setTypedSources((current) => [
+        typedWorkflowRegistrySource(savedSummary, saved.definition.graph),
+        ...(current ?? []).filter((item) => item.workflowId !== savedSummary.id),
       ]);
       setSelectedDefinition(saved);
       setShowCreateForm(false);
@@ -605,64 +735,80 @@ export function DagWorkflowsPanel({
           </h1>
         </div>
         <p className="mt-1 text-xs text-muted-foreground">
-          One workspace for two separate engines: vendored visual pipelines and project-scoped typed definitions.
+          One deduplicated registry with transparent routes to each workflow&apos;s backing engine.
         </p>
       </header>
 
       <div className="min-h-0 flex-1 space-y-6 overflow-y-auto p-5">
-        <section className="overflow-hidden rounded-lg border bg-background" aria-label="Vendored-engine pipelines">
-          <PipelinesPanel
-            onRunPipeline={(name) => void runVendoredPipeline(name)}
-            onEditPipeline={onEditPipeline}
-          />
+        <section className="overflow-hidden rounded-lg border bg-background" aria-labelledby="workflow-registry-title">
+          <header className="border-b px-4 py-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 id="workflow-registry-title" className="text-sm font-semibold">
+                    Workflow registry
+                  </h2>
+                  <span
+                    className={
+                      "rounded px-1.5 py-0.5 text-[11px] " +
+                      (vendoredHealthy === null
+                        ? "bg-muted text-muted-foreground"
+                        : vendoredHealthy
+                          ? "bg-emerald-500/15 text-emerald-600"
+                          : "bg-red-500/15 text-red-600")
+                    }
+                  >
+                    {vendoredHealthy === null
+                      ? "checking vendored engine…"
+                      : vendoredHealthy
+                        ? "vendored engine online"
+                        : "vendored engine offline"}
+                  </span>
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Matching names and graph topologies share one row; engine namespaces remain intact.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <a
+                  href={VENDORED_BUILDER_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="rounded-md border px-2.5 py-1.5 text-xs hover:bg-muted/50"
+                >
+                  Open builder ↗
+                </a>
+                <button
+                  type="button"
+                  onClick={() => void refreshRegistry()}
+                  className="rounded-md border px-2.5 py-1.5 text-xs hover:bg-muted/50"
+                >
+                  Refresh
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 text-xs font-medium hover:bg-muted"
+                  onClick={() => {
+                    setShowCreateForm((visible) => !visible);
+                    setError(null);
+                  }}
+                >
+                  <PlusIcon className="size-3.5" /> New typed workflow
+                </button>
+              </div>
+            </div>
+          </header>
+
+          {vendoredHealthy === false ? (
+            <p className="border-b px-4 py-2 text-xs text-muted-foreground">
+              The Scientific DAG Workflow Designer isn&apos;t reachable. Typed workflows remain available.
+            </p>
+          ) : null}
           {budgetBlocked ? (
-            <p role="alert" className="border-t border-destructive/30 bg-destructive/5 px-4 py-2 text-xs text-destructive">
+            <p role="alert" className="border-b border-destructive/30 bg-destructive/5 px-4 py-2 text-xs text-destructive">
               Vendored pipeline runs are disabled because the project spend limit is reached.
             </p>
           ) : null}
-          {Object.keys(vendoredRunReceipts).length > 0 ? (
-            <ul className="border-t" aria-label="Vendored pipeline run receipts">
-              {Object.entries(vendoredRunReceipts).map(([name, receipt]) => (
-                <li key={name} className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 text-xs">
-                  <span className="font-medium">{name}</span>
-                  <span role="status" className={receipt.error ? "text-destructive" : "text-muted-foreground"}>
-                    {receipt.error
-                      ? `Run failed: ${receipt.error}`
-                      : receipt.runId
-                        ? `Run ${receipt.runId} · ${receipt.status}`
-                        : receipt.receiptId
-                          ? `Dispatch ${receipt.receiptId} · ${receipt.status}`
-                          : receipt.status}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          ) : null}
-        </section>
-
-        <section className="overflow-hidden rounded-lg border bg-background" aria-labelledby="typed-workflows-title">
-          <header className="border-b px-4 py-3">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <h2 id="typed-workflows-title" className="text-sm font-semibold">
-                  Typed-engine definitions
-                </h2>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Revisioned Kady graphs remain in their separate project-scoped store.
-                </p>
-              </div>
-              <button
-                type="button"
-                className="inline-flex shrink-0 items-center gap-1 rounded-md border px-2.5 py-1.5 text-xs font-medium hover:bg-muted"
-                onClick={() => {
-                  setShowCreateForm((visible) => !visible);
-                  setError(null);
-                }}
-              >
-                <PlusIcon className="size-3.5" /> New typed workflow
-              </button>
-            </div>
-          </header>
 
           {showCreateForm ? (
             <form
@@ -757,32 +903,55 @@ export function DagWorkflowsPanel({
           ) : null}
 
           <div className="p-4">
-            {definitions === null ? (
+            {registryEntries === null ? (
               <div className="flex min-h-32 items-center justify-center gap-2 text-sm text-muted-foreground">
                 <LoaderCircleIcon className="size-4 animate-spin" />
-                Loading typed workflows…
+                Loading workflow registry…
               </div>
-            ) : definitions.length === 0 ? (
+            ) : registryEntries.length === 0 ? (
               <div className="flex min-h-32 items-center justify-center">
                 <div className="max-w-sm rounded-lg border border-dashed px-6 py-8 text-center">
                   <ListTreeIcon className="mx-auto size-6 text-muted-foreground" />
-                  <p className="mt-3 text-sm font-medium">No typed workflows yet</p>
+                  <p className="mt-3 text-sm font-medium">No workflows yet</p>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    Definitions saved through Kady&apos;s project-scoped typed API will appear here.
+                    Create a typed workflow here or use the vendored visual builder.
                   </p>
                 </div>
               </div>
             ) : (
-              <div className="overflow-hidden rounded-lg border bg-background">
-                {definitions.map((definition) => (
-                  <WorkflowDefinitionRow
-                    key={definition.id}
-                    definition={definition}
-                    opening={openingId === definition.id}
-                    onOpen={() => void openDefinition(definition)}
-                  />
-                ))}
-              </div>
+              <ul
+                className="overflow-hidden rounded-lg border bg-background"
+                aria-label="Scientific pipeline workflows"
+              >
+                {registryEntries.map((entry) => {
+                  const typedRoute = entry.typed;
+                  const vendoredRoute = entry.vendored;
+                  return (
+                    <WorkflowRegistryRow
+                      key={entry.id}
+                      entry={entry}
+                      opening={openingId === typedRoute?.sourceId}
+                      budgetBlocked={budgetBlocked}
+                      receipt={vendoredRoute ? vendoredRunReceipts[vendoredRoute.workflowName] : undefined}
+                      onOpenTyped={() => {
+                        if (typedRoute) void openDefinition(entry);
+                      }}
+                      onEditVendored={() => {
+                        if (vendoredRoute) {
+                          onEditPipeline(workflowRouteForEngine(entry, "vendored").workflowName);
+                        }
+                      }}
+                      onRunVendored={() => {
+                        if (vendoredRoute) {
+                          void runVendoredPipeline(
+                            workflowRouteForEngine(entry, "vendored").workflowName,
+                          );
+                        }
+                      }}
+                    />
+                  );
+                })}
+              </ul>
             )}
           </div>
         </section>

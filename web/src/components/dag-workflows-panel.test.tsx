@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -6,14 +6,26 @@ import { DagWorkflowsPanel } from "./dag-workflows-panel";
 import * as dagApi from "@/lib/dag-workflows";
 import * as pipelinesApi from "@/lib/pipelines";
 import { createDefaultWorkflowGraph } from "@/lib/dag-workflow-builder";
+import * as registryApi from "@/lib/scientific-pipeline-registry";
 
 beforeEach(() => {
   window.sessionStorage.clear();
   vi.spyOn(pipelinesApi, "pipelineHealth").mockResolvedValue(true);
-  vi.spyOn(pipelinesApi, "listPipelines").mockResolvedValue([]);
+  vi.spyOn(registryApi, "listVendoredWorkflowRegistrySources").mockResolvedValue([]);
 });
 
 afterEach(() => vi.restoreAllMocks());
+
+function mockVendoredWorkflows(
+  workflows: Array<{ name: string; description: string; nodes?: unknown[] }>,
+): void {
+  vi.mocked(registryApi.listVendoredWorkflowRegistrySources).mockResolvedValue(
+    workflows.map((workflow) => registryApi.vendoredWorkflowRegistrySource({
+      ...workflow,
+      nodes: workflow.nodes ?? [{ id: `${workflow.name}-node`, prompt: "Run workflow." }],
+    })!),
+  );
+}
 
 function renderPanel({
   activeSessionId = null,
@@ -38,8 +50,8 @@ function renderPanel({
 }
 
 describe("DagWorkflowsPanel", () => {
-  it("renders the vendored and typed-engine lists together with all vendored actions", async () => {
-    vi.mocked(pipelinesApi.listPipelines).mockResolvedValue([
+  it("renders one registry list with both engines and all backing actions", async () => {
+    mockVendoredWorkflows([
       { name: "microscopy-qc", description: "Inspect microscopy acquisition quality" },
     ]);
     vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([
@@ -76,15 +88,20 @@ describe("DagWorkflowsPanel", () => {
 
     expect(screen.getByRole("heading", { name: "Scientific Pipelines" })).toBeInTheDocument();
     expect(await screen.findByText("microscopy-qc")).toBeInTheDocument();
-    expect(screen.getByText("engine online")).toBeInTheDocument();
+    expect(screen.getByText("vendored engine online")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Open builder ↗" })).toBeInTheDocument();
     expect(await screen.findByText("Fusion review")).toBeInTheDocument();
+    expect(screen.getAllByRole("list")).toHaveLength(1);
     expect(screen.getByText("Revision 7")).toBeInTheDocument();
     expect(screen.getByText("4 nodes")).toBeInTheDocument();
     expect(screen.getByText("3 edges")).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
-    await userEvent.click(screen.getByRole("button", { name: "Run" }));
+    await userEvent.click(screen.getByRole("button", {
+      name: "Edit microscopy-qc with vendored engine",
+    }));
+    await userEvent.click(screen.getByRole("button", {
+      name: "Run microscopy-qc with vendored engine",
+    }));
     expect(onEditPipeline).toHaveBeenCalledWith("microscopy-qc");
     expect(onRunPipeline).toHaveBeenCalledWith("microscopy-qc");
 
@@ -104,8 +121,53 @@ describe("DagWorkflowsPanel", () => {
     });
   });
 
+  it("renders the same cross-engine workflow once when name and structure match", async () => {
+    const graph = createDefaultWorkflowGraph("shared-review", "Shared Review");
+    const selected: dagApi.VersionedDagWorkflowDefinition = {
+      etag: '"1"',
+      definition: {
+        storageVersion: 1,
+        id: "shared-review",
+        revision: 1,
+        createdAt: 1,
+        updatedAt: 1,
+        graphSha256: "shared-sha",
+        graph,
+      },
+    };
+    vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([{
+      id: "shared-review",
+      revision: 1,
+      createdAt: 1,
+      updatedAt: 1,
+      graphSha256: "shared-sha",
+      schemaVersion: graph.schemaVersion,
+      name: "Shared Review",
+      description: graph.description ?? null,
+      nodeCount: graph.nodes.length,
+      edgeCount: graph.edges.length,
+    }]);
+    vi.spyOn(dagApi, "readDagWorkflowDefinition").mockResolvedValue(selected);
+    mockVendoredWorkflows([{
+      name: "  shared   review ",
+      description: "The same workflow in the vendored engine",
+      nodes: graph.nodes.map((node) => ({
+        id: node.id,
+        prompt: "Run workflow.",
+        depends_on: graph.edges.filter((edge) => edge.to === node.id).map((edge) => edge.from),
+      })),
+    }]);
+
+    renderPanel();
+
+    const list = await screen.findByRole("list", { name: "Scientific pipeline workflows" });
+    expect(within(list).getAllByRole("listitem")).toHaveLength(1);
+    expect(within(list).getByText("Typed")).toBeInTheDocument();
+    expect(within(list).getByText("Vendored")).toBeInTheDocument();
+  });
+
   it("routes the selected vendored pipeline directly without invoking typed admission or Builder", async () => {
-    vi.mocked(pipelinesApi.listPipelines).mockResolvedValue([
+    mockVendoredWorkflows([
       { name: "microscopy-qc", description: "Inspect microscopy acquisition quality" },
     ]);
     vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
@@ -130,7 +192,9 @@ describe("DagWorkflowsPanel", () => {
       }),
     });
 
-    await userEvent.click(await screen.findByRole("button", { name: "Run" }));
+    await userEvent.click(await screen.findByRole("button", {
+      name: "Run microscopy-qc with vendored engine",
+    }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     const [url, init] = fetchMock.mock.calls[0];
@@ -148,7 +212,7 @@ describe("DagWorkflowsPanel", () => {
   });
 
   it("blocks vendored pipeline submission when the project budget is exhausted", async () => {
-    vi.mocked(pipelinesApi.listPipelines).mockResolvedValue([
+    mockVendoredWorkflows([
       { name: "microscopy-qc", description: "Inspect microscopy acquisition quality" },
     ]);
     vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
@@ -162,7 +226,9 @@ describe("DagWorkflowsPanel", () => {
     expect(await screen.findByText(
       "Vendored pipeline runs are disabled because the project spend limit is reached.",
     )).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Run" }));
+    await userEvent.click(screen.getByRole("button", {
+      name: "Run microscopy-qc with vendored engine",
+    }));
 
     expect(onRunPipeline).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(
@@ -188,7 +254,7 @@ describe("DagWorkflowsPanel", () => {
     },
     { httpStatus: 200, body: { status: "started" }, detail: "Vendored pipeline response did not confirm acceptance." },
   ])("renders HTTP $httpStatus non-success or unknown shapes as failures", async ({ httpStatus, body, detail }) => {
-    vi.mocked(pipelinesApi.listPipelines).mockResolvedValue([
+    mockVendoredWorkflows([
       { name: "microscopy-qc", description: "Inspect microscopy acquisition quality" },
     ]);
     vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
@@ -210,7 +276,9 @@ describe("DagWorkflowsPanel", () => {
       }),
     });
 
-    await userEvent.click(await screen.findByRole("button", { name: "Run" }));
+    await userEvent.click(await screen.findByRole("button", {
+      name: "Run microscopy-qc with vendored engine",
+    }));
 
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(
       `Run failed: ${detail}`,
@@ -497,7 +565,7 @@ describe("DagWorkflowsPanel", () => {
     vi.spyOn(dagApi, "saveDagWorkflowDefinition").mockResolvedValue(created);
     renderPanel();
 
-    await screen.findByText("No typed workflows yet");
+    await screen.findByText("No workflows yet");
     await userEvent.click(screen.getByRole("button", { name: "New typed workflow" }));
     await userEvent.type(screen.getByLabelText("New workflow id"), "new-research");
     await userEvent.type(screen.getByLabelText("New workflow name"), "New research");
@@ -543,7 +611,7 @@ describe("DagWorkflowsPanel", () => {
     vi.spyOn(dagApi, "saveDagWorkflowDefinition").mockResolvedValue(created);
     renderPanel();
 
-    await screen.findByText("No typed workflows yet");
+    await screen.findByText("No workflows yet");
     await userEvent.click(screen.getByRole("button", { name: "New typed workflow" }));
     await userEvent.selectOptions(
       screen.getByLabelText("Workflow template"),
