@@ -15,6 +15,10 @@ import { stepRetryConfigSchema } from './retry';
 import { loopNodeConfigSchema } from './loop';
 import { workflowNodeHooksSchema } from './hooks';
 import { isValidCommandName } from '../command-validation';
+import {
+  FUSION_TOPOLOGY_KINDS,
+  type FusionTopologyKind,
+} from '../dag-executor-topologies';
 
 // ---------------------------------------------------------------------------
 // TriggerRule
@@ -205,6 +209,13 @@ export const dagNodeBaseSchema = z.object({
 
 export type DagNodeBase = z.infer<typeof dagNodeBaseSchema>;
 
+export const fusionTopologyKindSchema = z.enum(FUSION_TOPOLOGY_KINDS);
+export const fusionTopologyAgentSchema = z.object({
+  id: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/),
+  role: z.string().trim().min(1).max(256),
+  prompt: z.string().trim().min(1).max(8_192).optional(),
+});
+
 // ---------------------------------------------------------------------------
 // Per-variant schemas — exported for type derivation only (use dagNodeSchema for validation)
 // ---------------------------------------------------------------------------
@@ -345,6 +356,25 @@ export type CancelNode = z.infer<typeof cancelNodeSchema> & {
   script?: never;
 };
 
+export const fusionTopologyNodeSchema = dagNodeBaseSchema.extend({
+  kind: fusionTopologyKindSchema,
+  task: z.string().trim().min(1).max(32_768),
+  topology_agents: z.array(fusionTopologyAgentSchema).min(1).max(32),
+  max_rounds: z.number().int().min(1).max(8).optional(),
+});
+
+/** Persisted provider-backed deliberation topology node. */
+export type FusionTopologyDagNode = z.infer<typeof fusionTopologyNodeSchema> & {
+  kind: FusionTopologyKind;
+  command?: never;
+  prompt?: never;
+  bash?: never;
+  loop?: never;
+  approval?: never;
+  cancel?: never;
+  script?: never;
+};
+
 /** A single node in a DAG workflow. command, prompt, bash, loop, approval, cancel, and script are mutually exclusive. */
 export type DagNode =
   | CommandNode
@@ -353,7 +383,8 @@ export type DagNode =
   | LoopNode
   | ApprovalNode
   | CancelNode
-  | ScriptNode;
+  | ScriptNode
+  | FusionTopologyDagNode;
 
 // ---------------------------------------------------------------------------
 // AI-specific fields that are meaningless on non-AI nodes
@@ -427,6 +458,10 @@ export const dagNodeSchema = dagNodeBaseSchema
       })
       .optional(),
     cancel: z.string().optional(),
+    kind: fusionTopologyKindSchema.optional(),
+    task: z.string().trim().min(1).max(32_768).optional(),
+    topology_agents: z.array(fusionTopologyAgentSchema).min(1).max(32).optional(),
+    max_rounds: z.number().int().min(1).max(8).optional(),
     // Script-only
     script: z.string().optional(),
     runtime: z.enum(['bun', 'uv']).optional(),
@@ -454,6 +489,7 @@ export const dagNodeSchema = dagNodeBaseSchema
     const hasApproval = data.approval !== undefined;
     const hasCancel = typeof data.cancel === 'string' && data.cancel.trim().length > 0;
     const hasScript = typeof data.script === 'string' && data.script.trim().length > 0;
+    const hasFusionTopology = data.kind !== undefined;
 
     const modeCount = [
       hasCommand,
@@ -463,13 +499,14 @@ export const dagNodeSchema = dagNodeBaseSchema
       hasApproval,
       hasCancel,
       hasScript,
+      hasFusionTopology,
     ].filter(Boolean).length;
 
     if (modeCount > 1) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message:
-          "'command', 'prompt', 'bash', 'loop', 'approval', 'cancel', and 'script' are mutually exclusive",
+          "'command', 'prompt', 'bash', 'loop', 'approval', 'cancel', 'script', and topology 'kind' are mutually exclusive",
       });
       return z.NEVER;
     }
@@ -501,7 +538,7 @@ export const dagNodeSchema = dagNodeBaseSchema
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message:
-          "must have either 'command', 'prompt', 'bash', 'loop', 'approval', 'cancel', or 'script'",
+          "must have either 'command', 'prompt', 'bash', 'loop', 'approval', 'cancel', 'script', or a topology 'kind'",
       });
       return z.NEVER;
     }
@@ -540,6 +577,35 @@ export const dagNodeSchema = dagNodeBaseSchema
           code: z.ZodIssueCode.custom,
           message: "'timeout' must be a positive number (ms)",
           path: ['timeout'],
+        });
+      }
+    }
+
+    if (hasFusionTopology) {
+      if (!data.task) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "'task' is required for topology nodes",
+          path: ['task'],
+        });
+      }
+      if (!data.topology_agents) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "'topology_agents' is required for topology nodes",
+          path: ['topology_agents'],
+        });
+      } else {
+        const seenAgentIds = new Set<string>();
+        data.topology_agents.forEach((agent, index) => {
+          if (seenAgentIds.has(agent.id)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `topology agent IDs must be unique: '${agent.id}'`,
+              path: ['topology_agents', index, 'id'],
+            });
+          }
+          seenAgentIds.add(agent.id);
         });
       }
     }
@@ -640,6 +706,20 @@ export const dagNodeSchema = dagNodeBaseSchema
     if (data.cancel !== undefined && data.cancel.trim().length > 0) {
       return { ...base, ...shared, cancel: data.cancel.trim() } as CancelNode;
     }
+    if (data.kind !== undefined) {
+      if (!data.task || !data.topology_agents) {
+        throw new Error('unreachable: topology task and agents must be defined');
+      }
+      return {
+        ...base,
+        ...shared,
+        ...aiOnly,
+        kind: data.kind,
+        task: data.task,
+        topology_agents: data.topology_agents,
+        ...(data.max_rounds !== undefined ? { max_rounds: data.max_rounds } : {}),
+      } as FusionTopologyDagNode;
+    }
     // loop — guaranteed by superRefine to be defined at this point
     if (!data.loop) throw new Error('unreachable: loop must be defined after superRefine');
     return { ...base, loop: data.loop } as LoopNode;
@@ -673,6 +753,10 @@ export function isCancelNode(node: DagNode): node is CancelNode {
 /** Type guard: check if a DAG node is a script node */
 export function isScriptNode(node: DagNode): node is ScriptNode {
   return 'script' in node && typeof node.script === 'string';
+}
+
+export function isFusionTopologyNode(node: DagNode): node is FusionTopologyDagNode {
+  return 'kind' in node && (FUSION_TOPOLOGY_KINDS as readonly string[]).includes(node.kind);
 }
 
 /** Type guard: validates a value is a known TriggerRule */

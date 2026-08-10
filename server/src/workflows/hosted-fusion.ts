@@ -23,6 +23,7 @@ import type {
   WorkflowModelResolutionReceipt,
 } from "./run-state.ts";
 import type { ModelRequest, WorkflowNode } from "./schema.ts";
+import { effectiveHostedFusionDefinitionFromFusion } from "./hosted-fusion-definition.ts";
 
 const MAX_HOSTED_FUSION_TEXT_BYTES = 8 * 1024;
 const HOSTED_FUSION_MAX_TOOL_CALLS = 16;
@@ -341,17 +342,32 @@ export function buildHostedFusionConfig(
     configError("Hosted Fusion judge receipts resolved to different models.");
   }
 
+  const effective = effectiveHostedFusionDefinitionFromFusion(
+    fusion,
+    router.reasoning,
+  );
+
   return {
     model: "openrouter/fusion",
     // Workflow "off" is OpenRouter's documented "none" effort. Every other
     // admitted tier is represented verbatim; "max" was rejected above.
-    reasoning_effort: router.reasoning === "off" ? "none" : router.reasoning,
+    reasoning_effort: effective.reasoningEffort === "off"
+      ? "none"
+      : effective.reasoningEffort,
     plugins: [
       {
         id: "fusion",
         preset: "general-high",
-        analysis_models: resolved.members.map((member) => member.receipt.resolved.model),
-        model: resolved.judgeFinal.resolved.model,
+        analysis_models: effective.fusion.members.map((member) => {
+          const request = member.model.requested;
+          if (request.source !== "fixed") return configError(
+            `Hosted Fusion panel member ${member.id} lost its fixed effective model.`,
+          );
+          return request.model;
+        }),
+        model: effective.fusion.judge.requested.source === "fixed"
+          ? effective.fusion.judge.requested.model
+          : configError("Hosted Fusion judge lost its fixed effective model."),
         max_tool_calls: HOSTED_FUSION_MAX_TOOL_CALLS,
       },
     ],

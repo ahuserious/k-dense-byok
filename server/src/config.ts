@@ -53,6 +53,23 @@ export const KADY_SKILLS_CACHE_DIR = path.resolve(
     path.join(os.homedir(), ".kady", "skills-cache"),
 );
 
+/**
+ * Deliberation personalities are not Pi skills. They are fetched from the
+ * scientific-agents profile repository into a server-owned store that is
+ * deliberately outside every project sandbox and the Pi agent directory.
+ */
+export const PERSONALITY_STORE_REPO =
+  process.env.KADY_PERSONALITY_STORE_REPO ?? "ahuserious/scientific-agents";
+/** Administrative source lock. Deliberation remains unavailable until both are pinned. */
+export const PERSONALITY_STORE_COMMIT =
+  process.env.KADY_PERSONALITY_STORE_COMMIT?.trim().toLowerCase() ?? "";
+export const PERSONALITY_STORE_MANIFEST_SHA256 =
+  process.env.KADY_PERSONALITY_STORE_MANIFEST_SHA256?.trim().toLowerCase() ?? "";
+export const KADY_PERSONALITY_STORE_DIR = path.resolve(
+  process.env.KADY_PERSONALITY_STORE_DIR?.trim() ||
+    path.join(os.homedir(), ".kady", "personality-store"),
+);
+
 export const DEFAULT_PROJECT_ID = "default";
 
 /** HTTP port for the backend (matches the old ADK server). */

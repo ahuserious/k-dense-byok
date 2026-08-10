@@ -9517,6 +9517,80 @@ describe('executeDagWorkflow -- completion telemetry', () => {
     );
   });
 
+  it('reconciles aborted topology sibling usage before reporting the failed run', async () => {
+    let active = 0;
+    let started = 0;
+    let abortedSiblings = 0;
+    let terminalUsageUsd = 0;
+    let releaseStarted: (() => void) | undefined;
+    const allStarted = new Promise<void>(resolve => {
+      releaseStarted = resolve;
+    });
+    mockSendQueryDag.mockImplementation(async function* (
+      prompt: string,
+      _cwd: string,
+      _resumeSessionId?: string,
+      options?: { abortSignal?: AbortSignal }
+    ) {
+      const role = prompt.match(/^Agent role: (.+)$/m)?.[1] ?? 'unknown';
+      active += 1;
+      started += 1;
+      if (started === 3) releaseStarted?.();
+      try {
+        await allStarted;
+        if (role === 'Lead scientist') {
+          terminalUsageUsd += 0.2;
+          yield {
+            type: 'result' as const,
+            sessionId: 'session-lead-failed',
+            cost: 0.2,
+            isError: true,
+            errorSubtype: 'provider_error',
+          };
+          return;
+        }
+        const signal = options?.abortSignal;
+        await new Promise<void>(resolve => {
+          if (signal?.aborted) {
+            resolve();
+            return;
+          }
+          signal?.addEventListener('abort', () => resolve(), { once: true });
+        });
+        abortedSiblings += 1;
+        const cost = role === 'Evidence auditor' ? 0.3 : 0.4;
+        terminalUsageUsd += cost;
+        yield { type: 'assistant' as const, content: `${role}: settled` };
+        yield { type: 'result' as const, sessionId: `session-${role}`, cost };
+      } finally {
+        active -= 1;
+      }
+    });
+
+    await runDag({
+      name: 'topology-settlement',
+      nodes: [{
+        id: 'deliberate',
+        kind: 'parallel',
+        task: 'Evaluate the evidence.',
+        topology_agents: [
+          { id: 'alpha', role: 'Lead scientist' },
+          { id: 'beta', role: 'Evidence auditor' },
+          { id: 'gamma', role: 'Adversarial reviewer' },
+        ],
+      }],
+    });
+
+    expect(active).toBe(0);
+    expect(abortedSiblings).toBe(2);
+    expect(terminalUsageUsd).toBeCloseTo(0.9);
+    expect(mockCaptureWorkflowCompleted).toHaveBeenCalledTimes(1);
+    expect(mockCaptureWorkflowCompleted).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: 'failed',
+      costUsd: 0.9,
+    }));
+  });
+
   it('emits outcome=failed exit_reason=node_error when one node completes and another fails', async () => {
     // node2 depends on node1, so order is deterministic: node1 yields assistant
     // text (completes), node2 yields only a result (fails) → 1 completed, 1 failed.

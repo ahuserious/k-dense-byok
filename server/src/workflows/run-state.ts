@@ -19,6 +19,10 @@ import {
 } from "./evidence-policy.ts";
 import { trustedLeanArtifactPaths } from "./lean4-artifacts.ts";
 import { resolveNodeSpecV1 } from "./validate.ts";
+import {
+  effectiveHostedFusionDefinition,
+  type HostedOpenRouterFusionNode,
+} from "./hosted-fusion-definition.ts";
 
 export const WORKFLOW_RUN_STORAGE_VERSION = 1 as const;
 export const WORKFLOW_RUN_EVENT_SCHEMA_VERSION = 1 as const;
@@ -30,6 +34,7 @@ export const WORKFLOW_RUN_EVENT_TYPES = [
   "run_blocked",
   "run_paused",
   "run_resumed",
+  "deliberation_staffing_bound",
   "model_call_declared",
   "model_resolved",
   "node_started",
@@ -138,6 +143,15 @@ export interface WorkflowModelCallSlotState extends WorkflowModelCallSlot {
   receipt?: WorkflowModelResolutionReceipt;
 }
 
+export interface WorkflowDeliberationStaffingReceipt {
+  storeRef: string;
+  source: string;
+  revision: string;
+  storeDigest: string;
+  selectedPersonalityRefs: string[];
+  effectivePromptSha256: string;
+}
+
 export interface WorkflowRunManifestV1 {
   storageVersion: typeof WORKFLOW_RUN_STORAGE_VERSION;
   id: string;
@@ -165,6 +179,7 @@ export interface WorkflowRunEventData {
   modelCallSlot?: WorkflowModelCallSlot;
   modelCallSlotId?: string;
   receipt?: WorkflowModelResolutionReceipt;
+  deliberationStaffingReceipt?: WorkflowDeliberationStaffingReceipt;
   error?: WorkflowRunErrorInfo;
   artifacts?: WorkflowArtifactReference[];
   [key: string]: unknown;
@@ -205,6 +220,7 @@ export interface WorkflowNodeExecutionState {
   branchId?: string;
   modelCallSlots: Record<string, WorkflowModelCallSlotState>;
   modelReceipt?: WorkflowModelResolutionReceipt;
+  deliberationStaffingReceipt?: WorkflowDeliberationStaffingReceipt;
   artifacts: WorkflowArtifactReference[];
   gateDecision?: WorkflowGateDecision;
   evidenceDecision?: WorkflowEvidenceDecision;
@@ -697,6 +713,34 @@ function isModelCallSlot(value: unknown): value is WorkflowModelCallSlot {
   );
 }
 
+function isDeliberationStaffingReceipt(
+  value: unknown,
+): value is WorkflowDeliberationStaffingReceipt {
+  const receipt = recordOf(value);
+  return Boolean(
+    receipt &&
+    hasOnlyKeys(receipt, [
+      "storeRef",
+      "source",
+      "revision",
+      "storeDigest",
+      "selectedPersonalityRefs",
+      "effectivePromptSha256",
+    ]) &&
+    isBoundedText(receipt.storeRef, 256) &&
+    isBoundedText(receipt.source, 512) &&
+    typeof receipt.revision === "string" && /^[a-f0-9]{40}$/.test(receipt.revision) &&
+    typeof receipt.storeDigest === "string" && /^[a-f0-9]{64}$/.test(receipt.storeDigest) &&
+    Array.isArray(receipt.selectedPersonalityRefs) &&
+    receipt.selectedPersonalityRefs.length >= 1 &&
+    receipt.selectedPersonalityRefs.length <= 32 &&
+    receipt.selectedPersonalityRefs.every((ref) => isBoundedText(ref, 256)) &&
+    new Set(receipt.selectedPersonalityRefs).size === receipt.selectedPersonalityRefs.length &&
+    typeof receipt.effectivePromptSha256 === "string" &&
+    /^[a-f0-9]{64}$/.test(receipt.effectivePromptSha256)
+  );
+}
+
 function fixedModelMatches(
   requested: Extract<RequestedModel, { source: "fixed" }>,
   resolved: WorkflowResolvedModel,
@@ -744,11 +788,14 @@ function modelRequestsForNode(
       add(node.chair, false);
       break;
     case "fusion":
-      node.fusion.members.forEach((member) => add(member.model, false));
       if (node.fusion.mode === "openrouter-router") {
-        add(node.fusion.router, false);
-        add(node.fusion.judge, false);
+        const effective = effectiveHostedFusionDefinition(
+          node as HostedOpenRouterFusionNode,
+        ).fusion;
+        effective.members.forEach((member) => requests.push(member.model));
+        requests.push(effective.router, effective.judge);
       } else {
+        node.fusion.members.forEach((member) => add(member.model, false));
         add(node.fusion.synthesizer, false);
       }
       break;
@@ -862,20 +909,14 @@ export function workflowModelCallSlotsForNode(
     }
     case "fusion": {
       if (node.fusion.mode === "openrouter-router") {
-        return withEvidencePolicySlot(graph, node, [
-          ...node.fusion.members.map((member) => ({
-            id: `fusion-panel-${member.id}`,
-            request: resolvedNodeSlotModel(graph, node, member.model, false)!,
-          })),
-          {
-            id: "fusion-judge-deliberation",
-            request: resolvedNodeSlotModel(graph, node, node.fusion.judge, false)!,
-          },
-          {
-            id: "fusion-judge-final",
-            request: resolvedNodeSlotModel(graph, node, node.fusion.judge, false)!,
-          },
-        ]);
+        const effective = effectiveHostedFusionDefinition(
+          node as HostedOpenRouterFusionNode,
+        );
+        return withEvidencePolicySlot(
+          graph,
+          node,
+          effective.slots.map((slot) => structuredClone(slot)),
+        );
       }
       const slots: WorkflowModelCallSlot[] = [];
       for (let round = 1; round <= node.fusion.rounds; round += 1) {
@@ -1036,6 +1077,7 @@ const RUN_EVENT_TYPES = new Set<WorkflowRunEventType>([
 ]);
 
 const NODE_EVENT_TYPES = new Set<WorkflowRunEventType>([
+  "deliberation_staffing_bound",
   "model_call_declared",
   "model_resolved",
   "node_started",
@@ -1136,6 +1178,11 @@ function staticEventContractError(event: WorkflowRunEventV1): string | undefined
           isModelCallSlot(data.modelCallSlot)
         ? undefined
         : "model_call_declared requires one valid model-call slot.";
+    case "deliberation_staffing_bound":
+      return data && hasOnlyKeys(data, ["deliberationStaffingReceipt"]) &&
+          isDeliberationStaffingReceipt(data.deliberationStaffingReceipt)
+        ? undefined
+        : "deliberation_staffing_bound requires one valid immutable staffing receipt.";
     case "model_resolved":
       return data && hasOnlyKeys(data, ["modelCallSlotId", "receipt"]) &&
           isWorkflowModelCallSlotId(data.modelCallSlotId) &&
@@ -1294,6 +1341,7 @@ export function reduceWorkflowRun(
   const rescueFinishedExecutions = new Set<string>();
   const evaluatedGateExecutions = new Set<string>();
   const checkedEvidenceExecutions = new Set<string>();
+  const deliberationReceiptByNode = new Map<string, WorkflowDeliberationStaffingReceipt>();
   const executionStartedSeq = new Map<string, number>();
   const terminalExecutionEvidence = new Map<string, {
     finishedSeq: number;
@@ -1522,6 +1570,34 @@ export function reduceWorkflowRun(
         if (!requireRunStatus(event, ["running", "waiting", "blocked"])) break;
         state.status = "paused";
         break;
+      case "deliberation_staffing_bound": {
+        if (!requireRunStatus(event, ["running"])) break;
+        const execution = executionForEvent(event);
+        const receipt = event.data?.deliberationStaffingReceipt;
+        if (!execution || execution.status !== "running") {
+          if (execution) {
+            fatal(
+              "invalid-deliberation-transition",
+              `deliberation_staffing_bound requires running execution ${event.executionId}.`,
+            );
+          }
+          break;
+        }
+        if (!isDeliberationStaffingReceipt(receipt)) {
+          fatal("invalid-deliberation-receipt", "Deliberation staffing receipt is malformed.");
+          break;
+        }
+        if (deliberationReceiptByNode.has(event.nodeId!)) {
+          fatal(
+            "duplicate-deliberation-receipt",
+            `Node ${event.nodeId} bound deliberation staffing more than once.`,
+          );
+          break;
+        }
+        execution.deliberationStaffingReceipt = structuredClone(receipt);
+        deliberationReceiptByNode.set(event.nodeId!, structuredClone(receipt));
+        break;
+      }
       case "model_call_declared": {
         if (!requireRunStatus(event, ["running"])) break;
         const execution = executionForEvent(event);

@@ -27,6 +27,10 @@ import {
   pendingNodeSpecEnforcements,
   pendingWorkflowSettingsEnforcements,
 } from "./node-spec-enforcement.ts";
+import {
+  effectiveHostedFusionDefinition,
+  type HostedOpenRouterFusionNode,
+} from "./hosted-fusion-definition.ts";
 
 export interface WorkflowValidationIssue {
   code: string;
@@ -617,6 +621,7 @@ function validateNode(
 ): void {
   if (node.limits) validateNodeLimits(node.limits, nodePath, document, issues);
   for (const finding of pendingNodeSpecEnforcements(node.settings)) {
+    if (finding.unit === "S5") continue;
     issues.push({
       code: finding.code,
       path: `${nodePath}/settings/${finding.pathSuffix}`,
@@ -624,6 +629,7 @@ function validateNode(
     });
   }
   for (const finding of pendingNodeKindSpecEnforcements(node)) {
+    if (finding.unit === "S5") continue;
     issues.push({
       code: finding.code,
       path: `${nodePath}/settings/${finding.pathSuffix}`,
@@ -711,6 +717,7 @@ function validateNode(
     });
   }
   validateWorkspacePolicy(node, nodePath, issues);
+  validateDeliberationNodeSpec(node, nodePath, issues);
 
   if (
     node.settings?.reasoningEffort !== undefined &&
@@ -808,8 +815,11 @@ function validateNode(
       break;
     case "fusion":
       if (node.fusion.mode === "openrouter-router") {
+        const fusion = effectiveHostedFusionDefinition(
+          node as HostedOpenRouterFusionNode,
+        ).fusion;
         const router = validateResolvedModel(
-          node.fusion.router,
+          fusion.router,
           `${nodePath}/fusion/router`,
           false,
           false,
@@ -821,9 +831,9 @@ function validateNode(
           true,
           issues,
         );
-        validateUniqueMemberIds(node.fusion.members, `${nodePath}/fusion/members`, issues);
+        validateUniqueMemberIds(fusion.members, `${nodePath}/fusion/members`, issues);
         const participants: Array<{ request: ModelRequest; path: string }> = [];
-        for (const [index, member] of node.fusion.members.entries()) {
+        for (const [index, member] of fusion.members.entries()) {
           const path = `${nodePath}/fusion/members/${index}/model`;
           const request = validateResolvedModel(
             member.model,
@@ -841,7 +851,7 @@ function validateNode(
           );
         }
         const judge = validateResolvedModel(
-          node.fusion.judge,
+          fusion.judge,
           `${nodePath}/fusion/judge`,
           false,
           false,
@@ -975,6 +985,49 @@ function validateNode(
         }
       }
       break;
+  }
+}
+
+function validateDeliberationNodeSpec(
+  node: WorkflowNode,
+  nodePath: string,
+  issues: WorkflowValidationIssue[],
+): void {
+  const deliberation = node.settings?.deliberation;
+  if (!deliberation) return;
+  if (node.kind !== "best-of-n" && node.kind !== "council" && node.kind !== "fusion") {
+    issues.push({
+      code: "deliberation-node-kind-unsupported",
+      path: `${nodePath}/settings/deliberation`,
+      message: "NodeSpec deliberation is executable only on best-of-n, council, and fusion nodes.",
+    });
+    return;
+  }
+  const mode = deliberation.mimeographs?.mode ?? "auto";
+  const refs = deliberation.mimeographs?.personalityRefs ?? [];
+  const count = deliberation.bestOfNPersonalityCount ??
+    DEFAULT_NODE_SPEC_V1.deliberation.bestOfNPersonalityCount;
+  if (new Set(refs).size !== refs.length) {
+    issues.push({
+      code: "duplicate-mimeograph-personality-ref",
+      path: `${nodePath}/settings/deliberation/mimeographs/personalityRefs`,
+      message: "Manual mimeograph personality refs must be unique.",
+    });
+  }
+  if (mode === "auto" && refs.length > 0) {
+    issues.push({
+      code: "auto-mimeographs-with-manual-refs",
+      path: `${nodePath}/settings/deliberation/mimeographs/personalityRefs`,
+      message: "Auto mimeograph staffing selects from the store and cannot also name manual personality refs.",
+    });
+  }
+  if (mode === "manual" && refs.length !== count) {
+    issues.push({
+      code: "manual-mimeograph-count-mismatch",
+      path: `${nodePath}/settings/deliberation/mimeographs/personalityRefs`,
+      message:
+        `Manual mimeograph staffing requires exactly bestOfNPersonalityCount (${count}) personality refs.`,
+    });
   }
 }
 

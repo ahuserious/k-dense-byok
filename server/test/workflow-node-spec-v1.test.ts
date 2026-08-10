@@ -96,10 +96,6 @@ describe("NodeSpec v1 contract", () => {
       skills: { mode: "auto", list: [] },
       subagents: { mode: "auto" },
       autonomy: "strict",
-      deliberation: {
-        bestOfNPersonalityCount: 2,
-        mimeographs: { mode: "auto", personalityRefs: [] },
-      },
       billingMode: "inherit",
       budget: { maxTokens: 2_000, maxCostUsd: 0.5 },
     };
@@ -242,5 +238,83 @@ describe("NodeSpec v1 contract", () => {
       validation.document,
       validation.document.nodes[0],
     )).toEqual([{ id: "agent", request: legacyModel }]);
+  });
+
+  it("accepts and resolves every bound deliberation field on a deliberation node", () => {
+    const document = foundationFixture();
+    document.nodes[0] = {
+      id: "worker",
+      name: "Personality best-of-n",
+      kind: "best-of-n",
+      terminal: true,
+      workspace: { isolation: "read-only", writePaths: [] },
+      goal: "Audit genome variant evidence and uncertainty.",
+      candidateCount: 2,
+      settings: {
+        deliberation: {
+          personalityStoreRef: "scientific-agents/v1",
+          bestOfNPersonalityCount: 2,
+          mimeographs: {
+            mode: "manual",
+            personalityRefs: ["genomics", "statistician"],
+          },
+        },
+      },
+    };
+
+    const validation = validateWorkflowGraphDocument(document);
+    expect(validation).toMatchObject({ ok: true });
+    if (!validation.ok) return;
+    expect(resolveNodeSpecV1(
+      validation.document,
+      validation.document.nodes[0],
+    ).deliberation).toEqual({
+      personalityStoreRef: "scientific-agents/v1",
+      bestOfNPersonalityCount: 2,
+      mimeographs: {
+        mode: "manual",
+        personalityRefs: ["genomics", "statistician"],
+      },
+    });
+  });
+
+  it("enforces manual and auto mimeograph staffing semantics during validation", () => {
+    const manualMismatch = foundationFixture();
+    manualMismatch.nodes[0] = {
+      id: "worker",
+      name: "Manual mismatch",
+      kind: "best-of-n",
+      terminal: true,
+      workspace: { isolation: "read-only", writePaths: [] },
+      goal: "Audit evidence.",
+      candidateCount: 2,
+      settings: {
+        deliberation: {
+          bestOfNPersonalityCount: 2,
+          mimeographs: { mode: "manual", personalityRefs: ["statistician"] },
+        },
+      },
+    };
+    const mismatch = validateWorkflowGraphDocument(manualMismatch);
+    expect(mismatch).toMatchObject({ ok: false });
+    if (!mismatch.ok) {
+      expect(mismatch.issues).toContainEqual(expect.objectContaining({
+        code: "manual-mimeograph-count-mismatch",
+        path: "/nodes/0/settings/deliberation/mimeographs/personalityRefs",
+      }));
+    }
+
+    const autoWithRefs = structuredClone(manualMismatch);
+    autoWithRefs.nodes[0].settings!.deliberation!.mimeographs = {
+      mode: "auto",
+      personalityRefs: ["statistician"],
+    };
+    const auto = validateWorkflowGraphDocument(autoWithRefs);
+    expect(auto).toMatchObject({ ok: false });
+    if (!auto.ok) {
+      expect(auto.issues).toContainEqual(expect.objectContaining({
+        code: "auto-mimeographs-with-manual-refs",
+      }));
+    }
   });
 });
