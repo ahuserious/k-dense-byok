@@ -1,4 +1,9 @@
+import fs from "node:fs";
+import path from "node:path";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { validateScientificWorkflowTemplatePreconditions } from "../../../web/src/data/dag-workflow-templates/types.ts";
+import { resolvePaths } from "../projects.ts";
+import { apiRelative } from "../sandbox-fs.ts";
 import { currentProjectId } from "../scope.ts";
 import {
   WorkflowBudgetError,
@@ -29,6 +34,34 @@ const IMPORT_REASONING_LEVELS = new Set([
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function observedUploadFiles(uploadRoot: string): string[] {
+  let rootStat: fs.Stats;
+  try {
+    rootStat = fs.lstatSync(uploadRoot);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) return [];
+
+  const files: string[] = [];
+  const walk = (directory: string): void => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const absolutePath = path.join(directory, entry.name);
+      const stat = fs.lstatSync(absolutePath);
+      if (stat.isSymbolicLink()) continue;
+      if (stat.isDirectory()) {
+        walk(absolutePath);
+      } else if (stat.isFile()) {
+        const relativePath = apiRelative(uploadRoot, absolutePath);
+        files.push(`user_data/${relativePath}`);
+      }
+    }
+  };
+  walk(uploadRoot);
+  return files.sort();
 }
 
 function workflowDefinitionSummary(definition: StoredWorkflowDefinitionV1) {
@@ -340,7 +373,40 @@ export async function registerDagWorkflowRoutes(
       if (body.input !== undefined && !isRecord(body.input)) {
         throw new WorkflowStoreError("INVALID_DEFINITION", "input must be an object.");
       }
-      const manifest = workflowStore.createRun(currentProjectId(), {
+      const projectId = currentProjectId();
+      const definition = workflowStore.readDefinition(
+        projectId,
+        request.params.workflowId,
+      );
+      if (!definition) {
+        throw new WorkflowStoreError(
+          "NOT_FOUND",
+          `Workflow ${request.params.workflowId} was not found.`,
+        );
+      }
+      const runInput = body.input as
+        | { goal?: unknown; variables?: Readonly<Record<string, unknown>> }
+        | undefined;
+      if (definition.graph.preconditions) {
+        const issues = validateScientificWorkflowTemplatePreconditions(
+          definition.graph.preconditions,
+          {
+            goal: runInput?.goal,
+            variables: runInput?.variables,
+            files: observedUploadFiles(resolvePaths(projectId).uploadDir),
+            capabilities: ["prompt-analysis", "read-uploaded-files"],
+          },
+        );
+        if (issues.length > 0) {
+          reply.code(422);
+          return {
+            code: "WORKFLOW_PRECONDITION_FAILED",
+            detail: `Workflow preconditions failed (${issues.length} issue${issues.length === 1 ? "" : "s"}).`,
+            issues: issues.slice(0, 256),
+          };
+        }
+      }
+      const manifest = workflowStore.createRun(projectId, {
         workflowId: request.params.workflowId,
         requestId: body.requestId,
         requestedBy: "user",
@@ -357,10 +423,10 @@ export async function registerDagWorkflowRoutes(
             }
           : {}),
       });
-      const run = workflowStore.readRun(currentProjectId(), manifest.id);
+      const run = workflowStore.readRun(projectId, manifest.id);
       if (!run) throw new WorkflowStoreError("CORRUPT", "Created run is unreadable.");
-      options.controller?.start(currentProjectId(), manifest.id);
-      const scheduled = workflowStore.readRun(currentProjectId(), manifest.id) ?? run;
+      options.controller?.start(projectId, manifest.id);
+      const scheduled = workflowStore.readRun(projectId, manifest.id) ?? run;
       reply.code(202);
       reply.header("Cache-Control", "no-store");
       reply.header("Location", `/dag-workflow-runs/${encodeURIComponent(manifest.id)}`);

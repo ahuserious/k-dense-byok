@@ -498,7 +498,8 @@ async function dispatchOrchestratorWorkflow(
    * report their real name, custom ones report "custom"). Optional: callers
    * that don't have it readily in scope omit it and the run reports "custom".
    */
-  source?: WorkflowSource
+  source?: WorkflowSource,
+  runMetadata?: Record<string, unknown>
 ): Promise<void> {
   // Capability gate: hard-fail before any worktree/clone/AI cost if the
   // workflow declares `requires: [github]` and the originating user hasn't
@@ -571,11 +572,13 @@ async function dispatchOrchestratorWorkflow(
   // is in a resumable state (paused/failed-by-approval) in this conversation+codebase
   // before dispatching fresh. This ensures chat platforms (slack, discord,
   // github) resume after approval gates just like web does.
-  const resumableRun = await workflowDb.findResumableRunByParentConversation(
-    workflow.name,
-    conversation.id,
-    codebase.id
-  );
+  const resumableRun = runMetadata
+    ? null
+    : await workflowDb.findResumableRunByParentConversation(
+        workflow.name,
+        conversation.id,
+        codebase.id
+      );
   if (resumableRun?.working_path) {
     getLog().info(
       {
@@ -628,6 +631,7 @@ async function dispatchOrchestratorWorkflow(
           parentConversationId: conversation.id,
           userId,
           source,
+          runMetadata,
           ...prepared,
         }
       );
@@ -649,6 +653,7 @@ async function dispatchOrchestratorWorkflow(
           parentConversationId: conversation.id,
           userId,
           source,
+          runMetadata,
         }
       );
     }
@@ -666,6 +671,7 @@ async function dispatchOrchestratorWorkflow(
         isolationHints,
         userId,
         source,
+        runMetadata,
       },
       workflow
     );
@@ -684,6 +690,7 @@ async function dispatchOrchestratorWorkflow(
         parentConversationId: conversation.id,
         userId,
         source,
+        runMetadata,
       }
     );
   }
@@ -872,6 +879,7 @@ export async function handleMessage(
     isolationHints,
     attachedFiles,
     userId,
+    workflowOverride,
   } = context ?? {};
   try {
     getLog().debug({ conversationId, userId }, 'orchestrator_message_received');
@@ -1037,6 +1045,30 @@ export async function handleMessage(
       ];
 
       if (deterministicCommands.includes(command)) {
+        if (command === 'workflow' && workflowOverride) {
+          const codebase = await codebaseDb.getCodebase(workflowOverride.codebaseId);
+          if (!codebase) {
+            await platform.sendMessage(conversationId, 'Codebase not found.');
+            return;
+          }
+          await platform.sendMessage(
+            conversationId,
+            `Starting workflow: \`${workflowOverride.definition.name}\``
+          );
+          await dispatchOrchestratorWorkflow(
+            platform,
+            conversationId,
+            conversation,
+            codebase,
+            workflowOverride.definition,
+            workflowOverride.args,
+            isolationHints,
+            userId,
+            workflowOverride.source,
+            workflowOverride.runMetadata
+          );
+          return;
+        }
         if (command === 'register-project') {
           getLog().debug({ command, conversationId }, 'deterministic_command');
           const result = await handleRegisterProject(message, platform, conversationId);

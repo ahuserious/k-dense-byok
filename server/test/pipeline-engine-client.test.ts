@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  getWorkflow,
   listWorkflows,
   PIPELINE_ENGINE_LIST_TIMEOUT_MS,
   PipelineEngineRequestAbortedError,
   PipelineEngineTimeoutError,
+  runWorkflow,
+  saveWorkflow,
 } from "../src/agent/pipeline-engine/client.ts";
 
 function installStalledSidecarFetch(): {
@@ -33,6 +36,54 @@ afterEach(() => {
 });
 
 describe("pipeline engine workflow-list cancellation", () => {
+  it("keeps different Kady project workflow lists isolated by cwd and codebase id", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(
+      new Response(JSON.stringify({ workflows: [] }), { status: 200 }),
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await listWorkflows({ cwd: "/projects/a/sandbox", codebaseId: "codebase-a" });
+    await listWorkflows({ cwd: "/projects/b/sandbox", codebaseId: "codebase-b" });
+
+    const urls = fetchMock.mock.calls.map(([url]) => new URL(String(url)));
+    expect(urls.map((url) => Object.fromEntries(url.searchParams))).toEqual([
+      { cwd: "/projects/a/sandbox", codebaseId: "codebase-a" },
+      { cwd: "/projects/b/sandbox", codebaseId: "codebase-b" },
+    ]);
+  });
+
+  it("round-trips a stable workflow id and project scope through get, edit, and run", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(
+      new Response(JSON.stringify({ accepted: true, status: "queued" }), { status: 200 }),
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+    const workflowId = "workflow_11111111111111111111111111111111";
+    const scope = { cwd: "/projects/a/sandbox", codebaseId: "codebase-a" };
+
+    await getWorkflow(workflowId, scope);
+    await saveWorkflow(workflowId, { definition: { name: "Edited workflow" } }, scope);
+    await runWorkflow(workflowId, { conversationId: "conversation-a", message: "Run" }, scope);
+
+    const getUrl = new URL(String(fetchMock.mock.calls[0]?.[0]));
+    const editUrl = new URL(String(fetchMock.mock.calls[1]?.[0]));
+    const runUrl = new URL(String(fetchMock.mock.calls[2]?.[0]));
+    expect(getUrl.pathname).toBe(`/api/workflows/${workflowId}`);
+    expect(editUrl.pathname).toBe(`/api/workflows/${workflowId}`);
+    expect(runUrl.pathname).toBe(`/api/workflows/${workflowId}/run`);
+    expect(Object.fromEntries(getUrl.searchParams)).toEqual(scope);
+    expect(Object.fromEntries(editUrl.searchParams)).toEqual(scope);
+    expect(Object.fromEntries(runUrl.searchParams)).toEqual(scope);
+    expect(fetchMock.mock.calls[1]?.[1]?.method).toBe("PUT");
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
+      definition: { name: "Edited workflow" },
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toMatchObject({
+      workflowId,
+      cwd: scope.cwd,
+      codebaseId: scope.codebaseId,
+    });
+  });
+
   it("aborts a stalled sidecar fetch at the client-owned timeout", async () => {
     vi.useFakeTimers();
     const { fetchMock, observed } = installStalledSidecarFetch();

@@ -50,6 +50,7 @@
   "RescuePolicySchema",
   "ResearchUntilGoalNodeSchema",
   "RunStateV1Schema",
+  "ScientificWorkflowPreconditionsSchema",
   "WORKFLOW_BEHAVIOR_CAPABILITIES",
   "WORKFLOW_BEHAVIOR_REGISTRY_VERSION",
   "WORKFLOW_BUDGET_SETTLEMENT_GRACE_MS",

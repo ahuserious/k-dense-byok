@@ -670,6 +670,66 @@ type NodeExecutionResult = NodeOutput & {
   loopIterations?: number;
 };
 
+function kadyCompletionMetadata(
+  workflowRun: WorkflowRun,
+  nodeOutputs: ReadonlyMap<string, NodeExecutionResult>
+): Record<string, unknown> | undefined {
+  const projectId = workflowRun.metadata.kadyProjectId;
+  const engineAdmissionKey = workflowRun.metadata.kadyEngineAdmissionKey;
+  const admittedNodeIds = workflowRun.metadata.kadyAdmittedModelNodeIds;
+  if (
+    typeof projectId !== 'string' ||
+    typeof engineAdmissionKey !== 'string' ||
+    !Array.isArray(admittedNodeIds) ||
+    admittedNodeIds.some(nodeId => typeof nodeId !== 'string')
+  ) {
+    return undefined;
+  }
+  const nodeIds = [...new Set(admittedNodeIds as string[])];
+  if (nodeIds.length !== admittedNodeIds.length) return undefined;
+  const usageByNode: Record<
+    string,
+    { costUsd: number; tokensIn: number; tokensOut: number }
+  > = {};
+  for (const nodeId of nodeIds) {
+    const output = nodeOutputs.get(nodeId);
+    if (!output || !['completed', 'failed', 'skipped'].includes(output.state)) return undefined;
+    if (output.state === 'skipped') {
+      usageByNode[nodeId] = { costUsd: 0, tokensIn: 0, tokensOut: 0 };
+      continue;
+    }
+    const costUsd = output.costUsd ?? 0;
+    const tokensIn = output.tokens?.input;
+    const tokensOut = output.tokens?.output;
+    if (
+      !Number.isFinite(costUsd) ||
+      costUsd < 0 ||
+      typeof tokensIn !== 'number' ||
+      !Number.isSafeInteger(tokensIn) ||
+      tokensIn < 0 ||
+      typeof tokensOut !== 'number' ||
+      !Number.isSafeInteger(tokensOut) ||
+      tokensOut < 0
+    ) {
+      return undefined;
+    }
+    usageByNode[nodeId] = {
+      costUsd,
+      tokensIn,
+      tokensOut,
+    };
+  }
+  return {
+    kady_completion_watermark: {
+      version: 1,
+      projectId,
+      engineAdmissionKey,
+      nodeIds,
+      usageByNode,
+    },
+  };
+}
+
 /** Throttle state for cancel checks (reads — no write contention in WAL mode) */
 const lastNodeCancelCheck = new Map<string, number>();
 const CANCEL_CHECK_INTERVAL_MS = 10_000;
@@ -4189,7 +4249,11 @@ export async function executeDagWorkflow(
     });
     // Note: nodeCounts not stored for failed runs — failWorkflowRun only stores { error }.
     // Frontend guards with isValidNodeCounts so missing node_counts is safe.
-    await deps.store.failWorkflowRun(workflowRun.id, failMsg).catch((dbErr: Error) => {
+    const completionMetadata = kadyCompletionMetadata(workflowRun, nodeOutputs);
+    const failRun = completionMetadata
+      ? deps.store.failWorkflowRun(workflowRun.id, failMsg, completionMetadata)
+      : deps.store.failWorkflowRun(workflowRun.id, failMsg);
+    await failRun.catch((dbErr: Error) => {
       getLog().error({ err: dbErr, workflowRunId: workflowRun.id }, 'dag_db_fail_failed');
     });
     await logWorkflowError(logDir, workflowRun.id, failMsg).catch((logErr: Error) => {
@@ -4235,7 +4299,11 @@ export async function executeDagWorkflow(
       ...failureTaxonomy,
       ...runUsageProps,
     });
-    await deps.store.failWorkflowRun(workflowRun.id, failMsg).catch((dbErr: Error) => {
+    const completionMetadata = kadyCompletionMetadata(workflowRun, nodeOutputs);
+    const failRun = completionMetadata
+      ? deps.store.failWorkflowRun(workflowRun.id, failMsg, completionMetadata)
+      : deps.store.failWorkflowRun(workflowRun.id, failMsg);
+    await failRun.catch((dbErr: Error) => {
       getLog().error({ err: dbErr, workflowRunId: workflowRun.id }, 'dag_db_fail_failed');
     });
     await logWorkflowError(logDir, workflowRun.id, failMsg).catch((logErr: Error) => {
@@ -4268,6 +4336,7 @@ export async function executeDagWorkflow(
       node_counts: nodeCounts,
       // totalCostUsd starts at 0; only write metadata when at least one node reported cost
       ...(totalCostUsd > 0 ? { total_cost_usd: totalCostUsd } : {}),
+      ...kadyCompletionMetadata(workflowRun, nodeOutputs),
     });
   } catch (dbErr) {
     getLog().error(

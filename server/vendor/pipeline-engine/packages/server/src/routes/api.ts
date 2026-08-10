@@ -14,8 +14,8 @@ import {
 } from '../trusted-proxy-header';
 import { rm, readFile, writeFile, unlink, mkdir, readdir, stat } from 'fs/promises';
 import { readFileSync } from 'fs';
-import { normalize, join, sep, basename } from 'path';
-import { randomUUID } from 'crypto';
+import { normalize, join, sep, basename, dirname } from 'path';
+import { createHash, randomUUID } from 'crypto';
 import type { Context } from 'hono';
 import type {
   ConversationLockManager,
@@ -90,6 +90,11 @@ import {
   TERMINAL_WORKFLOW_STATUSES,
 } from '@archon/workflows/schemas/workflow-run';
 import type { ApprovalContext, WorkflowRun } from '@archon/workflows/schemas/workflow-run';
+import type {
+  WorkflowDefinition,
+  WorkflowSource,
+  WorkflowWithSource,
+} from '@archon/workflows/schemas/workflow';
 import type { MessageRow } from '@archon/core/schemas/message';
 import type { DashboardWorkflowRun } from '@archon/core/schemas/workflow-run';
 import { findMarkdownFilesRecursive } from '@archon/core/utils/commands';
@@ -102,6 +107,120 @@ function getLog(): ReturnType<typeof createLogger> {
 }
 
 let legacyWebIdentityHeaderWarningLogged = false;
+
+const STABLE_WORKFLOW_ID_PATTERN = /^workflow_[a-f0-9]{32}$/;
+
+function stableWorkflowId(source: WorkflowSource, filename: string): string {
+  const digest = createHash('sha256')
+    .update(`${source}\0${filename}`)
+    .digest('hex')
+    .slice(0, 32);
+  return `workflow_${digest}`;
+}
+
+function canonicalWorkflowJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalWorkflowJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map(key => `${JSON.stringify(key)}:${canonicalWorkflowJson(record[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function workflowRevisionDigest(workflow: WorkflowDefinition): string {
+  return createHash('sha256').update(canonicalWorkflowJson(workflow)).digest('hex');
+}
+
+function admittedModelNodeIds(workflow: WorkflowDefinition): string[] {
+  return workflow.nodes
+    .filter(node => 'command' in node || 'prompt' in node || 'loop' in node)
+    .map(node => node.id);
+}
+
+interface KadyRunAdmission {
+  readonly metadata: Record<string, unknown>;
+}
+
+function validateKadyRunAdmission(
+  body: Record<string, unknown>,
+  workflow: WorkflowDefinition
+): KadyRunAdmission | { error: string } | undefined {
+  const fieldNames = [
+    'kadyProjectId',
+    'kadyAdmissionId',
+    'kadyEngineAdmissionKey',
+    'idempotencyKey',
+    'workflowRevisionSha256',
+    'metadata',
+  ] as const;
+  const present = fieldNames.filter(field => body[field] !== undefined);
+  if (present.length === 0) return undefined;
+  if (present.length !== fieldNames.length) {
+    return { error: `Kady admission requires all fields: ${fieldNames.join(', ')}` };
+  }
+  const [projectId, admissionId, engineAdmissionKey, idempotencyKey, revision] = [
+    body.kadyProjectId,
+    body.kadyAdmissionId,
+    body.kadyEngineAdmissionKey,
+    body.idempotencyKey,
+    body.workflowRevisionSha256,
+  ];
+  if (
+    typeof projectId !== 'string' ||
+    projectId.length < 1 ||
+    projectId.length > 128 ||
+    typeof admissionId !== 'string' ||
+    admissionId.length < 1 ||
+    admissionId.length > 256 ||
+    typeof engineAdmissionKey !== 'string' ||
+    typeof idempotencyKey !== 'string' ||
+    typeof revision !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(revision)
+  ) {
+    return { error: 'Invalid Kady admission field shape' };
+  }
+  if (idempotencyKey !== engineAdmissionKey) {
+    return { error: 'idempotencyKey must equal kadyEngineAdmissionKey' };
+  }
+  const expectedKey = `kadypipe_${createHash('sha256')
+    .update(`${projectId}\0${admissionId}`)
+    .digest('hex')
+    .slice(0, 32)}`;
+  if (engineAdmissionKey !== expectedKey) {
+    return { error: 'kadyEngineAdmissionKey does not match the scoped admission key' };
+  }
+  const actualRevision = workflowRevisionDigest(workflow);
+  if (revision !== actualRevision) {
+    return { error: 'workflowRevisionSha256 does not match the selected workflow revision' };
+  }
+  if (body.metadata === null || typeof body.metadata !== 'object' || Array.isArray(body.metadata)) {
+    return { error: 'metadata must be an object' };
+  }
+  const metadata = body.metadata as Record<string, unknown>;
+  return {
+    metadata: {
+      ...metadata,
+      kadyProjectId: projectId,
+      kadyAdmissionId: admissionId,
+      kadyEngineAdmissionKey: engineAdmissionKey,
+      kadyWorkflowRevisionSha256: revision,
+      workflowRevisionSha256: revision,
+      kadyAdmittedModelNodeIds: admittedModelNodeIds(workflow),
+    },
+  };
+}
+
+class WorkflowRouteResolutionError extends Error {
+  constructor(
+    readonly status: 400 | 404,
+    message: string
+  ) {
+    super(message);
+  }
+}
 
 export function resetLegacyWebIdentityHeaderWarningForTests(): void {
   legacyWebIdentityHeaderWarningLogged = false;
@@ -238,8 +357,6 @@ if (BUNDLED_IS_BINARY) {
   }
 }
 
-type WorkflowSource = 'project' | 'bundled' | 'global';
-
 // =========================================================================
 // OpenAPI route configs (module-scope — pure config, no runtime dependencies)
 // =========================================================================
@@ -252,7 +369,10 @@ function jsonError(description: string): {
   return { content: { 'application/json': { schema: errorSchema } }, description };
 }
 
-const cwdQuerySchema = z.object({ cwd: z.string().optional() });
+const cwdQuerySchema = z.object({
+  cwd: z.string().optional(),
+  codebaseId: z.string().optional(),
+});
 const workflowTargetQuerySchema = cwdQuerySchema.extend({
   source: z.enum(['project', 'global']).optional(),
 });
@@ -661,11 +781,14 @@ const runWorkflowRoute = createRoute({
   tags: ['Workflows'],
   summary: 'Run a workflow via the orchestrator (JSON or multipart with file uploads)',
   description:
-    'Accepts `application/json` with `{ conversationId, message }` or ' +
+    'Accepts `application/json` with `{ conversationId, message }` plus the optional ' +
+    'all-or-none Kady admission fields `kadyProjectId`, `kadyAdmissionId`, ' +
+    '`kadyEngineAdmissionKey`, `idempotencyKey`, `workflowRevisionSha256`, and `metadata`; or ' +
     '`multipart/form-data` with `conversationId`, `message`, and optional file ' +
     'attachments (max 5 files, 10 MB each).',
   request: {
     params: z.object({ name: z.string() }),
+    query: cwdQuerySchema,
   },
   responses: {
     200: {
@@ -742,6 +865,7 @@ const listWorkflowRunsRoute = createRoute({
       content: { 'application/json': { schema: workflowRunListResponseSchema } },
       description: 'OK',
     },
+    400: jsonError('Bad request'),
     500: jsonError('Server error'),
   },
 });
@@ -1368,6 +1492,64 @@ export function registerApiRoutes(
       const base = normalize(cb.default_cwd);
       return normalizedCwd === base || normalizedCwd.startsWith(base + sep);
     });
+  }
+
+  async function resolveWorkflowWorkingDir(c: Context): Promise<{
+    workingDir: string | undefined;
+    codebaseId: string | undefined;
+  }> {
+    const cwd = c.req.query('cwd');
+    const codebaseId = c.req.query('codebaseId');
+    if (codebaseId) {
+      const codebase = await codebaseDb.getCodebase(codebaseId);
+      if (!codebase) {
+        throw new WorkflowRouteResolutionError(404, 'Codebase not found');
+      }
+      if (cwd && normalize(cwd) !== normalize(codebase.default_cwd)) {
+        throw new WorkflowRouteResolutionError(
+          400,
+          'cwd does not match the supplied codebaseId'
+        );
+      }
+      return { workingDir: cwd ?? codebase.default_cwd, codebaseId };
+    }
+    if (cwd) {
+      if (!(await validateCwd(cwd))) {
+        throw new WorkflowRouteResolutionError(
+          400,
+          'Invalid cwd: must match a registered codebase path'
+        );
+      }
+      const codebase = await codebaseDb.findCodebaseByDefaultCwd(normalize(cwd));
+      return { workingDir: cwd, codebaseId: codebase?.id };
+    }
+    const codebases = await codebaseDb.listCodebases();
+    return {
+      workingDir: codebases[0]?.default_cwd,
+      codebaseId: codebases[0]?.id,
+    };
+  }
+
+  async function resolveWorkflowEntry(
+    identifier: string,
+    workingDir: string | undefined
+  ): Promise<WorkflowWithSource | undefined> {
+    const discovery = await discoverWorkflowsWithConfig(workingDir ?? null, loadConfig);
+    if (STABLE_WORKFLOW_ID_PATTERN.test(identifier)) {
+      return discovery.workflows.find(
+        entry => stableWorkflowId(entry.source, entry.filename) === identifier
+      );
+    }
+    const nameMatches = discovery.workflows.filter(
+      entry => entry.workflow.name === identifier
+    );
+    if (nameMatches.length > 1) {
+      throw new WorkflowRouteResolutionError(
+        400,
+        `Workflow name is ambiguous: ${identifier}; use the stable workflowId from GET /api/workflows`
+      );
+    }
+    return nameMatches[0];
   }
 
   // CORS for Web UI — allow-all is fine for a single-developer tool.
@@ -2976,21 +3158,7 @@ export function registerApiRoutes(
   // GET /api/workflows - Discover available workflows
   registerOpenApiRoute(getWorkflowsRoute, async c => {
     try {
-      const cwd = c.req.query('cwd');
-      let workingDir: string | undefined = cwd;
-
-      // Validate caller-supplied cwd against registered codebase paths
-      if (cwd) {
-        if (!(await validateCwd(cwd))) {
-          return apiError(c, 400, 'Invalid cwd: must match a registered codebase path');
-        }
-      } else {
-        // Fallback to first codebase's default_cwd
-        const codebases = await codebaseDb.listCodebases();
-        if (codebases.length > 0) {
-          workingDir = codebases[0].default_cwd;
-        }
-      }
+      const { workingDir } = await resolveWorkflowWorkingDir(c);
 
       // No project context (no cwd query param and no registered codebases) —
       // pass null to discovery so it returns bundled + home-scoped workflows.
@@ -3020,11 +3188,19 @@ export function registerApiRoutes(
       }
 
       return c.json({
-        workflows: result.workflows.map(ws => ({ workflow: ws.workflow, source: ws.source })),
+        workflows: result.workflows.map(ws => ({
+          workflow: ws.workflow,
+          source: ws.source,
+          filename: ws.filename,
+          workflowId: stableWorkflowId(ws.source, ws.filename),
+        })),
         recommended,
         errors: result.errors.length > 0 ? result.errors : undefined,
       });
     } catch (error) {
+      if (error instanceof WorkflowRouteResolutionError) {
+        return apiError(c, error.status, error.message);
+      }
       // Workflow discovery can fail if cwd is stale or deleted — return empty with warning
       const err = error instanceof Error ? error : new Error(String(error));
       getLog().error({ err }, 'workflow_discovery_failed');
@@ -3042,14 +3218,35 @@ export function registerApiRoutes(
   // run input can attach screenshots / stack traces / paste-blobs the same
   // way a freeform chat message can.
   registerOpenApiRoute(runWorkflowRoute, async c => {
-    const workflowName = c.req.param('name') ?? '';
+    const workflowIdentifier = c.req.param('name') ?? '';
     const userId = await resolveWebUserId(c);
-    if (!isValidCommandName(workflowName)) {
-      return apiError(c, 400, 'Invalid workflow name');
+    if (
+      !isValidCommandName(workflowIdentifier) &&
+      !STABLE_WORKFLOW_ID_PATTERN.test(workflowIdentifier)
+    ) {
+      return apiError(c, 400, 'Invalid workflow identifier');
     }
+
+    let workflowEntry: WorkflowWithSource | undefined;
+    let scopedCodebaseId: string | undefined;
+    try {
+      const scope = await resolveWorkflowWorkingDir(c);
+      scopedCodebaseId = scope.codebaseId;
+      workflowEntry = await resolveWorkflowEntry(workflowIdentifier, scope.workingDir);
+      if (!workflowEntry) {
+        return apiError(c, 404, `Workflow not found: ${workflowIdentifier}`);
+      }
+    } catch (error) {
+      if (error instanceof WorkflowRouteResolutionError) {
+        return apiError(c, error.status, error.message);
+      }
+      throw error;
+    }
+    const workflowName = workflowEntry.workflow.name;
 
     let message: string;
     let conversationId: string;
+    let runMetadata: Record<string, unknown> | undefined;
     let savedFiles: AttachedFile[] = [];
     let uploadDir = '';
 
@@ -3096,7 +3293,7 @@ export function registerApiRoutes(
         );
       }
     } else {
-      let body: { conversationId?: unknown; message?: unknown };
+      let body: Record<string, unknown>;
       try {
         body = await c.req.json();
       } catch (parseErr: unknown) {
@@ -3111,6 +3308,11 @@ export function registerApiRoutes(
       }
       conversationId = body.conversationId;
       message = body.message;
+      const admission = validateKadyRunAdmission(body, workflowEntry.workflow);
+      if (admission && 'error' in admission) {
+        return apiError(c, 400, admission.error);
+      }
+      runMetadata = admission?.metadata;
     }
 
     try {
@@ -3152,8 +3354,21 @@ export function registerApiRoutes(
       }
 
       const fullMessage = `/workflow run ${workflowName} ${message}`;
-      const extraContext: Omit<HandleMessageContext, 'isolationHints'> =
-        savedFiles.length > 0 ? { userId, attachedFiles: savedFiles } : { userId };
+      const extraContext: Omit<HandleMessageContext, 'isolationHints'> = {
+        userId,
+        ...(savedFiles.length > 0 ? { attachedFiles: savedFiles } : {}),
+        ...(scopedCodebaseId
+          ? {
+              workflowOverride: {
+                definition: workflowEntry.workflow,
+                codebaseId: scopedCodebaseId,
+                args: message,
+                source: workflowEntry.source,
+                runMetadata,
+              },
+            }
+          : {}),
+      };
       const filesToCleanup = savedFiles.length > 0 ? { files: savedFiles, uploadDir } : undefined;
       const result = await dispatchToOrchestrator(
         conversationId,
@@ -3543,6 +3758,14 @@ export function registerApiRoutes(
           ? (rawStatus as WorkflowRunStatus)
           : undefined;
       const codebaseId = c.req.query('codebaseId') ?? undefined;
+      const projectId = c.req.query('projectId') ?? undefined;
+      const admissionId = c.req.query('admissionId') ?? undefined;
+      if ((projectId === undefined) !== (admissionId === undefined)) {
+        return apiError(c, 400, 'projectId and admissionId must be supplied together');
+      }
+      if (projectId === '' || admissionId === '') {
+        return apiError(c, 400, 'projectId and admissionId must be non-empty');
+      }
       const limitRaw = Number(c.req.query('limit'));
       const limit = Number.isNaN(limitRaw) ? 50 : Math.min(Math.max(1, limitRaw), 200);
       // Non-enforcing "mine" filter: only narrows when an identity resolves.
@@ -3556,8 +3779,15 @@ export function registerApiRoutes(
         limit,
         codebaseId,
         userId,
+        kadyProjectId: projectId,
+        kadyAdmissionId: admissionId,
       });
-      return c.json({ runs: runs.map(toApiWorkflowRun) });
+      return c.json({
+        runs: runs.map(toApiWorkflowRun),
+        ...(projectId && admissionId
+          ? { admissionQuery: { projectId, admissionId, authoritative: true as const } }
+          : {}),
+      });
     } catch (error) {
       getLog().error({ err: error }, 'list_workflow_runs_failed');
       return apiError(c, 500, 'Failed to list workflow runs');
@@ -3658,115 +3888,36 @@ export function registerApiRoutes(
 
   // GET /api/workflows/:name - Fetch a single workflow definition
   registerOpenApiRoute(getWorkflowRoute, async c => {
-    const name = c.req.param('name') ?? '';
-    if (!isValidCommandName(name)) {
-      return apiError(c, 400, 'Invalid workflow name');
+    const identifier = c.req.param('name') ?? '';
+    if (!isValidCommandName(identifier) && !STABLE_WORKFLOW_ID_PATTERN.test(identifier)) {
+      return apiError(c, 400, 'Invalid workflow identifier');
     }
 
     try {
-      const cwd = c.req.query('cwd');
-      let workingDir = cwd;
-      if (cwd) {
-        if (!(await validateCwd(cwd))) {
-          return apiError(c, 400, 'Invalid cwd: must match a registered codebase path');
-        }
-      } else {
-        const codebases = await codebaseDb.listCodebases();
-        if (codebases.length > 0) workingDir = codebases[0].default_cwd;
-      }
-
-      const filename = `${name}.yaml`;
-
-      // 1. Try user-defined workflow in cwd.
-      if (workingDir) {
-        const [workflowFolder] = getWorkflowFolderSearchPaths();
-        const filePath = join(workingDir, workflowFolder, filename);
-        try {
-          const content = await readFile(filePath, 'utf-8');
-          const result = parseWorkflow(content, filename);
-          if (result.error) {
-            return apiError(c, 500, `Workflow file is invalid: ${result.error.error}`);
-          }
-          return c.json({
-            workflow: result.workflow,
-            filename,
-            source: 'project' as WorkflowSource,
-          });
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-            getLog().error({ err, name }, 'workflow.fetch_failed');
-            return apiError(c, 500, 'Failed to read workflow');
-          }
-        }
-      }
-
-      // 2. Fall back to home-scoped workflow (`~/.archon/workflows/`).
-      // Mirrors the discovery order in `discoverWorkflowsWithConfig`.
-      {
-        const homeFilePath = join(getHomeWorkflowsPath(), filename);
-        try {
-          const content = await readFile(homeFilePath, 'utf-8');
-          const result = parseWorkflow(content, filename);
-          if (result.error) {
-            return apiError(c, 500, `Home workflow file is invalid: ${result.error.error}`);
-          }
-          return c.json({
-            workflow: result.workflow,
-            filename,
-            source: 'global' as WorkflowSource,
-          });
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-            getLog().error({ err, name }, 'workflow.fetch_home_failed');
-            return apiError(c, 500, 'Failed to read home-scoped workflow');
-          }
-        }
-      }
-
-      // 3. Fall back to bundled defaults.
-      if (Object.hasOwn(BUNDLED_WORKFLOWS, name)) {
-        const bundledContent = BUNDLED_WORKFLOWS[name];
-        const result = parseWorkflow(bundledContent, filename);
-        if (result.error) {
-          return apiError(c, 500, `Bundled workflow is invalid: ${result.error.error}`);
-        }
-        return c.json({ workflow: result.workflow, filename, source: 'bundled' as WorkflowSource });
-      }
-
-      if (!isBinaryBuild()) {
-        const defaultFilePath = join(getDefaultWorkflowsPath(), filename);
-        try {
-          const content = await readFile(defaultFilePath, 'utf-8');
-          const result = parseWorkflow(content, filename);
-          if (result.error) {
-            return apiError(c, 500, `Default workflow is invalid: ${result.error.error}`);
-          }
-          return c.json({
-            workflow: result.workflow,
-            filename,
-            source: 'bundled' as WorkflowSource,
-          });
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-            getLog().error({ err, name }, 'workflow.fetch_default_failed');
-            return apiError(c, 500, 'Failed to read default workflow');
-          }
-        }
-      }
-
-      return apiError(c, 404, `Workflow not found: ${name}`);
+      const { workingDir } = await resolveWorkflowWorkingDir(c);
+      const entry = await resolveWorkflowEntry(identifier, workingDir);
+      if (!entry) return apiError(c, 404, `Workflow not found: ${identifier}`);
+      return c.json({
+        workflow: entry.workflow,
+        filename: entry.filename,
+        workflowId: stableWorkflowId(entry.source, entry.filename),
+        source: entry.source,
+      });
     } catch (error) {
+      if (error instanceof WorkflowRouteResolutionError) {
+        return apiError(c, error.status, error.message);
+      }
       const err = error instanceof Error ? error : new Error(String(error));
-      getLog().error({ err, name }, 'workflow.get_failed');
+      getLog().error({ err, identifier }, 'workflow.get_failed');
       return apiError(c, 500, 'Failed to get workflow');
     }
   });
 
   // PUT /api/workflows/:name - Save (create or update) a workflow
   registerOpenApiRoute(saveWorkflowRoute, async c => {
-    const name = c.req.param('name') ?? '';
-    if (!isValidCommandName(name)) {
-      return apiError(c, 400, 'Invalid workflow name');
+    const identifier = c.req.param('name') ?? '';
+    if (!isValidCommandName(identifier) && !STABLE_WORKFLOW_ID_PATTERN.test(identifier)) {
+      return apiError(c, 400, 'Invalid workflow identifier');
     }
 
     const targetSource = c.req.query('source');
@@ -3774,23 +3925,30 @@ export function registerApiRoutes(
       return apiError(c, 400, 'Invalid workflow source');
     }
 
-    const cwd = c.req.query('cwd');
-    let workingDir = cwd;
-    if (targetSource === 'global') {
-      workingDir = undefined;
-    } else if (cwd) {
-      if (!(await validateCwd(cwd))) {
-        return apiError(c, 400, 'Invalid cwd: must match a registered codebase path');
-      }
-    } else {
-      const codebases = await codebaseDb.listCodebases();
-      if (codebases.length > 0) workingDir = codebases[0].default_cwd;
-    }
-    if (!workingDir) {
-      workingDir = getArchonHome();
-    }
-
     const { definition } = getValidatedBody(c, saveWorkflowBodySchema);
+
+    let workingDir: string | undefined;
+    let existingEntry: WorkflowWithSource | undefined;
+    try {
+      ({ workingDir } = await resolveWorkflowWorkingDir(c));
+      if (STABLE_WORKFLOW_ID_PATTERN.test(identifier)) {
+        existingEntry = await resolveWorkflowEntry(identifier, workingDir);
+        if (!existingEntry) {
+          return apiError(c, 404, `Workflow not found: ${identifier}`);
+        }
+      }
+    } catch (error) {
+      if (error instanceof WorkflowRouteResolutionError) {
+        return apiError(c, error.status, error.message);
+      }
+      throw error;
+    }
+    const filename = existingEntry?.filename ?? `${identifier}.yaml`;
+    const source: WorkflowSource = targetSource === 'global' ||
+      (targetSource === undefined && existingEntry?.source === 'global')
+      ? 'global'
+      : 'project';
+    if (!workingDir) workingDir = getArchonHome();
 
     // Serialize and validate before writing
     let yamlContent: string;
@@ -3798,41 +3956,41 @@ export function registerApiRoutes(
       yamlContent = Bun.YAML.stringify(definition);
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
-      getLog().error({ err, name }, 'workflow.serialize_failed');
+      getLog().error({ err, identifier }, 'workflow.serialize_failed');
       return apiError(c, 400, 'Failed to serialize workflow definition');
     }
 
-    const parsed = parseWorkflow(yamlContent, `${name}.yaml`);
+    const parsed = parseWorkflow(yamlContent, filename);
     if (parsed.error) {
       return apiError(c, 400, 'Workflow definition is invalid', parsed.error.error);
     }
 
     try {
-      const source: WorkflowSource = targetSource === 'global' ? 'global' : 'project';
       const dirPath =
         source === 'global'
           ? getHomeWorkflowsPath()
           : join(workingDir, getWorkflowFolderSearchPaths()[0]);
-      await mkdir(dirPath, { recursive: true });
-      const filePath = join(dirPath, `${name}.yaml`);
+      const filePath = join(dirPath, filename);
+      await mkdir(dirname(filePath), { recursive: true });
       await writeFile(filePath, yamlContent, 'utf-8');
       return c.json({
         workflow: parsed.workflow,
-        filename: `${name}.yaml`,
+        filename,
+        workflowId: stableWorkflowId(source, filename),
         source,
       });
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
-      getLog().error({ err, name }, 'workflow.save_failed');
+      getLog().error({ err, identifier }, 'workflow.save_failed');
       return apiError(c, 500, 'Failed to save workflow');
     }
   });
 
   // DELETE /api/workflows/:name - Delete a user-defined workflow
   registerOpenApiRoute(deleteWorkflowRoute, async c => {
-    const name = c.req.param('name') ?? '';
-    if (!isValidCommandName(name)) {
-      return apiError(c, 400, 'Invalid workflow name');
+    const identifier = c.req.param('name') ?? '';
+    if (!isValidCommandName(identifier) && !STABLE_WORKFLOW_ID_PATTERN.test(identifier)) {
+      return apiError(c, 400, 'Invalid workflow identifier');
     }
 
     const targetSource = c.req.query('source');
@@ -3840,40 +3998,36 @@ export function registerApiRoutes(
       return apiError(c, 400, 'Invalid workflow source');
     }
 
-    // Refuse to delete bundled defaults
-    if (targetSource !== 'global' && Object.hasOwn(BUNDLED_WORKFLOWS, name)) {
-      return apiError(c, 400, `Cannot delete bundled default workflow: ${name}`);
-    }
-
-    const cwd = c.req.query('cwd');
-    let workingDir = cwd;
-    if (targetSource === 'global') {
-      workingDir = undefined;
-    } else if (cwd) {
-      if (!(await validateCwd(cwd))) {
-        return apiError(c, 400, 'Invalid cwd: must match a registered codebase path');
+    let workingDir: string | undefined;
+    let entry: WorkflowWithSource | undefined;
+    try {
+      ({ workingDir } = await resolveWorkflowWorkingDir(c));
+      entry = await resolveWorkflowEntry(identifier, workingDir);
+    } catch (error) {
+      if (error instanceof WorkflowRouteResolutionError) {
+        return apiError(c, error.status, error.message);
       }
-    } else {
-      const codebases = await codebaseDb.listCodebases();
-      if (codebases.length > 0) workingDir = codebases[0].default_cwd;
+      throw error;
     }
-    if (!workingDir) {
-      workingDir = getArchonHome();
+    if (!entry) return apiError(c, 404, `Workflow not found: ${identifier}`);
+    if (entry.source === 'bundled') {
+      return apiError(c, 400, `Cannot delete bundled default workflow: ${entry.workflow.name}`);
     }
-
+    const source = targetSource ?? entry.source;
+    if (!workingDir) workingDir = getArchonHome();
     const filePath =
-      targetSource === 'global'
-        ? join(getHomeWorkflowsPath(), `${name}.yaml`)
-        : join(workingDir, getWorkflowFolderSearchPaths()[0], `${name}.yaml`);
+      source === 'global'
+        ? join(getHomeWorkflowsPath(), entry.filename)
+        : join(workingDir, getWorkflowFolderSearchPaths()[0], entry.filename);
 
     try {
       await unlink(filePath);
-      return c.json({ deleted: true, name });
+      return c.json({ deleted: true, name: entry.workflow.name });
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        return apiError(c, 404, `Workflow not found: ${name}`);
+        return apiError(c, 404, `Workflow not found: ${identifier}`);
       }
-      getLog().error({ err, name }, 'workflow.delete_failed');
+      getLog().error({ err, identifier }, 'workflow.delete_failed');
       return apiError(c, 500, 'Failed to delete workflow');
     }
   });

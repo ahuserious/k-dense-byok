@@ -76,6 +76,10 @@ describe('workflows database', () => {
           null,
           null,
           null,
+          null,
+          null,
+          null,
+          null,
         ]
       );
     });
@@ -107,6 +111,10 @@ describe('workflows database', () => {
           null,
           null,
           null,
+          null,
+          null,
+          null,
+          null,
         ]
       );
     });
@@ -124,8 +132,47 @@ describe('workflows database', () => {
       expect(result.codebase_id).toBeNull();
       expect(mockQuery).toHaveBeenCalledWith(
         expect.stringContaining('INSERT INTO remote_agent_workflow_runs'),
-        ['feature-development', 'conv-456', null, 'Add dark mode support', '{}', null, null, null]
+        [
+          'feature-development',
+          'conv-456',
+          null,
+          'Add dark mode support',
+          '{}',
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+        ]
       );
+    });
+
+    test('returns the existing run when a scoped Kady admission is replayed', async () => {
+      const admissionMetadata = {
+        kadyProjectId: 'project-a',
+        kadyAdmissionId: 'admission-a',
+        kadyEngineAdmissionKey: 'kadypipe_11111111111111111111111111111111',
+        workflowRevisionSha256: 'a'.repeat(64),
+      };
+      mockQuery
+        .mockResolvedValueOnce(createQueryResult([]))
+        .mockResolvedValueOnce(createQueryResult([mockWorkflowRun]));
+
+      const result = await createWorkflowRun({
+        workflow_name: 'feature-development',
+        conversation_id: 'conv-456',
+        user_message: 'Add dark mode support',
+        metadata: admissionMetadata,
+      });
+
+      expect(result).toMatchObject({ id: mockWorkflowRun.id, idempotency_replayed: true });
+      expect(mockQuery.mock.calls[1]?.[0]).toContain('kady_project_id = $1');
+      expect(mockQuery.mock.calls[1]?.[1]).toEqual([
+        admissionMetadata.kadyProjectId,
+        admissionMetadata.kadyEngineAdmissionKey,
+      ]);
     });
   });
 
@@ -671,6 +718,23 @@ describe('workflows database', () => {
       const result = await listWorkflowRuns();
 
       expect(result).toEqual([mockWorkflowRun]);
+    });
+
+    test('uses the project-scoped admission lookup columns', async () => {
+      mockQuery.mockResolvedValueOnce(createQueryResult([]));
+
+      await listWorkflowRuns({
+        kadyProjectId: 'project-a',
+        kadyAdmissionId: 'kadypipe_11111111111111111111111111111111',
+      });
+
+      const [query, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+      expect(query).toContain('kady_project_id = $1');
+      expect(query).toContain('kady_engine_admission_key = $2');
+      expect(params.slice(0, 2)).toEqual([
+        'project-a',
+        'kadypipe_11111111111111111111111111111111',
+      ]);
     });
   });
 

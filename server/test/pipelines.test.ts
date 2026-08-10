@@ -13,7 +13,7 @@ import {
   unresolvedPipelineNodeBudgetHooks,
 } from "../src/api/pipelines.ts";
 import { projectCostSummary } from "../src/cost/ledger.ts";
-import { createProject, getProject } from "../src/projects.ts";
+import { createProject, getProject, resolvePaths } from "../src/projects.ts";
 import { withActiveProject } from "../src/scope.ts";
 import {
   listPipelineAdmissions,
@@ -107,6 +107,10 @@ async function registerTestRoutes(overrides: Parameters<typeof registerPipelineR
   await registerPipelineRoutes(app, {
     resolveBudgetHooks: resolveRealEngineHooks,
     reconciliationWorker: false,
+    resolveWorkflowScope: async (projectId) => ({
+      cwd: resolvePaths(projectId).sandbox,
+      codebaseId: `codebase-${projectId}`,
+    }),
     ...overrides,
   });
   return app;

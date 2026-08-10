@@ -132,10 +132,27 @@ export async function createWorkflowRun(data: {
   }
 
   try {
+    const kadyProjectId =
+      typeof data.metadata?.kadyProjectId === 'string' ? data.metadata.kadyProjectId : null;
+    const kadyAdmissionId =
+      typeof data.metadata?.kadyAdmissionId === 'string' ? data.metadata.kadyAdmissionId : null;
+    const kadyEngineAdmissionKey =
+      typeof data.metadata?.kadyEngineAdmissionKey === 'string'
+        ? data.metadata.kadyEngineAdmissionKey
+        : null;
+    const workflowRevisionSha256 =
+      typeof data.metadata?.workflowRevisionSha256 === 'string'
+        ? data.metadata.workflowRevisionSha256
+        : null;
     const result = await pool.query<WorkflowRun>(
       `INSERT INTO remote_agent_workflow_runs
-       (workflow_name, conversation_id, codebase_id, user_message, metadata, working_path, parent_conversation_id, user_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       (workflow_name, conversation_id, codebase_id, user_message, metadata, working_path,
+        parent_conversation_id, user_id, kady_project_id, kady_admission_id,
+        kady_engine_admission_key, workflow_revision_sha256)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       ON CONFLICT (kady_project_id, kady_engine_admission_key)
+         WHERE kady_project_id IS NOT NULL AND kady_engine_admission_key IS NOT NULL
+         DO NOTHING
        RETURNING *`,
       [
         data.workflow_name,
@@ -146,9 +163,24 @@ export async function createWorkflowRun(data: {
         data.working_path ?? null,
         data.parent_conversation_id ?? null,
         data.user_id ?? null,
+        kadyProjectId,
+        kadyAdmissionId,
+        kadyEngineAdmissionKey,
+        workflowRevisionSha256,
       ]
     );
-    const row = result.rows[0];
+    let row = result.rows[0];
+    if (!row && kadyProjectId && kadyEngineAdmissionKey) {
+      const existing = await pool.query<WorkflowRun>(
+        `SELECT * FROM remote_agent_workflow_runs
+         WHERE kady_project_id = $1 AND kady_engine_admission_key = $2`,
+        [kadyProjectId, kadyEngineAdmissionKey]
+      );
+      row = existing.rows[0];
+      if (row) {
+        return { ...normalizeWorkflowRun(row), idempotency_replayed: true };
+      }
+    }
     if (!row) {
       throw new Error(
         `Failed to create workflow run: INSERT returned no rows (workflow: ${data.workflow_name})`
@@ -643,7 +675,11 @@ export async function completeWorkflowRun(
   }
 }
 
-export async function failWorkflowRun(id: string, error: string): Promise<void> {
+export async function failWorkflowRun(
+  id: string,
+  error: string,
+  metadata?: Record<string, unknown>
+): Promise<void> {
   const dialect = getDialect();
   let result: Awaited<ReturnType<IDatabase['query']>>;
   try {
@@ -651,7 +687,7 @@ export async function failWorkflowRun(id: string, error: string): Promise<void> 
       `UPDATE remote_agent_workflow_runs
        SET status = 'failed', completed_at = ${dialect.now()}, metadata = ${dialect.jsonMerge('metadata', 2)}
        WHERE id = $1 AND status = 'running'`,
-      [id, JSON.stringify({ error })]
+      [id, JSON.stringify({ error, ...metadata })]
     );
   } catch (dbError) {
     const err = dbError as Error;
@@ -903,6 +939,8 @@ export async function listWorkflowRuns(options?: {
    * user (`user_id = $N`). Absent → all runs (default visibility stays open).
    */
   userId?: string;
+  kadyProjectId?: string;
+  kadyAdmissionId?: string;
 }): Promise<WorkflowRun[]> {
   const whereClauses: string[] = [];
   const values: unknown[] = [];
@@ -928,6 +966,16 @@ export async function listWorkflowRuns(options?: {
     values.push(options.codebaseId);
     whereClauses.push(
       `conversation_id IN (SELECT id FROM remote_agent_conversations WHERE codebase_id = $${String(values.length)})`
+    );
+  }
+  if (options?.kadyProjectId) {
+    values.push(options.kadyProjectId);
+    whereClauses.push(`kady_project_id = $${String(values.length)}`);
+  }
+  if (options?.kadyAdmissionId) {
+    values.push(options.kadyAdmissionId);
+    whereClauses.push(
+      `(kady_admission_id = $${String(values.length)} OR kady_engine_admission_key = $${String(values.length)})`
     );
   }
 

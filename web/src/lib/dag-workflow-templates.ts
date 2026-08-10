@@ -341,6 +341,15 @@ export function createDagWorkflowTemplateGraph(
       enabled: false,
     },
     entryNodeId: nodes[0].id,
+    ...(scientificTemplate
+      ? {
+          preconditions: {
+            requiredInputs: scientificTemplate.requiredInputs.map((input) => ({ ...input })),
+            requiredFiles: scientificTemplate.requiredFiles.map((file) => ({ ...file })),
+            requiredCapabilities: [...scientificTemplate.requiredCapabilities],
+          },
+        }
+      : {}),
     nodes,
     edges: sequentialEdges(nodes.map((node) => node.id)),
   };

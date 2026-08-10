@@ -670,7 +670,25 @@ export interface PipelineRouteOverrides {
   runWorkflow?: typeof pipelineEngine.runWorkflow;
   queryAdmission?: typeof queryEngineRunByAdmissionId;
   getRun?: typeof pipelineEngine.getRun;
+  resolveWorkflowScope?: (
+    projectId: string,
+  ) => Promise<pipelineEngine.PipelineWorkflowScope>;
   reconciliationWorker?: PipelineReconciliationWorker | false;
+}
+
+async function resolveProjectWorkflowScope(
+  projectId: string,
+): Promise<pipelineEngine.PipelineWorkflowScope> {
+  const cwd = resolvePaths(projectId).sandbox;
+  const registered = recordOf(await pipelineEngine.registerCodebase(cwd));
+  const codebaseId = registered?.id;
+  const registeredCwd = registered?.default_cwd;
+  if (typeof codebaseId !== "string" || registeredCwd !== cwd) {
+    throw new PipelineEngineUnavailableError(
+      `Pipeline engine did not return an exact codebase registration for project ${projectId}.`,
+    );
+  }
+  return { cwd, codebaseId };
 }
 
 export async function registerPipelineRoutes(
@@ -682,6 +700,7 @@ export async function registerPipelineRoutes(
   const runWorkflow = overrides.runWorkflow ?? pipelineEngine.runWorkflow;
   const queryAdmission = overrides.queryAdmission ?? queryEngineRunByAdmissionId;
   const getRun = overrides.getRun ?? pipelineEngine.getRun;
+  const resolveWorkflowScope = overrides.resolveWorkflowScope ?? resolveProjectWorkflowScope;
   if (overrides.reconciliationWorker !== false) {
     const worker = overrides.reconciliationWorker ?? new PipelineReconciliationWorker({
       queryAdmission,
@@ -698,11 +717,17 @@ export async function registerPipelineRoutes(
   app.get("/pipelines/health", async () => ({ healthy: await pipelineEngine.pipelineEngineHealthy() }));
 
   // --- workflow CRUD (proxied) ---
-  app.get("/pipelines", async (_req, reply) => {
+  app.get("/pipelines", async (req, reply) => {
+    const requestAbortController = new AbortController();
+    const abortForClosedRequest = () => requestAbortController.abort();
+    req.raw.once("close", abortForClosedRequest);
     try {
-      return await pipelineEngine.listWorkflows();
+      const scope = await resolveWorkflowScope(currentProjectId());
+      return await pipelineEngine.listWorkflows(scope, requestAbortController.signal);
     } catch (err) {
       return mapError(reply, err);
+    } finally {
+      req.raw.off("close", abortForClosedRequest);
     }
   });
 
@@ -716,7 +741,8 @@ export async function registerPipelineRoutes(
 
   app.get<{ Params: { name: string } }>("/pipelines/:name", async (req, reply) => {
     try {
-      return await pipelineEngine.getWorkflow(req.params.name);
+      const scope = await resolveWorkflowScope(currentProjectId());
+      return await pipelineEngine.getWorkflow(req.params.name, scope);
     } catch (err) {
       return mapError(reply, err);
     }
@@ -724,7 +750,8 @@ export async function registerPipelineRoutes(
 
   app.put<{ Params: { name: string } }>("/pipelines/:name", async (req, reply) => {
     try {
-      return await pipelineEngine.saveWorkflow(req.params.name, req.body);
+      const scope = await resolveWorkflowScope(currentProjectId());
+      return await pipelineEngine.saveWorkflow(req.params.name, req.body, scope);
     } catch (err) {
       return mapError(reply, err);
     }
@@ -732,7 +759,8 @@ export async function registerPipelineRoutes(
 
   app.delete<{ Params: { name: string } }>("/pipelines/:name", async (req, reply) => {
     try {
-      return await pipelineEngine.deleteWorkflow(req.params.name);
+      const scope = await resolveWorkflowScope(currentProjectId());
+      return await pipelineEngine.deleteWorkflow(req.params.name, scope);
     } catch (err) {
       return mapError(reply, err);
     }
@@ -779,7 +807,8 @@ export async function registerPipelineRoutes(
       const admissionId = typeof requestedAdmissionId === "string"
         ? requestedAdmissionId
         : pipelineAdmissionId(crypto.randomUUID());
-      const definition = await getWorkflowForAdmission(req.params.name);
+      const workflowScope = await resolveWorkflowScope(projectId);
+      const definition = await getWorkflowForAdmission(req.params.name, workflowScope);
       const admittedWorkflowRevision = workflowRevisionSha256(definition);
       const hooks = await resolveBudgetHooks(definition, {
         projectId,
@@ -861,7 +890,7 @@ export async function registerPipelineRoutes(
       if (!admissionRecord) {
         throw new WorkflowBudgetError("CORRUPT", "Pipeline admission record was not persisted before dispatch.");
       }
-      const latestDefinition = await getWorkflowForAdmission(req.params.name);
+      const latestDefinition = await getWorkflowForAdmission(req.params.name, workflowScope);
       if (workflowRevisionSha256(latestDefinition) !== admissionRecord.workflowRevisionSha256) {
         throw new WorkflowBudgetError("CONFLICT", "Pipeline workflow revision changed between admission and dispatch.");
       }
@@ -902,7 +931,7 @@ export async function registerPipelineRoutes(
       // Write-ahead dispatch intent before crossing the process boundary.
       updatePipelineAdmission(projectId, admission.admissionId, { status: "dispatching" });
       dispatchAttempted = true;
-      const result = await runWorkflow(req.params.name, runBody);
+      const result = await runWorkflow(req.params.name, runBody, workflowScope);
       const resultRecord = recordOf(result);
       if (resultRecord?.accepted === false && typeof resultRecord.status === "string") {
         await settlePipelineAdmission(projectId, admission.admissionId, {

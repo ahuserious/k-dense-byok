@@ -277,6 +277,8 @@ export type WorkflowEventResponse = components['schemas']['WorkflowEvent'];
 type GeneratedWorkflowListEntry = components['schemas']['WorkflowListEntry'];
 export type WorkflowListEntry = Omit<GeneratedWorkflowListEntry, 'workflow'> & {
   workflow: WorkflowDefinition;
+  filename: string;
+  workflowId: string;
 };
 
 export interface WorkflowListResult {
@@ -297,9 +299,11 @@ export async function listWorkflows(cwd?: string): Promise<WorkflowListResult> {
 export async function runWorkflow(
   name: string,
   conversationId: string,
-  message: string
+  message: string,
+  cwd?: string
 ): Promise<{ accepted: boolean; status: string }> {
-  return fetchJSON(`/api/workflows/${encodeURIComponent(name)}/run`, {
+  const params = cwd ? `?cwd=${encodeURIComponent(cwd)}` : '';
+  return fetchJSON(`/api/workflows/${encodeURIComponent(name)}/run${params}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ conversationId, message }),
@@ -428,6 +432,7 @@ export type WorkflowSource = components['schemas']['WorkflowSource'];
 export interface GetWorkflowResponse {
   workflow: WorkflowDefinition;
   filename: string;
+  workflowId: string;
   source: WorkflowSource;
 }
 

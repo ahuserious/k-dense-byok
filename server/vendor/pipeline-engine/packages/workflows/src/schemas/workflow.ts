@@ -165,6 +165,8 @@ export type WorkflowSource = 'bundled' | 'global' | 'project';
 export interface WorkflowWithSource {
   readonly workflow: WorkflowDefinition;
   readonly source: WorkflowSource;
+  /** Stable discovery key used for exact get/edit/run routing. */
+  readonly filename: string;
 }
 
 /**

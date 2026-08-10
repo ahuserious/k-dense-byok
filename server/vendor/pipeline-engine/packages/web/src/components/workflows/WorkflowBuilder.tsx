@@ -131,6 +131,7 @@ function WorkflowBuilderInner(): React.ReactElement {
   const [provider, setProvider] = useState<string | undefined>(undefined);
   const [model, setModel] = useState<string | undefined>(undefined);
   const [workflowSource, setWorkflowSource] = useState<WorkflowSource | undefined>(undefined);
+  const [loadedWorkflowId, setLoadedWorkflowId] = useState<string | undefined>(undefined);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
 
@@ -203,12 +204,13 @@ function WorkflowBuilderInner(): React.ReactElement {
   const loadWorkflow = useCallback(
     async (name: string): Promise<void> => {
       try {
-        const { workflow, source } = await getWorkflow(name, cwd);
+        const { workflow, source, workflowId } = await getWorkflow(name, cwd);
         setWorkflowName(workflow.name);
         setWorkflowDescription(workflow.description);
         setProvider(workflow.provider);
         setModel(workflow.model);
         setWorkflowSource(source);
+        setLoadedWorkflowId(workflowId);
         setValidationErrors([]);
 
         const { nodes: rfNodes, edges: rfEdges } = dagNodesToReactFlow(workflow.nodes);
@@ -299,7 +301,13 @@ function WorkflowBuilderInner(): React.ReactElement {
         return;
       }
       setValidationErrors([]);
-      await saveWorkflow(workflowName.trim(), def, cwd, workflowSource);
+      const saved = await saveWorkflow(
+        loadedWorkflowId ?? workflowName.trim(),
+        def,
+        cwd,
+        workflowSource
+      );
+      setLoadedWorkflowId(saved.workflowId);
       setHasUnsavedChanges(false);
     } catch (err) {
       const error = err instanceof Error ? err : new Error('Unknown error');
@@ -307,14 +315,14 @@ function WorkflowBuilderInner(): React.ReactElement {
       setValidationErrors([`Save failed: ${error.message}`]);
       setValidationPanelOpen(true);
     }
-  }, [buildDefinition, workflowName, cwd, workflowSource]);
+  }, [buildDefinition, workflowName, cwd, workflowSource, loadedWorkflowId]);
 
   const handleRun = useCallback(async (): Promise<void> => {
     if (!workflowName.trim() || hasUnsavedChanges) return;
     try {
       const result = await createConversation(selectedProjectId ?? undefined);
       const conversationId = result.conversationId;
-      await runWorkflow(workflowName.trim(), conversationId, '');
+      await runWorkflow(loadedWorkflowId ?? workflowName.trim(), conversationId, '', cwd);
       navigate(`/legacy/chat/${conversationId}`);
     } catch (err) {
       const error = err instanceof Error ? err : new Error('Unknown error');
@@ -322,7 +330,7 @@ function WorkflowBuilderInner(): React.ReactElement {
       setValidationErrors([`Run failed: ${error.message}`]);
       setValidationPanelOpen(true);
     }
-  }, [workflowName, hasUnsavedChanges, selectedProjectId, navigate]);
+  }, [workflowName, loadedWorkflowId, hasUnsavedChanges, selectedProjectId, navigate, cwd]);
 
   // Undo/redo handlers
   const handleUndo = useCallback((): void => {

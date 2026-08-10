@@ -215,6 +215,12 @@ export interface WorkflowArtifact {
   path?: string;
 }
 
+export interface ScientificWorkflowPreconditions {
+  requiredInputs: Array<{ key: string; label: string }>;
+  requiredFiles: Array<{ key: string; label: string; minimumCount: number }>;
+  requiredCapabilities: Array<"prompt-analysis" | "read-uploaded-files">;
+}
+
 export interface WorkflowGraphDocument {
   schemaVersion: "1.0";
   id: string;
@@ -226,6 +232,7 @@ export interface WorkflowGraphDocument {
   rescue?: WorkflowRescuePolicy;
   evidence: WorkflowEvidencePolicy;
   artifacts?: WorkflowArtifact[];
+  preconditions?: ScientificWorkflowPreconditions;
   nodes: WorkflowGraphNode[];
   edges: WorkflowGraphEdge[];
 }

@@ -722,6 +722,37 @@ describe('GET /api/workflows/runs', () => {
     expect(callArgs?.codebaseId).toBe('cb-uuid-1');
   });
 
+  test('returns an authoritative project admission lookup even when no run exists', async () => {
+    mockListWorkflowRuns.mockImplementationOnce(async () => []);
+
+    const { app } = makeApp();
+    const response = await app.request(
+      '/api/workflows/runs?projectId=project-a&admissionId=kadypipe_11111111111111111111111111111111'
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      runs: [],
+      admissionQuery: {
+        projectId: 'project-a',
+        admissionId: 'kadypipe_11111111111111111111111111111111',
+        authoritative: true,
+      },
+    });
+    expect(mockListWorkflowRuns).toHaveBeenCalledWith(expect.objectContaining({
+      kadyProjectId: 'project-a',
+      kadyAdmissionId: 'kadypipe_11111111111111111111111111111111',
+    }));
+  });
+
+  test('rejects a one-sided admission lookup', async () => {
+    const { app } = makeApp();
+    const response = await app.request('/api/workflows/runs?projectId=project-a');
+
+    expect(response.status).toBe(400);
+    expect(mockListWorkflowRuns).not.toHaveBeenCalled();
+  });
+
   test('caps limit at 200', async () => {
     mockListWorkflowRuns.mockImplementationOnce(async () => []);
 

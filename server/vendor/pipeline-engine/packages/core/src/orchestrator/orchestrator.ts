@@ -279,6 +279,8 @@ export interface WorkflowRoutingContext {
    * to the privacy-safe "custom" treatment when not provided.
    */
   readonly source?: WorkflowSource;
+  /** Validated admission metadata supplied by the exact run endpoint. */
+  readonly runMetadata?: Record<string, unknown>;
 }
 
 /**
@@ -391,10 +393,25 @@ export async function dispatchBackgroundWorkflow(
       codebase_id: ctx.codebaseId,
       user_message: ctx.originalMessage,
       working_path: workerCwd,
-      metadata: ctx.issueContext ? { github_context: ctx.issueContext } : {},
+      metadata: {
+        ...(ctx.issueContext ? { github_context: ctx.issueContext } : {}),
+        ...ctx.runMetadata,
+      },
       parent_conversation_id: ctx.conversationDbId,
       user_id: ctx.userId,
     });
+    if (preCreatedRun.idempotency_replayed) {
+      getLog().info(
+        {
+          workflowName: workflow.name,
+          workflowRunId: preCreatedRun.id,
+          kadyProjectId: preCreatedRun.kady_project_id,
+          kadyEngineAdmissionKey: preCreatedRun.kady_engine_admission_key,
+        },
+        'workflow_admission_replayed'
+      );
+      return;
+    }
   } catch (error) {
     const err = error as Error;
     getLog().error({ err, workflowName: workflow.name }, 'pre_create_workflow_run_failed');
@@ -421,6 +438,7 @@ export async function dispatchBackgroundWorkflow(
             preCreatedRun,
             userId: ctx.userId,
             source: ctx.source,
+            runMetadata: ctx.runMetadata,
           }
         );
         // Surface workflow output to parent conversation as a result card

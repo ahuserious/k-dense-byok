@@ -218,7 +218,7 @@ export async function discoverWorkflows(
       getLog().debug('loading_bundled_default_workflows');
       const bundledResult = loadBundledWorkflows();
       for (const [filename, workflow] of bundledResult.workflows) {
-        workflowsByFile.set(filename, { workflow, source: 'bundled' });
+        workflowsByFile.set(filename, { workflow, source: 'bundled', filename });
       }
       allErrors.push(...bundledResult.errors);
       getLog().info({ count: bundledResult.workflows.size }, 'bundled_default_workflows_loaded');
@@ -230,7 +230,7 @@ export async function discoverWorkflows(
         await access(appDefaultsPath);
         const appResult = await loadWorkflowsFromDir(appDefaultsPath);
         for (const [filename, workflow] of appResult.workflows) {
-          workflowsByFile.set(filename, { workflow, source: 'bundled' });
+          workflowsByFile.set(filename, { workflow, source: 'bundled', filename });
         }
         if (appResult.errors.length > 0) {
           getLog().warn(
@@ -263,7 +263,7 @@ export async function discoverWorkflows(
       if (workflowsByFile.has(filename)) {
         getLog().debug({ filename }, 'home_workflow_overrides_bundled');
       }
-      workflowsByFile.set(filename, { workflow, source: 'global' });
+      workflowsByFile.set(filename, { workflow, source: 'global', filename });
     }
     allErrors.push(...homeResult.errors);
     getLog().info({ count: homeResult.workflows.size }, 'home_workflows_loaded');
@@ -306,7 +306,7 @@ export async function discoverWorkflows(
         // This file was already loaded as a bundled default — the repo's defaults/
         // subdirectory is re-discovering it. Keep the bundled source label.
         getLog().debug({ filename }, 'repo_default_preserves_bundled_source');
-        workflowsByFile.set(filename, { workflow, source: 'bundled' });
+        workflowsByFile.set(filename, { workflow, source: 'bundled', filename });
       } else {
         if (existing) {
           getLog().debug(
@@ -314,7 +314,7 @@ export async function discoverWorkflows(
             'repo_workflow_overrides_lower_scope'
           );
         }
-        workflowsByFile.set(filename, { workflow, source: 'project' });
+        workflowsByFile.set(filename, { workflow, source: 'project', filename });
       }
     }
 

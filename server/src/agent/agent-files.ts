@@ -138,6 +138,11 @@ const DAG_HELPER_SEED_MIGRATIONS = [
     version: 3,
     names: new Set(["dag-workflow-rescue"]),
   },
+  {
+    version: 4,
+    names: new Set(["dag-workflow-rescue"]),
+    upgradeDefaultInheritSkills: true,
+  },
 ] as const;
 
 function dagHelperSeedMarkerPath(paths: ProjectPaths, version: number): string {
@@ -426,6 +431,34 @@ export function seedAgentFiles(paths: ProjectPaths): number {
     ) continue;
     const file = path.join(dir, `${type.name}.md`);
     const disabledFile = path.join(agentsDisabledDir(paths), `${type.name}.md`);
+    const defaultSkillUpgrade = pendingMigrations.some((migration) =>
+      "upgradeDefaultInheritSkills" in migration &&
+      migration.upgradeDefaultInheritSkills &&
+      migration.names.has(type.name)
+    );
+    const helperIntroductionPending = pendingMigrations.some((migration) =>
+      !("upgradeDefaultInheritSkills" in migration) && migration.names.has(type.name)
+    );
+    if (defaultSkillUpgrade) {
+      const existingFile = fs.existsSync(file)
+        ? file
+        : fs.existsSync(disabledFile)
+          ? disabledFile
+          : undefined;
+      if (existingFile) {
+        const currentDefault = rosterMarkdown(type);
+        const priorDefault = currentDefault.replace(
+          "inheritSkills: true",
+          "inheritSkills: false",
+        );
+        if (fs.readFileSync(existingFile, "utf-8") === priorDefault) {
+          fs.writeFileSync(existingFile, currentDefault, "utf-8");
+          written++;
+        }
+        continue;
+      }
+      if (!helperIntroductionPending) continue;
+    }
     if (fs.existsSync(file) || fs.existsSync(disabledFile)) continue;
     fs.writeFileSync(file, rosterMarkdown(type), "utf-8");
     written++;

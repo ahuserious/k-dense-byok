@@ -305,19 +305,27 @@ describe("DagWorkflowsPanel", () => {
     );
   });
 
-  it("shows duplicate vendored names as scope-unverified and non-routable", async () => {
+  it("routes duplicate vendored names independently by stable workflow id", async () => {
     vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
     vi.mocked(registryApi.listVendoredWorkflowRegistrySources).mockResolvedValue([
       registryApi.vendoredWorkflowRegistrySource({
         name: "duplicate-name",
         description: "First record",
         nodes: [{ id: "collect" }],
-      }, { origin: "project" })!,
+      }, {
+        origin: "project",
+        filename: "first.yaml",
+        workflowId: "workflow_11111111111111111111111111111111",
+      })!,
       registryApi.vendoredWorkflowRegistrySource({
         name: "duplicate-name",
         description: "Second record",
         nodes: [{ id: "collect" }],
-      }, { origin: "project" })!,
+      }, {
+        origin: "project",
+        filename: "second.yaml",
+        workflowId: "workflow_22222222222222222222222222222222",
+      })!,
     ]);
     const onEditPipeline = vi.fn();
     const onRunPipeline = vi.fn();
@@ -326,12 +334,6 @@ describe("DagWorkflowsPanel", () => {
 
     const list = await screen.findByRole("list", { name: "Scientific pipeline workflows" });
     expect(within(list).getAllByRole("listitem")).toHaveLength(2);
-    expect(within(list).getAllByText("Project scope unverified")).toHaveLength(2);
-    expect(within(list).getAllByText("Not routable")).toHaveLength(2);
-    expect(within(list).getAllByText(
-      registryApi.AMBIGUOUS_VENDORED_WORKFLOW_NAME_REASON,
-    )).toHaveLength(2);
-
     const editButtons = within(list).getAllByRole("button", {
       name: "Edit duplicate-name with vendored engine",
     });
@@ -339,14 +341,20 @@ describe("DagWorkflowsPanel", () => {
       name: "Run duplicate-name with vendored engine",
     });
     for (const button of [...editButtons, ...runButtons]) {
-      expect(button).toBeDisabled();
+      expect(button).toBeEnabled();
       await userEvent.click(button);
     }
-    expect(onEditPipeline).not.toHaveBeenCalled();
-    expect(onRunPipeline).not.toHaveBeenCalled();
+    expect(onEditPipeline.mock.calls.map(([id]) => id)).toEqual([
+      "workflow_11111111111111111111111111111111",
+      "workflow_22222222222222222222222222222222",
+    ]);
+    expect(onRunPipeline.mock.calls.map(([id]) => id)).toEqual([
+      "workflow_11111111111111111111111111111111",
+      "workflow_22222222222222222222222222222222",
+    ]);
   });
 
-  it("routes normalized-name collisions with exact identifiers and surfaces ambiguity", async () => {
+  it("routes normalized display-name collisions independently by stable filename", async () => {
     vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
     vi.mocked(registryApi.listVendoredWorkflowRegistrySources).mockResolvedValue([
       registryApi.vendoredWorkflowRegistrySource({
@@ -371,9 +379,7 @@ describe("DagWorkflowsPanel", () => {
       name: "Run foo with vendored engine",
     });
     expect(within(list).getAllByRole("listitem")).toHaveLength(2);
-    expect(within(list).getAllByRole("alert")[0]).toHaveTextContent(
-      "Ambiguous vendored routes",
-    );
+    expect(within(list).queryByRole("alert")).not.toBeInTheDocument();
 
     await userEvent.click(editButtons[0]);
     await userEvent.click(editButtons[1]);
@@ -381,9 +387,9 @@ describe("DagWorkflowsPanel", () => {
     await userEvent.click(runButtons[1]);
 
     expect(onEditPipeline.mock.calls.map(([identifier]) => identifier))
-      .toEqual([" foo ", "foo"]);
+      .toEqual(["padded.yaml", "plain.yaml"]);
     await waitFor(() => expect(onRunPipeline.mock.calls.map(([identifier]) => identifier))
-      .toEqual([" foo ", "foo"]));
+      .toEqual(["padded.yaml", "plain.yaml"]));
   });
 
   it("routes the selected vendored pipeline directly without invoking typed admission or Builder", async () => {

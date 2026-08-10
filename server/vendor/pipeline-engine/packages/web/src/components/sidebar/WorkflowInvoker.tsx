@@ -49,7 +49,7 @@ export function WorkflowInvoker({ codebaseId }: WorkflowInvokerProps): React.Rea
     let workflowStarted = false;
     try {
       ({ conversationId } = await createConversation(codebaseId ?? undefined));
-      await runWorkflow(selectedWorkflow, conversationId, message.trim());
+      await runWorkflow(selectedWorkflow, conversationId, message.trim(), cwd);
       workflowStarted = true;
       setSelectedWorkflow(null);
       setMessage('');
@@ -85,7 +85,7 @@ export function WorkflowInvoker({ codebaseId }: WorkflowInvokerProps): React.Rea
           <>
             <optgroup label="Recommended">
               {recommendedEntries.map(entry => (
-                <option key={entry.workflow.name} value={entry.workflow.name}>
+                <option key={entry.workflowId} value={entry.workflowId}>
                   {entry.workflow.name}
                 </option>
               ))}
@@ -93,7 +93,7 @@ export function WorkflowInvoker({ codebaseId }: WorkflowInvokerProps): React.Rea
             {otherEntries.length > 0 && (
               <optgroup label="Other workflows">
                 {otherEntries.map(entry => (
-                  <option key={entry.workflow.name} value={entry.workflow.name}>
+                  <option key={entry.workflowId} value={entry.workflowId}>
                     {entry.workflow.name}
                   </option>
                 ))}
@@ -102,7 +102,7 @@ export function WorkflowInvoker({ codebaseId }: WorkflowInvokerProps): React.Rea
           </>
         ) : (
           workflows.map(entry => (
-            <option key={entry.workflow.name} value={entry.workflow.name}>
+            <option key={entry.workflowId} value={entry.workflowId}>
               {entry.workflow.name}
             </option>
           ))

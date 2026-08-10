@@ -117,6 +117,12 @@ export const workflowRunSchema = z.object({
   last_activity_at: z.date().nullable(),
   working_path: z.string().nullable(),
   user_id: z.string().nullable(),
+  kady_project_id: z.string().nullable().optional(),
+  kady_admission_id: z.string().nullable().optional(),
+  kady_engine_admission_key: z.string().nullable().optional(),
+  workflow_revision_sha256: z.string().nullable().optional(),
+  /** In-process signal only; true when createWorkflowRun returned the existing admission. */
+  idempotency_replayed: z.boolean().optional(),
 });
 
 export type WorkflowRun = z.infer<typeof workflowRunSchema>;

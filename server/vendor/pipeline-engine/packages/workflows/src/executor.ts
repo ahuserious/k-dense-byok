@@ -313,6 +313,8 @@ export type ExecuteWorkflowOptions = ResumePayload & {
    * is preserved on resume.
    */
   userId?: string;
+  /** Validated server-owned admission metadata persisted on fresh runs. */
+  runMetadata?: Record<string, unknown>;
 };
 
 /**
@@ -378,6 +380,7 @@ export async function executeWorkflow(
     priorCompletedNodes,
     userId,
     source,
+    runMetadata,
   } = opts;
   // Load config once for the entire workflow execution
   const fileConfig = await deps.loadConfig(cwd);
@@ -555,10 +558,16 @@ export async function executeWorkflow(
         codebase_id: codebaseId,
         user_message: userMessage,
         working_path: cwd,
-        metadata: issueContext ? { github_context: issueContext } : {},
+        metadata: {
+          ...(issueContext ? { github_context: issueContext } : {}),
+          ...runMetadata,
+        },
         parent_conversation_id: parentConversationId,
         user_id: userId,
       });
+      if (workflowRun.idempotency_replayed) {
+        return { success: true, workflowRunId: workflowRun.id };
+      }
     } catch (error) {
       const err = error as Error;
       getLog().error(

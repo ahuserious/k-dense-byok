@@ -1230,6 +1230,7 @@ function WorkspacePage({
                 projectId={projectId}
                 activeSessionId={activeSessionId}
                 budgetBlocked={budgetBlocked}
+                uploadedFiles={allFiles.filter((filePath) => filePath.startsWith("user_data/"))}
                 onRunPipeline={handleRunPipeline}
                 onEditPipeline={handleEditPipeline}
               />

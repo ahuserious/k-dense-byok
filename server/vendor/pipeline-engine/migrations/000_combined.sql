@@ -1,5 +1,5 @@
 -- Remote Coding Agent - Combined Schema
--- Version: Combined (final state after migrations 001-020)
+-- Version: Combined (final state after migrations 001-024)
 -- Description: Complete database schema (idempotent - safe to run multiple times)
 --
 -- 14 Tables (+ the remote_agent_auth_* Better Auth tables, listed inline below):
@@ -238,7 +238,11 @@ CREATE TABLE IF NOT EXISTS remote_agent_workflow_runs (
   started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   completed_at TIMESTAMP WITH TIME ZONE,
   last_activity_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  working_path TEXT
+  working_path TEXT,
+  kady_project_id TEXT,
+  kady_admission_id TEXT,
+  kady_engine_admission_key TEXT,
+  workflow_revision_sha256 TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_conversation
@@ -247,6 +251,11 @@ CREATE INDEX IF NOT EXISTS idx_workflow_runs_status
   ON remote_agent_workflow_runs(status);
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_parent_conv
   ON remote_agent_workflow_runs(parent_conversation_id);
+CREATE UNIQUE INDEX IF NOT EXISTS unique_workflow_run_kady_admission
+  ON remote_agent_workflow_runs(kady_project_id, kady_engine_admission_key)
+  WHERE kady_project_id IS NOT NULL AND kady_engine_admission_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_kady_admission_lookup
+  ON remote_agent_workflow_runs(kady_project_id, kady_admission_id);
 
 -- Partial index for efficient staleness queries on running workflows
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_last_activity
@@ -386,6 +395,21 @@ ALTER TABLE remote_agent_codebases
 -- From migration 023: detected default branch on codebases
 ALTER TABLE remote_agent_codebases
   ADD COLUMN IF NOT EXISTS default_branch VARCHAR(255);
+
+-- From migration 024: Kady admission idempotency and workflow revision identity.
+ALTER TABLE remote_agent_workflow_runs
+  ADD COLUMN IF NOT EXISTS kady_project_id TEXT;
+ALTER TABLE remote_agent_workflow_runs
+  ADD COLUMN IF NOT EXISTS kady_admission_id TEXT;
+ALTER TABLE remote_agent_workflow_runs
+  ADD COLUMN IF NOT EXISTS kady_engine_admission_key TEXT;
+ALTER TABLE remote_agent_workflow_runs
+  ADD COLUMN IF NOT EXISTS workflow_revision_sha256 TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS unique_workflow_run_kady_admission
+  ON remote_agent_workflow_runs(kady_project_id, kady_engine_admission_key)
+  WHERE kady_project_id IS NOT NULL AND kady_engine_admission_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_kady_admission_lookup
+  ON remote_agent_workflow_runs(kady_project_id, kady_admission_id);
 
 -- User identity foreign keys (nullable on the four primary tables).
 -- All FKs use ON DELETE SET NULL so future user deletion never cascades destructively.

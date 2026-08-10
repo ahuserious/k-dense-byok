@@ -9,8 +9,8 @@ import { afterAll, describe, expect, it } from "vitest";
  * no vendored engine — it tests Kady's proxy, not the engine.
  */
 
-// Every request the stub saw, so passthrough assertions can check method,
-// path, and body reached the engine unmodified.
+// Every request the stub saw, so project-scope assertions can check the active
+// sandbox identity was resolved before the workflow request reached the engine.
 const stubRequests: { method: string; url: string; body: string }[] = [];
 
 const stub = http.createServer((req, res) => {
@@ -25,7 +25,16 @@ const stub = http.createServer((req, res) => {
       res.end(JSON.stringify({ status: "ok" }));
       return;
     }
-    if (req.method === "GET" && req.url === "/api/workflows") {
+    if (req.method === "GET" && req.url === "/api/codebases") {
+      res.end(JSON.stringify([]));
+      return;
+    }
+    if (req.method === "POST" && req.url === "/api/codebases") {
+      const request = JSON.parse(body || "{}") as { path?: string };
+      res.end(JSON.stringify({ id: "stub-codebase", default_cwd: request.path }));
+      return;
+    }
+    if (req.method === "GET" && req.url?.startsWith("/api/workflows?")) {
       res.end(JSON.stringify({ workflows: [{ name: "stub-flow" }], recommended: [] }));
       return;
     }
@@ -58,16 +67,24 @@ describe("pipelines proxy (engine up)", () => {
     expect(res.json()).toEqual({ healthy: true });
   });
 
-  it("passes workflow list straight through", async () => {
+  it("resolves and forwards the active project scope with the workflow list", async () => {
     const res = await app.inject({ method: "GET", url: "/pipelines" });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ workflows: [{ name: "stub-flow" }], recommended: [] });
     const seen = stubRequests.at(-1)!;
     expect(seen.method).toBe("GET");
-    expect(seen.url).toBe("/api/workflows");
+    const workflowUrl = new URL(seen.url, "http://pipeline-engine.test");
+    expect(workflowUrl.pathname).toBe("/api/workflows");
+    expect(workflowUrl.searchParams.get("codebaseId")).toBe("stub-codebase");
+    const registration = stubRequests.findLast(
+      (request) => request.method === "POST" && request.url === "/api/codebases",
+    );
+    const resolvedCwd = (JSON.parse(registration?.body ?? "{}") as { path?: string }).path;
+    expect(resolvedCwd).toMatch(/\/default\/sandbox$/);
+    expect(workflowUrl.searchParams.get("cwd")).toBe(resolvedCwd);
   });
 
-  it("passes a workflow save through with the body intact", async () => {
+  it("preserves the save body while forwarding the active project scope", async () => {
     const definition = { name: "demo", nodes: [{ id: "n1", type: "agent" }] };
     const res = await app.inject({
       method: "PUT",
@@ -78,7 +95,15 @@ describe("pipelines proxy (engine up)", () => {
     expect(res.json()).toEqual({ saved: true, echoed: definition });
     const seen = stubRequests.at(-1)!;
     expect(seen.method).toBe("PUT");
-    expect(seen.url).toBe("/api/workflows/demo");
+    const workflowUrl = new URL(seen.url, "http://pipeline-engine.test");
+    expect(workflowUrl.pathname).toBe("/api/workflows/demo");
+    expect(workflowUrl.searchParams.get("codebaseId")).toBe("stub-codebase");
+    const registration = stubRequests.findLast(
+      (request) => request.method === "POST" && request.url === "/api/codebases",
+    );
+    const resolvedCwd = (JSON.parse(registration?.body ?? "{}") as { path?: string }).path;
+    expect(resolvedCwd).toMatch(/\/default\/sandbox$/);
+    expect(workflowUrl.searchParams.get("cwd")).toBe(resolvedCwd);
     expect(JSON.parse(seen.body)).toEqual(definition);
   });
 });

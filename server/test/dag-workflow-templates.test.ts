@@ -84,7 +84,7 @@ describe("Scientific DAG workflow template validation", () => {
   );
 });
 
-describe.skip("POST-INTEGRATION(S10)", () => {
+describe("POST-INTEGRATION(S10)", () => {
   const templatesRequiringFiles = SCIENTIFIC_WORKFLOW_TEMPLATES.filter(
     (template) => template.requiredFiles.length > 0,
   );

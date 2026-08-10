@@ -122,7 +122,7 @@ describe("compaction watcher behavior", () => {
     expect(watcher.repairModel).toBe(DEFAULT_COMPACTION_REPAIR_MODEL);
   });
 
-  it("creates a proposal when upstream says non-resumable and preserves every restart field", async () => {
+  it("uses watcher authority when the upstream web origin is non-resumable", async () => {
     const { watcher, restartWorkflow, proposeRescue, semanticModel } = createHarness();
     const runId = "vendored-run-without-web-parent";
     const recovery = recoveryProof(runId);
@@ -137,21 +137,16 @@ describe("compaction watcher behavior", () => {
       status: "stalled",
       recovery,
       resumeResponse,
-    })).resolves.toMatchObject({
-      handled: true,
-      resumable: false,
-      proposal: {
-        proposalId: "proposal-1",
-        resumeResponse,
-      },
-    });
-    expect(proposeRescue).toHaveBeenCalledWith({
+    })).resolves.toMatchObject({ handled: true, resumable: true, resumed: true });
+    expect(restartWorkflow).toHaveBeenCalledWith({
       runId,
-      reason: "watcher-observed:stalled:upstream-marked-non-resumable",
+      resume: true,
+      originIndependent: true,
       recovery,
       resumeResponse,
+      reason: "watcher-observed:stalled",
     });
-    expect(restartWorkflow).not.toHaveBeenCalled();
+    expect(proposeRescue).not.toHaveBeenCalled();
     expect(semanticModel).not.toHaveBeenCalled();
   });
 

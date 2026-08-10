@@ -10,6 +10,8 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { validateScientificWorkflowTemplatePreconditions } from "@/data/dag-workflow-templates";
+
 import {
   createDagWorkflowRun,
   DagWorkflowApiError,
@@ -71,6 +73,7 @@ interface StoredRunRequest {
   revision: number;
   sessionId: string | null;
   goal: string;
+  variables?: Record<string, string>;
   requestId: string;
   savedAt: number;
 }
@@ -87,6 +90,11 @@ function isStoredRunRequest(value: unknown): value is StoredRunRequest {
     typeof request.revision === "number" &&
     (request.sessionId === null || typeof request.sessionId === "string") &&
     typeof request.goal === "string" &&
+    (request.variables === undefined ||
+      (request.variables !== null &&
+        typeof request.variables === "object" &&
+        !Array.isArray(request.variables) &&
+        Object.values(request.variables).every((value) => typeof value === "string"))) &&
     typeof request.requestId === "string" &&
     typeof request.savedAt === "number"
   );
@@ -215,7 +223,7 @@ function WorkflowRegistryRow({
 }) {
   const typed = entry.typed;
   const vendored = entry.vendored;
-  const vendoredBlockedReason = entry.vendoredRouting?.blockedReason;
+  const vendoredRouteBlocked = entry.vendoredRouting?.routable === false;
   return (
     <li
       data-workflow-registry-id={entry.id}
@@ -235,38 +243,19 @@ function WorkflowRegistryRow({
                 Vendored
               </span>
             ) : null}
-            {entry.vendoredRouting ? (
-              <span
-                className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300"
-                title={entry.vendoredRouting.scopeAdvisory}
-              >
-                Project scope unverified
-              </span>
-            ) : null}
-            {vendoredBlockedReason ? (
-              <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-[10px] font-medium text-destructive">
-                Not routable
-              </span>
-            ) : null}
           </div>
           <p className="mt-1 truncate text-xs text-muted-foreground">
             {entry.description || typed?.workflowId || vendored?.workflowName}
           </p>
-          {vendoredBlockedReason ? (
-            <p role="alert" className="mt-2 text-xs text-destructive">
-              {vendoredBlockedReason}
+          {entry.routingAmbiguities?.map((ambiguity) => (
+            <p
+              key={ambiguity.engine}
+              role="alert"
+              className="mt-2 text-xs text-amber-700 dark:text-amber-300"
+            >
+              {ambiguity.message}
             </p>
-          ) : (
-            entry.routingAmbiguities?.map((ambiguity) => (
-              <p
-                key={ambiguity.engine}
-                role="alert"
-                className="mt-2 text-xs text-amber-700 dark:text-amber-300"
-              >
-                {ambiguity.message}
-              </p>
-            ))
-          )}
+          ))}
           {typed ? (
             <p className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
               <span>Revision {typed.summary.revision}</span>
@@ -305,9 +294,8 @@ function WorkflowRegistryRow({
               <button
                 type="button"
                 onClick={onEditVendored}
-                disabled={Boolean(vendoredBlockedReason)}
+                disabled={vendoredRouteBlocked}
                 aria-label={`Edit ${entry.name} with vendored engine`}
-                title={vendoredBlockedReason}
                 className="rounded-md border px-2.5 py-1 text-xs hover:bg-muted/50 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Edit
@@ -315,9 +303,13 @@ function WorkflowRegistryRow({
               <button
                 type="button"
                 onClick={onRunVendored}
-                disabled={Boolean(vendoredBlockedReason)}
+                disabled={vendoredRouteBlocked}
                 aria-label={`Run ${entry.name} with vendored engine`}
-                title={vendoredBlockedReason ?? (budgetBlocked ? "Project spend limit reached" : undefined)}
+                title={vendoredRouteBlocked
+                  ? entry.vendoredRouting?.blockedReason
+                  : budgetBlocked
+                    ? "Project spend limit reached"
+                    : undefined}
                 className="rounded-md border px-2.5 py-1 text-xs hover:bg-muted/50 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Run
@@ -335,17 +327,20 @@ function DefinitionDetails({
   selectedDefinition,
   activeSessionId,
   budgetBlocked,
+  uploadedFiles,
   onClose,
 }: {
   projectId: string;
   selectedDefinition: VersionedDagWorkflowDefinition;
   activeSessionId: string | null;
   budgetBlocked: boolean;
+  uploadedFiles: readonly string[];
   onClose: () => void;
 }) {
   const { definition } = selectedDefinition;
   const { graph } = definition;
   const [runGoal, setRunGoal] = useState("");
+  const [runVariables, setRunVariables] = useState<Record<string, string>>({});
   const [launching, setLaunching] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [runNotice, setRunNotice] = useState<string | null>(null);
@@ -358,7 +353,19 @@ function DefinitionDetails({
     definition.revision,
     activeSessionId,
     runGoal.trim(),
+    runVariables,
   ]);
+  const preconditionIssues = useMemo(
+    () => graph.preconditions
+      ? validateScientificWorkflowTemplatePreconditions(graph.preconditions, {
+          goal: runGoal,
+          variables: runVariables,
+          files: uploadedFiles,
+          capabilities: ["prompt-analysis", "read-uploaded-files"],
+        })
+      : [],
+    [graph.preconditions, runGoal, runVariables, uploadedFiles],
+  );
 
   useEffect(() => {
     if (!restoredRunIntent.current) {
@@ -383,6 +390,7 @@ function DefinitionDetails({
           requestId: request.requestId,
         };
         setRunGoal(request.goal);
+        setRunVariables(request.variables ?? {});
         return;
       }
     }
@@ -401,7 +409,7 @@ function DefinitionDetails({
   }, [activeSessionId, definition.id, definition.revision, projectId, runIntentKey]);
 
   const launchRun = async () => {
-    if (launching || budgetBlocked) return;
+    if (launching || budgetBlocked || preconditionIssues.length > 0) return;
     const goal = runGoal.trim();
     const storedRequest = readStoredRunRequests(projectId)[runIntentKey];
     const request = pendingRunRequest.current?.intentKey === runIntentKey
@@ -415,6 +423,7 @@ function DefinitionDetails({
       revision: definition.revision,
       sessionId: activeSessionId,
       goal,
+      variables: runVariables,
       requestId: request.requestId,
       savedAt: Date.now(),
     });
@@ -426,7 +435,16 @@ function DefinitionDetails({
         requestId: request.requestId,
         expectedWorkflowRevision: definition.revision,
         ...(activeSessionId ? { sessionId: activeSessionId } : {}),
-        ...(goal ? { input: { goal } } : {}),
+        ...(goal || Object.keys(runVariables).length > 0
+          ? {
+              input: {
+                ...(goal ? { goal } : {}),
+                ...(Object.keys(runVariables).length > 0
+                  ? { variables: runVariables }
+                  : {}),
+              },
+            }
+          : {}),
       });
       setRunNotice(
         `Created run ${run.manifest.id} with status ${run.state.status}. Open Console for runner progress.`,
@@ -479,6 +497,46 @@ function DefinitionDetails({
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {graph.preconditions ? (
+            <div className="flex max-w-xl flex-wrap items-end gap-2">
+              {graph.preconditions.requiredInputs.map((input) => (
+                <label key={input.key} className="flex min-w-40 flex-col gap-1 text-[10px] text-muted-foreground">
+                  {input.label}
+                  <input
+                    aria-label={input.label}
+                    type="text"
+                    value={runVariables[input.key] ?? ""}
+                    disabled={launching}
+                    onChange={(event) => setRunVariables((current) => ({
+                      ...current,
+                      [input.key]: event.target.value,
+                    }))}
+                    placeholder={input.label}
+                    className="rounded-md border bg-background px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground disabled:opacity-50"
+                  />
+                </label>
+              ))}
+              {graph.preconditions.requiredFiles.length > 0 ? (
+                <div className="min-w-48 text-[10px] text-muted-foreground">
+                  <p className="font-medium text-foreground">Required uploads</p>
+                  <ul className="mt-1 list-disc pl-4">
+                    {graph.preconditions.requiredFiles.map((file) => (
+                      <li key={file.key}>
+                        {file.label} ({file.minimumCount} minimum)
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {preconditionIssues.length > 0 ? (
+                <ul role="alert" className="w-full text-[10px] text-destructive">
+                  {preconditionIssues.map((issue) => (
+                    <li key={`${issue.kind}:${issue.key}`}>{issue.message}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
           <input
             aria-label="Typed workflow run goal"
             type="text"
@@ -486,15 +544,17 @@ function DefinitionDetails({
             maxLength={MAX_WORKFLOW_RUN_GOAL_LENGTH}
             disabled={launching}
             onChange={(event) => setRunGoal(event.target.value)}
-            placeholder="Optional run goal"
+            placeholder={graph.preconditions ? "Required run goal" : "Optional run goal"}
             className="w-52 rounded-md border bg-background px-2 py-1.5 text-xs placeholder:text-muted-foreground disabled:opacity-50"
           />
           <button
             type="button"
-            disabled={launching || budgetBlocked}
+            disabled={launching || budgetBlocked || preconditionIssues.length > 0}
             title={
               budgetBlocked
                 ? "Project spend limit reached"
+                : preconditionIssues.length > 0
+                  ? "Complete the required workflow inputs before launch"
                 : activeSessionId
                   ? "Run this saved revision using the active Kady session"
                   : "Run this saved revision using the configured Kady default model"
@@ -567,12 +627,14 @@ export function DagWorkflowsPanel({
   projectId,
   activeSessionId,
   budgetBlocked,
+  uploadedFiles = [],
   onRunPipeline,
   onEditPipeline,
 }: {
   projectId: string;
   activeSessionId: string | null;
   budgetBlocked: boolean;
+  uploadedFiles?: readonly string[];
   onRunPipeline: (name: string) => Promise<unknown>;
   onEditPipeline: (name: string) => void;
 }) {
@@ -1019,19 +1081,19 @@ export function DagWorkflowsPanel({
                       entry={entry}
                       opening={openingId === typedRoute?.sourceId}
                       budgetBlocked={budgetBlocked}
-                      receipt={vendoredRoute ? vendoredRunReceipts[vendoredRoute.workflowName] : undefined}
+                      receipt={vendoredRoute ? vendoredRunReceipts[vendoredRoute.workflowId] : undefined}
                       onOpenTyped={() => {
                         if (typedRoute) void openDefinition(entry);
                       }}
                       onEditVendored={() => {
                         if (vendoredRoute) {
-                          onEditPipeline(workflowRouteForEngine(entry, "vendored").workflowName);
+                          onEditPipeline(workflowRouteForEngine(entry, "vendored").workflowId);
                         }
                       }}
                       onRunVendored={() => {
                         if (vendoredRoute) {
                           void runVendoredPipeline(
-                            workflowRouteForEngine(entry, "vendored").workflowName,
+                            workflowRouteForEngine(entry, "vendored").workflowId,
                           );
                         }
                       }}
@@ -1050,6 +1112,7 @@ export function DagWorkflowsPanel({
             selectedDefinition={selectedDefinition}
             activeSessionId={activeSessionId}
             budgetBlocked={budgetBlocked}
+            uploadedFiles={uploadedFiles}
             onClose={() => setSelectedDefinition(null)}
           />
         ) : null}
