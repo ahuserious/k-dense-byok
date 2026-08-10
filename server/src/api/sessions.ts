@@ -56,6 +56,14 @@ import {
 import { MethodsDraftError, runMethodsDraft } from "../agent/methods-draft.ts";
 import { mintRunId, setSessionRunId } from "../agent/run-ids.ts";
 import { runBroker, type RunHandle } from "../agent/run-broker.ts";
+import {
+  chatStreamErrorForSession,
+  completeChatTurnRun,
+  projectWorkflowRunStateV1,
+  registerChatTurnRun,
+  workflowRunForChatSession,
+  type BackgroundAgentTrailingNodeInput,
+} from "../agent/chat-turn-runs-adapter.ts";
 import { ProvenanceRecorder } from "../provenance/recorder.ts";
 import { SandboxError } from "../sandbox-fs.ts";
 import { toNotebook, toShellScript } from "../agent/session-export.ts";
@@ -104,6 +112,78 @@ function snapshot(session: { getSessionStats(): { cost: number; tokens: { input:
     cacheRead: s.tokens.cacheRead,
     total: s.tokens.total,
   };
+}
+
+const ACTIVE_WORKFLOW_RUN_STATUSES = new Set([
+  "running",
+  "waiting",
+  "blocked",
+  "paused",
+]);
+
+async function workflowRescueTrailingNode(
+  projectId: string,
+  paths: ReturnType<typeof activePaths>,
+  workflowRunId: string,
+  workflowRunStatus: string,
+): Promise<BackgroundAgentTrailingNodeInput | undefined> {
+  const activities = new Map(
+    runBroker
+      .activityForProject(projectId)
+      .map((activity) => [activity.sessionId, activity.state]),
+  );
+  for (const info of await listSessions(paths)) {
+    let binding: SessionProfileBinding;
+    try {
+      binding = readSessionProfileBinding(paths, info.id);
+    } catch (error) {
+      if (error instanceof SessionProfileBindingError) continue;
+      throw error;
+    }
+    if (
+      binding.profile !== "workflow-rescue" ||
+      binding.source?.kind !== "run" ||
+      binding.source.id !== workflowRunId
+    ) {
+      continue;
+    }
+    const activity = activities.get(binding.sessionId);
+    if (!activity) continue;
+
+    if (ACTIVE_WORKFLOW_RUN_STATUSES.has(workflowRunStatus)) {
+      return {
+        slotId: "background-agent",
+        agentId: "workflow-rescue",
+        status:
+          activity === "done"
+            ? "succeeded"
+            : activity === "error"
+              ? "failed"
+              : activity,
+      };
+    }
+    if (workflowRunStatus === "succeeded" && activity === "done") {
+      return {
+        slotId: "background-agent",
+        agentId: "workflow-rescue",
+        status: "succeeded",
+      };
+    }
+    if (
+      (workflowRunStatus === "failed" ||
+        workflowRunStatus === "cancelled" ||
+        workflowRunStatus === "interrupted") &&
+      (activity === "done" || activity === "error")
+    ) {
+      return {
+        slotId: "background-agent",
+        agentId: "workflow-rescue",
+        status: activity === "done" ? "succeeded" : "failed",
+      };
+    }
+    return undefined;
+  }
+  return undefined;
 }
 
 interface RunBody {
@@ -656,6 +736,44 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
     return runBroker.state(currentProjectId(), req.params.id);
   });
 
+  app.get<{ Params: { id: string } }>(
+    "/sessions/:id/workflow-run-state",
+    async (req, reply) => {
+      const projectId = currentProjectId();
+      const paths = activePaths();
+      reply.header("Cache-Control", "no-store");
+      if (!(await requireMainSession(projectId, paths, req.params.id, reply))) {
+        return { detail: "Workflow run state is unavailable for helper sessions." };
+      }
+      const workflowRun = workflowRunForChatSession(projectId, req.params.id);
+      if (!workflowRun) return { state: null };
+      try {
+        const backgroundAgentTrailingNode = await workflowRescueTrailingNode(
+          projectId,
+          paths,
+          workflowRun.manifest.id,
+          workflowRun.state.status,
+        );
+        const chatStreamError = chatStreamErrorForSession(projectId, req.params.id);
+        const state = projectWorkflowRunStateV1(workflowRun, {
+          ...(backgroundAgentTrailingNode ? { backgroundAgentTrailingNode } : {}),
+          ...(chatStreamError ? { chatStreamError } : {}),
+        });
+        return { state };
+      } catch (error) {
+        req.log.warn(
+          { err: error, workflowRunId: workflowRun.manifest.id },
+          "rejected invalid RunState v1 chat projection",
+        );
+        reply.code(422);
+        return {
+          detail: "The workflow run projection failed RunState v1 validation.",
+          code: "INVALID_RUN_STATE_PROJECTION",
+        };
+      }
+    },
+  );
+
   app.get<{ Params: { id: string }; Querystring: { after?: string } }>(
     "/sessions/:id/run/events",
     async (req, reply) => {
@@ -868,6 +986,7 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
       // owner cleanup so it covers every exit path.
       const runId = mintRunId();
       let handle: RunHandle;
+      let indexedChatRunId: string | null = null;
       try {
         setSessionRunId(projectId, session.sessionId, runId);
         handle = runBroker.start(projectId, sessionId, {
@@ -881,9 +1000,21 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
         // Publish immediately, before any awaited model setup, so refresh recovery
         // can discover the accepted run during that setup window.
         handle.publish({ type: "run_start", runId });
+        indexedChatRunId = registerChatTurnRun({
+          projectId,
+          sessionId,
+          prompt: body.message,
+          model: modelReference(requestedModel),
+        });
       } catch (err) {
         // The claim is taken but nothing owns it yet: without this release the
         // tab stays permanently 409-locked until the process restarts.
+        const startedHandle = runBroker.get(projectId, sessionId);
+        if (startedHandle && !startedHandle.isComplete) {
+          startedHandle.publish({ type: "error", message: (err as Error).message });
+          startedHandle.publish({ type: "done" });
+          startedHandle.complete();
+        }
         setSessionRunId(projectId, session.sessionId, null);
         unpinSession(projectId, session.sessionId);
         activeRuns.delete(runKey);
@@ -894,9 +1025,47 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
       // Remember the real active set so we can restore it in the finally; `null`
       // means "not a fusion run, nothing to restore".
       let savedToolNames: string[] | null = null;
+      let indexedUsage: Pick<
+        Parameters<typeof completeChatTurnRun>[0],
+        "costUsd" | "tokensIn" | "tokensOut"
+      > = {};
+      let indexFinalized = false;
       let detachedOwner = false;
       const log = req.log;
       const cleanup = () => {
+        if (!indexFinalized && indexedChatRunId) {
+          indexFinalized = true;
+          try {
+            const errorFrame = [...(handle.state().run?.frames ?? [])]
+              .reverse()
+              .find((frame) => frame.type === "error");
+            const failed =
+              handle.isAbortRequested ||
+              handle.activityState === "error" ||
+              handle.activityState === "blocked";
+            const finished = completeChatTurnRun({
+              projectId,
+              sessionId,
+              indexRunId: indexedChatRunId,
+              status: failed ? "failed" : "completed",
+              ...(errorFrame?.type === "error"
+                ? { error: String(errorFrame.message) }
+                : {}),
+              ...indexedUsage,
+            });
+            if (!finished) {
+              log.warn(
+                { indexedChatRunId },
+                "chat turn runs-index terminal row was not written",
+              );
+            }
+          } catch (error) {
+            log.warn(
+              { err: error, indexedChatRunId },
+              "failed to finalize chat turn runs-index row",
+            );
+          }
+        }
         // Restore the local tool set disabled for a fusion run. No-op for
         // non-fusion runs (savedToolNames stays null).
         if (savedToolNames !== null) {
@@ -1096,6 +1265,11 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
                   after: run,
                   billing: runBilling,
                 });
+                indexedUsage = {
+                  costUsd: entry?.costUsd ?? 0,
+                  tokensIn: run.input,
+                  tokensOut: run.output,
+                };
                 const stats = session.getSessionStats();
                 // `cost` is the session's full ledgered spend (subagents included,
                 // restart/compaction-proof); `tokens` is Pi's in-context cumulative;
