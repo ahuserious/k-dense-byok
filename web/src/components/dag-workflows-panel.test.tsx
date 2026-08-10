@@ -304,6 +304,47 @@ describe("DagWorkflowsPanel", () => {
     );
   });
 
+  it("shows duplicate vendored names as scope-unverified and non-routable", async () => {
+    vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
+    vi.mocked(registryApi.listVendoredWorkflowRegistrySources).mockResolvedValue([
+      registryApi.vendoredWorkflowRegistrySource({
+        name: "duplicate-name",
+        description: "First record",
+        nodes: [{ id: "collect" }],
+      }, { origin: "project" })!,
+      registryApi.vendoredWorkflowRegistrySource({
+        name: "duplicate-name",
+        description: "Second record",
+        nodes: [{ id: "collect" }],
+      }, { origin: "project" })!,
+    ]);
+    const onEditPipeline = vi.fn();
+    const onRunPipeline = vi.fn();
+
+    renderPanel({ onEditPipeline, onRunPipeline });
+
+    const list = await screen.findByRole("list", { name: "Scientific pipeline workflows" });
+    expect(within(list).getAllByRole("listitem")).toHaveLength(2);
+    expect(within(list).getAllByText("Project scope unverified")).toHaveLength(2);
+    expect(within(list).getAllByText("Not routable")).toHaveLength(2);
+    expect(within(list).getAllByText(
+      registryApi.AMBIGUOUS_VENDORED_WORKFLOW_NAME_REASON,
+    )).toHaveLength(2);
+
+    const editButtons = within(list).getAllByRole("button", {
+      name: "Edit duplicate-name with vendored engine",
+    });
+    const runButtons = within(list).getAllByRole("button", {
+      name: "Run duplicate-name with vendored engine",
+    });
+    for (const button of [...editButtons, ...runButtons]) {
+      expect(button).toBeDisabled();
+      await userEvent.click(button);
+    }
+    expect(onEditPipeline).not.toHaveBeenCalled();
+    expect(onRunPipeline).not.toHaveBeenCalled();
+  });
+
   it("routes normalized-name collisions with exact identifiers and surfaces ambiguity", async () => {
     vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
     vi.mocked(registryApi.listVendoredWorkflowRegistrySources).mockResolvedValue([

@@ -37,6 +37,19 @@ export interface ScientificPipelineRoutingAmbiguity {
   message: string;
 }
 
+export const VENDORED_PROJECT_SCOPE_ADVISORY =
+  "Project scope unverified — the current proxy does not bind the engine list to this project's codebase.";
+
+export const AMBIGUOUS_VENDORED_WORKFLOW_NAME_REASON =
+  "Ambiguous vendored workflow name — not routable until the engine exposes stable ids.";
+
+export interface VendoredWorkflowRoutingState {
+  routable: boolean;
+  projectScopeVerified: false;
+  scopeAdvisory: string;
+  blockedReason?: string;
+}
+
 export interface ScientificPipelineRegistryEntry {
   id: string;
   normalizedName: string;
@@ -45,6 +58,7 @@ export interface ScientificPipelineRegistryEntry {
   description: string;
   typed?: TypedWorkflowRegistrySource;
   vendored?: VendoredWorkflowRegistrySource;
+  vendoredRouting?: VendoredWorkflowRoutingState;
   routingAmbiguities?: ScientificPipelineRoutingAmbiguity[];
 }
 
@@ -188,6 +202,10 @@ function sourceRouteIdentifier(source: RegistrySource): string {
   return source.engine === "typed" ? source.workflowId : source.workflowName;
 }
 
+function vendoredNameScopeKey(source: VendoredWorkflowRegistrySource): string {
+  return JSON.stringify([source.origin ?? null, source.workflowName]);
+}
+
 function flagSameEngineRoutingAmbiguity(
   entries: Map<string, ScientificPipelineRegistryEntry>,
   normalizedName: string,
@@ -225,6 +243,12 @@ export function buildScientificPipelineRegistry(
   vendoredSources: VendoredWorkflowRegistrySource[],
 ): ScientificPipelineRegistryEntry[] {
   const entries = new Map<string, ScientificPipelineRegistryEntry>();
+  const vendoredNameCounts = new Map<string, number>();
+  for (const source of vendoredSources) {
+    const key = vendoredNameScopeKey(source);
+    vendoredNameCounts.set(key, (vendoredNameCounts.get(key) ?? 0) + 1);
+  }
+  const sourceOccurrences = new Map<string, number>();
 
   for (const source of [...typedSources, ...vendoredSources]) {
     const normalizedName = normalizeWorkflowName(sourceName(source));
@@ -233,12 +257,15 @@ export function buildScientificPipelineRegistry(
     let id = sharedId;
     let current = entries.get(id);
     const occupiedRoute = source.engine === "typed" ? current?.typed : current?.vendored;
-    if (occupiedRoute?.sourceId === source.sourceId) continue;
+    const occurrenceKey = `${sharedId}\u0000${source.engine}\u0000${source.sourceId}`;
+    const occurrence = sourceOccurrences.get(occurrenceKey) ?? 0;
+    sourceOccurrences.set(occurrenceKey, occurrence + 1);
+    if (source.engine === "typed" && occupiedRoute?.sourceId === source.sourceId) continue;
     if (occupiedRoute) {
       // Same-engine records remain independently addressable. Cross-engine
       // aliases may share a row, but presentation dedup must never discard a
       // second runnable backing record from the same engine.
-      id = `${sharedId}:${source.sourceId}`;
+      id = `${sharedId}:${source.sourceId}${occurrence > 0 ? `:occurrence-${occurrence}` : ""}`;
       current = entries.get(id);
     }
     const next: ScientificPipelineRegistryEntry = current ?? {
@@ -254,6 +281,15 @@ export function buildScientificPipelineRegistry(
       next.description = source.summary.description ?? next.description;
     } else {
       next.vendored = source;
+      const duplicateName = (vendoredNameCounts.get(vendoredNameScopeKey(source)) ?? 0) > 1;
+      next.vendoredRouting = {
+        routable: !duplicateName,
+        projectScopeVerified: false,
+        scopeAdvisory: VENDORED_PROJECT_SCOPE_ADVISORY,
+        ...(duplicateName
+          ? { blockedReason: AMBIGUOUS_VENDORED_WORKFLOW_NAME_REASON }
+          : {}),
+      };
       if (!next.description) next.description = source.description;
     }
     entries.set(id, next);
@@ -286,6 +322,11 @@ export function workflowRouteForEngine(
   const route = engine === "typed" ? entry.typed : entry.vendored;
   if (!route) {
     throw new Error(`Workflow ${entry.id} has no ${engine} backing route.`);
+  }
+  if (engine === "vendored" && entry.vendoredRouting?.routable === false) {
+    throw new Error(
+      entry.vendoredRouting.blockedReason ?? "Vendored workflow route is not safe to resolve.",
+    );
   }
   return route;
 }

@@ -215,6 +215,7 @@ function WorkflowRegistryRow({
 }) {
   const typed = entry.typed;
   const vendored = entry.vendored;
+  const vendoredBlockedReason = entry.vendoredRouting?.blockedReason;
   return (
     <li
       data-workflow-registry-id={entry.id}
@@ -234,19 +235,38 @@ function WorkflowRegistryRow({
                 Vendored
               </span>
             ) : null}
+            {entry.vendoredRouting ? (
+              <span
+                className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300"
+                title={entry.vendoredRouting.scopeAdvisory}
+              >
+                Project scope unverified
+              </span>
+            ) : null}
+            {vendoredBlockedReason ? (
+              <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-[10px] font-medium text-destructive">
+                Not routable
+              </span>
+            ) : null}
           </div>
           <p className="mt-1 truncate text-xs text-muted-foreground">
             {entry.description || typed?.workflowId || vendored?.workflowName}
           </p>
-          {entry.routingAmbiguities?.map((ambiguity) => (
-            <p
-              key={ambiguity.engine}
-              role="alert"
-              className="mt-2 text-xs text-amber-700 dark:text-amber-300"
-            >
-              {ambiguity.message}
+          {vendoredBlockedReason ? (
+            <p role="alert" className="mt-2 text-xs text-destructive">
+              {vendoredBlockedReason}
             </p>
-          ))}
+          ) : (
+            entry.routingAmbiguities?.map((ambiguity) => (
+              <p
+                key={ambiguity.engine}
+                role="alert"
+                className="mt-2 text-xs text-amber-700 dark:text-amber-300"
+              >
+                {ambiguity.message}
+              </p>
+            ))
+          )}
           {typed ? (
             <p className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
               <span>Revision {typed.summary.revision}</span>
@@ -285,17 +305,20 @@ function WorkflowRegistryRow({
               <button
                 type="button"
                 onClick={onEditVendored}
+                disabled={Boolean(vendoredBlockedReason)}
                 aria-label={`Edit ${entry.name} with vendored engine`}
-                className="rounded-md border px-2.5 py-1 text-xs hover:bg-muted/50"
+                title={vendoredBlockedReason}
+                className="rounded-md border px-2.5 py-1 text-xs hover:bg-muted/50 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Edit
               </button>
               <button
                 type="button"
                 onClick={onRunVendored}
+                disabled={Boolean(vendoredBlockedReason)}
                 aria-label={`Run ${entry.name} with vendored engine`}
-                title={budgetBlocked ? "Project spend limit reached" : undefined}
-                className="rounded-md border px-2.5 py-1 text-xs hover:bg-muted/50"
+                title={vendoredBlockedReason ?? (budgetBlocked ? "Project spend limit reached" : undefined)}
+                className="rounded-md border px-2.5 py-1 text-xs hover:bg-muted/50 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Run
               </button>

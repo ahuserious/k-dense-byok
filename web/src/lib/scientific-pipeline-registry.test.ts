@@ -3,11 +3,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DagWorkflowDefinitionSummary, WorkflowGraphDocument } from "./dag-workflows";
 import { apiFetch } from "./projects";
 import {
+  AMBIGUOUS_VENDORED_WORKFLOW_NAME_REASON,
   buildScientificPipelineRegistry,
   listVendoredWorkflowRegistrySources,
   typedWorkflowRegistrySource,
   vendoredPipelineEngineHealth,
   vendoredWorkflowRegistrySource,
+  VENDORED_PROJECT_SCOPE_ADVISORY,
   workflowRouteForEngine,
 } from "./scientific-pipeline-registry";
 
@@ -252,6 +254,67 @@ describe("scientific pipeline registry", () => {
     });
     expect(source.sourceId).toContain("origin=project");
     expect(source.sourceId).toContain("filename=source-aware.yaml");
+  });
+
+  it("fails closed on duplicate names from the real engine list shape while distinct names remain routable", async () => {
+    apiFetchMock.mockResolvedValue(new Response(JSON.stringify({
+      workflows: [
+        {
+          workflow: {
+            name: "duplicate-name",
+            description: "First record",
+            nodes: [{ id: "collect" }],
+          },
+          source: "project",
+        },
+        {
+          workflow: {
+            name: "duplicate-name",
+            description: "Second record",
+            nodes: [{ id: "collect" }],
+          },
+          source: "project",
+        },
+        {
+          workflow: {
+            name: "distinct-name",
+            description: "Unique record",
+            nodes: [{ id: "review" }],
+          },
+          source: "project",
+        },
+      ],
+    }), { status: 200 }));
+
+    const sources = await listVendoredWorkflowRegistrySources("project-a");
+    const registry = buildScientificPipelineRegistry([], sources);
+    const duplicates = registry.filter(
+      (entry) => entry.vendored?.workflowName === "duplicate-name",
+    );
+    const distinct = registry.find(
+      (entry) => entry.vendored?.workflowName === "distinct-name",
+    );
+
+    expect(sources[0].sourceId).toBe(sources[1].sourceId);
+    expect(duplicates).toHaveLength(2);
+    expect(new Set(duplicates.map((entry) => entry.id)).size).toBe(2);
+    for (const entry of duplicates) {
+      expect(entry.vendoredRouting).toEqual({
+        routable: false,
+        projectScopeVerified: false,
+        scopeAdvisory: VENDORED_PROJECT_SCOPE_ADVISORY,
+        blockedReason: AMBIGUOUS_VENDORED_WORKFLOW_NAME_REASON,
+      });
+      expect(() => workflowRouteForEngine(entry, "vendored"))
+        .toThrow(AMBIGUOUS_VENDORED_WORKFLOW_NAME_REASON);
+    }
+    expect(distinct?.vendoredRouting).toEqual({
+      routable: true,
+      projectScopeVerified: false,
+      scopeAdvisory: VENDORED_PROJECT_SCOPE_ADVISORY,
+    });
+    expect(workflowRouteForEngine(distinct!, "vendored").workflowName)
+      .toBe("distinct-name");
   });
 
   it("keeps the timeout active while a vendored response body is stalled", async () => {
