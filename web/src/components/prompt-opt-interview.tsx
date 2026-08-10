@@ -180,7 +180,8 @@ export function PromptOptimizationInterview({
                     disabled={submitting}
                     onClick={() => setAnswers((current) => {
                       if (question.type === "single") return { ...current, [question.id]: label };
-                      const values = Array.isArray(current[question.id]) ? current[question.id] : [];
+                      const existing = current[question.id];
+                      const values = Array.isArray(existing) ? existing : [];
                       return {
                         ...current,
                         [question.id]: selected
@@ -197,7 +198,7 @@ export function PromptOptimizationInterview({
           )}
           {question.type === "text" && (
             <Textarea
-              value={typeof answers[question.id] === "string" ? answers[question.id] : ""}
+              value={((answer) => (typeof answer === "string" ? answer : ""))(answers[question.id])}
               disabled={submitting}
               onChange={(event) => setAnswers((current) => ({
                 ...current,
