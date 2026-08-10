@@ -194,6 +194,137 @@ export async function createWorkflowRun(data: {
   }
 }
 
+export interface KadyWorkflowDispatchScope {
+  workflowName: string;
+  codebaseId: string;
+  workingPath: string;
+  projectId: string;
+  engineAdmissionKey: string;
+  workflowRevisionSha256: string;
+}
+
+/**
+ * Atomically claim a durable Kady admission for dispatch.
+ *
+ * A pending row owned by this process is already represented in its in-memory
+ * lock queue and is not claimed twice. A pending row owned by another process
+ * is safe to reclaim: process ids are minted at boot, so that owner cannot have
+ * an executable queue in this process after restart.
+ */
+export async function claimKadyWorkflowDispatch(
+  id: string,
+  scope: KadyWorkflowDispatchScope,
+  processId: string,
+  claimId: string
+): Promise<{ claimed: boolean; run: WorkflowRun }> {
+  const dialect = getDialect();
+  const isPostgres = getDatabaseType() === 'postgresql';
+  const dispatchState = isPostgres
+    ? "metadata->>'kadyDispatchState'"
+    : "json_extract(metadata, '$.kadyDispatchState')";
+  const dispatchProcessId = isPostgres
+    ? "metadata->>'kadyDispatchProcessId'"
+    : "json_extract(metadata, '$.kadyDispatchProcessId')";
+  const claimMetadata = JSON.stringify({
+    kadyDispatchState: 'dispatching',
+    kadyDispatchProcessId: processId,
+    kadyDispatchClaimId: claimId,
+  });
+
+  const result = await pool.query(
+    `UPDATE remote_agent_workflow_runs
+     SET metadata = ${dialect.jsonMerge('metadata', 1)}
+     WHERE id = $2
+       AND status = 'pending'
+       AND workflow_name = $3
+       AND codebase_id = $4
+       AND working_path = $5
+       AND kady_project_id = $6
+       AND kady_engine_admission_key = $7
+       AND workflow_revision_sha256 = $8
+       AND (
+         ${dispatchState} IS NULL
+         OR ${dispatchState} = 'pre_dispatch'
+         OR (
+           ${dispatchState} IN ('dispatching', 'dispatched')
+           AND COALESCE(${dispatchProcessId}, '') <> $9
+         )
+       )`,
+    [
+      claimMetadata,
+      id,
+      scope.workflowName,
+      scope.codebaseId,
+      scope.workingPath,
+      scope.projectId,
+      scope.engineAdmissionKey,
+      scope.workflowRevisionSha256,
+      processId,
+    ]
+  );
+  const run = await getWorkflowRun(id);
+  if (!run) throw new Error(`Workflow run not found (id: ${id})`);
+  return { claimed: result.rowCount === 1, run };
+}
+
+export async function markKadyWorkflowDispatched(
+  id: string,
+  processId: string,
+  claimId: string
+): Promise<void> {
+  const dialect = getDialect();
+  const isPostgres = getDatabaseType() === 'postgresql';
+  const dispatchState = isPostgres
+    ? "metadata->>'kadyDispatchState'"
+    : "json_extract(metadata, '$.kadyDispatchState')";
+  const dispatchProcessId = isPostgres
+    ? "metadata->>'kadyDispatchProcessId'"
+    : "json_extract(metadata, '$.kadyDispatchProcessId')";
+  const dispatchClaimId = isPostgres
+    ? "metadata->>'kadyDispatchClaimId'"
+    : "json_extract(metadata, '$.kadyDispatchClaimId')";
+  const result = await pool.query(
+    `UPDATE remote_agent_workflow_runs
+     SET metadata = ${dialect.jsonMerge('metadata', 1)}
+     WHERE id = $2
+       AND ${dispatchState} = 'dispatching'
+       AND ${dispatchProcessId} = $3
+       AND ${dispatchClaimId} = $4`,
+    [JSON.stringify({ kadyDispatchState: 'dispatched' }), id, processId, claimId]
+  );
+  if (result.rowCount !== 1) {
+    throw new Error(`Kady workflow dispatch claim no longer owned (id: ${id})`);
+  }
+}
+
+export async function releaseKadyWorkflowDispatchClaim(
+  id: string,
+  processId: string,
+  claimId: string
+): Promise<void> {
+  const dialect = getDialect();
+  const isPostgres = getDatabaseType() === 'postgresql';
+  const dispatchState = isPostgres
+    ? "metadata->>'kadyDispatchState'"
+    : "json_extract(metadata, '$.kadyDispatchState')";
+  const dispatchProcessId = isPostgres
+    ? "metadata->>'kadyDispatchProcessId'"
+    : "json_extract(metadata, '$.kadyDispatchProcessId')";
+  const dispatchClaimId = isPostgres
+    ? "metadata->>'kadyDispatchClaimId'"
+    : "json_extract(metadata, '$.kadyDispatchClaimId')";
+  await pool.query(
+    `UPDATE remote_agent_workflow_runs
+     SET metadata = ${dialect.jsonMerge('metadata', 1)}
+     WHERE id = $2
+       AND status = 'pending'
+       AND ${dispatchState} = 'dispatching'
+       AND ${dispatchProcessId} = $3
+       AND ${dispatchClaimId} = $4`,
+    [JSON.stringify({ kadyDispatchState: 'pre_dispatch' }), id, processId, claimId]
+  );
+}
+
 export async function getWorkflowRun(id: string): Promise<WorkflowRun | null> {
   try {
     const result = await pool.query<WorkflowRun>(

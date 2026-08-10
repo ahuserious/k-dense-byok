@@ -251,11 +251,6 @@ CREATE INDEX IF NOT EXISTS idx_workflow_runs_status
   ON remote_agent_workflow_runs(status);
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_parent_conv
   ON remote_agent_workflow_runs(parent_conversation_id);
-CREATE UNIQUE INDEX IF NOT EXISTS unique_workflow_run_kady_admission
-  ON remote_agent_workflow_runs(kady_project_id, kady_engine_admission_key)
-  WHERE kady_project_id IS NOT NULL AND kady_engine_admission_key IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_workflow_runs_kady_admission_lookup
-  ON remote_agent_workflow_runs(kady_project_id, kady_admission_id);
 
 -- Partial index for efficient staleness queries on running workflows
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_last_activity

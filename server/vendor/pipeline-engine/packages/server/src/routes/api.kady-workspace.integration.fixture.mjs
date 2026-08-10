@@ -1,5 +1,5 @@
 import { OpenAPIHono } from '@hono/zod-openapi';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { createHash } from 'crypto';
 import { join } from 'path';
@@ -10,7 +10,7 @@ import { SSETransport } from '../adapters/web/transport.ts';
 import { WorkflowEventBridge } from '../adapters/web/workflow-bridge.ts';
 import { ConversationLockManager } from '@archon/core';
 
-const [{ createProject, resolvePaths }, { registerApiRoutes }, { parseWorkflow }] = await Promise.all([
+const [{ createProject, ensureProjectExists, resolvePaths }, { registerApiRoutes }, { parseWorkflow }] = await Promise.all([
   import('../../../../../../src/projects.ts'),
   import('./api.ts'),
   import('@archon/workflows/loader'),
@@ -155,6 +155,129 @@ if (!terminalRun) {
     `Durable workflow run did not reach a terminal status: ${JSON.stringify({ lastLookupBody, lockStats: lockManager.getStats() })}`
   );
 }
+
+async function exerciseEnsuredProject(projectId, workflowName, preExistingNonGit) {
+  const projectPaths = resolvePaths(projectId);
+  if (preExistingNonGit) {
+    mkdirSync(projectPaths.sandbox, { recursive: true });
+    writeFileSync(join(projectPaths.sandbox, 'legacy-input.txt'), 'legacy data\n');
+  }
+  const ensured = ensureProjectExists(projectId);
+  const commitCountAfterUpgrade = Number(execFileSync(
+    'git',
+    ['-C', ensured.sandbox, 'rev-list', '--count', 'HEAD'],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
+  ).trim());
+  ensureProjectExists(projectId);
+  const commitCountAfterRepeat = Number(execFileSync(
+    'git',
+    ['-C', ensured.sandbox, 'rev-list', '--count', 'HEAD'],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
+  ).trim());
+
+  const registerResponse = await app.request('/api/codebases', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: ensured.sandbox, name: `kady/${projectId}` }),
+  });
+  const registeredCodebase = await registerResponse.json();
+  if (registerResponse.status !== 201 || !registeredCodebase.id) {
+    throw new Error(`Ensured workspace registration failed: ${registerResponse.status}`);
+  }
+  const ensuredScope = new URLSearchParams({
+    cwd: ensured.sandbox,
+    codebaseId: registeredCodebase.id,
+  });
+  const saveResponse = await app.request(`/api/workflows/${workflowName}?${ensuredScope}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      definition: {
+        name: workflowName,
+        description: `Executable workflow for ${projectId}`,
+        nodes: [{ id: 'verify', bash: `printf ${projectId}` }],
+      },
+    }),
+  });
+  if (saveResponse.status !== 200) {
+    throw new Error(`Ensured workflow save failed: ${saveResponse.status}`);
+  }
+  const listResponse = await app.request(`/api/workflows?${ensuredScope}`);
+  const ensuredListBody = await listResponse.json();
+  const ensuredWorkflow = ensuredListBody.workflows?.find(
+    entry => entry.workflow.name === workflowName
+  );
+  if (!ensuredWorkflow) throw new Error(`Ensured workflow list failed: ${listResponse.status}`);
+
+  const ensuredAdmissionId = `${projectId}-admission`;
+  const ensuredAdmissionKey = `kadypipe_${createHash('sha256')
+    .update(`${projectId}\0${ensuredAdmissionId}`)
+    .digest('hex')
+    .slice(0, 32)}`;
+  const ensuredParsed = parseWorkflow(
+    readFileSync(join(ensured.sandbox, '.archon', 'workflows', `${workflowName}.yaml`), 'utf8'),
+    `${workflowName}.yaml`
+  );
+  if (ensuredParsed.error) throw new Error(ensuredParsed.error.error);
+  const ensuredRevision = createHash('sha256')
+    .update(canonicalJson(ensuredParsed.workflow))
+    .digest('hex');
+  const launchResponse = await app.request(
+    `/api/workflows/${ensuredWorkflow.workflowId}/run?${ensuredScope}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        conversationId: `${projectId}-conversation`,
+        message: 'Run it',
+        kadyProjectId: projectId,
+        kadyAdmissionId: ensuredAdmissionId,
+        kadyEngineAdmissionKey: ensuredAdmissionKey,
+        idempotencyKey: ensuredAdmissionKey,
+        workflowRevisionSha256: ensuredRevision,
+        metadata: { kadyRunId: `${projectId}-run` },
+      }),
+    }
+  );
+  if (launchResponse.status !== 200) {
+    throw new Error(`Ensured workflow launch failed: ${launchResponse.status}`);
+  }
+  let ensuredTerminalRun;
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    const lookup = await app.request(
+      `/api/workflows/runs?projectId=${encodeURIComponent(projectId)}&admissionId=${encodeURIComponent(ensuredAdmissionId)}`
+    );
+    const body = await lookup.json();
+    ensuredTerminalRun = body.runs?.find(run =>
+      ['completed', 'failed', 'cancelled'].includes(run.status)
+    );
+    if (ensuredTerminalRun) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  if (!ensuredTerminalRun) throw new Error(`Ensured workflow did not finish: ${projectId}`);
+  return {
+    hasGitDirectory: existsSync(join(ensured.sandbox, '.git')),
+    commitCountAfterUpgrade,
+    commitCountAfterRepeat,
+    legacyFileTracked: preExistingNonGit
+      ? execFileSync('git', ['-C', ensured.sandbox, 'ls-files', '--error-unmatch', 'legacy-input.txt'], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        }).trim() === 'legacy-input.txt'
+      : undefined,
+    registrationStatus: registerResponse.status,
+    listStatus: listResponse.status,
+    launchStatus: launchResponse.status,
+    terminalStatus: ensuredTerminalRun.status,
+  };
+}
+
+const defaultProject = await exerciseEnsuredProject('default', 'default-workflow', false);
+const upgradedProject = await exerciseEnsuredProject(
+  'legacy-upgrade',
+  'legacy-workflow',
+  true
+);
 console.log(`KADY_WORKSPACE_RESULT=${JSON.stringify({
   hasGitDirectory: existsSync(join(sandbox, '.git')),
   initialCommitAuthor,
@@ -175,6 +298,8 @@ console.log(`KADY_WORKSPACE_RESULT=${JSON.stringify({
   pendingStatus: pendingBody.runs?.[0]?.status,
   terminalStatus: terminalRun.status,
   terminalWorkingPath: terminalRun.workingPath ?? terminalRun.working_path,
+  defaultProject,
+  upgradedProject,
 })}`);
 
 await webAdapter.stop();

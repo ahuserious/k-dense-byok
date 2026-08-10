@@ -108,6 +108,7 @@ function getLog(): ReturnType<typeof createLogger> {
 let legacyWebIdentityHeaderWarningLogged = false;
 
 const STABLE_WORKFLOW_ID_PATTERN = /^workflow_[a-f0-9]{32}$/;
+const KADY_DISPATCH_PROCESS_ID = randomUUID();
 
 function stableWorkflowId(source: WorkflowSource, filename: string): string {
   const digest = createHash('sha256')
@@ -795,6 +796,7 @@ const runWorkflowRoute = createRoute({
       description: 'Accepted',
     },
     400: jsonError('Bad request'),
+    409: jsonError('Admission conflict'),
     500: jsonError('Server error'),
   },
 });
@@ -1469,11 +1471,15 @@ export function registerApiRoutes(
   app: OpenAPIHono,
   webAdapter: WebAdapter,
   lockManager: ConversationLockManager,
-  activePlatforms?: readonly string[]
+  activePlatforms?: readonly string[],
+  faultInjection?: {
+    /** Integration-test crash boundary: durable row exists, dispatch claim does not. */
+    afterKadyAdmissionPersisted?: (run: WorkflowRun) => void | Promise<void>;
+  }
 ): void {
   function apiError(
     c: Context,
-    status: 400 | 401 | 404 | 422 | 500 | 503,
+    status: 400 | 401 | 404 | 409 | 422 | 500 | 503,
     message: string,
     detail?: string
   ): Response {
@@ -3316,6 +3322,7 @@ export function registerApiRoutes(
         return apiError(c, 400, admission.error);
       }
       runMetadata = admission?.metadata;
+      if (runMetadata) runMetadata.kadyDispatchState = 'pre_dispatch';
     }
 
     try {
@@ -3367,6 +3374,7 @@ export function registerApiRoutes(
 
       const fullMessage = `/workflow run ${workflowName} ${message}`;
       let preCreatedRun: Awaited<ReturnType<typeof workflowDb.createWorkflowRun>> | undefined;
+      let dispatchClaimId: string | undefined;
       if (runMetadata) {
         if (!conv || !scopedCodebaseId || !scopedWorkingDir) {
           throw new Error('Unable to establish durable workflow admission scope');
@@ -3381,7 +3389,37 @@ export function registerApiRoutes(
           parent_conversation_id: conv.id,
           user_id: userId,
         });
+        await faultInjection?.afterKadyAdmissionPersisted?.(preCreatedRun);
         if (preCreatedRun.idempotency_replayed) {
+          const expectedRevision = runMetadata.workflowRevisionSha256 as string;
+          if (
+            preCreatedRun.workflow_name !== workflowName ||
+            preCreatedRun.codebase_id !== scopedCodebaseId ||
+            preCreatedRun.working_path !== scopedWorkingDir ||
+            preCreatedRun.workflow_revision_sha256 !== expectedRevision
+          ) {
+            return apiError(c, 409, 'Admission replay does not match the original workflow scope');
+          }
+          if (preCreatedRun.status !== 'pending') {
+            return c.json({ accepted: true, status: preCreatedRun.status });
+          }
+        }
+        dispatchClaimId = randomUUID();
+        const claim = await workflowDb.claimKadyWorkflowDispatch(
+          preCreatedRun.id,
+          {
+            workflowName,
+            codebaseId: scopedCodebaseId,
+            workingPath: scopedWorkingDir,
+            projectId: runMetadata.kadyProjectId as string,
+            engineAdmissionKey: runMetadata.kadyEngineAdmissionKey as string,
+            workflowRevisionSha256: runMetadata.workflowRevisionSha256 as string,
+          },
+          KADY_DISPATCH_PROCESS_ID,
+          dispatchClaimId
+        );
+        preCreatedRun = claim.run;
+        if (!claim.claimed) {
           return c.json({ accepted: true, status: preCreatedRun.status });
         }
       }
@@ -3402,12 +3440,38 @@ export function registerApiRoutes(
           : {}),
       };
       const filesToCleanup = savedFiles.length > 0 ? { files: savedFiles, uploadDir } : undefined;
-      const result = await dispatchToOrchestrator(
-        conversationId,
-        fullMessage,
-        extraContext,
-        filesToCleanup
-      );
+      let result: Awaited<ReturnType<typeof dispatchToOrchestrator>>;
+      try {
+        result = await dispatchToOrchestrator(
+          conversationId,
+          fullMessage,
+          extraContext,
+          filesToCleanup
+        );
+      } catch (error) {
+        if (preCreatedRun && dispatchClaimId) {
+          await workflowDb
+            .releaseKadyWorkflowDispatchClaim(
+              preCreatedRun.id,
+              KADY_DISPATCH_PROCESS_ID,
+              dispatchClaimId
+            )
+            .catch(releaseError => {
+              getLog().error(
+                { err: releaseError, workflowRunId: preCreatedRun?.id },
+                'workflow_dispatch_claim_release_failed'
+              );
+            });
+        }
+        throw error;
+      }
+      if (preCreatedRun && dispatchClaimId) {
+        await workflowDb.markKadyWorkflowDispatched(
+          preCreatedRun.id,
+          KADY_DISPATCH_PROCESS_ID,
+          dispatchClaimId
+        );
+      }
       return c.json(result);
     } catch (error) {
       getLog().error({ err: error }, 'run_workflow_failed');

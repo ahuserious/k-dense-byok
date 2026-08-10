@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
@@ -11,7 +11,7 @@ afterEach(() => {
 });
 
 describe('Kady git workspace integration', () => {
-  test('createProject retains a lost-response pending admission and completes through the real lock', async () => {
+  test('new, default, and upgraded projects register and complete through the real lock', async () => {
     testRoot = mkdtempSync(join(tmpdir(), 'pipeline-kady-workspace-'));
     const childEnvironment = { ...process.env };
     childEnvironment.ARCHON_HOME = join(testRoot, 'engine-home');
@@ -57,6 +57,8 @@ describe('Kady git workspace integration', () => {
       pendingStatus: string;
       terminalStatus: string;
       terminalWorkingPath: string;
+      defaultProject: Record<string, unknown>;
+      upgradedProject: Record<string, unknown>;
     };
     expect(result).toEqual({
       hasGitDirectory: true,
@@ -73,6 +75,89 @@ describe('Kady git workspace integration', () => {
       pendingStatus: 'pending',
       terminalStatus: 'completed',
       terminalWorkingPath: expect.stringContaining('worktrees'),
+      defaultProject: {
+        hasGitDirectory: true,
+        commitCountAfterUpgrade: 1,
+        commitCountAfterRepeat: 1,
+        registrationStatus: 201,
+        listStatus: 200,
+        launchStatus: 200,
+        terminalStatus: 'completed',
+      },
+      upgradedProject: {
+        hasGitDirectory: true,
+        commitCountAfterUpgrade: 1,
+        commitCountAfterRepeat: 1,
+        legacyFileTracked: true,
+        registrationStatus: 201,
+        listStatus: 200,
+        launchStatus: 200,
+        terminalStatus: 'completed',
+      },
     });
-  }, 30_000);
+  }, 60_000);
+
+  test('replays a process-crashed pre-dispatch admission and completes the original run', async () => {
+    testRoot = mkdtempSync(join(tmpdir(), 'pipeline-kady-dispatch-crash-'));
+    const childEnvironment = { ...process.env };
+    childEnvironment.ARCHON_HOME = join(testRoot, 'engine-home');
+    childEnvironment.KADY_PROJECTS_ROOT = join(testRoot, 'projects');
+    delete childEnvironment.DATABASE_URL;
+    delete childEnvironment.FORCE_COLOR;
+    delete childEnvironment.NO_COLOR;
+    const fixture = join(import.meta.dir, 'api.kady-dispatch-crash.integration.fixture.mjs');
+
+    const seed = Bun.spawn([process.execPath, fixture], {
+      env: { ...childEnvironment, KADY_CRASH_FIXTURE_MODE: 'seed' },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const [seedExit, _seedStdout, seedStderr] = await Promise.all([
+      seed.exited,
+      new Response(seed.stdout).text(),
+      new Response(seed.stderr).text(),
+    ]);
+    expect({ seedExit, seedStderr }).toEqual({ seedExit: 86, seedStderr: '' });
+    const seeded = JSON.parse(
+      readFileSync(join(testRoot, 'engine-home', 'crash-state.json'), 'utf8')
+    ) as {
+      runId: string;
+      pendingStatus: string;
+      dispatchState: string;
+      [key: string]: unknown;
+    };
+    expect(seeded).toMatchObject({ pendingStatus: 'pending', dispatchState: 'pre_dispatch' });
+
+    const replay = Bun.spawn([process.execPath, fixture], {
+      env: {
+        ...childEnvironment,
+        KADY_CRASH_FIXTURE_MODE: 'replay',
+        KADY_CRASH_STATE: JSON.stringify(seeded),
+      },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const [replayExit, replayStdout, replayStderr] = await Promise.all([
+      replay.exited,
+      new Response(replay.stdout).text(),
+      new Response(replay.stderr).text(),
+    ]);
+    expect({ replayExit, replayStderr }).toEqual({ replayExit: 0, replayStderr: '' });
+    const replayLine = replayStdout
+      .split('\n')
+      .find(line => line.startsWith('KADY_CRASH_REPLAY='));
+    expect(replayLine).toBeDefined();
+    const replayed = JSON.parse(replayLine!.slice('KADY_CRASH_REPLAY='.length)) as {
+      replayStatus: number;
+      runId: string;
+      terminalStatus: string;
+      dispatchState: string;
+    };
+    expect(replayed).toEqual({
+      replayStatus: 200,
+      runId: seeded.runId,
+      terminalStatus: 'completed',
+      dispatchState: 'dispatched',
+    });
+  }, 60_000);
 });

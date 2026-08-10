@@ -698,10 +698,11 @@ function kadyCompletionMetadata(
       usageByNode[nodeId] = { costUsd: 0, tokensIn: 0, tokensOut: 0 };
       continue;
     }
-    const costUsd = output.costUsd ?? 0;
+    const costUsd = output.costUsd;
     const tokensIn = output.tokens?.input;
     const tokensOut = output.tokens?.output;
     if (
+      typeof costUsd !== 'number' ||
       !Number.isFinite(costUsd) ||
       costUsd < 0 ||
       typeof tokensIn !== 'number' ||

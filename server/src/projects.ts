@@ -263,20 +263,82 @@ export interface CreateProjectInput {
   spendLimitUsd?: number | null;
 }
 
-function initializeProjectRepository(sandbox: string): void {
-  execFileSync("git", ["init", "--quiet", sandbox], { stdio: "ignore" });
-  execFileSync("git", ["-C", sandbox, "config", "user.name", "Kady"], { stdio: "ignore" });
-  execFileSync(
-    "git",
-    ["-C", sandbox, "config", "user.email", "kady@localhost"],
-    { stdio: "ignore" },
-  );
-  execFileSync("git", ["-C", sandbox, "add", "--all"], { stdio: "ignore" });
-  execFileSync(
-    "git",
-    ["-C", sandbox, "commit", "--quiet", "--allow-empty", "-m", "Initialize Kady project"],
-    { stdio: "ignore" },
-  );
+function hasProjectRepositoryCommit(sandbox: string): boolean {
+  // Do not let Git walk upward into Kady's own checkout: the sandbox itself
+  // must own the repository used for engine worktree isolation.
+  if (!fs.existsSync(path.join(sandbox, ".git"))) return false;
+  try {
+    execFileSync("git", ["-C", sandbox, "rev-parse", "--verify", "HEAD"], {
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function processIsRunning(processId: number): boolean {
+  try {
+    process.kill(processId, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+function acquireProjectRepositoryLock(sandbox: string): () => void {
+  const lockPath = path.join(path.dirname(sandbox), ".git-init.lock");
+  const waitBuffer = new Int32Array(new SharedArrayBuffer(4));
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      const descriptor = fs.openSync(lockPath, "wx", 0o600);
+      fs.writeFileSync(descriptor, `${process.pid}\n`, "utf-8");
+      return () => {
+        fs.closeSync(descriptor);
+        fs.rmSync(lockPath, { force: true });
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      let ownerProcessId = Number.NaN;
+      try {
+        ownerProcessId = Number.parseInt(fs.readFileSync(lockPath, "utf-8").trim(), 10);
+      } catch {
+        // An interrupted writer left an unreadable lock; remove it below.
+      }
+      if (!Number.isSafeInteger(ownerProcessId) || !processIsRunning(ownerProcessId)) {
+        fs.rmSync(lockPath, { force: true });
+        continue;
+      }
+      Atomics.wait(waitBuffer, 0, 0, 25);
+    }
+  }
+  throw new Error(`Timed out initializing project repository: ${sandbox}`);
+}
+
+function ensureProjectRepository(sandbox: string): void {
+  if (hasProjectRepositoryCommit(sandbox)) return;
+  const releaseLock = acquireProjectRepositoryLock(sandbox);
+  try {
+    if (hasProjectRepositoryCommit(sandbox)) return;
+    if (!fs.existsSync(path.join(sandbox, ".git"))) {
+      execFileSync("git", ["init", "--quiet", sandbox], { stdio: "ignore" });
+    }
+    execFileSync("git", ["-C", sandbox, "config", "user.name", "Kady"], { stdio: "ignore" });
+    execFileSync(
+      "git",
+      ["-C", sandbox, "config", "user.email", "kady@localhost"],
+      { stdio: "ignore" },
+    );
+    execFileSync("git", ["-C", sandbox, "add", "--all"], { stdio: "ignore" });
+    execFileSync(
+      "git",
+      ["-C", sandbox, "commit", "--quiet", "-m", "Initialize Kady project"],
+      { stdio: "ignore" },
+    );
+  } finally {
+    releaseLock();
+  }
 }
 
 export function createProject(input: CreateProjectInput): ProjectMeta {
@@ -311,7 +373,7 @@ export function createProject(input: CreateProjectInput): ProjectMeta {
   try {
     fs.mkdirSync(paths.sandbox, { recursive: true });
     seedSandboxFiles(paths);
-    initializeProjectRepository(paths.sandbox);
+    ensureProjectRepository(paths.sandbox);
     writeProjectJson(paths, meta);
   } catch (error) {
     fs.rmSync(paths.root, { recursive: true, force: true });
@@ -403,6 +465,9 @@ export function ensureProjectExists(projectId: string): ProjectPaths {
   fs.mkdirSync(paths.kadyDir, { recursive: true });
   // Covers projects that predate sandbox seeding; no-op once the files exist.
   seedSandboxFiles(paths);
+  // Project workspaces are execution repositories. This also upgrades the
+  // default project and sandboxes created before Git initialization existed.
+  ensureProjectRepository(paths.sandbox);
 
   if (!fs.existsSync(paths.projectJson)) {
     const now = nowIso();

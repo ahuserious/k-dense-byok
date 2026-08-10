@@ -4,7 +4,11 @@ import { mkdirSync, mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { closeDatabase, getDatabase, resetDatabase } from '../connection';
-import { createWorkflowRun } from '../workflows';
+import {
+  claimKadyWorkflowDispatch,
+  createWorkflowRun,
+  markKadyWorkflowDispatched,
+} from '../workflows';
 
 const originalArchonHome = process.env.ARCHON_HOME;
 const originalDatabaseUrl = process.env.DATABASE_URL;
@@ -165,5 +169,68 @@ describe('SQLite workflow admission schema integration', () => {
     await closeDatabase();
     resetDatabase();
     expect(() => getDatabase()).not.toThrow();
+  });
+
+  test('reclaims a pending dispatch after a process restart without double-claiming in-process', async () => {
+    useIsolatedSqliteHome('pipeline-sqlite-dispatch-claim-');
+    await seedRunParents('conversation-dispatch-claim');
+    const scope = {
+      workflowName: 'claim-workflow',
+      codebaseId: 'codebase-1',
+      workingPath: '/tmp/kady-test-project',
+      projectId: 'project-claim',
+      engineAdmissionKey: 'kadypipe_55555555555555555555555555555555',
+      workflowRevisionSha256: 'c'.repeat(64),
+    };
+    const run = await createWorkflowRun({
+      workflow_name: scope.workflowName,
+      conversation_id: 'conversation-dispatch-claim',
+      codebase_id: scope.codebaseId,
+      user_message: 'Run the claimed workflow',
+      working_path: scope.workingPath,
+      metadata: {
+        kadyProjectId: scope.projectId,
+        kadyAdmissionId: 'admission-claim',
+        kadyEngineAdmissionKey: scope.engineAdmissionKey,
+        workflowRevisionSha256: scope.workflowRevisionSha256,
+        kadyDispatchState: 'pre_dispatch',
+      },
+    });
+
+    const firstClaim = await claimKadyWorkflowDispatch(
+      run.id,
+      scope,
+      'process-a',
+      'claim-a'
+    );
+    expect(firstClaim).toMatchObject({
+      claimed: true,
+      run: { metadata: { kadyDispatchState: 'dispatching' } },
+    });
+    expect(
+      await claimKadyWorkflowDispatch(run.id, scope, 'process-a', 'claim-a-retry')
+    ).toMatchObject({ claimed: false });
+
+    await markKadyWorkflowDispatched(run.id, 'process-a', 'claim-a');
+    expect(
+      await claimKadyWorkflowDispatch(run.id, scope, 'process-a', 'claim-a-after-dispatch')
+    ).toMatchObject({ claimed: false });
+
+    const restartedClaim = await claimKadyWorkflowDispatch(
+      run.id,
+      scope,
+      'process-b',
+      'claim-b'
+    );
+    expect(restartedClaim).toMatchObject({
+      claimed: true,
+      run: {
+        metadata: {
+          kadyDispatchState: 'dispatching',
+          kadyDispatchProcessId: 'process-b',
+          kadyDispatchClaimId: 'claim-b',
+        },
+      },
+    });
   });
 });

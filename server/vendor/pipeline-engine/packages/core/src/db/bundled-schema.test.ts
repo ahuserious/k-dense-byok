@@ -23,4 +23,23 @@ describe('getSchemaSQL() — binary build', () => {
     expect(BUNDLED_SCHEMA_SQL).toContain('remote_agent_codebases');
     expect(BUNDLED_SCHEMA_SQL).toContain('CREATE TABLE IF NOT EXISTS');
   });
+
+  test('creates admission indexes only after the pre-024 column upgrade block', () => {
+    const admissionUpgrade = BUNDLED_SCHEMA_SQL.indexOf('-- From migration 024:');
+    const finalAdmissionColumn = BUNDLED_SCHEMA_SQL.indexOf(
+      'ADD COLUMN IF NOT EXISTS workflow_revision_sha256 TEXT;',
+      admissionUpgrade
+    );
+    const uniqueAdmissionIndex = BUNDLED_SCHEMA_SQL.indexOf(
+      'CREATE UNIQUE INDEX IF NOT EXISTS unique_workflow_run_kady_admission'
+    );
+    const lookupAdmissionIndex = BUNDLED_SCHEMA_SQL.indexOf(
+      'CREATE INDEX IF NOT EXISTS idx_workflow_runs_kady_admission_lookup'
+    );
+
+    expect(admissionUpgrade).toBeGreaterThan(-1);
+    expect(finalAdmissionColumn).toBeGreaterThan(admissionUpgrade);
+    expect(uniqueAdmissionIndex).toBeGreaterThan(finalAdmissionColumn);
+    expect(lookupAdmissionIndex).toBeGreaterThan(uniqueAdmissionIndex);
+  });
 });
