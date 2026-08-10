@@ -10,6 +10,7 @@ import { createProject, resolvePaths } from "../src/projects.ts";
 import {
   WorkflowBudgetError,
   WorkflowBudgetStore,
+  reservePipelineNodeBudgets,
   reserveWorkflowBudget,
   workflowBudgetReservationId,
   workflowRunBudgetSummary,
@@ -165,6 +166,83 @@ function mixedBudgetRaceWorker(args: {
 }
 
 describe("durable workflow budget reservations", () => {
+  describe("Tier A S4 pipeline NodeSpec admission", () => {
+    it("atomically reserves API hooks while retaining subscription token caps", async () => {
+      createProject({ name: "Pipeline budget", projectId: "pipeline-budget", spendLimitUsd: 5 });
+      const admission = await reservePipelineNodeBudgets({
+        projectId: "pipeline-budget",
+        admissionId: "request-one",
+        workflowNodeCount: 2,
+        hooks: [
+          {
+            nodeId: "api-node",
+            maxTokens: 1_000,
+            maxCostUsd: 3,
+            declaredBillingMode: "api",
+            billing: { provider: "openrouter", authType: "api_key", billingMode: "payg" },
+          },
+          {
+            nodeId: "subscription-node",
+            maxTokens: 2_000,
+            maxCostUsd: 9,
+            declaredBillingMode: "subscription",
+            billing: { provider: "openai-codex", authType: "oauth", billingMode: "subscription" },
+          },
+        ],
+      });
+      expect(admission?.handle.record).toMatchObject({
+        status: "active",
+        maxTokens: 3_000,
+        maxCostUsd: 3,
+        modelCallCount: 2,
+        reservedCostUsd: 3,
+      });
+      expect(projectCostSummary("pipeline-budget").workflowReservedUsd).toBe(3);
+    });
+
+    it("rejects the aggregate before provider work when per-node caps exceed the project", async () => {
+      createProject({ name: "Pipeline reject", projectId: "pipeline-reject", spendLimitUsd: 2 });
+      const providerCalls: string[] = [];
+      const admitThenCallProvider = async () => {
+        await reservePipelineNodeBudgets({
+          projectId: "pipeline-reject",
+          admissionId: "request-rejected",
+          workflowNodeCount: 1,
+          hooks: [
+            {
+              nodeId: "expensive",
+              maxTokens: 1_000,
+              maxCostUsd: 3,
+              declaredBillingMode: "api",
+              billing: { provider: "openrouter", authType: "api_key", billingMode: "payg" },
+            },
+          ],
+        });
+        providerCalls.push("provider");
+      };
+      await expect(admitThenCallProvider()).rejects.toMatchObject({ code: "LIMIT_EXCEEDED" });
+      expect(providerCalls).toEqual([]);
+      expect(projectCostSummary("pipeline-reject").workflowReservedUsd).toBe(0);
+    });
+
+    it("rejects a zero envelope for a centrally cap-counted provider", async () => {
+      createProject({ name: "Pipeline zero", projectId: "pipeline-zero", spendLimitUsd: 10 });
+      await expect(reservePipelineNodeBudgets({
+        projectId: "pipeline-zero",
+        admissionId: "request-zero",
+        workflowNodeCount: 1,
+        hooks: [{
+          nodeId: "unfunded",
+          maxTokens: 1_000,
+          maxCostUsd: 0,
+          declaredBillingMode: "inherit",
+          billing: { provider: "anthropic", authType: "oauth", billingMode: "metered_oauth" },
+        }],
+      })).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+      expect(projectCostSummary("pipeline-zero").workflowReservedUsd).toBe(0);
+    });
+  });
+
   it("projects one run's ceilings and commitments without reasons or false token claims", async () => {
     createProject({ name: "Run projection", projectId: "run-projection", spendLimitUsd: 100 });
     let now = 1_000;
