@@ -11,26 +11,28 @@
 import { EngineIframePanel } from "@/components/engine-iframe-panel";
 import { PIPELINE_ENGINE_URL } from "@/lib/embed-config";
 import { pipelineHealth } from "@/lib/pipelines";
+import type { VendoredPipelineEditTarget } from "@/lib/scientific-pipeline-registry";
 
 // The visual builder canvas / YAML editor is the default landing view.
 const BUILDER_URL = `${PIPELINE_ENGINE_URL}/legacy/workflows/builder`;
 
-// Build the iframe src. With no workflowName we open the blank builder canvas. When a
-// workflowName is passed (the Edit affordance from the DAG Pipelines list) we deep-link
-// the canvas with it loaded — the builder reads the workflow to open from the
-// `?edit=` query param (WorkflowBuilder.tsx auto-loads it on mount); the name is
-// URL-encoded to mirror the engine's WorkflowCard deep-link. Changing the src navigates
-// the iframe to the new ?edit= URL (a real load), so the canvas re-initializes — no
-// component remount / key churn needed.
-function builderSrc(workflowName?: string): string {
-  if (!workflowName) return BUILDER_URL;
-  return `${BUILDER_URL}?edit=${encodeURIComponent(workflowName)}`;
+// Edit links bind both the stable workflow id and its exact registered codebase.
+// Changing either value navigates the iframe, clearing any prior project's builder state.
+export function builderSrc(editTarget?: VendoredPipelineEditTarget): string {
+  if (!editTarget) return BUILDER_URL;
+  const query = new URLSearchParams({
+    edit: editTarget.workflowId,
+    codebaseId: editTarget.codebaseId,
+  });
+  return `${BUILDER_URL}?${query.toString()}`;
 }
 
-export function PipelineBuilderPanel({ workflowName }: { workflowName?: string } = {}) {
+export function PipelineBuilderPanel({
+  editTarget,
+}: { editTarget?: VendoredPipelineEditTarget } = {}) {
   return (
     <EngineIframePanel
-      src={builderSrc(workflowName)}
+      src={builderSrc(editTarget)}
       title="DAG Builder"
       healthCheck={pipelineHealth}
       engineLabel="Scientific DAG Workflow Designer"

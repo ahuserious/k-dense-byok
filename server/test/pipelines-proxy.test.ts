@@ -74,7 +74,10 @@ describe("pipelines proxy (engine up)", () => {
   it("resolves and forwards the active project scope with the workflow list", async () => {
     const res = await app.inject({ method: "GET", url: "/pipelines" });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ workflows: [{ name: "stub-flow" }], recommended: [] });
+    expect(res.json()).toEqual({
+      workflows: [{ name: "stub-flow", codebaseId: "stub-codebase" }],
+      recommended: [],
+    });
     const seen = stubRequests.at(-1)!;
     expect(seen.method).toBe("GET");
     const workflowUrl = new URL(seen.url, "http://pipeline-engine.test");

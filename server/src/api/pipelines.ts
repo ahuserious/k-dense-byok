@@ -726,7 +726,17 @@ export async function registerPipelineRoutes(
     req.raw.once("close", abortForClosedRequest);
     try {
       const scope = await resolveWorkflowScope(currentProjectId());
-      return await pipelineEngine.listWorkflows(scope, requestAbortController.signal);
+      const result = await pipelineEngine.listWorkflows(scope, requestAbortController.signal);
+      const resultRecord = recordOf(result);
+      const workflows = resultRecord?.workflows;
+      if (!Array.isArray(workflows)) return result;
+      return {
+        ...resultRecord,
+        workflows: workflows.map((candidate) => {
+          const workflow = recordOf(candidate);
+          return workflow ? { ...workflow, codebaseId: scope.codebaseId } : candidate;
+        }),
+      };
     } catch (err) {
       return mapError(reply, err);
     } finally {

@@ -24,7 +24,7 @@ function mockVendoredWorkflows(
     workflows.map((workflow) => registryApi.vendoredWorkflowRegistrySource({
       ...workflow,
       nodes: workflow.nodes ?? [{ id: `${workflow.name}-node`, prompt: "Run workflow." }],
-    })!),
+    }, { codebaseId: "codebase-a" })!),
   );
 }
 
@@ -37,7 +37,7 @@ function renderPanel({
   activeSessionId?: string | null;
   budgetBlocked?: boolean;
   onRunPipeline?: (name: string) => Promise<unknown>;
-  onEditPipeline?: (name: string) => void;
+  onEditPipeline?: (target: registryApi.VendoredPipelineEditTarget) => void;
 } = {}) {
   return render(
     <DagWorkflowsPanel
@@ -103,7 +103,10 @@ describe("DagWorkflowsPanel", () => {
     await userEvent.click(screen.getByRole("button", {
       name: "Run microscopy-qc with vendored engine",
     }));
-    expect(onEditPipeline).toHaveBeenCalledWith("microscopy-qc");
+    expect(onEditPipeline).toHaveBeenCalledWith({
+      workflowId: "microscopy-qc",
+      codebaseId: "codebase-a",
+    });
     expect(onRunPipeline).toHaveBeenCalledWith("microscopy-qc");
 
     await userEvent.click(screen.getByRole("button", {
@@ -232,7 +235,7 @@ describe("DagWorkflowsPanel", () => {
         prompt: "Run workflow.",
         depends_on: graph.edges.filter((edge) => edge.to === node.id).map((edge) => edge.from),
       })),
-    });
+    }, { codebaseId: "codebase-a" });
     await act(async () => resolveVendored([vendored!]));
 
     await waitFor(() => {
@@ -313,6 +316,7 @@ describe("DagWorkflowsPanel", () => {
         description: "First record",
         nodes: [{ id: "collect" }],
       }, {
+        codebaseId: "codebase-a",
         origin: "project",
         filename: "first.yaml",
         workflowId: "workflow_11111111111111111111111111111111",
@@ -322,6 +326,7 @@ describe("DagWorkflowsPanel", () => {
         description: "Second record",
         nodes: [{ id: "collect" }],
       }, {
+        codebaseId: "codebase-a",
         origin: "project",
         filename: "second.yaml",
         workflowId: "workflow_22222222222222222222222222222222",
@@ -344,9 +349,15 @@ describe("DagWorkflowsPanel", () => {
       expect(button).toBeEnabled();
       await userEvent.click(button);
     }
-    expect(onEditPipeline.mock.calls.map(([id]) => id)).toEqual([
-      "workflow_11111111111111111111111111111111",
-      "workflow_22222222222222222222222222222222",
+    expect(onEditPipeline.mock.calls.map(([target]) => target)).toEqual([
+      {
+        workflowId: "workflow_11111111111111111111111111111111",
+        codebaseId: "codebase-a",
+      },
+      {
+        workflowId: "workflow_22222222222222222222222222222222",
+        codebaseId: "codebase-a",
+      },
     ]);
     expect(onRunPipeline.mock.calls.map(([id]) => id)).toEqual([
       "workflow_11111111111111111111111111111111",
@@ -360,11 +371,11 @@ describe("DagWorkflowsPanel", () => {
       registryApi.vendoredWorkflowRegistrySource({
         name: " foo ",
         nodes: [{ id: "collect", prompt: "Collect evidence." }],
-      }, { origin: "project", filename: "padded.yaml" })!,
+      }, { codebaseId: "codebase-a", origin: "project", filename: "padded.yaml" })!,
       registryApi.vendoredWorkflowRegistrySource({
         name: "foo",
         nodes: [{ id: "collect", prompt: "Collect evidence." }],
-      }, { origin: "catalogue", filename: "plain.yaml" })!,
+      }, { codebaseId: "codebase-a", origin: "catalogue", filename: "plain.yaml" })!,
     ]);
     const onEditPipeline = vi.fn();
     const onRunPipeline = vi.fn().mockResolvedValue({ accepted: true, status: "started" });
@@ -386,8 +397,11 @@ describe("DagWorkflowsPanel", () => {
     await userEvent.click(runButtons[0]);
     await userEvent.click(runButtons[1]);
 
-    expect(onEditPipeline.mock.calls.map(([identifier]) => identifier))
-      .toEqual(["padded.yaml", "plain.yaml"]);
+    expect(onEditPipeline.mock.calls.map(([target]) => target))
+      .toEqual([
+        { workflowId: "padded.yaml", codebaseId: "codebase-a" },
+        { workflowId: "plain.yaml", codebaseId: "codebase-a" },
+      ]);
     await waitFor(() => expect(onRunPipeline.mock.calls.map(([identifier]) => identifier))
       .toEqual(["padded.yaml", "plain.yaml"]));
   });

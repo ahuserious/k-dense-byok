@@ -3,6 +3,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Value } from "typebox/value";
+import {
+  validateScientificWorkflowTemplatePreconditions,
+  type ScientificWorkflowPreconditionIssue,
+} from "../../../web/src/data/dag-workflow-templates/types.ts";
 import { isValidSessionId } from "../agent/notebook-store.ts";
 import {
   ProjectLifecycleLockError,
@@ -74,6 +78,7 @@ export type WorkflowStoreErrorCode =
   | "TOO_LARGE"
   | "LIMIT_REACHED"
   | "CANCEL_REQUESTED"
+  | "PRECONDITION_FAILED"
   | "CORRUPT"
   | "UNSUPPORTED_VERSION";
 
@@ -84,6 +89,19 @@ export class WorkflowStoreError extends Error {
     super(message);
     this.name = "WorkflowStoreError";
     this.code = code;
+  }
+}
+
+export class WorkflowPreconditionError extends WorkflowStoreError {
+  readonly issues: ScientificWorkflowPreconditionIssue[];
+
+  constructor(issues: ScientificWorkflowPreconditionIssue[]) {
+    super(
+      "PRECONDITION_FAILED",
+      `Workflow preconditions failed (${issues.length} issue${issues.length === 1 ? "" : "s"}).`,
+    );
+    this.name = "WorkflowPreconditionError";
+    this.issues = structuredClone(issues);
   }
 }
 
@@ -355,6 +373,33 @@ function assertManagedTarget(paths: ProjectPaths, target: string): void {
 function projectPaths(projectId: string): ProjectPaths {
   assertProjectId(projectId);
   return resolvePaths(projectId);
+}
+
+function observedUploadFiles(uploadRoot: string): string[] {
+  let rootStat: fs.Stats;
+  try {
+    rootStat = fs.lstatSync(uploadRoot);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) return [];
+
+  const files: string[] = [];
+  const walk = (directory: string): void => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const absolutePath = path.join(directory, entry.name);
+      const stat = fs.lstatSync(absolutePath);
+      if (stat.isSymbolicLink()) continue;
+      if (stat.isDirectory()) {
+        walk(absolutePath);
+      } else if (stat.isFile()) {
+        files.push(`user_data/${apiRelative(uploadRoot, absolutePath)}`);
+      }
+    }
+  };
+  walk(uploadRoot);
+  return files.sort();
 }
 
 function ensureManagedDirectory(paths: ProjectPaths, directory: string): void {
@@ -2195,6 +2240,19 @@ export class WorkflowStore {
         "CONFLICT",
         `Workflow ${input.workflowId} is revision ${definition.revision}; expected ${input.expectedWorkflowRevision}.`,
       );
+    }
+
+    if (definition.graph.preconditions) {
+      const issues = validateScientificWorkflowTemplatePreconditions(
+        definition.graph.preconditions,
+        {
+          goal: input.input?.goal,
+          variables: input.input?.variables,
+          files: observedUploadFiles(projectPaths(projectId).uploadDir),
+          capabilities: ["prompt-analysis", "read-uploaded-files"],
+        },
+      );
+      if (issues.length > 0) throw new WorkflowPreconditionError(issues);
     }
 
     const createdAt = Date.now();

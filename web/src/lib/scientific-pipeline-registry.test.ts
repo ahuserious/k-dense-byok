@@ -95,7 +95,7 @@ describe("scientific pipeline registry", () => {
         { id: "review", depends_on: ["collect"], prompt: "Review evidence." },
         { id: "collect", prompt: "Collect evidence." },
       ],
-    });
+    }, { codebaseId: "codebase-a" });
 
     expect(vendored).not.toBeNull();
     const registry = buildScientificPipelineRegistry([typed], [vendored!]);
@@ -116,7 +116,7 @@ describe("scientific pipeline registry", () => {
         { id: "collect", prompt: "Collect evidence." },
         { id: "publish", depends_on: ["collect"], prompt: "Publish evidence." },
       ],
-    });
+    }, { codebaseId: "codebase-a" });
     const differentNameSameStructure = vendoredWorkflowRegistrySource({
       name: "Another Workflow",
       description: "Same topology, different identity",
@@ -124,7 +124,7 @@ describe("scientific pipeline registry", () => {
         { id: "collect", prompt: "Collect evidence." },
         { id: "review", depends_on: ["collect"], prompt: "Review evidence." },
       ],
-    });
+    }, { codebaseId: "codebase-a" });
 
     const registry = buildScientificPipelineRegistry(
       [typedWorkflowRegistrySource(
@@ -150,7 +150,7 @@ describe("scientific pipeline registry", () => {
         { id: "collect", prompt: "Collect evidence." },
         { id: "review", depends_on: ["collect"], prompt: "Review evidence." },
       ],
-    });
+    }, { codebaseId: "codebase-a" });
     const [entry] = buildScientificPipelineRegistry([typed], [vendored!]);
 
     expect(workflowRouteForEngine(entry, "typed")).toMatchObject({
@@ -167,11 +167,11 @@ describe("scientific pipeline registry", () => {
     const padded = vendoredWorkflowRegistrySource({
       name: " foo ",
       nodes: [{ id: "collect", prompt: "Collect evidence." }],
-    }, { origin: "project", filename: "padded.yaml" });
+    }, { codebaseId: "codebase-a", origin: "project", filename: "padded.yaml" });
     const plain = vendoredWorkflowRegistrySource({
       name: "foo",
       nodes: [{ id: "collect", prompt: "Collect evidence." }],
-    }, { origin: "catalogue", filename: "plain.yaml" });
+    }, { codebaseId: "codebase-a", origin: "catalogue", filename: "plain.yaml" });
 
     const registry = buildScientificPipelineRegistry([], [padded!, plain!]);
 
@@ -190,11 +190,11 @@ describe("scientific pipeline registry", () => {
     const first = vendoredWorkflowRegistrySource({
       name: "First display name",
       nodes: [{ id: "collect" }],
-    }, { origin: "project", filename: "duplicate.yaml" });
+    }, { codebaseId: "codebase-a", origin: "project", filename: "duplicate.yaml" });
     const second = vendoredWorkflowRegistrySource({
       name: "Second display name",
       nodes: [{ id: "review" }],
-    }, { origin: "project", filename: "duplicate.yaml" });
+    }, { codebaseId: "codebase-a", origin: "project", filename: "duplicate.yaml" });
 
     const registry = buildScientificPipelineRegistry([], [first!, second!]);
 
@@ -261,6 +261,7 @@ describe("scientific pipeline registry", () => {
         workflow: { name: "source-aware", nodes: [{ id: "collect" }] },
         source: "project",
         filename: "source-aware.yaml",
+        codebaseId: "codebase-a",
       }],
     }), { status: 200 }));
 
@@ -271,6 +272,7 @@ describe("scientific pipeline registry", () => {
       displayName: "source-aware",
       origin: "project",
       filename: "source-aware.yaml",
+      codebaseId: "codebase-a",
     });
     expect(source.sourceId).toContain("origin=project");
     expect(source.sourceId).toContain("filename=source-aware.yaml");
@@ -288,6 +290,7 @@ describe("scientific pipeline registry", () => {
           source: "project",
           filename: "first.yaml",
           workflowId: "workflow_11111111111111111111111111111111",
+          codebaseId: "codebase-a",
         },
         {
           workflow: {
@@ -298,6 +301,7 @@ describe("scientific pipeline registry", () => {
           source: "project",
           filename: "second.yaml",
           workflowId: "workflow_22222222222222222222222222222222",
+          codebaseId: "codebase-a",
         },
         {
           workflow: {
@@ -308,6 +312,7 @@ describe("scientific pipeline registry", () => {
           source: "project",
           filename: "distinct.yaml",
           workflowId: "workflow_33333333333333333333333333333333",
+          codebaseId: "codebase-a",
         },
       ],
     }), { status: 200 }));

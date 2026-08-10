@@ -69,6 +69,7 @@
   "WorkflowLimitsSchema",
   "WorkflowNodePositionSchema",
   "WorkflowNodeSchema",
+  "WorkflowPreconditionError",
   "WorkflowRunAbortError",
   "WorkflowRunController",
   "WorkflowRunControllerError",

@@ -41,6 +41,7 @@ import {
   workflowRouteForEngine,
   type ScientificPipelineRegistryEntry,
   type TypedWorkflowRegistrySource,
+  type VendoredPipelineEditTarget,
   type VendoredWorkflowRegistrySource,
 } from "@/lib/scientific-pipeline-registry";
 
@@ -636,7 +637,7 @@ export function DagWorkflowsPanel({
   budgetBlocked: boolean;
   uploadedFiles?: readonly string[];
   onRunPipeline: (name: string) => Promise<unknown>;
-  onEditPipeline: (name: string) => void;
+  onEditPipeline: (target: VendoredPipelineEditTarget) => void;
 }) {
   const [typedSources, setTypedSources] = useState<TypedWorkflowRegistrySource[] | null>(null);
   const [vendoredSources, setVendoredSources] = useState<VendoredWorkflowRegistrySource[] | null>(null);
@@ -1087,7 +1088,11 @@ export function DagWorkflowsPanel({
                       }}
                       onEditVendored={() => {
                         if (vendoredRoute) {
-                          onEditPipeline(workflowRouteForEngine(entry, "vendored").workflowId);
+                          const route = workflowRouteForEngine(entry, "vendored");
+                          onEditPipeline({
+                            workflowId: route.workflowId,
+                            codebaseId: route.codebaseId,
+                          });
                         }
                       }}
                       onRunVendored={() => {

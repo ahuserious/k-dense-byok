@@ -23,12 +23,19 @@ export interface VendoredWorkflowRegistrySource {
   sourceId: string;
   /** Exact engine identifier. Never normalize this value before routing. */
   workflowId: string;
+  /** Exact engine codebase registration used for every edit read/write. */
+  codebaseId: string;
   workflowName: string;
   displayName: string;
   origin?: string;
   filename?: string;
   description: string;
   workflow: Record<string, unknown>;
+}
+
+export interface VendoredPipelineEditTarget {
+  workflowId: string;
+  codebaseId: string;
 }
 
 export interface ScientificPipelineRoutingAmbiguity {
@@ -143,7 +150,7 @@ export function typedWorkflowRegistrySource(
 
 export function vendoredWorkflowRegistrySource(
   workflow: Record<string, unknown>,
-  identity: { origin?: string; filename?: string; workflowId?: string } = {},
+  identity: { codebaseId: string; origin?: string; filename?: string; workflowId?: string },
 ): VendoredWorkflowRegistrySource | null {
   const workflowName = typeof workflow.name === "string" ? workflow.name : "";
   const displayName = workflowName.trim().replace(/\s+/g, " ");
@@ -163,6 +170,7 @@ export function vendoredWorkflowRegistrySource(
     engine: "vendored",
     sourceId: `vendored:${identityParts.join(":")}`,
     workflowId,
+    codebaseId: identity.codebaseId,
     workflowName,
     displayName,
     ...(identity.origin !== undefined ? { origin: identity.origin } : {}),
@@ -395,7 +403,10 @@ export async function listVendoredWorkflowRegistrySources(
     const origin = candidateRecord?.source ?? workflow?.origin;
     const filename = candidateRecord?.filename ?? workflow?.filename;
     const workflowId = candidateRecord?.workflowId;
+    const codebaseId = candidateRecord?.codebaseId;
+    if (typeof codebaseId !== "string" || codebaseId.length === 0) return [];
     const source = workflow ? vendoredWorkflowRegistrySource(workflow, {
+      codebaseId,
       ...(typeof origin === "string" ? { origin } : {}),
       ...(typeof filename === "string" ? { filename } : {}),
       ...(typeof workflowId === "string" ? { workflowId } : {}),

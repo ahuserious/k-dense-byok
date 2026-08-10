@@ -5,6 +5,7 @@
  */
 import type { WorkflowRunStatus } from '@/lib/types';
 import type { components } from '@/lib/api.generated';
+import { workflowRequestPath } from '@/lib/workflow-request-path';
 
 export type NodeReasoningLevel =
   | 'off'
@@ -436,22 +437,22 @@ export interface GetWorkflowResponse {
   source: WorkflowSource;
 }
 
-export async function getWorkflow(name: string, cwd?: string): Promise<GetWorkflowResponse> {
-  const params = cwd ? `?cwd=${encodeURIComponent(cwd)}` : '';
-  return fetchJSON(`/api/workflows/${encodeURIComponent(name)}${params}`);
+export async function getWorkflow(
+  name: string,
+  cwd?: string,
+  codebaseId?: string
+): Promise<GetWorkflowResponse> {
+  return fetchJSON(workflowRequestPath(name, cwd, codebaseId));
 }
 
 export async function saveWorkflow(
   name: string,
   definition: WorkflowDefinition,
   cwd?: string,
-  source?: WorkflowSource
+  source?: WorkflowSource,
+  codebaseId?: string
 ): Promise<GetWorkflowResponse> {
-  const query = new URLSearchParams();
-  if (cwd) query.set('cwd', cwd);
-  if (source === 'global') query.set('source', source);
-  const params = query.toString() ? `?${query.toString()}` : '';
-  return fetchJSON(`/api/workflows/${encodeURIComponent(name)}${params}`, {
+  return fetchJSON(workflowRequestPath(name, cwd, codebaseId, source), {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ definition }),

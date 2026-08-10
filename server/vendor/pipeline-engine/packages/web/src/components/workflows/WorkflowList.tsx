@@ -224,6 +224,8 @@ export function WorkflowList(): React.ReactElement {
                     <WorkflowCard
                       key={entry.workflowId}
                       workflow={entry.workflow}
+                      workflowId={entry.workflowId}
+                      codebaseId={localProjectId ?? ''}
                       isSelected={selectedWorkflow === entry.workflowId}
                       onToggle={(): void => {
                         setSelectedWorkflow(
@@ -249,6 +251,8 @@ export function WorkflowList(): React.ReactElement {
                   <WorkflowCard
                     key={entry.workflowId}
                     workflow={entry.workflow}
+                    workflowId={entry.workflowId}
+                    codebaseId={localProjectId ?? ''}
                     isSelected={selectedWorkflow === entry.workflowId}
                     onToggle={(): void => {
                       setSelectedWorkflow(

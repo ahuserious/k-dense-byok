@@ -193,4 +193,146 @@ describe("POST-INTEGRATION(S10)", () => {
     "POST rejects a missing required variable for $id before createRun",
     (template) => expectAdmissionRejected(template, "missing-variable"),
   );
+
+  it("returns the original run on an exact lost-response retry without re-validating changed preconditions", async () => {
+    const [{ buildApp }, { ensureProjectExists, resolvePaths }] = await Promise.all([
+      import("../src/index.ts"),
+      import("../src/projects.ts"),
+    ]);
+    projectSequence += 1;
+    const projectId = `s10-preconditions-${projectSequence}`;
+    ensureProjectExists(projectId);
+    const paths = resolvePaths(projectId);
+    const app = await buildApp({ workflowController: null });
+    const template = SCIENTIFIC_WORKFLOW_TEMPLATES[0];
+    const templateGraph = createDagWorkflowTemplateGraph(
+      template.id,
+      template.suggestedWorkflowId,
+      template.name,
+      template.description,
+    );
+    const { preconditions: _initialPreconditions, ...graph } = templateGraph;
+    const requestPayload = {
+      requestId: "lost-response-retry",
+      expectedWorkflowRevision: 1,
+      input: { goal: "Original admitted goal", variables: {} },
+    };
+
+    try {
+      const saved = await app.inject({
+        method: "PUT",
+        url: `/dag-workflows/${graph.id}`,
+        headers: { "x-project-id": projectId },
+        payload: graph,
+      });
+      expect(saved.statusCode).toBe(201);
+
+      const first = await app.inject({
+        method: "POST",
+        url: `/dag-workflows/${graph.id}/runs`,
+        headers: { "x-project-id": projectId },
+        payload: requestPayload,
+      });
+      expect(first.statusCode).toBe(202);
+
+      const changedGraph = {
+        ...graph,
+        name: "Changed after admission",
+        preconditions: {
+          requiredInputs: [{ key: "new_required_value", label: "New required value" }],
+          requiredFiles: [],
+          requiredCapabilities: [],
+        },
+      };
+      const changed = await app.inject({
+        method: "PUT",
+        url: `/dag-workflows/${graph.id}`,
+        headers: {
+          "x-project-id": projectId,
+          "if-match": "1",
+        },
+        payload: changedGraph,
+      });
+      expect(changed.statusCode).toBe(200);
+
+      const retry = await app.inject({
+        method: "POST",
+        url: `/dag-workflows/${graph.id}/runs`,
+        headers: { "x-project-id": projectId },
+        payload: requestPayload,
+      });
+      expect(retry.statusCode).toBe(202);
+      expect(retry.json().manifest).toEqual(first.json().manifest);
+      expect(retry.json().manifest).toMatchObject({
+        workflowRevision: 1,
+        graph: { name: graph.name },
+      });
+    } finally {
+      await app.close();
+      fs.rmSync(paths.root, { recursive: true, force: true });
+    }
+  });
+
+  it("serializes a definition update with run admission so no run validates an old graph then snapshots the new graph", async () => {
+    const [{ WorkflowStore, WorkflowPreconditionError }, { ensureProjectExists, resolvePaths }] = await Promise.all([
+      import("../src/workflows/store.ts"),
+      import("../src/projects.ts"),
+    ]);
+    projectSequence += 1;
+    const projectId = `s10-preconditions-${projectSequence}`;
+    ensureProjectExists(projectId);
+    const paths = resolvePaths(projectId);
+    const store = new WorkflowStore();
+    const template = SCIENTIFIC_WORKFLOW_TEMPLATES[0];
+    const generatedOldGraph = createDagWorkflowTemplateGraph(
+      template.id,
+      template.suggestedWorkflowId,
+      "Old admissible graph",
+      template.description,
+    );
+    const { preconditions: _oldPreconditions, ...oldGraph } = generatedOldGraph;
+    const newGraph = {
+      ...oldGraph,
+      name: "New guarded graph",
+      preconditions: {
+        requiredInputs: [{ key: "new_required_value", label: "New required value" }],
+        requiredFiles: [],
+        requiredCapabilities: [],
+      },
+    };
+    store.saveDefinition(projectId, oldGraph.id, oldGraph);
+
+    try {
+      const update = Promise.resolve().then(() =>
+        store.saveDefinition(projectId, oldGraph.id, newGraph, { expectedRevision: 1 })
+      );
+      const admission = Promise.resolve().then(() => {
+        try {
+          return store.createRun(projectId, {
+            workflowId: oldGraph.id,
+            requestId: "definition-admission-race",
+            requestedBy: "user",
+            input: { goal: "Goal valid only for the old graph", variables: {} },
+          });
+        } catch (error) {
+          if (error instanceof WorkflowPreconditionError) return error;
+          throw error;
+        }
+      });
+      const [, outcome] = await Promise.all([update, admission]);
+
+      if (outcome instanceof WorkflowPreconditionError) {
+        expect(outcome.issues).toEqual(expect.arrayContaining([
+          expect.objectContaining({ kind: "variable", key: "new_required_value" }),
+        ]));
+      } else {
+        expect(outcome).toMatchObject({
+          workflowRevision: 1,
+          graph: { name: "Old admissible graph" },
+        });
+      }
+    } finally {
+      fs.rmSync(paths.root, { recursive: true, force: true });
+    }
+  });
 });
