@@ -108,7 +108,7 @@ const admissionKey = `kadypipe_${createHash('sha256')
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   if (value !== null && typeof value === 'object') {
-    return `{${Object.keys(value).sort().map(key =>
+    return `{${Object.keys(value).filter(key => value[key] !== undefined).sort().map(key =>
       `${JSON.stringify(key)}:${canonicalJson(value[key])}`
     ).join(',')}}`;
   }

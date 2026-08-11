@@ -94,6 +94,7 @@ import type {
   WorkflowSource,
   WorkflowWithSource,
 } from '@archon/workflows/schemas/workflow';
+import { providerCallCountForDagNode } from '@archon/workflows/schemas/dag-node';
 import type { MessageRow } from '@archon/core/schemas/message';
 import type { DashboardWorkflowRun } from '@archon/core/schemas/workflow-run';
 import { findMarkdownFilesRecursive } from '@archon/core/utils/commands';
@@ -123,6 +124,7 @@ function canonicalWorkflowJson(value: unknown): string {
   if (value !== null && typeof value === 'object') {
     const record = value as Record<string, unknown>;
     return `{${Object.keys(record)
+      .filter(key => record[key] !== undefined)
       .sort()
       .map(key => `${JSON.stringify(key)}:${canonicalWorkflowJson(record[key])}`)
       .join(',')}}`;
@@ -136,7 +138,7 @@ function workflowRevisionDigest(workflow: WorkflowDefinition): string {
 
 function admittedModelNodeIds(workflow: WorkflowDefinition): string[] {
   return workflow.nodes
-    .filter(node => 'command' in node || 'prompt' in node || 'loop' in node)
+    .filter(node => providerCallCountForDagNode(node) > 0)
     .map(node => node.id);
 }
 
@@ -3459,7 +3461,12 @@ export function registerApiRoutes(
             return apiError(c, 409, 'Admission replay does not match the original workflow scope');
           }
           if (preCreatedRun.status !== 'pending') {
-            return c.json({ accepted: true, status: preCreatedRun.status });
+            return c.json({
+              accepted: true,
+              status: preCreatedRun.status,
+              runId: preCreatedRun.id,
+              dispatchState: preCreatedRun.metadata.kadyDispatchState,
+            });
           }
         }
         dispatchClaimId = randomUUID();
@@ -3478,7 +3485,12 @@ export function registerApiRoutes(
         );
         preCreatedRun = claim.run;
         if (!claim.claimed) {
-          return c.json({ accepted: true, status: preCreatedRun.status });
+          return c.json({
+            accepted: true,
+            status: preCreatedRun.status,
+            runId: preCreatedRun.id,
+            dispatchState: preCreatedRun.metadata.kadyDispatchState,
+          });
         }
       }
       const extraContext: Omit<HandleMessageContext, 'isolationHints'> = {
@@ -3540,7 +3552,12 @@ export function registerApiRoutes(
           dispatchClaimId
         );
       }
-      return c.json(result);
+      return c.json({
+        ...result,
+        ...(preCreatedRun
+          ? { runId: preCreatedRun.id, dispatchState: 'queued' as const }
+          : {}),
+      });
     } catch (error) {
       getLog().error({ err: error }, 'run_workflow_failed');
       return apiError(c, 500, 'Failed to run workflow');
@@ -3946,10 +3963,19 @@ export function registerApiRoutes(
         kadyProjectId: projectId,
         kadyAdmissionId: admissionId,
       });
+      const admissionRun = projectId && admissionId && runs.length === 1 ? runs[0] : undefined;
+      const dispatchState = admissionRun?.metadata.kadyDispatchState;
       return c.json({
         runs: runs.map(toApiWorkflowRun),
         ...(projectId && admissionId
-          ? { admissionQuery: { projectId, admissionId, authoritative: true as const } }
+          ? {
+              admissionQuery: {
+                projectId,
+                admissionId,
+                authoritative: true as const,
+                ...(typeof dispatchState === 'string' ? { dispatchState } : {}),
+              },
+            }
           : {}),
       });
     } catch (error) {

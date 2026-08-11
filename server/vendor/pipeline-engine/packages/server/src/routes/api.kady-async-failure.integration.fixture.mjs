@@ -28,7 +28,7 @@ import { registerApiRoutes } from './api.ts';
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   if (value !== null && typeof value === 'object') {
-    return `{${Object.keys(value).sort().map(key =>
+    return `{${Object.keys(value).filter(key => value[key] !== undefined).sort().map(key =>
       `${JSON.stringify(key)}:${canonicalJson(value[key])}`
     ).join(',')}}`;
   }
@@ -87,7 +87,17 @@ async function runFailure(stage) {
       definition: {
         name: workflowName,
         description: `Fault at ${stage}`,
-        nodes: [{ id: 'admitted', command: 'test-command' }],
+        provider: 'claude',
+        nodes: [{
+          id: 'admitted',
+          kind: 'council',
+          task: 'This topology must never reach provider access.',
+          topology_agents: [
+            { id: 'alpha', role: 'Lead' },
+            { id: 'beta', role: 'Reviewer' },
+            { id: 'gamma', role: 'Skeptic' },
+          ],
+        }],
       },
     }),
   });
@@ -172,6 +182,7 @@ async function runFailure(stage) {
     dispatchState: terminalRun.metadata?.kadyDispatchState,
     failureStage: terminalRun.metadata?.kadyDispatchFailureStage,
     hasWatermark: terminalRun.metadata?.kady_completion_watermark !== undefined,
+    watermarkNodeIds: terminalRun.metadata?.kady_completion_watermark?.nodeIds,
     watermarkCost: Object.values(
       terminalRun.metadata?.kady_completion_watermark?.usageByNode ?? {}
     ).reduce((sum, usage) => sum + usage.costUsd, 0),

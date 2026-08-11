@@ -351,9 +351,38 @@ function scopedRunNotFound(reply: FastifyReply): { detail: string } {
 }
 
 export type AdmissionQueryResult =
-  | { status: "found"; runId: string; run: Record<string, unknown> }
+  | { status: "found"; runId: string; run: Record<string, unknown>; dispatchState?: string }
   | { status: "not-found" }
   | { status: "unknown" };
+
+const CLAIMED_ENGINE_DISPATCH_STATES = new Set(["queued", "running", "dispatched"]);
+
+function engineDispatchState(run: Record<string, unknown>): string | undefined {
+  const metadata = recordOf(run.metadata);
+  const value = metadata?.kadyDispatchState ?? metadata?.kady_dispatch_state;
+  return typeof value === "string" ? value : undefined;
+}
+
+function engineRunHasDurableDispatchClaim(query: Extract<AdmissionQueryResult, { status: "found" }>): boolean {
+  const runStatus = String(query.run.status ?? query.run.state ?? "").toLowerCase();
+  return TERMINAL_RUN_STATUSES.has(runStatus) ||
+    runStatus === "running" || runStatus === "paused" ||
+    (runStatus === "pending" && query.dispatchState !== undefined &&
+      CLAIMED_ENGINE_DISPATCH_STATES.has(query.dispatchState));
+}
+
+function engineRunNeedsIdempotentReplay(
+  query: Extract<AdmissionQueryResult, { status: "found" }>,
+): boolean {
+  const runStatus = String(query.run.status ?? query.run.state ?? "").toLowerCase();
+  return runStatus === "pending" && query.dispatchState === "pre_dispatch";
+}
+
+function engineRunSnapshotSha(run: Record<string, unknown>): string | undefined {
+  const metadata = recordOf(run.metadata);
+  const value = metadata?.kadyRunSnapshotSha ?? metadata?.kady_run_snapshot_sha;
+  return typeof value === "string" && /^[a-f0-9]{40,64}$/.test(value) ? value : undefined;
+}
 
 /** A paginated legacy response can prove presence, but only the merge-time
  * authoritative admission-query watermark can prove absence. */
@@ -396,7 +425,16 @@ export async function queryEngineRunByAdmissionId(
     if (typeof matches[0].id !== "string" || matches[0].id.length < 1) {
       throw new Error(`Pipeline engine admission ${projectId}/${engineAdmissionKey} has no run id.`);
     }
-    return { status: "found", runId: matches[0].id, run: matches[0] };
+    const query = recordOf(root.admissionQuery ?? root.admission_query);
+    const queryDispatchState = query?.dispatchState ?? query?.dispatch_state;
+    const dispatchState = engineDispatchState(matches[0]) ??
+      (typeof queryDispatchState === "string" ? queryDispatchState : undefined);
+    return {
+      status: "found",
+      runId: matches[0].id,
+      run: matches[0],
+      ...(dispatchState === undefined ? {} : { dispatchState }),
+    };
   }
   const query = recordOf(root.admissionQuery ?? root.admission_query);
   return query?.authoritative === true &&
@@ -539,7 +577,11 @@ export async function reconcilePipelineTerminalSnapshot(
     throw new WorkflowBudgetError("NOT_FOUND", "Pipeline run admission key is not owned by this project.");
   }
   const admissionId = recovered.record.admissionId;
-  if ((run.workflow_name ?? run.workflowName) !== recovered.record.workflowName) {
+  const runMetadata = recordOf(run.metadata);
+  const workflowIdentity = typeof runMetadata?.kadyWorkflowId === "string"
+    ? runMetadata.kadyWorkflowId
+    : run.workflow_name ?? run.workflowName;
+  if (workflowIdentity !== recovered.record.workflowName) {
     throw new WorkflowBudgetError("CONFLICT", "Pipeline run workflow does not match its admission owner.");
   }
   if (recovered.record.status === "intent") {
@@ -649,6 +691,10 @@ export class PipelineReconciliationWorker {
                 record.engineAdmissionKey,
               );
               if (query.status === "found") {
+                if (!engineRunHasDurableDispatchClaim(query)) {
+                  await this.renewIfNeeded(project.id, record.admissionId);
+                  continue;
+                }
                 engineRunId = query.runId;
                 updatePipelineAdmission(project.id, record.admissionId, {
                   status: "dispatched",
@@ -841,6 +887,7 @@ export async function registerPipelineRoutes(
     let admissionRecord: PipelineAdmissionRecordV1 | undefined;
     let ownershipPersisted = false;
     let dispatchAttempted = false;
+    let replayRunSnapshotSha: string | undefined;
     try {
       const body = recordOf(req.body) ?? {};
       const conversationId = body.conversationId;
@@ -883,6 +930,7 @@ export async function registerPipelineRoutes(
       });
       const existing = findPipelineAdmission(projectId, admissionId);
       if (existing) {
+        let replayingUnclaimedEngineRun = false;
         if (existing.record.workflowName !== req.params.name ||
           existing.record.requestSha256 !== requestSha256) {
           throw new WorkflowBudgetError("CONFLICT", `Pipeline admission ${admissionId} belongs to another request.`);
@@ -898,8 +946,33 @@ export async function registerPipelineRoutes(
           const query = await queryAdmission(projectId, existing.record.engineAdmissionKey)
             .catch((): AdmissionQueryResult => ({ status: "unknown" }));
           if (query.status === "found") {
-            updatePipelineAdmission(projectId, admissionId, { status: "dispatched", engineRunId: query.runId });
-            return { accepted: true, status: String(query.run.status ?? "accepted"), kadyAdmissionId: admissionId, recovered: true };
+            if (engineRunNeedsIdempotentReplay(query)) {
+              replayRunSnapshotSha = engineRunSnapshotSha(query.run);
+              if (!replayRunSnapshotSha) {
+                throw new WorkflowBudgetError(
+                  "CORRUPT",
+                  `Pipeline admission ${admissionId} has an unclaimed engine row without its bound snapshot.`,
+                );
+              }
+              admission = existing.admission;
+              admissionRecord = existing.record;
+              ownershipPersisted = true;
+              replayingUnclaimedEngineRun = true;
+            } else if (engineRunHasDurableDispatchClaim(query)) {
+              updatePipelineAdmission(projectId, admissionId, {
+                status: "dispatched",
+                engineRunId: query.runId,
+              });
+              return {
+                accepted: true,
+                status: String(query.run.status ?? "accepted"),
+                kadyAdmissionId: admissionId,
+                recovered: true,
+              };
+            } else {
+              reply.code(503);
+              return { accepted: false, status: "indeterminate", kadyAdmissionId: admissionId };
+            }
           }
           if ((existing.record.status === "dispatching" || existing.record.status === "indeterminate") &&
             query.status === "not-found") {
@@ -910,24 +983,28 @@ export async function registerPipelineRoutes(
             });
             throw new WorkflowBudgetError("CONFLICT", `Pipeline admission ${admissionId} was not accepted and has been released.`);
           }
-          reply.code(503);
-          return { accepted: false, status: "indeterminate", kadyAdmissionId: admissionId };
+          if (!replayingUnclaimedEngineRun) {
+            reply.code(503);
+            return { accepted: false, status: "indeterminate", kadyAdmissionId: admissionId };
+          }
         }
-        if (existing.record.ownerInstanceId === PIPELINE_ADMISSION_OWNER_INSTANCE_ID) {
-          reply.code(503);
-          return { accepted: false, status: "admission-pending", kadyAdmissionId: admissionId };
+        if (!replayingUnclaimedEngineRun) {
+          if (existing.record.ownerInstanceId === PIPELINE_ADMISSION_OWNER_INSTANCE_ID) {
+            reply.code(503);
+            return { accepted: false, status: "admission-pending", kadyAdmissionId: admissionId };
+          }
+          if (existing.record.workflowRevisionSha256 !== admittedWorkflowRevision) {
+            await settlePipelineAdmission(projectId, admissionId, {
+              status: "failed",
+              usage: ZERO_PIPELINE_USAGE,
+              reason: "workflow revision changed before recovered admission dispatch",
+            });
+            throw new WorkflowBudgetError("CONFLICT", "Pipeline workflow revision changed before dispatch.");
+          }
+          admission = existing.admission;
+          admissionRecord = existing.record;
+          ownershipPersisted = true;
         }
-        if (existing.record.workflowRevisionSha256 !== admittedWorkflowRevision) {
-          await settlePipelineAdmission(projectId, admissionId, {
-            status: "failed",
-            usage: ZERO_PIPELINE_USAGE,
-            reason: "workflow revision changed before recovered admission dispatch",
-          });
-          throw new WorkflowBudgetError("CONFLICT", "Pipeline workflow revision changed before dispatch.");
-        }
-        admission = existing.admission;
-        admissionRecord = existing.record;
-        ownershipPersisted = true;
       } else {
         admission = await reservePipelineNodeBudgets({
           projectId,
@@ -948,8 +1025,11 @@ export async function registerPipelineRoutes(
         );
         ownershipPersisted = true;
       }
-      if (!admissionRecord) {
-        throw new WorkflowBudgetError("CORRUPT", "Pipeline admission record was not persisted before dispatch.");
+      if (!admission || !admissionRecord) {
+        throw new WorkflowBudgetError(
+          "CORRUPT",
+          "Pipeline admission and its durable record were not available before dispatch.",
+        );
       }
       const latestDefinition = await getWorkflowForAdmission(req.params.name, workflowScope);
       if (workflowRevisionSha256(latestDefinition) !== admissionRecord.workflowRevisionSha256) {
@@ -972,7 +1052,8 @@ export async function registerPipelineRoutes(
               },
             }
           : body;
-      const runSnapshotSha = createProjectRunSnapshot(projectId, admissionRecord.engineAdmissionKey);
+      const runSnapshotSha = replayRunSnapshotSha ??
+        createProjectRunSnapshot(projectId, admissionRecord.engineAdmissionKey);
       const runBody = {
         ...baseRunBody,
         message: `${message}\n\n${projectLabel}\n${correlationLabel}`,
@@ -988,6 +1069,7 @@ export async function registerPipelineRoutes(
           kadyAdmissionId: admission.admissionId,
           kadyEngineAdmissionKey: admissionRecord.engineAdmissionKey,
           kadyWorkflowRevisionSha256: admissionRecord.workflowRevisionSha256,
+          kadyWorkflowId: req.params.name,
           kadyWorkflowNodeCount: admission.workflowNodeCount,
           kadyRunSnapshotSha: runSnapshotSha,
         },
@@ -1009,8 +1091,40 @@ export async function registerPipelineRoutes(
       if (resultRecord?.accepted !== true || typeof resultRecord.status !== "string") {
         throw new Error("Pipeline engine returned an indeterminate run response.");
       }
+      const resultDispatchState = typeof resultRecord.dispatchState === "string"
+        ? resultRecord.dispatchState
+        : typeof resultRecord.dispatch_state === "string"
+          ? resultRecord.dispatch_state
+          : undefined;
+      const resultRunId = typeof resultRecord.runId === "string"
+        ? resultRecord.runId
+        : typeof resultRecord.run_id === "string"
+          ? resultRecord.run_id
+          : undefined;
+      let claimedRunId = resultRunId;
+      let dispatchClaimDurable = resultDispatchState !== undefined &&
+        CLAIMED_ENGINE_DISPATCH_STATES.has(resultDispatchState);
+      if (!dispatchClaimDurable) {
+        const query = await queryAdmission(projectId, admissionRecord.engineAdmissionKey)
+          .catch((): AdmissionQueryResult => ({ status: "unknown" }));
+        if (query.status === "found" && engineRunHasDurableDispatchClaim(query)) {
+          dispatchClaimDurable = true;
+          claimedRunId = query.runId;
+        }
+      }
+      if (!dispatchClaimDurable) {
+        reply.code(503);
+        return {
+          accepted: false,
+          status: "indeterminate",
+          kadyAdmissionId: admission.admissionId,
+        };
+      }
       try {
-        updatePipelineAdmission(projectId, admission.admissionId, { status: "dispatched" });
+        updatePipelineAdmission(projectId, admission.admissionId, {
+          status: "dispatched",
+          ...(claimedRunId === undefined ? {} : { engineRunId: claimedRunId }),
+        });
       } catch (error) {
         // The already-fsynced `dispatching` mapping proves uncertainty.
         // Never release its reservation after the engine has accepted work.
@@ -1024,12 +1138,16 @@ export async function registerPipelineRoutes(
         if (!engineAdmissionKey) return mapPipelineRunError(reply, err);
         const query = await queryAdmission(admission.handle.record.projectId, engineAdmissionKey)
           .catch((): AdmissionQueryResult => ({ status: "unknown" }));
-        if (query.status === "found") {
+        if (query.status === "found" && engineRunHasDurableDispatchClaim(query)) {
           updatePipelineAdmission(admission.handle.record.projectId, admission.admissionId, {
             status: "dispatched",
             engineRunId: query.runId,
           });
           return { accepted: true, status: String(query.run.status ?? "accepted"), kadyAdmissionId: admission.admissionId, recovered: true };
+        }
+        if (query.status === "found") {
+          reply.code(503);
+          return { accepted: false, status: "indeterminate", kadyAdmissionId: admission.admissionId };
         }
         if (query.status === "not-found") {
           try {

@@ -41,6 +41,7 @@ describe('Kady git workspace integration', () => {
         dispatchState: 'failed',
         failureStage: 'setup',
         hasWatermark: true,
+        watermarkNodeIds: ['admitted'],
         watermarkCost: 0,
         reconciliationEvidence: 'durable-completion-watermark',
         admissionStatus: 'settled',
@@ -54,6 +55,7 @@ describe('Kady git workspace integration', () => {
       dispatchState: 'failed',
       failureStage: 'execution-setup',
       hasWatermark: true,
+      watermarkNodeIds: ['admitted'],
       watermarkCost: 0,
       reconciliationEvidence: 'durable-completion-watermark',
       admissionStatus: 'settled',
@@ -219,7 +221,7 @@ describe('Kady git workspace integration', () => {
     });
   }, 60_000);
 
-  test('replays a process-crashed pre-dispatch admission and completes the original run', async () => {
+  test('retries through Kady after an engine pre-claim crash and settles the original run', async () => {
     testRoot = mkdtempSync(join(tmpdir(), 'pipeline-kady-dispatch-crash-'));
     const childEnvironment = { ...process.env };
     childEnvironment.ARCHON_HOME = join(testRoot, 'engine-home');
@@ -246,15 +248,19 @@ describe('Kady git workspace integration', () => {
       runId: string;
       pendingStatus: string;
       dispatchState: string;
+      kadyAdmissionStatus: string;
       [key: string]: unknown;
     };
-    expect(seeded).toMatchObject({ pendingStatus: 'pending', dispatchState: 'pre_dispatch' });
+    expect(seeded).toMatchObject({
+      pendingStatus: 'pending',
+      dispatchState: 'pre_dispatch',
+      kadyAdmissionStatus: 'dispatching',
+    });
 
     const replay = Bun.spawn([process.execPath, fixture], {
       env: {
         ...childEnvironment,
         KADY_CRASH_FIXTURE_MODE: 'replay',
-        KADY_CRASH_STATE: JSON.stringify(seeded),
       },
       stdout: 'pipe',
       stderr: 'pipe',
@@ -274,12 +280,22 @@ describe('Kady git workspace integration', () => {
       runId: string;
       terminalStatus: string;
       dispatchState: string;
+      replayedThroughKady: boolean;
+      originalRunId: string;
+      admissionStatus: string;
+      reservationStatus: string;
+      activeReservedUsd: number;
     };
     expect(replayed).toEqual({
       replayStatus: 200,
+      replayedThroughKady: true,
       runId: seeded.runId,
+      originalRunId: seeded.runId,
       terminalStatus: 'completed',
       dispatchState: 'running',
+      admissionStatus: 'settled',
+      reservationStatus: 'completed',
+      activeReservedUsd: 0,
     });
   }, 60_000);
 });

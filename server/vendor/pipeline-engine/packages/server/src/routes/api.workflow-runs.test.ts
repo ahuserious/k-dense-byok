@@ -773,6 +773,31 @@ describe('GET /api/workflows/runs', () => {
     }));
   });
 
+  test('exposes the durable dispatch state for an exact admission lookup', async () => {
+    mockListWorkflowRuns.mockImplementationOnce(async () => [{
+      ...MOCK_PENDING_RUN,
+      metadata: {
+        ...MOCK_PENDING_RUN.metadata,
+        kadyDispatchState: 'pre_dispatch',
+      },
+    }]);
+
+    const { app } = makeApp();
+    const response = await app.request(
+      '/api/workflows/runs?projectId=project-a&admissionId=kadypipe_11111111111111111111111111111111'
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      admissionQuery: {
+        projectId: 'project-a',
+        admissionId: 'kadypipe_11111111111111111111111111111111',
+        authoritative: true,
+        dispatchState: 'pre_dispatch',
+      },
+    });
+  });
+
   test('rejects a one-sided admission lookup', async () => {
     const { app } = makeApp();
     const response = await app.request('/api/workflows/runs?projectId=project-a');

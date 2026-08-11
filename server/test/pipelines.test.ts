@@ -9,6 +9,7 @@ import {
   type AdmissionQueryResult,
   pipelineNodeBudgetHooks,
   queryEngineRunByAdmissionId,
+  reconcilePipelineTerminalSnapshot,
   registerPipelineRoutes,
   unresolvedPipelineNodeBudgetHooks,
 } from "../src/api/pipelines.ts";
@@ -272,6 +273,152 @@ describe("Tier A S4 dual-shape pipeline admission", () => {
     }
   });
 
+  it("settles every admitted topology at its exact durable usage instead of its reservation", async () => {
+    const topologyKinds = [
+      "opinion",
+      "parallel",
+      "coordinate",
+      "ultraplan",
+      "plan-debate",
+      "auto-validate",
+      "draco-fusion",
+      "council",
+      "fusion",
+      "best-of-n",
+    ] as const;
+    for (const kind of topologyKinds) {
+      const projectId = `settle-${kind}`;
+      const workflowName = `topology-${kind}`;
+      createProject({ name: workflowName, projectId, spendLimitUsd: 10 });
+      const definition = {
+        workflow: {
+          name: workflowName,
+          provider: "pi",
+          model: "openrouter/openai/gpt-4o-mini",
+          nodes: [{
+            id: "deliberate",
+            kind,
+            task: "Evaluate the evidence.",
+            topology_agents: [
+              { id: "alpha", role: "Lead" },
+              { id: "beta", role: "Reviewer" },
+              { id: "gamma", role: "Skeptic" },
+            ],
+            max_rounds: 3,
+            maxBudgetUsd: 2,
+          }],
+        },
+      };
+      const runId = `run-settlement-${kind}`;
+      const app = await registerTestRoutes({
+        getWorkflow: async () => definition,
+        runWorkflow: async () => ({
+          accepted: true,
+          status: "pending",
+          runId,
+          dispatchState: "queued",
+        }),
+      });
+      const response = await app.inject({
+        method: "POST",
+        url: `/pipelines/${workflowName}/run`,
+        headers: { "x-project-id": projectId },
+        payload: {
+          conversationId: `conversation-${kind}`,
+          message: `Run ${kind}`,
+        },
+      });
+      expect(response.statusCode).toBe(200);
+      const admissionId = response.json().kadyAdmissionId as string;
+      const recovered = recoverPipelineAdmission(projectId, admissionId);
+      const reservedCostUsd = recovered.admission.handle.record.reservedCostUsd;
+      expect(recovered.record).toMatchObject({
+        status: "dispatched",
+        engineRunId: runId,
+        nodeIds: ["deliberate"],
+      });
+      expect(reservedCostUsd).toBeGreaterThan(0.25);
+      const reconciliation = await reconcilePipelineTerminalSnapshot(projectId, runId, {
+        run: {
+          id: runId,
+          workflow_name: workflowName,
+          status: "completed",
+          metadata: {
+            kadyProjectId: projectId,
+            kadyEngineAdmissionKey: recovered.record.engineAdmissionKey,
+            kady_completion_watermark: {
+              version: 1,
+              projectId,
+              engineAdmissionKey: recovered.record.engineAdmissionKey,
+              nodeIds: ["deliberate"],
+              usageByNode: {
+                deliberate: { costUsd: 0.25, tokensIn: 120, tokensOut: 30 },
+              },
+            },
+          },
+        },
+        events: [],
+      }, "full-charge");
+      expect(reconciliation).toMatchObject({
+        evidence: "durable-completion-watermark",
+        entry: {
+          settlement: { chargedCostUsd: 0.25, usageComplete: true },
+        },
+      });
+      expect(projectCostSummary(projectId)).toMatchObject({
+        workflowReservedUsd: 0,
+        workflowSpentUsd: 0.25,
+      });
+      await app.close();
+    }
+  }, 30_000);
+
+  it("releases a topology reservation when dispatch fails before execution", async () => {
+    const projectId = "topology-dispatch-failure";
+    const admissionId = "kadypipe_44444444444444444444444444444444";
+    createProject({ name: "Topology dispatch failure", projectId, spendLimitUsd: 10 });
+    const app = await registerTestRoutes({
+      getWorkflow: async () => ({
+        workflow: {
+          name: "topology-failure",
+          provider: "pi",
+          model: "openrouter/openai/gpt-4o-mini",
+          nodes: [{
+            id: "deliberate",
+            kind: "council",
+            task: "Evaluate the evidence.",
+            topology_agents: [
+              { id: "alpha", role: "Lead" },
+              { id: "beta", role: "Reviewer" },
+              { id: "gamma", role: "Skeptic" },
+            ],
+            maxBudgetUsd: 2,
+          }],
+        },
+      }),
+      runWorkflow: async () => ({ accepted: false, status: "rejected" }),
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/pipelines/topology-failure/run",
+      headers: { "x-project-id": projectId },
+      payload: { conversationId: "topology-failure", message: "Run", kadyAdmissionId: admissionId },
+    });
+    expect(response.statusCode).toBe(409);
+    expect(recoverPipelineAdmission(projectId, admissionId)).toMatchObject({
+      record: { status: "settled", nodeIds: ["deliberate"] },
+      admission: {
+        handle: {
+          record: {
+            status: "failed",
+            settlement: { chargedCostUsd: 0, usageComplete: true },
+          },
+        },
+      },
+    });
+    await app.close();
+  });
+
   it("fails closed on a provider-shaped kind outside the vendored engine schema", () => {
     expect(() => unresolvedPipelineNodeBudgetHooks({
       workflow: {
@@ -523,7 +670,7 @@ describe("Tier A S4 idempotent dispatch and durable reconciliation", () => {
     const getWorkflow = vi.fn()
       .mockResolvedValueOnce(legacyWorkflow())
       .mockResolvedValueOnce(changed);
-    const dispatch = vi.fn(async () => ({ accepted: true, status: "started" }));
+    const dispatch = vi.fn(async () => ({ accepted: true, status: "started", dispatchState: "queued" }));
     const admissionId = "kadypipe_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const app = await registerTestRoutes({ getWorkflow, runWorkflow: dispatch });
     const response = await app.inject({
@@ -552,7 +699,7 @@ describe("Tier A S4 idempotent dispatch and durable reconciliation", () => {
       getWorkflow: async () => legacyWorkflow(),
       runWorkflow: async (_name, body) => {
         submitted.push(body as Record<string, unknown>);
-        return { accepted: true, status: "started" };
+        return { accepted: true, status: "started", dispatchState: "queued" };
       },
     });
     const admissionId = "kadypipe_cccccccccccccccccccccccccccccccc";
@@ -662,7 +809,7 @@ describe("Tier A S4 idempotent dispatch and durable reconciliation", () => {
 
   it("rejects a route-level workflow with no settings or legacy budget before dispatch", async () => {
     vi.spyOn(pipelineEngine, "getWorkflow").mockResolvedValue(settingsWorkflow({ model: FIXED_MODEL }));
-    const dispatch = vi.fn(async () => ({ accepted: true, status: "started" }));
+    const dispatch = vi.fn(async () => ({ accepted: true, status: "started", dispatchState: "queued" }));
     const app = await registerTestRoutes({ runWorkflow: dispatch });
     const response = await app.inject({ method: "POST", url: "/pipelines/research/run", payload: { conversationId: "missing-budget", message: "Run" } });
     expect(response.statusCode).toBe(400);
@@ -685,7 +832,9 @@ describe("Tier A S4 idempotent dispatch and durable reconciliation", () => {
 
   it("retains unknown terminal accounting, then the worker full-charges without events", async () => {
     vi.spyOn(pipelineEngine, "getWorkflow").mockResolvedValue(legacyWorkflow());
-    const app = await registerTestRoutes({ runWorkflow: async () => ({ accepted: true, status: "started" }) });
+    const app = await registerTestRoutes({
+      runWorkflow: async () => ({ accepted: true, status: "started", dispatchState: "queued" }),
+    });
     const start = await app.inject({ method: "POST", url: "/pipelines/research/run", payload: { conversationId: "no-events", message: "Run" } });
     const admissionId = start.json().kadyAdmissionId as string;
     const admissionRecord = recoverPipelineAdmission("default", admissionId).record;
@@ -721,7 +870,9 @@ describe("Tier A S4 idempotent dispatch and durable reconciliation", () => {
 
   it("settles observed overrun only from a complete durable watermark", async () => {
     vi.spyOn(pipelineEngine, "getWorkflow").mockResolvedValue(legacyWorkflow());
-    const app = await registerTestRoutes({ runWorkflow: async () => ({ accepted: true, status: "started" }) });
+    const app = await registerTestRoutes({
+      runWorkflow: async () => ({ accepted: true, status: "started", dispatchState: "queued" }),
+    });
     const start = await app.inject({ method: "POST", url: "/pipelines/research/run", payload: { conversationId: "watermark", message: "Run" } });
     const admissionId = start.json().kadyAdmissionId as string;
     const admissionRecord = recoverPipelineAdmission("default", admissionId).record;
@@ -738,7 +889,9 @@ describe("Tier A S4 idempotent dispatch and durable reconciliation", () => {
 
   it("settles a terminal run without a client and a restarted worker resumes persisted ownership", async () => {
     vi.spyOn(pipelineEngine, "getWorkflow").mockResolvedValue(legacyWorkflow());
-    const app = await registerTestRoutes({ runWorkflow: async () => ({ accepted: true, status: "started" }) });
+    const app = await registerTestRoutes({
+      runWorkflow: async () => ({ accepted: true, status: "started", dispatchState: "queued" }),
+    });
     const start = await app.inject({ method: "POST", url: "/pipelines/research/run", payload: { conversationId: "restart-worker", message: "Run" } });
     const admissionId = start.json().kadyAdmissionId as string;
     const admissionRecord = recoverPipelineAdmission("default", admissionId).record;
