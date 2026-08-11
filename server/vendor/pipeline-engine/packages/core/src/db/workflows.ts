@@ -246,7 +246,7 @@ export async function claimKadyWorkflowDispatch(
          ${dispatchState} IS NULL
          OR ${dispatchState} = 'pre_dispatch'
          OR (
-           ${dispatchState} IN ('dispatching', 'dispatched')
+           ${dispatchState} IN ('dispatching', 'queued', 'running', 'dispatched')
            AND COALESCE(${dispatchProcessId}, '') <> $9
          )
        )`,
@@ -267,7 +267,7 @@ export async function claimKadyWorkflowDispatch(
   return { claimed: result.rowCount === 1, run };
 }
 
-export async function markKadyWorkflowDispatched(
+export async function markKadyWorkflowQueued(
   id: string,
   processId: string,
   claimId: string
@@ -290,11 +290,38 @@ export async function markKadyWorkflowDispatched(
        AND ${dispatchState} = 'dispatching'
        AND ${dispatchProcessId} = $3
        AND ${dispatchClaimId} = $4`,
-    [JSON.stringify({ kadyDispatchState: 'dispatched' }), id, processId, claimId]
+    [JSON.stringify({ kadyDispatchState: 'queued' }), id, processId, claimId]
   );
   if (result.rowCount !== 1) {
+    const run = await getWorkflowRun(id);
+    const state = run?.metadata.kadyDispatchState;
+    if (
+      run?.metadata.kadyDispatchProcessId === processId &&
+      run.metadata.kadyDispatchClaimId === claimId &&
+      (state === 'running' || run.status === 'completed' || run.status === 'failed')
+    ) {
+      return;
+    }
     throw new Error(`Kady workflow dispatch claim no longer owned (id: ${id})`);
   }
+}
+
+/** Terminalize a durable Kady admission when asynchronous dispatch setup fails. */
+export async function failKadyWorkflowDispatch(
+  id: string,
+  error: string,
+  metadata: Record<string, unknown>
+): Promise<boolean> {
+  const dialect = getDialect();
+  const result = await pool.query(
+    `UPDATE remote_agent_workflow_runs
+     SET status = 'failed',
+         completed_at = ${dialect.now()},
+         metadata = ${dialect.jsonMerge('metadata', 1)}
+     WHERE id = $2 AND status = 'pending'`,
+    [JSON.stringify({ error, kadyDispatchState: 'failed', ...metadata }), id]
+  );
+  return result.rowCount === 1;
 }
 
 export async function releaseKadyWorkflowDispatchClaim(

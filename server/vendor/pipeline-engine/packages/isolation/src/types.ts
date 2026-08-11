@@ -52,6 +52,9 @@ interface IsolationRequestBase {
    * ambient git identity (unchanged behavior).
    */
   gitIdentity?: { email: string; name?: string };
+
+  /** Immutable Kady run snapshot used as the worktree branch start point. */
+  snapshotSha?: string;
 }
 
 export interface IssueIsolationRequest extends IsolationRequestBase {
@@ -226,6 +229,9 @@ export interface IsolationHints {
 
   // Adoption hints
   suggestedBranch?: string;
+
+  /** Immutable commit containing the exact sandbox inputs admitted for this run. */
+  snapshotSha?: string;
 }
 
 export type IsolationBlockReason = 'creation_failed';

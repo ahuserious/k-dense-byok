@@ -11,7 +11,10 @@ import { SSETransport } from '../adapters/web/transport.ts';
 import { WorkflowEventBridge } from '../adapters/web/workflow-bridge.ts';
 import { validationErrorHook } from './openapi-defaults.ts';
 import { registerApiRoutes } from './api.ts';
-import { ensureProjectExists } from '../../../../../../src/projects.ts';
+import {
+  createProjectRunSnapshot,
+  ensureProjectExists,
+} from '../../../../../../src/projects.ts';
 
 const mode = process.env.KADY_CRASH_FIXTURE_MODE;
 const projectId = 'dispatch-crash-project';
@@ -95,6 +98,7 @@ if (mode === 'seed') {
     .update(`${projectId}\0${admissionId}`)
     .digest('hex')
     .slice(0, 32)}`;
+  const runSnapshotSha = createProjectRunSnapshot(projectId, admissionKey);
   crashState = {
     projectId,
     admissionId,
@@ -104,6 +108,7 @@ if (mode === 'seed') {
     revision,
     codebaseId: codebase.id,
     sandbox: paths.sandbox,
+    runSnapshotSha,
   };
   await app.request(`/api/workflows/${listed.workflowId}/run?${scope}`, {
     method: 'POST',
@@ -116,7 +121,8 @@ if (mode === 'seed') {
       kadyEngineAdmissionKey: admissionKey,
       idempotencyKey: admissionKey,
       workflowRevisionSha256: revision,
-      metadata: {},
+      kadyRunSnapshotSha: runSnapshotSha,
+      metadata: { kadyRunSnapshotSha: runSnapshotSha },
     }),
   });
   throw new Error('Crash boundary did not terminate the seed process');
@@ -139,7 +145,8 @@ if (mode === 'replay') {
       kadyEngineAdmissionKey: state.admissionKey,
       idempotencyKey: state.admissionKey,
       workflowRevisionSha256: state.revision,
-      metadata: {},
+      kadyRunSnapshotSha: state.runSnapshotSha,
+      metadata: { kadyRunSnapshotSha: state.runSnapshotSha },
     }),
   });
   if (replay.status !== 200) {

@@ -341,6 +341,62 @@ function ensureProjectRepository(sandbox: string): void {
   }
 }
 
+/**
+ * Materialize the sandbox inputs visible to a workflow as an unreachable-by-branch
+ * Git commit, then retain it under a Kady-owned ref for the lifetime of the run.
+ * A temporary index keeps the user's checkout, index, and current branch untouched.
+ */
+export function createProjectRunSnapshot(projectId: string, runIdentity: string): string {
+  validateId(projectId);
+  const paths = ensureProjectExists(projectId);
+  const temporaryDirectory = fs.mkdtempSync(path.join(paths.root, ".run-snapshot-"));
+  const temporaryIndex = path.join(temporaryDirectory, "index");
+  const gitEnvironment = { ...process.env, GIT_INDEX_FILE: temporaryIndex };
+  try {
+    execFileSync("git", ["-C", paths.sandbox, "read-tree", "--empty"], {
+      env: gitEnvironment,
+      stdio: "ignore",
+    });
+    const permittedEntries = fs.readdirSync(paths.sandbox).filter((entry) =>
+      !entry.startsWith(".") || entry === ".archon"
+    );
+    if (permittedEntries.length > 0) {
+      execFileSync(
+        "git",
+        ["-C", paths.sandbox, "add", "--all", "--force", "--", ...permittedEntries],
+        { env: gitEnvironment, stdio: "ignore" },
+      );
+    }
+    const tree = execFileSync("git", ["-C", paths.sandbox, "write-tree"], {
+      env: gitEnvironment,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    const parent = execFileSync("git", ["-C", paths.sandbox, "rev-parse", "HEAD"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    const snapshot = execFileSync(
+      "git",
+      ["-C", paths.sandbox, "commit-tree", tree, "-p", parent, "-m", `Kady run snapshot ${runIdentity}`],
+      {
+        env: gitEnvironment,
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    ).trim();
+    const snapshotRef = crypto.createHash("sha256").update(runIdentity).digest("hex");
+    execFileSync(
+      "git",
+      ["-C", paths.sandbox, "update-ref", `refs/kady/run-snapshots/${snapshotRef}`, snapshot],
+      { stdio: "ignore" },
+    );
+    return snapshot;
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+}
+
 export function createProject(input: CreateProjectInput): ProjectMeta {
   const name = (input.name || "").trim() || "Untitled project";
   const projectId = input.projectId ?? mintProjectId(name);

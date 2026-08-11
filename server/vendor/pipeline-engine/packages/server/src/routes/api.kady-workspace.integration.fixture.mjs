@@ -10,7 +10,7 @@ import { SSETransport } from '../adapters/web/transport.ts';
 import { WorkflowEventBridge } from '../adapters/web/workflow-bridge.ts';
 import { ConversationLockManager } from '@archon/core';
 
-const [{ createProject, ensureProjectExists, resolvePaths }, { registerApiRoutes }, { parseWorkflow }] = await Promise.all([
+const [{ createProject, createProjectRunSnapshot, ensureProjectExists, resolvePaths }, { registerApiRoutes }, { parseWorkflow }] = await Promise.all([
   import('../../../../../../src/projects.ts'),
   import('./api.ts'),
   import('@archon/workflows/loader'),
@@ -21,6 +21,8 @@ const project = createProject({
   spendLimitUsd: 10,
 });
 const sandbox = resolvePaths(project.id).sandbox;
+writeFileSync(join(sandbox, 'current-input.txt'), 'current-v1\n');
+writeFileSync(join(sandbox, 'current-input.txt'), 'current-v2\n');
 const initialCommitAuthor = execFileSync(
   'git',
   ['-C', sandbox, 'log', '-1', '--format=%an <%ae>'],
@@ -68,7 +70,7 @@ const save = await app.request(`/api/workflows/fresh-workflow?${scope.toString()
     definition: {
       name: 'fresh-workflow',
       description: 'Fresh Kady workflow',
-      nodes: [{ id: 'verify', bash: 'printf durable' }],
+      nodes: [{ id: 'verify', bash: 'test "$(cat current-input.txt)" = "current-v2"' }],
     },
   }),
 });
@@ -110,6 +112,7 @@ if (parsedWorkflow.error) throw new Error(parsedWorkflow.error.error);
 const workflowRevisionSha256 = createHash('sha256')
   .update(canonicalJson(parsedWorkflow.workflow))
   .digest('hex');
+const runSnapshotSha = createProjectRunSnapshot(project.id, admissionKey);
 const launch = await app.request(
   `/api/workflows/${listed.workflowId}/run?${scope.toString()}`,
   {
@@ -123,7 +126,8 @@ const launch = await app.request(
       kadyEngineAdmissionKey: admissionKey,
       idempotencyKey: admissionKey,
       workflowRevisionSha256,
-      metadata: { kadyRunId: 'fresh-kady-run' },
+      kadyRunSnapshotSha: runSnapshotSha,
+      metadata: { kadyRunId: 'fresh-kady-run', kadyRunSnapshotSha: runSnapshotSha },
     }),
   }
 );
@@ -155,6 +159,58 @@ if (!terminalRun) {
     `Durable workflow run did not reach a terminal status: ${JSON.stringify({ lastLookupBody, lockStats: lockManager.getStats() })}`
   );
 }
+
+const nestedWorkflowRoot = join(sandbox, '.archon', 'workflows');
+mkdirSync(join(nestedWorkflowRoot, 'alpha'), { recursive: true });
+mkdirSync(join(nestedWorkflowRoot, 'beta'), { recursive: true });
+const nestedYaml = name => `name: ${name}\ndescription: Nested workflow\nnodes:\n  - id: verify\n    bash: printf nested\n`;
+writeFileSync(join(nestedWorkflowRoot, 'alpha', 'shared.yaml'), nestedYaml('alpha-shared'));
+writeFileSync(join(nestedWorkflowRoot, 'beta', 'shared.yaml'), nestedYaml('beta-shared'));
+const nestedListResponse = await app.request(`/api/workflows?${scope.toString()}`);
+const nestedList = await nestedListResponse.json();
+const alphaNested = nestedList.workflows?.find(entry => entry.filename === 'alpha/shared.yaml');
+const betaNested = nestedList.workflows?.find(entry => entry.filename === 'beta/shared.yaml');
+if (!alphaNested || !betaNested || alphaNested.workflowId === betaNested.workflowId) {
+  throw new Error(`Nested workflow identities collided: ${JSON.stringify(nestedList)}`);
+}
+const alphaGet = await app.request(
+  `/api/workflows/${alphaNested.workflowId}?${scope.toString()}`
+);
+const betaGet = await app.request(
+  `/api/workflows/${betaNested.workflowId}?${scope.toString()}`
+);
+const alphaUpdate = await app.request(
+  `/api/workflows/${alphaNested.workflowId}?${scope.toString()}`,
+  {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      definition: {
+        name: 'alpha-updated',
+        description: 'Updated nested workflow',
+        nodes: [{ id: 'verify', bash: 'printf updated' }],
+      },
+    }),
+  }
+);
+const betaDelete = await app.request(
+  `/api/workflows/${betaNested.workflowId}?${scope.toString()}`,
+  { method: 'DELETE' }
+);
+const nestedCrud = {
+  filenames: [alphaNested.filename, betaNested.filename].sort(),
+  distinctStableIds: alphaNested.workflowId !== betaNested.workflowId,
+  alphaGetName: (await alphaGet.json()).workflow?.name,
+  betaGetName: (await betaGet.json()).workflow?.name,
+  alphaUpdateStatus: alphaUpdate.status,
+  betaDeleteStatus: betaDelete.status,
+  alphaUpdatedInPlace: readFileSync(
+    join(nestedWorkflowRoot, 'alpha', 'shared.yaml'),
+    'utf8'
+  ).includes('alpha-updated'),
+  betaDeletedInPlace: !existsSync(join(nestedWorkflowRoot, 'beta', 'shared.yaml')),
+  rootSiblingCreated: existsSync(join(nestedWorkflowRoot, 'shared.yaml')),
+};
 
 async function exerciseEnsuredProject(projectId, workflowName, preExistingNonGit) {
   const projectPaths = resolvePaths(projectId);
@@ -222,6 +278,7 @@ async function exerciseEnsuredProject(projectId, workflowName, preExistingNonGit
   const ensuredRevision = createHash('sha256')
     .update(canonicalJson(ensuredParsed.workflow))
     .digest('hex');
+  const ensuredSnapshotSha = createProjectRunSnapshot(projectId, ensuredAdmissionKey);
   const launchResponse = await app.request(
     `/api/workflows/${ensuredWorkflow.workflowId}/run?${ensuredScope}`,
     {
@@ -235,7 +292,11 @@ async function exerciseEnsuredProject(projectId, workflowName, preExistingNonGit
         kadyEngineAdmissionKey: ensuredAdmissionKey,
         idempotencyKey: ensuredAdmissionKey,
         workflowRevisionSha256: ensuredRevision,
-        metadata: { kadyRunId: `${projectId}-run` },
+        kadyRunSnapshotSha: ensuredSnapshotSha,
+        metadata: {
+          kadyRunId: `${projectId}-run`,
+          kadyRunSnapshotSha: ensuredSnapshotSha,
+        },
       }),
     }
   );
@@ -298,6 +359,17 @@ console.log(`KADY_WORKSPACE_RESULT=${JSON.stringify({
   pendingStatus: pendingBody.runs?.[0]?.status,
   terminalStatus: terminalRun.status,
   terminalWorkingPath: terminalRun.workingPath ?? terminalRun.working_path,
+  runSnapshotSha,
+  snapshotInput: execFileSync(
+    'git',
+    ['-C', sandbox, 'show', `${runSnapshotSha}:current-input.txt`],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
+  ).trim(),
+  workerInput: readFileSync(
+    join(terminalRun.workingPath ?? terminalRun.working_path, 'current-input.txt'),
+    'utf8'
+  ).trim(),
+  nestedCrud,
   defaultProject,
   upgradedProject,
 })}`);

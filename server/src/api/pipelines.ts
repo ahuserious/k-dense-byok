@@ -35,7 +35,7 @@ import {
 } from "../cost/billing.ts";
 import { currentProjectId } from "../scope.ts";
 import { corsResponseHeaders } from "../cors.ts";
-import { listProjects, resolvePaths } from "../projects.ts";
+import { createProjectRunSnapshot, listProjects, resolvePaths } from "../projects.ts";
 import { resolveWorkflowModel } from "../agent/workflow-model-resolution.ts";
 import type { ModelRequest } from "../workflows/schema.ts";
 import {
@@ -313,6 +313,21 @@ function mapError(reply: FastifyReply, err: unknown): { detail: string; engine: 
   }
   reply.code(502);
   return { detail: (err as Error).message, engine: "error" };
+}
+
+function engineRunRecord(snapshot: unknown): Record<string, unknown> | undefined {
+  const root = recordOf(snapshot);
+  return recordOf(root?.run) ?? root;
+}
+
+function engineRunBelongsToCodebase(snapshot: unknown, codebaseId: string): boolean {
+  const run = engineRunRecord(snapshot);
+  return run?.codebase_id === codebaseId || run?.codebaseId === codebaseId;
+}
+
+function scopedRunNotFound(reply: FastifyReply): { detail: string } {
+  reply.code(404);
+  return { detail: "Pipeline run not found." };
 }
 
 export type AdmissionQueryResult =
@@ -670,6 +685,9 @@ export interface PipelineRouteOverrides {
   runWorkflow?: typeof pipelineEngine.runWorkflow;
   queryAdmission?: typeof queryEngineRunByAdmissionId;
   getRun?: typeof pipelineEngine.getRun;
+  listRuns?: typeof pipelineEngine.listRuns;
+  resumeRun?: typeof pipelineEngine.resumeRun;
+  cancelRun?: typeof pipelineEngine.cancelRun;
   resolveWorkflowScope?: (
     projectId: string,
   ) => Promise<pipelineEngine.PipelineWorkflowScope>;
@@ -702,6 +720,9 @@ export async function registerPipelineRoutes(
   const runWorkflow = overrides.runWorkflow ?? pipelineEngine.runWorkflow;
   const queryAdmission = overrides.queryAdmission ?? queryEngineRunByAdmissionId;
   const getRun = overrides.getRun ?? pipelineEngine.getRun;
+  const listRuns = overrides.listRuns ?? pipelineEngine.listRuns;
+  const resumeRun = overrides.resumeRun ?? pipelineEngine.resumeRun;
+  const cancelRun = overrides.cancelRun ?? pipelineEngine.cancelRun;
   const resolveWorkflowScope = overrides.resolveWorkflowScope ?? resolveProjectWorkflowScope;
   if (overrides.reconciliationWorker !== false) {
     const worker = overrides.reconciliationWorker ?? new PipelineReconciliationWorker({
@@ -745,7 +766,15 @@ export async function registerPipelineRoutes(
 
   app.get("/pipelines/runs", async (_req, reply) => {
     try {
-      return await pipelineEngine.listRuns();
+      const scope = await resolveWorkflowScope(currentProjectId());
+      const result = await listRuns(scope.codebaseId);
+      const resultRecord = recordOf(result);
+      const runs = resultRecord?.runs;
+      if (!Array.isArray(runs)) return result;
+      return {
+        ...resultRecord,
+        runs: runs.filter((run) => engineRunBelongsToCodebase(run, scope.codebaseId)),
+      };
     } catch (err) {
       return mapError(reply, err);
     }
@@ -923,6 +952,7 @@ export async function registerPipelineRoutes(
               },
             }
           : body;
+      const runSnapshotSha = createProjectRunSnapshot(projectId, admissionRecord.engineAdmissionKey);
       const runBody = {
         ...baseRunBody,
         message: `${message}\n\n${projectLabel}\n${correlationLabel}`,
@@ -931,6 +961,7 @@ export async function registerPipelineRoutes(
         kadyEngineAdmissionKey: admissionRecord.engineAdmissionKey,
         idempotencyKey: admissionRecord.engineAdmissionKey,
         workflowRevisionSha256: admissionRecord.workflowRevisionSha256,
+        kadyRunSnapshotSha: runSnapshotSha,
         metadata: {
           ...(recordOf(baseRunBody.metadata) ?? {}),
           kadyProjectId: projectId,
@@ -938,6 +969,7 @@ export async function registerPipelineRoutes(
           kadyEngineAdmissionKey: admissionRecord.engineAdmissionKey,
           kadyWorkflowRevisionSha256: admissionRecord.workflowRevisionSha256,
           kadyWorkflowNodeCount: admission.workflowNodeCount,
+          kadyRunSnapshotSha: runSnapshotSha,
         },
       };
       // Write-ahead dispatch intent before crossing the process boundary.
@@ -1029,7 +1061,10 @@ export async function registerPipelineRoutes(
 
   app.get<{ Params: { runId: string } }>("/pipelines/runs/:runId", async (req, reply) => {
     try {
-      return await pipelineEngine.getRun(req.params.runId);
+      const scope = await resolveWorkflowScope(currentProjectId());
+      const snapshot = await getRun(req.params.runId);
+      if (!engineRunBelongsToCodebase(snapshot, scope.codebaseId)) return scopedRunNotFound(reply);
+      return snapshot;
     } catch (err) {
       return mapError(reply, err);
     }
@@ -1037,7 +1072,10 @@ export async function registerPipelineRoutes(
 
   app.post<{ Params: { runId: string } }>("/pipelines/runs/:runId/resume", async (req, reply) => {
     try {
-      return await pipelineEngine.resumeRun(req.params.runId, req.body);
+      const scope = await resolveWorkflowScope(currentProjectId());
+      const snapshot = await getRun(req.params.runId);
+      if (!engineRunBelongsToCodebase(snapshot, scope.codebaseId)) return scopedRunNotFound(reply);
+      return await resumeRun(req.params.runId, req.body);
     } catch (err) {
       return mapError(reply, err);
     }
@@ -1045,7 +1083,10 @@ export async function registerPipelineRoutes(
 
   app.post<{ Params: { runId: string } }>("/pipelines/runs/:runId/cancel", async (req, reply) => {
     try {
-      return await pipelineEngine.cancelRun(req.params.runId);
+      const scope = await resolveWorkflowScope(currentProjectId());
+      const snapshot = await getRun(req.params.runId);
+      if (!engineRunBelongsToCodebase(snapshot, scope.codebaseId)) return scopedRunNotFound(reply);
+      return await cancelRun(req.params.runId);
     } catch (err) {
       return mapError(reply, err);
     }
@@ -1058,7 +1099,9 @@ export async function registerPipelineRoutes(
     "/pipelines/runs/:runId/reconcile-cost",
     async (req, reply) => {
       try {
+        const scope = await resolveWorkflowScope(currentProjectId());
         const snapshot = await getRun(req.params.runId);
+        if (!engineRunBelongsToCodebase(snapshot, scope.codebaseId)) return scopedRunNotFound(reply);
         return await reconcilePipelineTerminalSnapshot(
           currentProjectId(),
           req.params.runId,
@@ -1087,6 +1130,17 @@ export async function registerPipelineRoutes(
     "/pipelines/runs/:runId/stream",
     async (req, reply) => {
       const runId = req.params.runId;
+      let scopedCodebaseId: string;
+      try {
+        const scope = await resolveWorkflowScope(currentProjectId());
+        const initialSnapshot = await getRun(runId);
+        if (!engineRunBelongsToCodebase(initialSnapshot, scope.codebaseId)) {
+          return scopedRunNotFound(reply);
+        }
+        scopedCodebaseId = scope.codebaseId;
+      } catch (err) {
+        return mapError(reply, err);
+      }
       // Clamp the poll period to a sane band: fast enough to feel live, slow
       // enough not to hammer a flaky SQLite engine. Default 2s.
       const requestedPollMs = Number(req.query.pollMs);
@@ -1129,7 +1183,11 @@ export async function registerPipelineRoutes(
         for (let poll = 0; poll < MAX_POLLS && !closed; poll++) {
           let snapshot: unknown;
           try {
-            snapshot = await pipelineEngine.getRun(runId);
+            snapshot = await getRun(runId);
+            if (!engineRunBelongsToCodebase(snapshot, scopedCodebaseId)) {
+              write({ type: "error", engine: "error", message: "Pipeline run not found." });
+              break;
+            }
           } catch (err) {
             // Engine down or a flaky read. Surface it as an `error` frame; if the
             // engine is simply unavailable we close (no point polling a dead

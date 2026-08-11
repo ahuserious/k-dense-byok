@@ -7,7 +7,7 @@ import { closeDatabase, getDatabase, resetDatabase } from '../connection';
 import {
   claimKadyWorkflowDispatch,
   createWorkflowRun,
-  markKadyWorkflowDispatched,
+  markKadyWorkflowQueued,
 } from '../workflows';
 
 const originalArchonHome = process.env.ARCHON_HOME;
@@ -211,7 +211,7 @@ describe('SQLite workflow admission schema integration', () => {
       await claimKadyWorkflowDispatch(run.id, scope, 'process-a', 'claim-a-retry')
     ).toMatchObject({ claimed: false });
 
-    await markKadyWorkflowDispatched(run.id, 'process-a', 'claim-a');
+    await markKadyWorkflowQueued(run.id, 'process-a', 'claim-a');
     expect(
       await claimKadyWorkflowDispatch(run.id, scope, 'process-a', 'claim-a-after-dispatch')
     ).toMatchObject({ claimed: false });

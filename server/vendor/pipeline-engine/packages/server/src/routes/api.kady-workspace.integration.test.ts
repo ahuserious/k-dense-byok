@@ -11,6 +11,79 @@ afterEach(() => {
 });
 
 describe('Kady git workspace integration', () => {
+  test('terminalizes post-claim isolation and row-rebind failures and releases admission holds', async () => {
+    testRoot = mkdtempSync(join(tmpdir(), 'pipeline-kady-async-failure-'));
+    const childEnvironment = { ...process.env };
+    childEnvironment.ARCHON_HOME = join(testRoot, 'engine-home');
+    childEnvironment.KADY_PROJECTS_ROOT = join(testRoot, 'projects');
+    delete childEnvironment.DATABASE_URL;
+    delete childEnvironment.FORCE_COLOR;
+    delete childEnvironment.NO_COLOR;
+    const child = Bun.spawn(
+      [process.execPath, join(import.meta.dir, 'api.kady-async-failure.integration.fixture.mjs')],
+      { env: childEnvironment, stdout: 'pipe', stderr: 'pipe' }
+    );
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: '' });
+    const resultLine = stdout
+      .split('\n')
+      .find(line => line.startsWith('KADY_ASYNC_FAILURE_RESULT='));
+    expect(resultLine).toBeDefined();
+    const result = JSON.parse(resultLine!.slice('KADY_ASYNC_FAILURE_RESULT='.length));
+    for (const stage of ['isolation', 'rebind']) {
+      expect(result[stage]).toEqual({
+        launchStatus: 200,
+        terminalStatus: 'failed',
+        dispatchState: 'failed',
+        failureStage: 'setup',
+        watermarkCost: 0,
+        reconciliationEvidence: 'durable-completion-watermark',
+        admissionStatus: 'settled',
+        reservationStatuses: ['failed'],
+        activeReservedUsd: 0,
+      });
+    }
+  }, 60_000);
+
+  test('scopes list and every addressed run lifecycle route to the active codebase', async () => {
+    testRoot = mkdtempSync(join(tmpdir(), 'pipeline-kady-lifecycle-'));
+    const childEnvironment = { ...process.env };
+    childEnvironment.ARCHON_HOME = join(testRoot, 'engine-home');
+    childEnvironment.KADY_PROJECTS_ROOT = join(testRoot, 'projects');
+    delete childEnvironment.DATABASE_URL;
+    delete childEnvironment.FORCE_COLOR;
+    delete childEnvironment.NO_COLOR;
+    const child = Bun.spawn(
+      [process.execPath, join(import.meta.dir, 'api.kady-lifecycle.integration.fixture.mjs')],
+      { env: childEnvironment, stdout: 'pipe', stderr: 'pipe' }
+    );
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: '' });
+    const resultLine = stdout
+      .split('\n')
+      .find(line => line.startsWith('KADY_LIFECYCLE_RESULT='));
+    expect(resultLine).toBeDefined();
+    const result = JSON.parse(resultLine!.slice('KADY_LIFECYCLE_RESULT='.length));
+    expect(result).toMatchObject({
+      listStatus: 200,
+      listedIds: [result.ownRunId],
+      getCrossStatus: 404,
+      streamCrossStatus: 404,
+      resumeCrossStatus: 404,
+      cancelCrossStatus: 404,
+      hiddenRunStatusAfterActions: 'pending',
+    });
+    expect(result.listedIds).not.toContain(result.hiddenRunId);
+  }, 60_000);
+
   test('new, default, and upgraded projects register and complete through the real lock', async () => {
     testRoot = mkdtempSync(join(tmpdir(), 'pipeline-kady-workspace-'));
     const childEnvironment = { ...process.env };
@@ -57,6 +130,10 @@ describe('Kady git workspace integration', () => {
       pendingStatus: string;
       terminalStatus: string;
       terminalWorkingPath: string;
+      runSnapshotSha: string;
+      snapshotInput: string;
+      workerInput: string;
+      nestedCrud: Record<string, unknown>;
       defaultProject: Record<string, unknown>;
       upgradedProject: Record<string, unknown>;
     };
@@ -75,6 +152,20 @@ describe('Kady git workspace integration', () => {
       pendingStatus: 'pending',
       terminalStatus: 'completed',
       terminalWorkingPath: expect.stringContaining('worktrees'),
+      runSnapshotSha: expect.stringMatching(/^[a-f0-9]{40,64}$/),
+      snapshotInput: 'current-v2',
+      workerInput: 'current-v2',
+      nestedCrud: {
+        filenames: ['alpha/shared.yaml', 'beta/shared.yaml'],
+        distinctStableIds: true,
+        alphaGetName: 'alpha-shared',
+        betaGetName: 'beta-shared',
+        alphaUpdateStatus: 200,
+        betaDeleteStatus: 200,
+        alphaUpdatedInPlace: true,
+        betaDeletedInPlace: true,
+        rootSiblingCreated: false,
+      },
       defaultProject: {
         hasGitDirectory: true,
         commitCountAfterUpgrade: 1,
@@ -157,7 +248,7 @@ describe('Kady git workspace integration', () => {
       replayStatus: 200,
       runId: seeded.runId,
       terminalStatus: 'completed',
-      dispatchState: 'dispatched',
+      dispatchState: 'running',
     });
   }, 60_000);
 });

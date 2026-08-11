@@ -1110,7 +1110,9 @@ export class WorktreeProvider implements IIsolationProvider {
       await execFileAsync('git', ['-C', repoPath, 'remote'], { timeout: 10_000 })
     ).stdout.split(/\r?\n/);
     const startPoint =
-      request.workflowType === 'task' && request.fromBranch
+      request.snapshotSha
+        ? request.snapshotSha
+        : request.workflowType === 'task' && request.fromBranch
         ? request.fromBranch
         : remotes.includes('origin')
           ? `origin/${baseBranch}`

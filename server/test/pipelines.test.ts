@@ -79,6 +79,7 @@ function completionSnapshot(
     run: {
       id: runId,
       workflow_name: "research",
+      codebase_id: `codebase-${projectId}`,
       status: "completed",
       metadata: {
         kadyProjectId: projectId,
@@ -440,7 +441,7 @@ describe("Tier A S4 idempotent dispatch and durable reconciliation", () => {
       url: `/pipelines/runs/${runId}/reconcile-cost`,
       headers: { "x-project-id": "scope-b" },
     });
-    expect(crossProject.statusCode).toBe(409);
+    expect(crossProject.statusCode).toBe(404);
     expect(recoverPipelineAdmission("scope-b", admissionId).admission.handle.record.status).toBe("active");
     await reconcileApp.close();
     await app.close();
@@ -527,7 +528,10 @@ describe("Tier A S4 idempotent dispatch and durable reconciliation", () => {
 
   it("rejects nonterminal reconciliation before settlement", async () => {
     const app = await registerTestRoutes({
-      getRun: async () => ({ run: { id: "run-early", status: "running" }, events: [] }),
+      getRun: async () => ({
+        run: { id: "run-early", codebase_id: "codebase-default", status: "running" },
+        events: [],
+      }),
     });
     const response = await app.inject({ method: "POST", url: "/pipelines/runs/run-early/reconcile-cost" });
     expect(response.statusCode).toBe(409);
@@ -546,6 +550,7 @@ describe("Tier A S4 idempotent dispatch and durable reconciliation", () => {
       run: {
         id: runId,
         workflow_name: "research",
+        codebase_id: "codebase-default",
         status: "completed",
         metadata: {
           kadyProjectId: "default",

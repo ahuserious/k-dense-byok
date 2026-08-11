@@ -650,6 +650,31 @@ nodes:
       const names = workflows.map(w => w.name).sort();
       expect(names).toEqual(['root-workflow', 'sub-workflow']);
     });
+
+    it('uses root-relative POSIX filenames so duplicate nested basenames stay distinct', async () => {
+      const workflowDir = join(testDir, '.archon', 'workflows');
+      await mkdir(join(workflowDir, 'alpha'), { recursive: true });
+      await mkdir(join(workflowDir, 'beta'), { recursive: true });
+
+      const workflowYaml = (name: string) => `name: ${name}
+description: Nested workflow
+nodes:
+  - id: test
+    command: test
+`;
+      await writeFile(join(workflowDir, 'alpha', 'shared.yaml'), workflowYaml('alpha-shared'));
+      await writeFile(join(workflowDir, 'beta', 'shared.yaml'), workflowYaml('beta-shared'));
+
+      const result = await discoverWorkflows(testDir, { loadDefaults: false });
+      expect(result.workflows.map(entry => entry.filename).sort()).toEqual([
+        'alpha/shared.yaml',
+        'beta/shared.yaml',
+      ]);
+      expect(result.workflows.map(entry => entry.workflow.name).sort()).toEqual([
+        'alpha-shared',
+        'beta-shared',
+      ]);
+    });
   });
 
   describe('command name validation (Issue #129)', () => {
@@ -1381,7 +1406,7 @@ nodes:
       expect(result.workflows).toHaveLength(0);
       expect(result.errors).toHaveLength(2);
       const filenames = result.errors.map(e => e.filename).sort();
-      expect(filenames).toEqual(['root-bad.yaml', 'sub-bad.yaml']);
+      expect(filenames).toEqual(['root-bad.yaml', 'sub/sub-bad.yaml']);
     });
 
     it('should report validation error for empty YAML content', async () => {
@@ -2705,17 +2730,17 @@ nodes:
       expect(readErrors).toHaveLength(0);
     });
 
-    it('still loads bundled defaults when loadDefaults:true and cwd is null', async () => {
+    it('does not invent project workflows when Kady has no bundled defaults', async () => {
       const result = await discoverWorkflows(null, { loadDefaults: true });
 
       // No project-source entries (project step skipped).
       const projectSourced = result.workflows.filter(w => w.source === 'project');
       expect(projectSourced).toHaveLength(0);
 
-      // Bundled-source entries must surface — without this assertion the test
-      // would silently pass even if the bundled-defaults loader regressed.
+      // Kady's scientific template library owns app defaults, so the vendored
+      // engine intentionally ships an empty bundled workflow record.
       const bundledSourced = result.workflows.filter(w => w.source === 'bundled');
-      expect(bundledSourced.length).toBeGreaterThan(0);
+      expect(bundledSourced).toHaveLength(0);
     });
 
     it('discoverWorkflowsWithConfig does not call loadConfig when cwd is null', async () => {

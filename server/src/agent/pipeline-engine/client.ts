@@ -222,8 +222,11 @@ export async function runWorkflow(
     },
   );
 }
-export async function listRuns(): Promise<unknown> {
-  return pipelineEngineFetch("/api/dashboard/runs");
+export async function listRuns(codebaseId?: string): Promise<unknown> {
+  const query = codebaseId
+    ? `?${new URLSearchParams({ codebaseId }).toString()}`
+    : "";
+  return pipelineEngineFetch(`/api/dashboard/runs${query}`);
 }
 export async function getRun(runId: string): Promise<unknown> {
   return pipelineEngineFetch(`/api/workflows/runs/${encodeURIComponent(runId)}`);

@@ -284,6 +284,11 @@ export interface WorkflowRoutingContext {
   readonly runMetadata?: Record<string, unknown>;
   /** Durable admission row created before the HTTP request was accepted. */
   readonly preCreatedRun?: WorkflowRun;
+  /** Deterministic integration-test failures at real async setup boundaries. */
+  readonly dispatchFaultInjection?: {
+    beforeWorkerIsolation?: () => void | Promise<void>;
+    beforePreCreatedRunRebind?: () => void | Promise<void>;
+  };
 }
 
 /**
@@ -329,12 +334,19 @@ export async function dispatchBackgroundWorkflow(
         `Cannot dispatch workflow "${workflow.name}": codebase ${ctx.codebaseId} not found`
       );
     }
+    await ctx.dispatchFaultInjection?.beforeWorkerIsolation?.();
     const result = await validateAndResolveIsolation(
       workerConv,
       codebase,
       ctx.platform,
       workerPlatformId,
-      { workflowType: 'thread', workflowId: workerPlatformId },
+      {
+        workflowType: 'thread',
+        workflowId: workerPlatformId,
+        ...(ctx.isolationHints?.snapshotSha
+          ? { snapshotSha: ctx.isolationHints.snapshotSha }
+          : {}),
+      },
       false,
       ctx.userId
     );
@@ -391,16 +403,19 @@ export async function dispatchBackgroundWorkflow(
   let preCreatedRun = ctx.preCreatedRun;
   try {
     if (preCreatedRun) {
+      await ctx.dispatchFaultInjection?.beforePreCreatedRunRebind?.();
       await workflowDeps.store.updateWorkflowRun(preCreatedRun.id, {
         conversation_id: workerConv.id,
         working_path: workerCwd,
         parent_conversation_id: ctx.conversationDbId,
+        metadata: { kadyDispatchState: 'running' },
       });
       preCreatedRun = {
         ...preCreatedRun,
         conversation_id: workerConv.id,
         working_path: workerCwd,
         parent_conversation_id: ctx.conversationDbId,
+        metadata: { ...preCreatedRun.metadata, kadyDispatchState: 'running' },
       };
     } else {
       preCreatedRun = await workflowDeps.store.createWorkflowRun({

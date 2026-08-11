@@ -168,6 +168,7 @@ function validateKadyRunAdmission(
     body.idempotencyKey,
     body.workflowRevisionSha256,
   ];
+  const runSnapshotSha = body.kadyRunSnapshotSha;
   if (
     typeof projectId !== 'string' ||
     projectId.length < 1 ||
@@ -178,7 +179,9 @@ function validateKadyRunAdmission(
     typeof engineAdmissionKey !== 'string' ||
     typeof idempotencyKey !== 'string' ||
     typeof revision !== 'string' ||
-    !/^[a-f0-9]{64}$/.test(revision)
+    !/^[a-f0-9]{64}$/.test(revision) ||
+    typeof runSnapshotSha !== 'string' ||
+    !/^[a-f0-9]{40,64}$/.test(runSnapshotSha)
   ) {
     return { error: 'Invalid Kady admission field shape' };
   }
@@ -200,6 +203,9 @@ function validateKadyRunAdmission(
     return { error: 'metadata must be an object' };
   }
   const metadata = body.metadata as Record<string, unknown>;
+  if (metadata.kadyRunSnapshotSha !== runSnapshotSha) {
+    return { error: 'metadata.kadyRunSnapshotSha must match kadyRunSnapshotSha' };
+  }
   return {
     metadata: {
       ...metadata,
@@ -209,6 +215,34 @@ function validateKadyRunAdmission(
       kadyWorkflowRevisionSha256: revision,
       workflowRevisionSha256: revision,
       kadyAdmittedModelNodeIds: admittedModelNodeIds(workflow),
+      kadyRunSnapshotSha: runSnapshotSha,
+    },
+  };
+}
+
+function kadyDispatchFailureMetadata(run: WorkflowRun): Record<string, unknown> {
+  const projectId = run.metadata.kadyProjectId;
+  const engineAdmissionKey = run.metadata.kadyEngineAdmissionKey;
+  const admittedNodeIds = run.metadata.kadyAdmittedModelNodeIds;
+  if (
+    typeof projectId !== 'string' ||
+    typeof engineAdmissionKey !== 'string' ||
+    !Array.isArray(admittedNodeIds) ||
+    admittedNodeIds.some(nodeId => typeof nodeId !== 'string')
+  ) {
+    return { kadyDispatchFailureStage: 'setup' };
+  }
+  const nodeIds = [...new Set(admittedNodeIds as string[])];
+  return {
+    kadyDispatchFailureStage: 'setup',
+    kady_completion_watermark: {
+      version: 1,
+      projectId,
+      engineAdmissionKey,
+      nodeIds,
+      usageByNode: Object.fromEntries(
+        nodeIds.map(nodeId => [nodeId, { costUsd: 0, tokensIn: 0, tokensOut: 0 }])
+      ),
     },
   };
 }
@@ -1475,6 +1509,8 @@ export function registerApiRoutes(
   faultInjection?: {
     /** Integration-test crash boundary: durable row exists, dispatch claim does not. */
     afterKadyAdmissionPersisted?: (run: WorkflowRun) => void | Promise<void>;
+    beforeKadyWorkerIsolation?: (run: WorkflowRun) => void | Promise<void>;
+    beforeKadyRunRebind?: (run: WorkflowRun) => void | Promise<void>;
   }
 ): void {
   function apiError(
@@ -2307,17 +2343,37 @@ export function registerApiRoutes(
     extraContext?: Omit<HandleMessageContext, 'isolationHints'>,
     filesToCleanup?: { files: AttachedFile[]; uploadDir: string }
   ): Promise<{ accepted: boolean; status: string }> {
+    const runSnapshotSha = extraContext?.workflowOverride?.runMetadata?.kadyRunSnapshotSha;
     const result = await lockManager.acquireLock(conversationId, async () => {
       // Emit lock:true at handler start so the UI knows processing has begun.
       // Fire-and-forget — if no SSE stream is connected yet, the event is buffered.
       webAdapter.emitLockEvent(conversationId, true);
       try {
         await handleMessage(webAdapter, conversationId, message, {
-          isolationHints: { workflowType: 'thread', workflowId: conversationId },
+          isolationHints: {
+            workflowType: 'thread',
+            workflowId: conversationId,
+            ...(typeof runSnapshotSha === 'string' ? { snapshotSha: runSnapshotSha } : {}),
+          },
           ...extraContext,
         });
       } catch (error) {
         getLog().error({ err: error, conversationId }, 'handle_message_failed');
+        const preCreatedRun = extraContext?.workflowOverride?.preCreatedRun;
+        if (preCreatedRun) {
+          await workflowDb
+            .failKadyWorkflowDispatch(
+              preCreatedRun.id,
+              (error as Error).message ?? 'Workflow dispatch setup failed',
+              kadyDispatchFailureMetadata(preCreatedRun)
+            )
+            .catch(failureError => {
+              getLog().error(
+                { err: failureError, workflowRunId: preCreatedRun.id },
+                'workflow_dispatch_failure_terminalize_failed'
+              );
+            });
+        }
         try {
           await webAdapter.emitSSE(
             conversationId,
@@ -3396,7 +3452,8 @@ export function registerApiRoutes(
             preCreatedRun.workflow_name !== workflowName ||
             preCreatedRun.codebase_id !== scopedCodebaseId ||
             preCreatedRun.working_path !== scopedWorkingDir ||
-            preCreatedRun.workflow_revision_sha256 !== expectedRevision
+            preCreatedRun.workflow_revision_sha256 !== expectedRevision ||
+            preCreatedRun.metadata.kadyRunSnapshotSha !== runMetadata.kadyRunSnapshotSha
           ) {
             return apiError(c, 409, 'Admission replay does not match the original workflow scope');
           }
@@ -3435,6 +3492,14 @@ export function registerApiRoutes(
                 source: workflowEntry.source,
                 runMetadata,
                 preCreatedRun,
+                dispatchFaultInjection: preCreatedRun
+                  ? {
+                      beforeWorkerIsolation: () =>
+                        faultInjection?.beforeKadyWorkerIsolation?.(preCreatedRun!),
+                      beforePreCreatedRunRebind: () =>
+                        faultInjection?.beforeKadyRunRebind?.(preCreatedRun!),
+                    }
+                  : undefined,
               },
             }
           : {}),
@@ -3451,22 +3516,22 @@ export function registerApiRoutes(
       } catch (error) {
         if (preCreatedRun && dispatchClaimId) {
           await workflowDb
-            .releaseKadyWorkflowDispatchClaim(
+            .failKadyWorkflowDispatch(
               preCreatedRun.id,
-              KADY_DISPATCH_PROCESS_ID,
-              dispatchClaimId
+              (error as Error).message ?? 'Workflow dispatch setup failed',
+              kadyDispatchFailureMetadata(preCreatedRun)
             )
-            .catch(releaseError => {
+            .catch(failureError => {
               getLog().error(
-                { err: releaseError, workflowRunId: preCreatedRun?.id },
-                'workflow_dispatch_claim_release_failed'
+                { err: failureError, workflowRunId: preCreatedRun?.id },
+                'workflow_dispatch_failure_terminalize_failed'
               );
             });
         }
         throw error;
       }
       if (preCreatedRun && dispatchClaimId) {
-        await workflowDb.markKadyWorkflowDispatched(
+        await workflowDb.markKadyWorkflowQueued(
           preCreatedRun.id,
           KADY_DISPATCH_PROCESS_ID,
           dispatchClaimId

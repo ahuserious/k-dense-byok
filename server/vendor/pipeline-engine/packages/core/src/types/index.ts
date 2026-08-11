@@ -57,6 +57,11 @@ export interface HandleMessageContext {
     runMetadata?: Record<string, unknown>;
     /** Durable admission row created before the request is accepted. */
     preCreatedRun?: WorkflowRun;
+    /** Deterministic integration-test failures at real async setup boundaries. */
+    dispatchFaultInjection?: {
+      beforeWorkerIsolation?: () => void | Promise<void>;
+      beforePreCreatedRunRebind?: () => void | Promise<void>;
+    };
   };
   /**
    * Pipeline Engine user UUID resolved from the inbound platform user identifier.

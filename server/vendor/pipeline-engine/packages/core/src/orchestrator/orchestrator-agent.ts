@@ -500,7 +500,8 @@ async function dispatchOrchestratorWorkflow(
    */
   source?: WorkflowSource,
   runMetadata?: Record<string, unknown>,
-  preCreatedRun?: WorkflowRun
+  preCreatedRun?: WorkflowRun,
+  dispatchFaultInjection?: NonNullable<HandleMessageContext['workflowOverride']>['dispatchFaultInjection']
 ): Promise<void> {
   // Capability gate: hard-fail before any worktree/clone/AI cost if the
   // workflow declares `requires: [github]` and the originating user hasn't
@@ -516,6 +517,7 @@ async function dispatchOrchestratorWorkflow(
           'workflow.requirement_unmet'
         );
         await platform.sendMessage(conversationId, err.message);
+        if (preCreatedRun) throw err;
         return;
       }
       throw err;
@@ -562,6 +564,7 @@ async function dispatchOrchestratorWorkflow(
           },
           'isolation_blocked'
         );
+        if (preCreatedRun) throw error;
         return;
       }
       throw error;
@@ -674,6 +677,7 @@ async function dispatchOrchestratorWorkflow(
         source,
         runMetadata,
         preCreatedRun,
+        dispatchFaultInjection,
       },
       workflow
     );
@@ -1069,7 +1073,8 @@ export async function handleMessage(
             userId,
             workflowOverride.source,
             workflowOverride.runMetadata,
-            workflowOverride.preCreatedRun
+            workflowOverride.preCreatedRun,
+            workflowOverride.dispatchFaultInjection
           );
           return;
         }
@@ -1511,6 +1516,9 @@ export async function handleMessage(
     } catch (sendError) {
       getLog().error({ err: toError(sendError), conversationId }, 'error_notification_failed');
     }
+    // Exact Kady admissions already own a durable pending row. Let the route's
+    // async failure boundary terminalize it instead of swallowing setup errors.
+    if (workflowOverride?.preCreatedRun) throw err;
   }
 }
 
