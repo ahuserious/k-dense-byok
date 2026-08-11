@@ -316,6 +316,50 @@ function acquireProjectRepositoryLock(sandbox: string): () => void {
   throw new Error(`Timed out initializing project repository: ${sandbox}`);
 }
 
+const BASELINE_EXCLUDED_DIRECTORIES = new Set([
+  ".git",
+  ".kady",
+  ".pi",
+  ".venv",
+  "node_modules",
+]);
+
+function isBaselineCredentialName(name: string): boolean {
+  const lowerName = name.toLowerCase();
+  return (
+    lowerName.startsWith(".env") ||
+    /(^|[._-])credentials?([._-]|$)/.test(lowerName)
+  );
+}
+
+/** Enumerate only privacy-safe regular files/symlinks for the bootstrap commit. */
+function privacySafeProjectSnapshotPaths(sandbox: string): string[] {
+  const permittedPaths: string[] = [];
+  const visit = (absoluteDirectory: string, relativeDirectory: string): void => {
+    for (const entry of fs.readdirSync(absoluteDirectory, { withFileTypes: true })) {
+      const isAllowedEngineDataRoot = relativeDirectory === "" && entry.name === ".archon";
+      if (
+        BASELINE_EXCLUDED_DIRECTORIES.has(entry.name) ||
+        isBaselineCredentialName(entry.name) ||
+        (entry.name.startsWith(".") && !isAllowedEngineDataRoot)
+      ) {
+        continue;
+      }
+      const relativePath = relativeDirectory
+        ? path.posix.join(relativeDirectory, entry.name)
+        : entry.name;
+      const absolutePath = path.join(absoluteDirectory, entry.name);
+      if (entry.isDirectory()) {
+        visit(absolutePath, relativePath);
+      } else if (entry.isFile() || entry.isSymbolicLink()) {
+        permittedPaths.push(relativePath);
+      }
+    }
+  };
+  visit(sandbox, "");
+  return permittedPaths;
+}
+
 function ensureProjectRepository(sandbox: string): void {
   if (hasProjectRepositoryCommit(sandbox)) return;
   const releaseLock = acquireProjectRepositoryLock(sandbox);
@@ -330,12 +374,46 @@ function ensureProjectRepository(sandbox: string): void {
       ["-C", sandbox, "config", "user.email", "kady@localhost"],
       { stdio: "ignore" },
     );
-    execFileSync("git", ["-C", sandbox, "add", "--all"], { stdio: "ignore" });
-    execFileSync(
-      "git",
-      ["-C", sandbox, "commit", "--quiet", "-m", "Initialize Kady project"],
-      { stdio: "ignore" },
-    );
+    const temporaryDirectory = fs.mkdtempSync(path.join(path.dirname(sandbox), ".git-baseline-"));
+    const temporaryIndex = path.join(temporaryDirectory, "index");
+    const gitEnvironment = {
+      ...process.env,
+      GIT_INDEX_FILE: temporaryIndex,
+      GIT_LITERAL_PATHSPECS: "1",
+    };
+    try {
+      execFileSync("git", ["-C", sandbox, "read-tree", "--empty"], {
+        env: gitEnvironment,
+        stdio: "ignore",
+      });
+      const permittedPaths = privacySafeProjectSnapshotPaths(sandbox);
+      if (permittedPaths.length > 0) {
+        execFileSync(
+          "git",
+          ["-C", sandbox, "add", "--force", "--", ...permittedPaths],
+          { env: gitEnvironment, stdio: "ignore" },
+        );
+      }
+      const tree = execFileSync("git", ["-C", sandbox, "write-tree"], {
+        env: gitEnvironment,
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+      const commit = execFileSync(
+        "git",
+        ["-C", sandbox, "commit-tree", tree, "-m", "Initialize Kady project"],
+        {
+          env: gitEnvironment,
+          encoding: "utf-8",
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      ).trim();
+      execFileSync("git", ["-C", sandbox, "update-ref", "HEAD", commit], {
+        stdio: "ignore",
+      });
+    } finally {
+      fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
   } finally {
     releaseLock();
   }
@@ -352,19 +430,21 @@ export function createProjectRunSnapshot(projectId: string, runIdentity: string)
   const paths = ensureProjectExists(projectId);
   const temporaryDirectory = fs.mkdtempSync(path.join(paths.root, ".run-snapshot-"));
   const temporaryIndex = path.join(temporaryDirectory, "index");
-  const gitEnvironment = { ...process.env, GIT_INDEX_FILE: temporaryIndex };
+  const gitEnvironment = {
+    ...process.env,
+    GIT_INDEX_FILE: temporaryIndex,
+    GIT_LITERAL_PATHSPECS: "1",
+  };
   try {
     execFileSync("git", ["-C", paths.sandbox, "read-tree", "--empty"], {
       env: gitEnvironment,
       stdio: "ignore",
     });
-    const permittedEntries = fs.readdirSync(paths.sandbox).filter((entry) =>
-      !entry.startsWith(".") || entry === ".archon"
-    );
-    if (permittedEntries.length > 0) {
+    const permittedPaths = privacySafeProjectSnapshotPaths(paths.sandbox);
+    if (permittedPaths.length > 0) {
       execFileSync(
         "git",
-        ["-C", paths.sandbox, "add", "--all", "--force", "--", ...permittedEntries],
+        ["-C", paths.sandbox, "add", "--force", "--", ...permittedPaths],
         { env: gitEnvironment, stdio: "ignore" },
       );
     }

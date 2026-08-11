@@ -7,7 +7,10 @@ import { closeDatabase, getDatabase, resetDatabase } from '../connection';
 import {
   claimKadyWorkflowDispatch,
   createWorkflowRun,
+  failKadyWorkflowDispatch,
+  getWorkflowRun,
   markKadyWorkflowQueued,
+  updateWorkflowRun,
 } from '../workflows';
 
 const originalArchonHome = process.env.ARCHON_HOME;
@@ -231,6 +234,29 @@ describe('SQLite workflow admission schema integration', () => {
           kadyDispatchClaimId: 'claim-b',
         },
       },
+    });
+
+    await updateWorkflowRun(run.id, { metadata: { kadyDispatchState: 'running' } });
+    expect(
+      await failKadyWorkflowDispatch(
+        run.id,
+        'stale owner',
+        { kadyDispatchFailureStage: 'execution-setup' },
+        { processId: 'process-a', claimId: 'claim-a', state: 'running' }
+      )
+    ).toBe(false);
+    expect((await getWorkflowRun(run.id))?.status).toBe('pending');
+    expect(
+      await failKadyWorkflowDispatch(
+        run.id,
+        'current owner',
+        { kadyDispatchFailureStage: 'execution-setup' },
+        { processId: 'process-b', claimId: 'claim-b', state: 'running' }
+      )
+    ).toBe(true);
+    expect(await getWorkflowRun(run.id)).toMatchObject({
+      status: 'failed',
+      metadata: { kadyDispatchState: 'failed' },
     });
   });
 });

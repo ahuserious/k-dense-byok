@@ -61,6 +61,7 @@ export interface HandleMessageContext {
     dispatchFaultInjection?: {
       beforeWorkerIsolation?: () => void | Promise<void>;
       beforePreCreatedRunRebind?: () => void | Promise<void>;
+      beforeProviderAccess?: () => void | Promise<void>;
     };
   };
   /**

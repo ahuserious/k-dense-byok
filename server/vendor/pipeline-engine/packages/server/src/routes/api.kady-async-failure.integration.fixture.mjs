@@ -55,6 +55,11 @@ registerApiRoutes(app, adapter, lockManager, undefined, {
       throw new Error('Injected pre-created row rebind failure');
     }
   },
+  beforeKadyProviderAccess(run) {
+    if (run.metadata.kadyFailureFixture === 'execute') {
+      throw new Error('Injected executeWorkflow setup failure after rebind');
+    }
+  },
 });
 
 async function jsonRequest(path, init) {
@@ -166,6 +171,7 @@ async function runFailure(stage) {
     terminalStatus: terminalRun.status,
     dispatchState: terminalRun.metadata?.kadyDispatchState,
     failureStage: terminalRun.metadata?.kadyDispatchFailureStage,
+    hasWatermark: terminalRun.metadata?.kady_completion_watermark !== undefined,
     watermarkCost: Object.values(
       terminalRun.metadata?.kady_completion_watermark?.usageByNode ?? {}
     ).reduce((sum, usage) => sum + usage.costUsd, 0),
@@ -178,7 +184,8 @@ async function runFailure(stage) {
 
 const isolation = await runFailure('isolation');
 const rebind = await runFailure('rebind');
-console.log(`KADY_ASYNC_FAILURE_RESULT=${JSON.stringify({ isolation, rebind })}`);
+const execute = await runFailure('execute');
+console.log(`KADY_ASYNC_FAILURE_RESULT=${JSON.stringify({ isolation, rebind, execute })}`);
 
 await adapter.stop();
 await closeDatabase();

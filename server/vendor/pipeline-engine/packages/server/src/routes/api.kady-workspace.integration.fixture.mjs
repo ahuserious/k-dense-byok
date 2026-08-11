@@ -71,7 +71,10 @@ const save = await app.request(`/api/workflows/fresh-workflow?${scope.toString()
     definition: {
       name: 'fresh-workflow',
       description: 'Fresh Kady workflow',
-      nodes: [{ id: 'verify', bash: 'test "$(cat current-input.txt)" = "current-v2"' }],
+      nodes: [{
+        id: 'verify',
+        bash: 'test "$(cat current-input.txt)" = "current-v2" && test "$(cat .archon/snapshot-marker.txt)" = "engine-s1" && test "$(cat copied-input.txt)" = "copied-s1"',
+      }],
     },
   }),
 });
@@ -84,6 +87,12 @@ const listed = listBody.workflows?.find(entry => entry.workflow.name === 'fresh-
 if (!listed) {
   throw new Error(`Scoped workflow list failed: ${list.status} ${JSON.stringify(listBody)}`);
 }
+writeFileSync(
+  join(sandbox, '.archon', 'config.yaml'),
+  'worktree:\n  copyFiles:\n    - copied-input.txt\n'
+);
+writeFileSync(join(sandbox, '.archon', 'snapshot-marker.txt'), 'engine-s1\n');
+writeFileSync(join(sandbox, 'copied-input.txt'), 'copied-s1\n');
 
 let releaseCapacity;
 const capacityGate = new Promise(resolve => {
@@ -135,6 +144,10 @@ const launch = await app.request(
 if (launch.status !== 200) {
   throw new Error(`Workflow launch failed: ${launch.status} ${await launch.text()}`);
 }
+// The lock keeps worktree setup queued while the canonical sandbox changes.
+// Snapshot-bound copy paths must still come from runSnapshotSha, never here.
+writeFileSync(join(sandbox, '.archon', 'snapshot-marker.txt'), 'engine-live-v2\n');
+writeFileSync(join(sandbox, 'copied-input.txt'), 'copied-live-v2\n');
 // Treat the accepted response as lost: prove the durable admission is visible
 // while the real lock still delays execution.
 const pendingLookup = await app.request(
@@ -331,6 +344,14 @@ async function exerciseEnsuredProject(projectId, workflowName, preExistingNonGit
   if (preExistingNonGit) {
     mkdirSync(projectPaths.sandbox, { recursive: true });
     writeFileSync(join(projectPaths.sandbox, 'legacy-input.txt'), 'legacy data\n');
+    writeFileSync(join(projectPaths.sandbox, '.env'), 'SECRET=baseline-env\n');
+    writeFileSync(join(projectPaths.sandbox, '.env.local'), 'SECRET=baseline-local\n');
+    writeFileSync(join(projectPaths.sandbox, '.hidden-state'), 'private\n');
+    writeFileSync(join(projectPaths.sandbox, 'credentials.json'), '{"secret":true}\n');
+    for (const volatilePath of ['.pi/sessions', '.kady/runs', '.venv/bin']) {
+      mkdirSync(join(projectPaths.sandbox, volatilePath), { recursive: true });
+      writeFileSync(join(projectPaths.sandbox, volatilePath, 'private-state'), 'secret\n');
+    }
   }
   const ensured = ensureProjectExists(projectId);
   const commitCountAfterUpgrade = Number(execFileSync(
@@ -435,10 +456,25 @@ async function exerciseEnsuredProject(projectId, workflowName, preExistingNonGit
     commitCountAfterUpgrade,
     commitCountAfterRepeat,
     legacyFileTracked: preExistingNonGit
-      ? execFileSync('git', ['-C', ensured.sandbox, 'ls-files', '--error-unmatch', 'legacy-input.txt'], {
+      ? execFileSync('git', ['-C', ensured.sandbox, 'ls-tree', '-r', '--name-only', 'HEAD'], {
           encoding: 'utf8',
           stdio: ['ignore', 'pipe', 'pipe'],
-        }).trim() === 'legacy-input.txt'
+        }).split(/\r?\n/).includes('legacy-input.txt')
+      : undefined,
+    reachablePrivatePaths: preExistingNonGit
+      ? execFileSync('git', ['-C', ensured.sandbox, 'rev-list', '--objects', '--all'], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
+          .split(/\r?\n/)
+          .map(line => line.slice(line.indexOf(' ') + 1))
+          .filter(name =>
+            (name.startsWith('.') && name !== '.archon' && !name.startsWith('.archon/')) ||
+            name === 'credentials.json' ||
+            name.startsWith('.pi/') ||
+            name.startsWith('.kady/') ||
+            name.startsWith('.venv/')
+          )
       : undefined,
     registrationStatus: registerResponse.status,
     listStatus: listResponse.status,
@@ -481,6 +517,14 @@ console.log(`KADY_WORKSPACE_RESULT=${JSON.stringify({
   ).trim(),
   workerInput: readFileSync(
     join(terminalRun.workingPath ?? terminalRun.working_path, 'current-input.txt'),
+    'utf8'
+  ).trim(),
+  workerEngineMarker: readFileSync(
+    join(terminalRun.workingPath ?? terminalRun.working_path, '.archon', 'snapshot-marker.txt'),
+    'utf8'
+  ).trim(),
+  workerConfiguredCopy: readFileSync(
+    join(terminalRun.workingPath ?? terminalRun.working_path, 'copied-input.txt'),
     'utf8'
   ).trim(),
   snapshotIdentity,

@@ -315,7 +315,17 @@ export type ExecuteWorkflowOptions = ResumePayload & {
   userId?: string;
   /** Validated server-owned admission metadata persisted on fresh runs. */
   runMetadata?: Record<string, unknown>;
+  /** Integration boundary after durable rebind and credential setup, before provider access. */
+  beforeProviderAccess?: () => void | Promise<void>;
 };
+
+/** Marks failures that are proven to occur before any provider can be invoked. */
+export class WorkflowPreProviderAccessError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'WorkflowPreProviderAccessError';
+  }
+}
 
 /**
  * Hydrate an already-located resumable `WorkflowRun` candidate into the form
@@ -381,6 +391,7 @@ export async function executeWorkflow(
     userId,
     source,
     runMetadata,
+    beforeProviderAccess,
   } = opts;
   // Load config once for the entire workflow execution
   const fileConfig = await deps.loadConfig(cwd);
@@ -719,6 +730,15 @@ export async function executeWorkflow(
   // returns {} when the feature is disabled or no userId is present).
   const userProviderEnv = await resolveUserProviderEnvForWorkflow(deps, userId, artifactsDir);
   config.envVars = { ...config.envVars, ...userProviderEnv };
+
+  if (beforeProviderAccess) {
+    try {
+      await beforeProviderAccess();
+    } catch (error) {
+      const cause = error instanceof Error ? error : new Error(String(error));
+      throw new WorkflowPreProviderAccessError(cause.message, { cause });
+    }
+  }
 
   // Wrap execution in try-catch to ensure workflow is marked as failed on any error
   try {

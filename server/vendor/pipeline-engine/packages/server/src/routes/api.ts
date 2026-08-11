@@ -1511,6 +1511,7 @@ export function registerApiRoutes(
     afterKadyAdmissionPersisted?: (run: WorkflowRun) => void | Promise<void>;
     beforeKadyWorkerIsolation?: (run: WorkflowRun) => void | Promise<void>;
     beforeKadyRunRebind?: (run: WorkflowRun) => void | Promise<void>;
+    beforeKadyProviderAccess?: (run: WorkflowRun) => void | Promise<void>;
   }
 ): void {
   function apiError(
@@ -3498,6 +3499,8 @@ export function registerApiRoutes(
                         faultInjection?.beforeKadyWorkerIsolation?.(preCreatedRun!),
                       beforePreCreatedRunRebind: () =>
                         faultInjection?.beforeKadyRunRebind?.(preCreatedRun!),
+                      beforeProviderAccess: () =>
+                        faultInjection?.beforeKadyProviderAccess?.(preCreatedRun!),
                     }
                   : undefined,
               },

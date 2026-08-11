@@ -48,7 +48,10 @@ import * as db from '../db/conversations';
 import { createIsolationStore } from '../db/isolation-environments';
 import { toError } from '../utils/error';
 import { getCodebase } from '../db/codebases';
-import { executeWorkflow } from '@archon/workflows/executor';
+import {
+  executeWorkflow,
+  WorkflowPreProviderAccessError,
+} from '@archon/workflows/executor';
 import type { WorkflowDefinition, WorkflowSource } from '@archon/workflows/schemas/workflow';
 import type { WorkflowRun } from '@archon/workflows/schemas/workflow-run';
 import { createWorkflowDeps } from '../workflows/store-adapter';
@@ -60,6 +63,7 @@ import {
 import { loadRepoConfig } from '../config/config-loader';
 import { isPerUserGitHubEnabled } from '../github-auth/config';
 import { getUserGithubNoreplyEmail } from '../db/user-github-token-store';
+import * as workflowDb from '../db/workflows';
 
 type IsolationResolution =
   | { status: 'existing'; cwd: string; env: IsolationEnvironmentRow }
@@ -288,6 +292,41 @@ export interface WorkflowRoutingContext {
   readonly dispatchFaultInjection?: {
     beforeWorkerIsolation?: () => void | Promise<void>;
     beforePreCreatedRunRebind?: () => void | Promise<void>;
+    beforeProviderAccess?: () => void | Promise<void>;
+  };
+}
+
+function detachedDispatchFailureMetadata(
+  run: WorkflowRun,
+  zeroUsageIsProven: boolean
+): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {
+    kadyDispatchFailureStage: 'execution-setup',
+  };
+  if (!zeroUsageIsProven) return metadata;
+  const projectId = run.metadata.kadyProjectId;
+  const engineAdmissionKey = run.metadata.kadyEngineAdmissionKey;
+  const admittedNodeIds = run.metadata.kadyAdmittedModelNodeIds;
+  if (
+    typeof projectId !== 'string' ||
+    typeof engineAdmissionKey !== 'string' ||
+    !Array.isArray(admittedNodeIds) ||
+    admittedNodeIds.some(nodeId => typeof nodeId !== 'string')
+  ) {
+    return metadata;
+  }
+  const nodeIds = [...new Set(admittedNodeIds as string[])];
+  return {
+    ...metadata,
+    kady_completion_watermark: {
+      version: 1,
+      projectId,
+      engineAdmissionKey,
+      nodeIds,
+      usageByNode: Object.fromEntries(
+        nodeIds.map(nodeId => [nodeId, { costUsd: 0, tokensIn: 0, tokensOut: 0 }])
+      ),
+    },
   };
 }
 
@@ -475,6 +514,7 @@ export async function dispatchBackgroundWorkflow(
             userId: ctx.userId,
             source: ctx.source,
             runMetadata: ctx.runMetadata,
+            beforeProviderAccess: ctx.dispatchFaultInjection?.beforeProviderAccess,
           }
         );
         // Surface workflow output to parent conversation as a result card
@@ -520,6 +560,39 @@ export async function dispatchBackgroundWorkflow(
         }
       } catch (error) {
         const err = toError(error);
+        if (preCreatedRun) {
+          const processId = preCreatedRun.metadata.kadyDispatchProcessId;
+          const claimId = preCreatedRun.metadata.kadyDispatchClaimId;
+          if (typeof processId === 'string' && typeof claimId === 'string') {
+            try {
+              const terminalized = await workflowDb.failKadyWorkflowDispatch(
+                preCreatedRun.id,
+                err.message,
+                detachedDispatchFailureMetadata(
+                  preCreatedRun,
+                  error instanceof WorkflowPreProviderAccessError
+                ),
+                { processId, claimId, state: 'running' }
+              );
+              if (!terminalized) {
+                getLog().warn(
+                  { workflowRunId: preCreatedRun.id, processId, claimId },
+                  'background_workflow_failure_claim_lost'
+                );
+              }
+            } catch (terminalizeError) {
+              getLog().error(
+                { err: toError(terminalizeError), workflowRunId: preCreatedRun.id },
+                'background_workflow_failure_terminalize_failed'
+              );
+            }
+          } else {
+            getLog().error(
+              { workflowRunId: preCreatedRun.id },
+              'background_workflow_failure_claim_missing'
+            );
+          }
+        }
         getLog().error(
           {
             err,

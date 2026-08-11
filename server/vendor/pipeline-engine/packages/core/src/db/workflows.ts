@@ -310,16 +310,40 @@ export async function markKadyWorkflowQueued(
 export async function failKadyWorkflowDispatch(
   id: string,
   error: string,
-  metadata: Record<string, unknown>
+  metadata: Record<string, unknown>,
+  claim?: { processId: string; claimId: string; state: 'running' }
 ): Promise<boolean> {
   const dialect = getDialect();
+  const isPostgres = getDatabaseType() === 'postgresql';
+  const dispatchState = isPostgres
+    ? "metadata->>'kadyDispatchState'"
+    : "json_extract(metadata, '$.kadyDispatchState')";
+  const dispatchProcessId = isPostgres
+    ? "metadata->>'kadyDispatchProcessId'"
+    : "json_extract(metadata, '$.kadyDispatchProcessId')";
+  const dispatchClaimId = isPostgres
+    ? "metadata->>'kadyDispatchClaimId'"
+    : "json_extract(metadata, '$.kadyDispatchClaimId')";
+  const claimPredicate = claim
+    ? ` AND ${dispatchState} = $3
+        AND ${dispatchProcessId} = $4
+        AND ${dispatchClaimId} = $5`
+    : '';
   const result = await pool.query(
     `UPDATE remote_agent_workflow_runs
      SET status = 'failed',
          completed_at = ${dialect.now()},
          metadata = ${dialect.jsonMerge('metadata', 1)}
-     WHERE id = $2 AND status = 'pending'`,
-    [JSON.stringify({ error, kadyDispatchState: 'failed', ...metadata }), id]
+     WHERE id = $2 AND status = 'pending'${claimPredicate}`,
+    claim
+      ? [
+          JSON.stringify({ error, kadyDispatchState: 'failed', ...metadata }),
+          id,
+          claim.state,
+          claim.processId,
+          claim.claimId,
+        ]
+      : [JSON.stringify({ error, kadyDispatchState: 'failed', ...metadata }), id]
   );
   return result.rowCount === 1;
 }

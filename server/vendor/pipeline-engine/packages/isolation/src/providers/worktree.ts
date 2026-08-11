@@ -740,12 +740,13 @@ export class WorktreeProvider implements IIsolationProvider {
       await this.initSubmodules(worktreePath);
     }
 
-    // Copy git-ignored files based on repo config
-    const { configLoadFailed } = await this.copyConfiguredFiles(
-      repoPath,
-      worktreePath,
-      worktreeConfig
-    );
+    // A snapshot-bound worktree must be byte-for-byte derived from its commit.
+    // Live copies would let a concurrent canonical-workspace edit overwrite the
+    // admitted snapshot after checkout. Kady snapshots force-add their allowed
+    // .archon and configured-copy inputs, so the checkout already contains them.
+    const { configLoadFailed } = request.snapshotSha
+      ? { configLoadFailed: false }
+      : await this.copyConfiguredFiles(repoPath, worktreePath, worktreeConfig);
 
     const warnings: string[] = [];
     if (configLoadFailed) {

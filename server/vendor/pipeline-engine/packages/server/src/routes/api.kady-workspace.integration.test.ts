@@ -11,7 +11,7 @@ afterEach(() => {
 });
 
 describe('Kady git workspace integration', () => {
-  test('terminalizes post-claim isolation and row-rebind failures and releases admission holds', async () => {
+  test('terminalizes post-claim isolation, rebind, and executor-setup failures and releases holds', async () => {
     testRoot = mkdtempSync(join(tmpdir(), 'pipeline-kady-async-failure-'));
     const childEnvironment = { ...process.env };
     childEnvironment.ARCHON_HOME = join(testRoot, 'engine-home');
@@ -40,6 +40,7 @@ describe('Kady git workspace integration', () => {
         terminalStatus: 'failed',
         dispatchState: 'failed',
         failureStage: 'setup',
+        hasWatermark: true,
         watermarkCost: 0,
         reconciliationEvidence: 'durable-completion-watermark',
         admissionStatus: 'settled',
@@ -47,6 +48,18 @@ describe('Kady git workspace integration', () => {
         activeReservedUsd: 0,
       });
     }
+    expect(result.execute).toEqual({
+      launchStatus: 200,
+      terminalStatus: 'failed',
+      dispatchState: 'failed',
+      failureStage: 'execution-setup',
+      hasWatermark: true,
+      watermarkCost: 0,
+      reconciliationEvidence: 'durable-completion-watermark',
+      admissionStatus: 'settled',
+      reservationStatuses: ['failed'],
+      activeReservedUsd: 0,
+    });
   }, 60_000);
 
   test('scopes list and every addressed run lifecycle route to the active codebase', async () => {
@@ -133,6 +146,8 @@ describe('Kady git workspace integration', () => {
       runSnapshotSha: string;
       snapshotInput: string;
       workerInput: string;
+      workerEngineMarker: string;
+      workerConfiguredCopy: string;
       snapshotIdentity: Record<string, unknown>;
       nestedCrud: Record<string, unknown>;
       defaultProject: Record<string, unknown>;
@@ -156,6 +171,8 @@ describe('Kady git workspace integration', () => {
       runSnapshotSha: expect.stringMatching(/^[a-f0-9]{40,64}$/),
       snapshotInput: 'current-v2',
       workerInput: 'current-v2',
+      workerEngineMarker: 'engine-s1',
+      workerConfiguredCopy: 'copied-s1',
       snapshotIdentity: {
         snapshotA: expect.stringMatching(/^[a-f0-9]{40,64}$/),
         snapshotB: expect.stringMatching(/^[a-f0-9]{40,64}$/),
@@ -193,6 +210,7 @@ describe('Kady git workspace integration', () => {
         commitCountAfterUpgrade: 1,
         commitCountAfterRepeat: 1,
         legacyFileTracked: true,
+        reachablePrivatePaths: [],
         registrationStatus: 201,
         listStatus: 200,
         launchStatus: 200,
