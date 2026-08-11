@@ -133,6 +133,7 @@ describe('Kady git workspace integration', () => {
       runSnapshotSha: string;
       snapshotInput: string;
       workerInput: string;
+      snapshotIdentity: Record<string, unknown>;
       nestedCrud: Record<string, unknown>;
       defaultProject: Record<string, unknown>;
       upgradedProject: Record<string, unknown>;
@@ -155,6 +156,18 @@ describe('Kady git workspace integration', () => {
       runSnapshotSha: expect.stringMatching(/^[a-f0-9]{40,64}$/),
       snapshotInput: 'current-v2',
       workerInput: 'current-v2',
+      snapshotIdentity: {
+        snapshotA: expect.stringMatching(/^[a-f0-9]{40,64}$/),
+        snapshotB: expect.stringMatching(/^[a-f0-9]{40,64}$/),
+        distinctSnapshots: true,
+        distinctWorktrees: true,
+        runAHeadMatches: true,
+        runBHeadMatches: true,
+        runAInput: 'snapshot-s1',
+        runAObserved: 'snapshot-s1',
+        runBInput: 'snapshot-s2',
+        runBObserved: 'snapshot-s2',
+      },
       nestedCrud: {
         filenames: ['alpha/shared.yaml', 'beta/shared.yaml'],
         distinctStableIds: true,

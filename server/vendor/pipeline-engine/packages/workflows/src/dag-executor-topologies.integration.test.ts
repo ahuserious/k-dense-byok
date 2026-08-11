@@ -148,6 +148,9 @@ describe('persisted fusion topology reachability', () => {
     'plan-debate',
     'auto-validate',
     'draco-fusion',
+    'council',
+    'fusion',
+    'best-of-n',
   ])('executes persisted %s through the public production API', async kind => {
     const phases: string[] = [];
     const sendQuery = mock(async function* (prompt: string) {

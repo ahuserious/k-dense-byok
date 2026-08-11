@@ -18,6 +18,7 @@ import { withActiveProject } from "../src/scope.ts";
 import {
   listPipelineAdmissions,
   recoverPipelineAdmission,
+  reservePipelineNodeBudgets,
 } from "../src/workflows/budget.ts";
 
 const FIXED_MODEL = {
@@ -226,11 +227,154 @@ describe("Tier A S4 dual-shape pipeline admission", () => {
       budget: { maxTokens: 2_000, maxCostUsd: 1.5 },
     }))).toEqual([{
       nodeId: "search",
+      modelCallCount: 1,
       maxTokens: 2_000,
       maxCostUsd: 1.5,
       declaredBillingMode: "api",
       modelRequest: FIXED_MODEL,
     }]);
+  });
+
+  it("derives every vendored topology's worst-case provider calls from the shared node schema", () => {
+    const expectedCalls = new Map([
+      ["opinion", 1],
+      ["parallel", 3],
+      ["coordinate", 4],
+      ["ultraplan", 4],
+      ["plan-debate", 7],
+      ["auto-validate", 6],
+      ["draco-fusion", 7],
+      ["council", 12],
+      ["fusion", 10],
+      ["best-of-n", 4],
+    ]);
+    for (const [kind, modelCallCount] of expectedCalls) {
+      const hooks = unresolvedPipelineNodeBudgetHooks({
+        workflow: {
+          name: `topology-${kind}`,
+          provider: "pi",
+          model: "openrouter/openai/gpt-4o-mini",
+          nodes: [{
+            id: "deliberate",
+            kind,
+            task: "Review the evidence.",
+            topology_agents: [
+              { id: "alpha", role: "Lead" },
+              { id: "beta", role: "Reviewer" },
+              { id: "gamma", role: "Skeptic" },
+            ],
+            max_rounds: 3,
+            maxBudgetUsd: 2,
+          }],
+        },
+      });
+      expect(hooks).toEqual([expect.objectContaining({ nodeId: "deliberate", modelCallCount })]);
+    }
+  });
+
+  it("fails closed on a provider-shaped kind outside the vendored engine schema", () => {
+    expect(() => unresolvedPipelineNodeBudgetHooks({
+      workflow: {
+        name: "unsupported-provider-node",
+        provider: "pi",
+        model: "openrouter/openai/gpt-4o-mini",
+        nodes: [{
+          id: "future-provider-node",
+          kind: "future-topology",
+          maxBudgetUsd: 1,
+        }],
+      },
+    })).toThrow(/not supported by the engine node schema/);
+  });
+
+  it("reserves and settles the mixed prompt plus topology aggregate including every model call", async () => {
+    createProject({ name: "Topology budget", projectId: "topology-budget", spendLimitUsd: 3 });
+    const definition = {
+      workflow: {
+        name: "mixed-topology",
+        provider: "pi",
+        model: "openrouter/openai/gpt-4o-mini",
+        limits: { maxTokens: 10_000, maxCostUsd: 10 },
+        nodes: [
+          { id: "ordinary", prompt: "Summarize", maxBudgetUsd: 0.5 },
+          {
+            id: "deliberate",
+            kind: "plan-debate",
+            task: "Challenge the summary.",
+            topology_agents: [
+              { id: "alpha", role: "Lead" },
+              { id: "beta", role: "Reviewer" },
+              { id: "gamma", role: "Skeptic" },
+            ],
+            maxBudgetUsd: 1.5,
+          },
+        ],
+      },
+    };
+    const hooks = await pipelineNodeBudgetHooks(
+      definition,
+      { projectId: "topology-budget", sessionId: "topology-session" },
+    );
+    const admission = await reservePipelineNodeBudgets({
+      projectId: "topology-budget",
+      admissionId: "mixed-topology-admission",
+      workflowNodeCount: 2,
+      hooks,
+    });
+    expect(hooks.map((hook) => [hook.nodeId, hook.modelCallCount])).toEqual([
+      ["ordinary", 1],
+      ["deliberate", 7],
+    ]);
+    expect(admission.handle.record).toMatchObject({
+      maxCostUsd: 2,
+      modelCallCount: 8,
+      runMaxModelCalls: 8,
+      reservedCostUsd: 2,
+    });
+    await admission.handle.settle({
+      status: "completed",
+      usage: { input: 400, output: 200, total: 600, cost: 1.25, cacheRead: 0, cacheWrite: 0 },
+    });
+    expect(projectCostSummary("topology-budget")).toMatchObject({
+      workflowReservedUsd: 0,
+      workflowSpentUsd: 1.25,
+    });
+  });
+
+  it("rejects a mixed topology envelope over the cap without leaving a reservation", async () => {
+    createProject({ name: "Topology cap", projectId: "topology-cap", spendLimitUsd: 1.9 });
+    const hooks = await pipelineNodeBudgetHooks({
+      workflow: {
+        name: "mixed-topology-over-cap",
+        provider: "pi",
+        model: "openrouter/openai/gpt-4o-mini",
+        limits: { maxTokens: 10_000, maxCostUsd: 10 },
+        nodes: [
+          { id: "ordinary", prompt: "Summarize", maxBudgetUsd: 0.5 },
+          {
+            id: "deliberate",
+            kind: "plan-debate",
+            task: "Challenge the summary.",
+            topology_agents: [
+              { id: "alpha", role: "Lead" },
+              { id: "beta", role: "Reviewer" },
+              { id: "gamma", role: "Skeptic" },
+            ],
+            maxBudgetUsd: 1.5,
+          },
+        ],
+      },
+    }, { projectId: "topology-cap", sessionId: "topology-cap-session" });
+    await expect(reservePipelineNodeBudgets({
+      projectId: "topology-cap",
+      admissionId: "mixed-topology-over-cap",
+      workflowNodeCount: 2,
+      hooks,
+    })).rejects.toMatchObject({ code: "LIMIT_EXCEEDED" });
+    expect(projectCostSummary("topology-cap")).toMatchObject({
+      workflowReservedUsd: 0,
+      workflowSpentUsd: 0,
+    });
   });
 
   it("fails closed when neither settings nor legacy fields provide a budget basis", () => {

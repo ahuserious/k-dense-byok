@@ -1,5 +1,5 @@
 import { OpenAPIHono } from '@hono/zod-openapi';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { createHash } from 'crypto';
 import { join } from 'path';
@@ -9,6 +9,7 @@ import { MessagePersistence } from '../adapters/web/persistence.ts';
 import { SSETransport } from '../adapters/web/transport.ts';
 import { WorkflowEventBridge } from '../adapters/web/workflow-bridge.ts';
 import { ConversationLockManager } from '@archon/core';
+import { getConversationByPlatformId } from '@archon/core/db';
 
 const [{ createProject, createProjectRunSnapshot, ensureProjectExists, resolvePaths }, { registerApiRoutes }, { parseWorkflow }] = await Promise.all([
   import('../../../../../../src/projects.ts'),
@@ -20,7 +21,7 @@ const project = createProject({
   projectId: 'fresh-executable',
   spendLimitUsd: 10,
 });
-const sandbox = resolvePaths(project.id).sandbox;
+const sandbox = realpathSync(resolvePaths(project.id).sandbox);
 writeFileSync(join(sandbox, 'current-input.txt'), 'current-v1\n');
 writeFileSync(join(sandbox, 'current-input.txt'), 'current-v2\n');
 const initialCommitAuthor = execFileSync(
@@ -159,6 +160,119 @@ if (!terminalRun) {
     `Durable workflow run did not reach a terminal status: ${JSON.stringify({ lastLookupBody, lockStats: lockManager.getStats() })}`
   );
 }
+
+// Exercise the foreground resolver twice with one conversation. The first run
+// deliberately dirties its worktree; the second must resolve a distinct
+// snapshot identity at S2 rather than reusing S1's conversation environment.
+const snapshotIdentitySave = await app.request(
+  `/api/workflows/snapshot-identity?${scope.toString()}`,
+  {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      definition: {
+        name: 'snapshot-identity',
+        description: 'Run snapshot identity regression',
+        interactive: true,
+        nodes: [{
+          id: 'capture',
+          bash: 'cp current-input.txt observed-input.txt',
+        }],
+      },
+    }),
+  }
+);
+if (snapshotIdentitySave.status !== 200) {
+  throw new Error(`Snapshot identity workflow save failed: ${snapshotIdentitySave.status}`);
+}
+const snapshotIdentityListResponse = await app.request(`/api/workflows?${scope.toString()}`);
+const snapshotIdentityList = await snapshotIdentityListResponse.json();
+const snapshotIdentityWorkflow = snapshotIdentityList.workflows?.find(
+  entry => entry.workflow.name === 'snapshot-identity'
+);
+if (!snapshotIdentityWorkflow) throw new Error('Snapshot identity workflow was not listed.');
+const snapshotIdentityParsed = parseWorkflow(
+  readFileSync(join(sandbox, '.archon', 'workflows', 'snapshot-identity.yaml'), 'utf8'),
+  'snapshot-identity.yaml'
+);
+if (snapshotIdentityParsed.error) throw new Error(snapshotIdentityParsed.error.error);
+const snapshotIdentityRevision = createHash('sha256')
+  .update(canonicalJson(snapshotIdentityParsed.workflow))
+  .digest('hex');
+
+async function runSnapshotIdentityVersion(admissionId, content) {
+  writeFileSync(join(sandbox, 'current-input.txt'), `${content}\n`);
+  const admissionKey = `kadypipe_${createHash('sha256')
+    .update(`${project.id}\0${admissionId}`)
+    .digest('hex')
+    .slice(0, 32)}`;
+  const snapshotSha = createProjectRunSnapshot(project.id, admissionKey);
+  const response = await app.request(
+    `/api/workflows/${snapshotIdentityWorkflow.workflowId}/run?${scope.toString()}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        conversationId: 'snapshot-identity-conversation',
+        message: `Capture ${content}`,
+        kadyProjectId: project.id,
+        kadyAdmissionId: admissionId,
+        kadyEngineAdmissionKey: admissionKey,
+        idempotencyKey: admissionKey,
+        workflowRevisionSha256: snapshotIdentityRevision,
+        kadyRunSnapshotSha: snapshotSha,
+        metadata: { kadyRunId: `${admissionId}-run`, kadyRunSnapshotSha: snapshotSha },
+      }),
+    }
+  );
+  if (response.status !== 200) {
+    throw new Error(`Snapshot identity launch failed: ${response.status} ${await response.text()}`);
+  }
+  let terminal;
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    const lookup = await app.request(
+      `/api/workflows/runs?projectId=${encodeURIComponent(project.id)}&admissionId=${encodeURIComponent(admissionId)}`
+    );
+    const body = await lookup.json();
+    terminal = body.runs?.find(run => ['completed', 'failed', 'cancelled'].includes(run.status));
+    if (terminal) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  if (!terminal || terminal.status !== 'completed') {
+    throw new Error(`Snapshot identity run did not complete: ${admissionId} ${JSON.stringify(terminal)}`);
+  }
+  const conversation = await getConversationByPlatformId('web', 'snapshot-identity-conversation');
+  const workingPath = conversation?.cwd;
+  if (!workingPath) throw new Error('Snapshot identity conversation has no resolved worktree.');
+  if (!existsSync(join(workingPath, 'observed-input.txt'))) {
+    throw new Error(`Snapshot identity output missing from ${workingPath}.`);
+  }
+  return {
+    snapshotSha,
+    workingPath,
+    head: execFileSync('git', ['-C', workingPath, 'rev-parse', 'HEAD'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim(),
+    input: readFileSync(join(workingPath, 'current-input.txt'), 'utf8').trim(),
+    observed: readFileSync(join(workingPath, 'observed-input.txt'), 'utf8').trim(),
+  };
+}
+
+const snapshotRunA = await runSnapshotIdentityVersion('snapshot-identity-a', 'snapshot-s1');
+const snapshotRunB = await runSnapshotIdentityVersion('snapshot-identity-b', 'snapshot-s2');
+const snapshotIdentity = {
+  snapshotA: snapshotRunA.snapshotSha,
+  snapshotB: snapshotRunB.snapshotSha,
+  distinctSnapshots: snapshotRunA.snapshotSha !== snapshotRunB.snapshotSha,
+  distinctWorktrees: snapshotRunA.workingPath !== snapshotRunB.workingPath,
+  runAHeadMatches: snapshotRunA.head === snapshotRunA.snapshotSha,
+  runBHeadMatches: snapshotRunB.head === snapshotRunB.snapshotSha,
+  runAInput: snapshotRunA.input,
+  runAObserved: snapshotRunA.observed,
+  runBInput: snapshotRunB.input,
+  runBObserved: snapshotRunB.observed,
+};
 
 const nestedWorkflowRoot = join(sandbox, '.archon', 'workflows');
 mkdirSync(join(nestedWorkflowRoot, 'alpha'), { recursive: true });
@@ -369,6 +483,7 @@ console.log(`KADY_WORKSPACE_RESULT=${JSON.stringify({
     join(terminalRun.workingPath ?? terminalRun.working_path, 'current-input.txt'),
     'utf8'
   ).trim(),
+  snapshotIdentity,
   nestedCrud,
   defaultProject,
   upgradedProject,

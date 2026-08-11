@@ -184,6 +184,8 @@ export interface WorkflowRunBudgetCeilings {
 
 export interface PipelineNodeBudgetHook {
   nodeId: string;
+  /** Engine-derived worst-case provider invocations; legacy direct callers default to one. */
+  modelCallCount?: number;
   maxTokens: number;
   maxCostUsd: number;
   declaredBillingMode: "inherit" | "api" | "subscription";
@@ -2199,11 +2201,19 @@ export async function reservePipelineNodeBudgets(input: {
   const seen = new Set<string>();
   let maxTokens = 0;
   let maxCostUsd = 0;
+  let modelCallCount = 0;
   for (const hook of input.hooks) {
     if (!hook.nodeId || seen.has(hook.nodeId)) {
       budgetError("INVALID_ARGUMENT", "Pipeline NodeSpec budget hooks require unique node ids.");
     }
     seen.add(hook.nodeId);
+    modelCallCount = safeModelCallCount(
+      modelCallCount + safeModelCallCount(
+        hook.modelCallCount ?? 1,
+        `Node ${hook.nodeId} modelCallCount`,
+      ),
+      "pipeline aggregate modelCallCount",
+    );
     maxTokens = safeTokenCount(maxTokens + safeTokenCount(
       hook.maxTokens,
       `Node ${hook.nodeId} budget.maxTokens`,
@@ -2251,8 +2261,8 @@ export async function reservePipelineNodeBudgets(input: {
     runId,
     runMaxCostUsd: maxCostUsd,
     runMaxTokens: maxTokens,
-    runMaxModelCalls: input.hooks.length,
-    modelCallCount: input.hooks.length,
+    runMaxModelCalls: modelCallCount,
+    modelCallCount,
     maxCostUsd,
     maxTokens,
     ...(pipelineAdmissionIntent ? { pipelineAdmissionIntent } : {}),

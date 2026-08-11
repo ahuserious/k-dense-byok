@@ -347,6 +347,7 @@ function ensureProjectRepository(sandbox: string): void {
  * A temporary index keeps the user's checkout, index, and current branch untouched.
  */
 export function createProjectRunSnapshot(projectId: string, runIdentity: string): string {
+  // TODO(#33-hardening): bound retained snapshot refs/manifests and add safe GC in the hardening lane.
   validateId(projectId);
   const paths = ensureProjectExists(projectId);
   const temporaryDirectory = fs.mkdtempSync(path.join(paths.root, ".run-snapshot-"));

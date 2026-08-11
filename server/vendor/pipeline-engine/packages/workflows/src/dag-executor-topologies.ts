@@ -7,9 +7,46 @@ export const FUSION_TOPOLOGY_KINDS = [
   'plan-debate',
   'auto-validate',
   'draco-fusion',
+  'council',
+  'fusion',
+  'best-of-n',
 ] as const;
 
 export type FusionTopologyKind = (typeof FUSION_TOPOLOGY_KINDS)[number];
+
+/**
+ * Maximum provider invocations performed by one topology attempt. This is the
+ * admission-side twin of the exhaustive executor switch below: adding a new
+ * topology cannot silently become unaccounted provider work because TypeScript
+ * requires this switch to classify it too.
+ */
+export function fusionTopologyProviderCallCount(
+  kind: FusionTopologyKind,
+  agentCount: number,
+  maxRounds = 2
+): number {
+  switch (kind) {
+    case 'opinion':
+      return 1;
+    case 'parallel':
+      return agentCount;
+    case 'coordinate':
+      return agentCount > 1 ? agentCount + 1 : 2;
+    case 'ultraplan':
+      return agentCount + 1;
+    case 'plan-debate':
+    case 'draco-fusion':
+      return agentCount * 2 + 1;
+    case 'auto-validate':
+      return maxRounds * 2;
+    case 'council':
+      return (agentCount + 1) * maxRounds;
+    case 'fusion':
+      return agentCount * maxRounds + 1;
+    case 'best-of-n':
+      return agentCount + 1;
+  }
+}
 
 export interface FusionTopologyAgent {
   id: string;
@@ -42,7 +79,13 @@ export type FusionTopologyPhase =
   | 'auto-validate-repair'
   | 'draco-opinion'
   | 'draco-deliberation'
-  | 'draco-final';
+  | 'draco-final'
+  | 'council-member'
+  | 'council-chair'
+  | 'fusion-member'
+  | 'fusion-final'
+  | 'best-of-n-candidate'
+  | 'best-of-n-evaluator';
 
 export interface FusionTopologyInvocation {
   nodeId: string;
@@ -284,6 +327,36 @@ export async function executeFusionTopology(
       const deliberation = await parallel('draco-deliberation', node.agents, opinions, 2);
       const final = await invoke('draco-final', lead, [...opinions, ...deliberation], 3);
       return { kind: node.kind, output: final.output, outputs: deliberation, trace };
+    }
+    case 'council': {
+      const maxRounds = node.maxRounds ?? 2;
+      let decision: { agentId: string; output: string } | undefined;
+      let members: Array<{ agentId: string; output: string }> = [];
+      for (let round = 1; round <= maxRounds; round += 1) {
+        members = await parallel(
+          'council-member',
+          node.agents,
+          decision ? [decision] : [],
+          round
+        );
+        decision = await invoke('council-chair', lead, members, round);
+      }
+      if (!decision) throw new Error('Council topology completed without a chair decision.');
+      return { kind: node.kind, output: decision.output, outputs: members, trace };
+    }
+    case 'fusion': {
+      const maxRounds = node.maxRounds ?? 2;
+      let panel: Array<{ agentId: string; output: string }> = [];
+      for (let round = 1; round <= maxRounds; round += 1) {
+        panel = await parallel('fusion-member', node.agents, panel, round);
+      }
+      const final = await invoke('fusion-final', lead, panel, maxRounds + 1);
+      return { kind: node.kind, output: final.output, outputs: panel, trace };
+    }
+    case 'best-of-n': {
+      const candidates = await parallel('best-of-n-candidate');
+      const final = await invoke('best-of-n-evaluator', lead, candidates, 2);
+      return { kind: node.kind, output: final.output, outputs: candidates, trace };
     }
   }
 }

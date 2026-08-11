@@ -38,6 +38,28 @@ describe('fusion topology executor semantics', () => {
         'draco-final',
       ],
     ],
+    [
+      'council',
+      [
+        'council-member', 'council-member', 'council-member', 'council-chair',
+        'council-member', 'council-member', 'council-member', 'council-chair',
+      ],
+    ],
+    [
+      'fusion',
+      [
+        'fusion-member', 'fusion-member', 'fusion-member',
+        'fusion-member', 'fusion-member', 'fusion-member',
+        'fusion-final',
+      ],
+    ],
+    [
+      'best-of-n',
+      [
+        'best-of-n-candidate', 'best-of-n-candidate', 'best-of-n-candidate',
+        'best-of-n-evaluator',
+      ],
+    ],
   ] as const)('executes %s with its bounded phase topology', async (kind, expectedPhases) => {
     const provider = {
       run: mock(async (invocation: FusionTopologyInvocation) =>

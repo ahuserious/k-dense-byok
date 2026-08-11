@@ -39,6 +39,10 @@ import { createProjectRunSnapshot, listProjects, resolvePaths } from "../project
 import { resolveWorkflowModel } from "../agent/workflow-model-resolution.ts";
 import type { ModelRequest } from "../workflows/schema.ts";
 import {
+  dagNodeSchema,
+  providerCallCountForDagNode,
+} from "../../vendor/pipeline-engine/packages/workflows/src/schemas/dag-node.ts";
+import {
   completePipelineAdmissionSettlement,
   findPipelineAdmission,
   findPipelineAdmissionByEngineKey,
@@ -136,6 +140,7 @@ function workflowRevisionSha256(definition: unknown): string {
 
 interface UnresolvedPipelineNodeBudgetHook {
   nodeId: string;
+  modelCallCount: number;
   maxTokens: number;
   maxCostUsd: number;
   declaredBillingMode: "inherit" | "api" | "subscription";
@@ -157,11 +162,6 @@ function legacyBilling(provider: string, model: string): ReturnType<typeof billi
   return billingForProvider(modelProvider, authType);
 }
 
-function executablePipelineNode(node: Record<string, unknown>): boolean {
-  return typeof node.command === "string" || typeof node.prompt === "string" ||
-    recordOf(node.loop) !== undefined;
-}
-
 /** Extract settings-bearing hooks, falling back to the current engine's legacy fields. */
 export function unresolvedPipelineNodeBudgetHooks(
   definition: unknown,
@@ -180,7 +180,25 @@ export function unresolvedPipelineNodeBudgetHooks(
   const hooks: UnresolvedPipelineNodeBudgetHook[] = [];
   for (const [index, candidate] of nodes.entries()) {
     const node = recordOf(candidate);
-    if (!node || !executablePipelineNode(node)) continue;
+    if (!node) {
+      throw new WorkflowBudgetError(
+        "INVALID_ARGUMENT",
+        `Pipeline node ${String(index)} is not an object accepted by the engine schema.`,
+      );
+    }
+    const parsedNode = dagNodeSchema.safeParse(node);
+    if (!parsedNode.success) {
+      const providerShaped = typeof node.kind === "string" || typeof node.prompt === "string" ||
+        typeof node.command === "string" || recordOf(node.loop) !== undefined;
+      throw new WorkflowBudgetError(
+        "INVALID_ARGUMENT",
+        providerShaped
+          ? `Provider-backed pipeline node ${String(node.id ?? index)} is not supported by the engine node schema.`
+          : `Pipeline node ${String(node.id ?? index)} is not accepted by the engine node schema.`,
+      );
+    }
+    const modelCallCount = providerCallCountForDagNode(parsedNode.data);
+    if (modelCallCount === 0) continue;
     const settings = recordOf(node?.settings);
     const budget = recordOf(settings?.budget);
     const legacyMaxCostUsd = finiteNonNegative(node.maxBudgetUsd);
@@ -238,6 +256,7 @@ export function unresolvedPipelineNodeBudgetHooks(
     }
     hooks.push({
       nodeId: String(node?.id ?? `node-${index}`),
+      modelCallCount,
       maxTokens,
       maxCostUsd,
       declaredBillingMode: billingMode,
@@ -288,6 +307,7 @@ export async function pipelineNodeBudgetHooks(
     }
     return {
       nodeId: hook.nodeId,
+      modelCallCount: hook.modelCallCount,
       maxTokens: hook.maxTokens,
       maxCostUsd: hook.maxCostUsd,
       declaredBillingMode: hook.declaredBillingMode,

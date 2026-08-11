@@ -14,6 +14,8 @@ import {
   findWorktreeByBranch,
   toBranchName,
   isAncestorOf,
+  hasUncommittedChanges,
+  execFileAsync,
   verifyWorktreeOwnership,
 } from '@archon/git';
 import type { RepoPath, BranchName, WorktreePath } from '@archon/git';
@@ -110,9 +112,10 @@ export class IsolationResolver {
    */
   async resolve(request: ResolveRequest): Promise<IsolationResolution> {
     const baseBranch = request.hints?.baseBranch;
+    const snapshotSha = request.hints?.snapshotSha;
 
     // 1. Check existing isolation reference
-    if (request.existingEnvId) {
+    if (request.existingEnvId && !snapshotSha) {
       const existing = await this.checkExisting(request.existingEnvId, baseBranch);
       if (existing) return existing;
       // Stale — tell caller to clear and retry
@@ -127,7 +130,10 @@ export class IsolationResolver {
     const codebase = request.codebase;
     const hints = request.hints;
     const workflowType: IsolationWorkflowType = hints?.workflowType ?? 'thread';
-    const workflowId = hints?.workflowId ?? '';
+    const requestedWorkflowId = hints?.workflowId ?? '';
+    const workflowId = snapshotSha
+      ? `${requestedWorkflowId}:snapshot:${snapshotSha}`
+      : requestedWorkflowId;
 
     // Compute canonical repo path once — paths 3-6 all need it either for
     // ownership verification (cross-clone guard) or for worktree creation.
@@ -165,13 +171,28 @@ export class IsolationResolver {
       };
     }
 
+    // Snapshot-bound work is a separate isolation identity. A conversation's
+    // prior environment may be reused only when it is still pristine at the
+    // exact admitted commit; otherwise remove it and resolve a fresh worktree.
+    if (request.existingEnvId && snapshotSha) {
+      const existing = await this.checkSnapshotExisting(
+        request.existingEnvId,
+        canonicalPath,
+        workflowId,
+        snapshotSha,
+        baseBranch
+      );
+      if (existing) return existing;
+    }
+
     // 3. Check for existing environment with same workflow
     const reusable = await this.findReusable(
       codebase.id,
       canonicalPath,
       workflowType,
       workflowId,
-      baseBranch
+      baseBranch,
+      snapshotSha
     );
     if (reusable?.outcome === 'protected_legacy') {
       return protectedLegacyEnvironmentBlockedResult();
@@ -187,13 +208,13 @@ export class IsolationResolver {
     }
 
     // 4. Check linked issues for sharing
-    if (hints?.linkedIssues?.length) {
+    if (!snapshotSha && hints?.linkedIssues?.length) {
       const linked = await this.findLinkedIssueEnv(codebase.id, canonicalPath, hints.linkedIssues);
       if (linked) return linked;
     }
 
     // 5. Try PR branch adoption
-    if (hints?.prBranch) {
+    if (!snapshotSha && hints?.prBranch) {
       const adopted = await this.tryBranchAdoption(
         codebase,
         canonicalPath,
@@ -280,6 +301,77 @@ export class IsolationResolver {
     return null;
   }
 
+  private async checkSnapshotExisting(
+    envId: string,
+    canonicalRepoPath: RepoPath,
+    workflowId: string,
+    snapshotSha: string,
+    baseBranch?: BranchName
+  ): Promise<IsolationResolution | null> {
+    const env = await this.store.getById(envId);
+    if (!env) return null;
+    if (isProtectedLegacyEnvironment(env)) return protectedLegacyEnvironmentBlockedResult();
+
+    const reusable = await this.snapshotEnvironmentIsReusable(
+      env,
+      canonicalRepoPath,
+      workflowId,
+      snapshotSha
+    );
+    if (!reusable) {
+      await this.recreateSnapshotEnvironment(env, canonicalRepoPath);
+      return null;
+    }
+
+    const warnings = await this.collectBaseBranchWarnings(env, baseBranch, { envId, snapshotSha });
+    return {
+      status: 'resolved',
+      env,
+      cwd: env.working_path,
+      method: { type: 'existing' },
+      ...(warnings.length > 0 ? { warnings } : {}),
+    };
+  }
+
+  private async snapshotEnvironmentIsReusable(
+    env: IsolationEnvironmentRow,
+    canonicalRepoPath: RepoPath,
+    workflowId: string,
+    snapshotSha: string
+  ): Promise<boolean> {
+    const worktreePath = toWorktreePath(env.working_path);
+    if (!(await worktreeExists(worktreePath))) return false;
+    await this.assertWorktreeOwnership(
+      worktreePath,
+      canonicalRepoPath,
+      { envId: env.id, snapshotSha },
+      'isolation.snapshot_reuse_refused_cross_checkout'
+    );
+    if (env.workflow_id !== workflowId) return false;
+    const [{ stdout }, dirty] = await Promise.all([
+      execFileAsync('git', ['-C', worktreePath, 'rev-parse', 'HEAD'], { timeout: 10_000 }),
+      hasUncommittedChanges(worktreePath),
+    ]);
+    return stdout.trim() === snapshotSha && !dirty;
+  }
+
+  private async recreateSnapshotEnvironment(
+    env: IsolationEnvironmentRow,
+    canonicalRepoPath: RepoPath
+  ): Promise<void> {
+    if (await worktreeExists(toWorktreePath(env.working_path))) {
+      await this.provider.destroy(env.working_path, {
+        canonicalRepoPath,
+        branchName: toBranchName(env.branch_name),
+        force: true,
+      });
+      if (await worktreeExists(toWorktreePath(env.working_path))) {
+        throw new Error(`Snapshot worktree ${env.working_path} could not be safely recreated.`);
+      }
+    }
+    await this.store.updateStatus(env.id, 'destroyed');
+  }
+
   /**
    * Verify that an on-disk worktree belongs to the expected repo before
    * adopting. Wraps the shared `verifyWorktreeOwnership` with logging that
@@ -319,7 +411,8 @@ export class IsolationResolver {
     canonicalRepoPath: RepoPath,
     workflowType: IsolationWorkflowType,
     workflowId: string,
-    baseBranch?: BranchName
+    baseBranch?: BranchName,
+    snapshotSha?: string
   ): Promise<ReusableEnvironmentLookup | null> {
     const existing = await this.store.findActiveByWorkflow(codebaseId, workflowType, workflowId);
     if (!existing) return null;
@@ -333,7 +426,17 @@ export class IsolationResolver {
         'isolation.reuse_refused_cross_checkout'
       );
 
-      getLog().debug({ workflowType, workflowId }, 'isolation_reuse_existing');
+      if (snapshotSha && !(await this.snapshotEnvironmentIsReusable(
+        existing,
+        canonicalRepoPath,
+        workflowId,
+        snapshotSha
+      ))) {
+        await this.recreateSnapshotEnvironment(existing, canonicalRepoPath);
+        return null;
+      }
+
+      getLog().debug({ workflowType, workflowId, snapshotSha }, 'isolation_reuse_existing');
       const warnings = await this.collectBaseBranchWarnings(existing, baseBranch, {
         workflowType,
         workflowId,
@@ -558,6 +661,7 @@ export class IsolationResolver {
         metadata: {
           related_issues: hints?.linkedIssues ?? [],
           related_prs: hints?.linkedPRs ?? [],
+          ...(hints?.snapshotSha ? { snapshot_sha: hints.snapshotSha } : {}),
         },
       });
     } catch (storeError) {

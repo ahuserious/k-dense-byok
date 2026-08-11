@@ -48,6 +48,7 @@ export {
   isCancelNode,
   isScriptNode,
   isFusionTopologyNode,
+  providerCallCountForDagNode,
   isPersistableNode,
   isTriggerRule,
   BASH_NODE_AI_FIELDS,
