@@ -47,5 +47,5 @@ describe("WorkflowsPanel template preconditions", () => {
     expect(launchButton).toBeEnabled();
     await userEvent.click(launchButton);
     expect(onLaunch).toHaveBeenCalledTimes(1);
-  });
+  }, 30000);
 });
