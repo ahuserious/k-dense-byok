@@ -2,6 +2,7 @@ import {
   RAINDROP_ANALYST_QUESTION,
   RAINDROP_ANALYST_RESPONSE,
   REFRESHED_WORKFLOW_RUN_ID,
+  RESCUE_WORKFLOW_RUN_ID,
   WORKFLOW_RUN_ID,
   expect,
   lastRequestPostData,
@@ -33,6 +34,24 @@ async function openConsoleForStatus(
 
 function statusLabel(status: RunStatus) {
   return `${status.charAt(0).toUpperCase()}${status.slice(1)}`;
+}
+
+const RUN_CONTROL_ACTIONS = ["cancel", "resume", "rescue"] as const;
+
+function runControlPath(action: typeof RUN_CONTROL_ACTIONS[number]) {
+  return `/dag-workflow-runs/${WORKFLOW_RUN_ID}/${action}`;
+}
+
+async function expectOnlyControlPost(
+  apiState: MockApiState,
+  expectedAction: typeof RUN_CONTROL_ACTIONS[number],
+) {
+  await expect.poll(() => requestCount(apiState, "POST", runControlPath(expectedAction))).toBe(1);
+  for (const action of RUN_CONTROL_ACTIONS) {
+    expect(requestCount(apiState, "POST", runControlPath(action))).toBe(
+      action === expectedAction ? 1 : 0,
+    );
+  }
 }
 
 test.describe("durable DAG Console", () => {
@@ -68,21 +87,37 @@ test.describe("durable DAG Console", () => {
   test("Cancel invokes the runner control", async ({ workspacePage, apiState }) => {
     await openConsoleForStatus(workspacePage, apiState, "running");
     await workspacePage.getByRole("button", { name: "Cancel" }).click();
-    await expect(workspacePage.getByRole("status")).toContainText("Cancel requested");
+    await expectOnlyControlPost(apiState, "cancel");
+    await expect(workspacePage.getByRole("status")).toHaveText(
+      `Cancel requested for ${WORKFLOW_RUN_ID}; current status is cancelled.`,
+    );
   });
 
   test("Resume invokes the runner control", async ({ workspacePage, apiState }) => {
     await openConsoleForStatus(workspacePage, apiState, "interrupted");
     await workspacePage.getByRole("button", { name: "Resume" }).click();
-    await expect(workspacePage.getByRole("status")).toContainText("Resume requested");
+    await expectOnlyControlPost(apiState, "resume");
+    await expect(workspacePage.getByRole("status")).toHaveText(
+      `Resume requested for ${WORKFLOW_RUN_ID}; current status is running.`,
+    );
   });
 
   test("failed run exposes proposal-only Rescue", async ({ workspacePage, apiState }) => {
     await openConsoleForStatus(workspacePage, apiState, "failed");
     await workspacePage.getByRole("button", { name: "Rescue as new run" }).click();
+    await expectOnlyControlPost(apiState, "rescue");
+    const rescueBody = JSON.parse(
+      lastRequestPostData(apiState, "POST", runControlPath("rescue")) ?? "null",
+    ) as unknown;
+    expect(rescueBody).toEqual({
+      requestId: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      ),
+    });
     await expect(workspacePage.getByRole("status")).toHaveText(
-      `Created rescue run ${WORKFLOW_RUN_ID} with status running.`,
+      `Created rescue run ${RESCUE_WORKFLOW_RUN_ID} with status queued.`,
     );
+    await expect(workspacePage.getByText(RESCUE_WORKFLOW_RUN_ID, { exact: true }).first()).toBeVisible();
   });
 
   test("failed run surfaces its API error", async ({ workspacePage, apiState }) => {
@@ -183,6 +218,17 @@ test.describe("Raindrop log interactions", () => {
     apiState,
   }) => {
     await selectWorkspaceTab(workspacePage, "Raindrop");
+    const run = workspacePage.getByTitle(WORKFLOW_RUN_ID);
+    const runContextRequestsBefore = requestCount(
+      apiState,
+      "POST",
+      "/helper-sessions/raindrop/context",
+    );
+    await run.click();
+    await expect(run).toHaveAttribute("aria-current", "true");
+    await expect.poll(() => requestCount(apiState, "POST", "/helper-sessions/raindrop/context"))
+      .toBeGreaterThan(runContextRequestsBefore);
+
     const session = workspacePage.getByTitle("session-e2e");
     const contextRequestsBefore = requestCount(apiState, "POST", "/helper-sessions/raindrop/context");
     await session.click();

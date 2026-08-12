@@ -1,7 +1,10 @@
 import { expect, test as base } from "@stablyai/playwright-test";
 import type { FrameLocator, Locator, Page, Route } from "@playwright/test";
 
-import { SCIENTIFIC_TEMPLATES } from "./inventory";
+import {
+  SCIENTIFIC_TEMPLATES,
+  type NodeSpecSaveContract,
+} from "./inventory";
 
 export type RunStatus =
   | "queued"
@@ -23,16 +26,20 @@ export interface MockApiState {
   requests: Array<{ method: string; path: string; postData: string | null }>;
   showRefreshedRegistryData: boolean;
   showRefreshedRun: boolean;
+  rescueRunCreated: boolean;
   failTypedDefinitionRead: boolean;
   unexpectedRequests: string[];
+  expectedSaveContract?: NodeSpecSaveContract;
 }
 
 const BACKEND_PATTERN = /^http:\/\/(?:127\.0\.0\.1|localhost):18000\//;
-const PIPELINE_ENGINE_API_PATTERN = /^http:\/\/(?:127\.0\.0\.1|localhost):\d+\/api\//;
+const PIPELINE_ENGINE_API_PATTERN =
+  /^http:\/\/(?:127\.0\.0\.1|localhost):(?!18000(?:\/|$))\d+\/api\//;
 const E2E_CODEBASE_CWD = "/tmp/kady-e2e-codebase";
 const now = Date.now();
 export const WORKFLOW_RUN_ID = `wrun_${"1".repeat(32)}`;
 export const REFRESHED_WORKFLOW_RUN_ID = `wrun_${"2".repeat(32)}`;
+export const RESCUE_WORKFLOW_RUN_ID = `wrun_${"3".repeat(32)}`;
 type HelperSessionProfile = "raindrop" | "workflow-rescue";
 type HelperSessionSource = { kind: "run" | "session"; id: string };
 
@@ -224,40 +231,82 @@ function vendoredWorkflowDefinition() {
   };
 }
 
-function validationResult(definition: unknown): { valid: boolean; errors?: string[] } {
+export function valueAtJsonPointer(value: unknown, pointer: string): unknown {
+  if (!pointer.startsWith("/")) throw new Error(`Invalid JSON pointer: ${pointer}`);
+  let current = value;
+  for (const encodedPart of pointer.slice(1).split("/")) {
+    if (current === null || typeof current !== "object") return undefined;
+    const part = encodedPart.replaceAll("~1", "/").replaceAll("~0", "~");
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+}
+
+function sameJsonValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((item, index) => sameJsonValue(item, right[index]));
+  }
+  if (
+    left === null ||
+    right === null ||
+    typeof left !== "object" ||
+    typeof right !== "object"
+  ) {
+    return false;
+  }
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord);
+  const rightKeys = Object.keys(rightRecord);
+  return leftKeys.length === rightKeys.length &&
+    leftKeys.every((key) => (
+      Object.hasOwn(rightRecord, key) && sameJsonValue(leftRecord[key], rightRecord[key])
+    ));
+}
+
+function validationResult(
+  definition: unknown,
+  expectedSaveContract?: NodeSpecSaveContract,
+): { valid: boolean; errors?: string[] } {
   if (definition === null || typeof definition !== "object") {
     return { valid: false, errors: ["Workflow definition is required."] };
   }
-  const record = definition as {
-    nodes?: Array<{
-      settings?: {
-        autonomy?: unknown;
-        billingMode?: unknown;
-        conditions?: unknown;
-        databases?: unknown;
-        deliberation?: unknown;
-        harness?: unknown;
-        hyperparameters?: unknown;
-        skills?: unknown;
-        subagents?: unknown;
+  if (expectedSaveContract) {
+    const submittedValue = valueAtJsonPointer(
+      { definition },
+      expectedSaveContract.bodyPath,
+    );
+    if (!sameJsonValue(submittedValue, expectedSaveContract.expectedValue)) {
+      return {
+        valid: false,
+        errors: [
+          `E2E save contract mismatch for ${expectedSaveContract.label} at ` +
+          `${expectedSaveContract.bodyPath}: expected ${JSON.stringify(expectedSaveContract.expectedValue)}, ` +
+          `received ${JSON.stringify(submittedValue)}.`,
+        ],
       };
-    }>;
-  };
-  const settings = record.nodes?.[0]?.settings;
-  if (settings?.deliberation !== undefined) {
-    return { valid: false, errors: ["Pending unit S5: deliberation binding is not implemented."] };
+    }
+    if (expectedSaveContract.saveOutcome !== "accepted") {
+      return {
+        valid: false,
+        errors: [
+          `Pending unit ${expectedSaveContract.saveOutcome}: ` +
+          `${expectedSaveContract.saveOutcome === "S4" ? "runtime" : "deliberation"} binding is not implemented.`,
+        ],
+      };
+    }
+    return { valid: true };
   }
-  if (
-    settings?.hyperparameters !== undefined ||
-    settings?.conditions !== undefined ||
-    settings?.harness !== undefined ||
-    settings?.databases !== undefined ||
-    settings?.skills !== undefined ||
-    settings?.subagents !== undefined ||
-    settings?.autonomy !== undefined ||
-    (settings?.billingMode !== undefined && settings.billingMode !== "inherit")
-  ) {
-    return { valid: false, errors: ["Pending unit S4: runtime binding is not implemented."] };
+  const record = definition as { nodes?: Array<{ settings?: unknown }> };
+  if (record.nodes?.some((node) => node.settings !== undefined)) {
+    return {
+      valid: false,
+      errors: ["E2E validation received NodeSpec settings without a named save contract."],
+    };
   }
   return { valid: true };
 }
@@ -360,12 +409,17 @@ async function installPipelineEngineApiMocks(page: Page, state: MockApiState) {
   await page.route(PIPELINE_ENGINE_API_PATTERN, async (route) => {
     const request = route.request();
     const url = new URL(request.url());
-    if (url.port === "18000") return route.fallback();
 
     const path = url.pathname;
     const method = request.method();
     state.requests.push({ method, path, postData: request.postData() });
 
+    if (path === "/api/auth/status" && method === "GET") {
+      return routeJson(route, { enabled: false, signup: "disabled" });
+    }
+    if (path === "/api/auth/get-session" && method === "GET") {
+      return routeJson(route, null);
+    }
     if (path === "/api/codebases" && method === "GET") {
       return routeJson(route, [{
         id: "e2e-codebase",
@@ -410,7 +464,7 @@ async function installPipelineEngineApiMocks(page: Page, state: MockApiState) {
     }
     if (path === "/api/workflows/validate" && method === "POST") {
       const body = JSON.parse(request.postData() ?? "{}") as { definition?: unknown };
-      return routeJson(route, validationResult(body.definition));
+      return routeJson(route, validationResult(body.definition, state.expectedSaveContract));
     }
     if (isExactBoundWorkflow && method === "PUT") {
       const body = JSON.parse(request.postData() ?? "{}") as { definition?: unknown };
@@ -421,17 +475,8 @@ async function installPipelineEngineApiMocks(page: Page, state: MockApiState) {
         source: "project",
       });
     }
-    if (
-      path === "/api/workflows/e2e-vendored" ||
-      path === "/api/workflows/validate" ||
-      path === "/api/workflows" ||
-      path === "/api/codebases" ||
-      path === "/api/commands"
-    ) {
-      state.unexpectedRequests.push(`${method} ${path}`);
-      return routeJson(route, { detail: `Unexpected E2E engine request: ${method} ${path}` }, 501);
-    }
-    return route.fallback();
+    state.unexpectedRequests.push(`${method} ${path}`);
+    return routeJson(route, { detail: `Unexpected E2E engine request: ${method} ${path}` }, 501);
   });
 }
 
@@ -638,13 +683,13 @@ async function installApiMocks(page: Page, state: MockApiState) {
         },
       });
     }
-    if (
-      matchingFixtureSessionId(path, "/notebook") ||
-      matchingFixtureSessionId(path, "/interview")
-    ) {
-      return routeJson(route, path.endsWith("interview") ? { pending: null } : { entries: [] });
+    if (matchingFixtureSessionId(path, "/notebook") && method === "GET") {
+      return routeJson(route, { entries: [] });
     }
-    if (matchingFixtureSessionId(path, "/steer")) {
+    if (matchingFixtureSessionId(path, "/interview") && method === "GET") {
+      return routeJson(route, { pending: null });
+    }
+    if (matchingFixtureSessionId(path, "/steer") && method === "POST") {
       return routeJson(route, { pending: ["steering"] });
     }
 
@@ -723,6 +768,9 @@ async function installApiMocks(page: Page, state: MockApiState) {
       return routeJson(route, {
         runs: [
           runSummary(state.runStatus),
+          ...(state.rescueRunCreated
+            ? [runSummary("queued", RESCUE_WORKFLOW_RUN_ID)]
+            : []),
           ...(state.showRefreshedRun
             ? [runSummary("queued", REFRESHED_WORKFLOW_RUN_ID)]
             : []),
@@ -732,9 +780,23 @@ async function installApiMocks(page: Page, state: MockApiState) {
     if (path === `/dag-workflow-runs/${WORKFLOW_RUN_ID}` && method === "GET") {
       return routeJson(route, runRecord(state.runStatus));
     }
-    if (path === `/dag-workflow-runs/${WORKFLOW_RUN_ID}/budget` && method === "GET") {
+    if (
+      path === `/dag-workflow-runs/${RESCUE_WORKFLOW_RUN_ID}` &&
+      method === "GET" &&
+      state.rescueRunCreated
+    ) {
+      return routeJson(route, runRecord("queued", RESCUE_WORKFLOW_RUN_ID));
+    }
+    const budgetRunId = [WORKFLOW_RUN_ID, RESCUE_WORKFLOW_RUN_ID].find(
+      (runId) => path === `/dag-workflow-runs/${runId}/budget`,
+    );
+    if (
+      budgetRunId &&
+      method === "GET" &&
+      (budgetRunId === WORKFLOW_RUN_ID || state.rescueRunCreated)
+    ) {
       return routeJson(route, {
-        runId: WORKFLOW_RUN_ID,
+        runId: budgetRunId,
         reservationCount: 0,
         ceilings: null,
         modelCallCount: 0,
@@ -749,23 +811,43 @@ async function installApiMocks(page: Page, state: MockApiState) {
         fullChargeReservationCount: 0,
       });
     }
-    if (path === `/dag-workflow-runs/${WORKFLOW_RUN_ID}/events` && method === "GET") {
+    const eventsRunId = [WORKFLOW_RUN_ID, RESCUE_WORKFLOW_RUN_ID].find(
+      (runId) => path === `/dag-workflow-runs/${runId}/events`,
+    );
+    if (
+      eventsRunId &&
+      method === "GET" &&
+      (eventsRunId === WORKFLOW_RUN_ID || state.rescueRunCreated)
+    ) {
       return routeJson(route, {
         events: [
-          { schemaVersion: 1, eventId: "event-1", runId: WORKFLOW_RUN_ID, seq: 1, ts: now, type: "run_started" },
-          { schemaVersion: 1, eventId: "event-2", runId: WORKFLOW_RUN_ID, seq: 2, ts: now + 1, type: "node_started", nodeId: "analyze" },
+          { schemaVersion: 1, eventId: "event-1", runId: eventsRunId, seq: 1, ts: now, type: "run_started" },
+          { schemaVersion: 1, eventId: "event-2", runId: eventsRunId, seq: 2, ts: now + 1, type: "node_started", nodeId: "analyze" },
         ],
         lastSeq: 2,
         hasMore: false,
         diagnostics: [],
       });
     }
-    const controlMatch = path.match(
-      new RegExp(`^/dag-workflow-runs/${WORKFLOW_RUN_ID}/(cancel|resume|rescue)$`),
-    );
-    if (controlMatch && method === "POST") {
-      const status = controlMatch[1] === "cancel" ? "cancelled" : "running";
-      return routeJson(route, runRecord(status));
+    if (path === `/dag-workflow-runs/${WORKFLOW_RUN_ID}/cancel` && method === "POST") {
+      state.runStatus = "cancelled";
+      return routeJson(route, runRecord("cancelled"));
+    }
+    if (path === `/dag-workflow-runs/${WORKFLOW_RUN_ID}/resume` && method === "POST") {
+      state.runStatus = "running";
+      return routeJson(route, runRecord("running"));
+    }
+    if (path === `/dag-workflow-runs/${WORKFLOW_RUN_ID}/rescue` && method === "POST") {
+      const body = JSON.parse(request.postData() ?? "{}") as Record<string, unknown>;
+      if (
+        Object.keys(body).length !== 1 ||
+        typeof body.requestId !== "string" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.requestId)
+      ) {
+        return routeJson(route, { detail: "Rescue requires exactly one UUID v4 requestId." }, 422);
+      }
+      state.rescueRunCreated = true;
+      return routeJson(route, runRecord("queued", RESCUE_WORKFLOW_RUN_ID), 201);
     }
     if (path === "/helper-sessions/raindrop/context" && method === "POST") {
       const source = JSON.parse(request.postData() ?? "{}") as { kind?: string; id?: string };
@@ -836,6 +918,7 @@ export const test = base.extend<{
       requests: [],
       showRefreshedRegistryData: false,
       showRefreshedRun: false,
+      rescueRunCreated: false,
       failTypedDefinitionRead: false,
       unexpectedRequests: [],
     });

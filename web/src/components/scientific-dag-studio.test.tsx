@@ -29,14 +29,23 @@ describe("ScientificDagStudio", () => {
     const closeButton = screen.getByRole("button", {
       name: "Close components studio",
     });
+    const disabledSpecimenButtons = ["Run graph", "Validate", "Save draft"].map(
+      (name) => screen.getByRole("button", { name }),
+    );
     await waitFor(() => expect(closeButton).toHaveFocus());
 
+    for (const disabledSpecimenButton of disabledSpecimenButtons) {
+      expect(disabledSpecimenButton).toBeDisabled();
+      disabledSpecimenButton.focus();
+      expect(disabledSpecimenButton).not.toHaveFocus();
+    }
+
     await user.tab({ shift: true });
-    expect(screen.getByRole("button", { name: "Save draft" })).toHaveFocus();
     expect(dialog).toContainElement(document.activeElement as HTMLElement);
 
     await user.tab();
     expect(closeButton).toHaveFocus();
+    expect(dialog).toContainElement(document.activeElement as HTMLElement);
 
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
