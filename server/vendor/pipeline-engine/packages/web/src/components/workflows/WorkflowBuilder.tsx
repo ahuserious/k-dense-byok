@@ -130,6 +130,8 @@ function WorkflowBuilderInner(): React.ReactElement {
   );
   const activeCodebaseId = projectBinding?.codebaseId;
   const cwd = projectBinding?.cwd;
+  const saveDisabledReason =
+    !activeCodebaseId || !cwd ? 'Open a workflow from the registry before saving' : undefined;
   const bindingKey = `${editName ?? ''}\u0000${activeCodebaseId ?? ''}\u0000${cwd ?? ''}`;
 
   // Core state
@@ -513,6 +515,7 @@ function WorkflowBuilderInner(): React.ReactElement {
         onSave={(): void => {
           void handleSave();
         }}
+        saveDisabledReason={saveDisabledReason}
         onRun={(): void => {
           void handleRun();
         }}

@@ -10,17 +10,19 @@ export function ButtonsCtasSection(props: ComponentProps<"section">) {
       {...props}
     >
       <div className="scientific-dag-studio-action-row">
-        <button className="scientific-dag-studio-button" type="button">
+        <button className="scientific-dag-studio-button" disabled type="button">
           Run graph
         </button>
         <button
           className="scientific-dag-studio-button scientific-dag-studio-button--secondary"
+          disabled
           type="button"
         >
           Validate
         </button>
         <button
           className="scientific-dag-studio-button scientific-dag-studio-button--quiet"
+          disabled
           type="button"
         >
           Save draft

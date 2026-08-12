@@ -20,12 +20,16 @@ export interface MockApiState {
   graphError: boolean;
   uploadedFiles: string[];
   runListRequests: number;
+  requests: Array<{ method: string; path: string; postData: string | null }>;
+  showRefreshedRegistryData: boolean;
   showRefreshedRun: boolean;
   failTypedDefinitionRead: boolean;
   unexpectedRequests: string[];
 }
 
 const BACKEND_PATTERN = /^http:\/\/(?:127\.0\.0\.1|localhost):18000\//;
+const PIPELINE_ENGINE_API_PATTERN = /^http:\/\/(?:127\.0\.0\.1|localhost):\d+\/api\//;
+const E2E_CODEBASE_CWD = "/tmp/kady-e2e-codebase";
 const now = Date.now();
 export const WORKFLOW_RUN_ID = `wrun_${"1".repeat(32)}`;
 export const REFRESHED_WORKFLOW_RUN_ID = `wrun_${"2".repeat(32)}`;
@@ -146,10 +150,10 @@ function storedDefinition(id = "e2e-workflow", name = "E2E Workflow", graph = gr
   };
 }
 
-function runSummary(status: RunStatus, id = WORKFLOW_RUN_ID) {
+function runSummary(status: RunStatus, id = WORKFLOW_RUN_ID, workflowId = "e2e-workflow") {
   return {
     id,
-    workflowId: "e2e-workflow",
+    workflowId,
     workflowRevision: 1,
     graphSha256: "e2e-graph-sha256",
     sessionId: "session-e2e",
@@ -169,14 +173,14 @@ function runSummary(status: RunStatus, id = WORKFLOW_RUN_ID) {
   };
 }
 
-function runRecord(status: RunStatus, id = WORKFLOW_RUN_ID) {
-  const graph = graphDocument();
+function runRecord(status: RunStatus, id = WORKFLOW_RUN_ID, workflowId = "e2e-workflow") {
+  const graph = graphDocument(workflowId);
   return {
     manifest: {
       storageVersion: 1,
       id,
       projectId: "default",
-      workflowId: "e2e-workflow",
+      workflowId,
       workflowRevision: 1,
       graphSha256: "e2e-graph-sha256",
       requestId: "e2e-request",
@@ -205,6 +209,57 @@ function runRecord(status: RunStatus, id = WORKFLOW_RUN_ID) {
       diagnostics: [],
     },
   };
+}
+
+function vendoredWorkflowDefinition() {
+  return {
+    name: "E2E Workflow",
+    description: "Deterministic E2E workflow",
+    nodes: [
+      {
+        id: "analyze",
+        prompt: "Inspect the evidence. Compare every source. Report the bounded result.",
+      },
+    ],
+  };
+}
+
+function validationResult(definition: unknown): { valid: boolean; errors?: string[] } {
+  if (definition === null || typeof definition !== "object") {
+    return { valid: false, errors: ["Workflow definition is required."] };
+  }
+  const record = definition as {
+    nodes?: Array<{
+      settings?: {
+        autonomy?: unknown;
+        billingMode?: unknown;
+        conditions?: unknown;
+        databases?: unknown;
+        deliberation?: unknown;
+        harness?: unknown;
+        hyperparameters?: unknown;
+        skills?: unknown;
+        subagents?: unknown;
+      };
+    }>;
+  };
+  const settings = record.nodes?.[0]?.settings;
+  if (settings?.deliberation !== undefined) {
+    return { valid: false, errors: ["Pending unit S5: deliberation binding is not implemented."] };
+  }
+  if (
+    settings?.hyperparameters !== undefined ||
+    settings?.conditions !== undefined ||
+    settings?.harness !== undefined ||
+    settings?.databases !== undefined ||
+    settings?.skills !== undefined ||
+    settings?.subagents !== undefined ||
+    settings?.autonomy !== undefined ||
+    (settings?.billingMode !== undefined && settings.billingMode !== "inherit")
+  ) {
+    return { valid: false, errors: ["Pending unit S4: runtime binding is not implemented."] };
+  }
+  return { valid: true };
 }
 
 function routeJson(route: Route, body: unknown, status = 200, headers: Record<string, string> = {}) {
@@ -301,13 +356,94 @@ async function installStreamingFetch(page: Page) {
   });
 }
 
+async function installPipelineEngineApiMocks(page: Page, state: MockApiState) {
+  await page.route(PIPELINE_ENGINE_API_PATTERN, async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.port === "18000") return route.fallback();
+
+    const path = url.pathname;
+    const method = request.method();
+    state.requests.push({ method, path, postData: request.postData() });
+
+    if (path === "/api/codebases" && method === "GET") {
+      return routeJson(route, [{
+        id: "e2e-codebase",
+        name: "E2E Codebase",
+        repository_url: null,
+        default_cwd: E2E_CODEBASE_CWD,
+        default_branch: null,
+        ai_assistant_type: "pi",
+        commands: {},
+        created_at: new Date(now).toISOString(),
+        updated_at: new Date(now).toISOString(),
+      }]);
+    }
+    if (path === "/api/providers" && method === "GET") {
+      return routeJson(route, { providers: [] });
+    }
+    if (
+      path === "/api/commands" &&
+      method === "GET" &&
+      [null, E2E_CODEBASE_CWD].includes(url.searchParams.get("cwd"))
+    ) {
+      return routeJson(route, { commands: [] });
+    }
+    if (
+      path === "/api/workflows" &&
+      method === "GET" &&
+      [null, E2E_CODEBASE_CWD].includes(url.searchParams.get("cwd"))
+    ) {
+      return routeJson(route, { workflows: [], recommended: [] });
+    }
+    const isExactBoundWorkflow =
+      path === "/api/workflows/e2e-vendored" &&
+      url.searchParams.get("cwd") === E2E_CODEBASE_CWD &&
+      url.searchParams.get("codebaseId") === "e2e-codebase";
+    if (isExactBoundWorkflow && method === "GET") {
+      return routeJson(route, {
+        workflow: vendoredWorkflowDefinition(),
+        filename: "e2e-workflow.yaml",
+        workflowId: "e2e-vendored",
+        source: "project",
+      });
+    }
+    if (path === "/api/workflows/validate" && method === "POST") {
+      const body = JSON.parse(request.postData() ?? "{}") as { definition?: unknown };
+      return routeJson(route, validationResult(body.definition));
+    }
+    if (isExactBoundWorkflow && method === "PUT") {
+      const body = JSON.parse(request.postData() ?? "{}") as { definition?: unknown };
+      return routeJson(route, {
+        workflow: body.definition,
+        filename: "e2e-workflow.yaml",
+        workflowId: "e2e-vendored",
+        source: "project",
+      });
+    }
+    if (
+      path === "/api/workflows/e2e-vendored" ||
+      path === "/api/workflows/validate" ||
+      path === "/api/workflows" ||
+      path === "/api/codebases" ||
+      path === "/api/commands"
+    ) {
+      state.unexpectedRequests.push(`${method} ${path}`);
+      return routeJson(route, { detail: `Unexpected E2E engine request: ${method} ${path}` }, 501);
+    }
+    return route.fallback();
+  });
+}
+
 async function installApiMocks(page: Page, state: MockApiState) {
   await installStreamingFetch(page);
+  await installPipelineEngineApiMocks(page, state);
   await page.route(BACKEND_PATTERN, async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
     const method = request.method();
+    state.requests.push({ method, path, postData: request.postData() });
 
     if (path === "/projects" && method === "GET") {
       return routeJson(route, [
@@ -437,19 +573,19 @@ async function installApiMocks(page: Page, state: MockApiState) {
     if (path === "/sessions" && method === "POST") return routeJson(route, { id: "session-e2e" });
     if (path === "/sessions" && method === "GET") {
       return routeJson(route, [
-        { id: "session-e2e", title: "E2E chat", created: now, modified: now, messageCount: 2 },
+        { id: "session-e2e", name: "E2E chat", created: now, modified: now, messageCount: 2 },
       ]);
     }
     const runStateSessionId = matchingFixtureSessionId(path, "/run/state");
-    if (runStateSessionId) {
+    if (runStateSessionId && method === "GET") {
       return routeJson(route, { status: "none", run: null });
     }
     const historySessionId = matchingFixtureSessionId(path, "/history");
-    if (historySessionId) {
+    if (historySessionId && method === "GET") {
       return routeJson(route, { messages: [], contextUsage: null });
     }
     const costsSessionId = matchingFixtureSessionId(path, "/costs");
-    if (costsSessionId) {
+    if (costsSessionId && method === "GET") {
       return routeJson(route, {
         sessionId: costsSessionId,
         totalUsd: 0,
@@ -460,7 +596,7 @@ async function installApiMocks(page: Page, state: MockApiState) {
         entries: [],
       });
     }
-    if (path === "/sessions/session-e2e/workflow-run-state") {
+    if (path === "/sessions/session-e2e/workflow-run-state" && method === "GET") {
       const failed = state.graphError;
       return routeJson(route, {
         state: {
@@ -523,7 +659,9 @@ async function installApiMocks(page: Page, state: MockApiState) {
             codebaseId: "e2e-codebase",
             workflow: {
               name: "E2E Workflow",
-              description: "Deterministic E2E workflow",
+              description: state.showRefreshedRegistryData
+                ? "Refreshed deterministic E2E workflow"
+                : "Deterministic E2E workflow",
               nodes: [{ id: "analyze" }],
             },
           },
@@ -549,7 +687,9 @@ async function installApiMocks(page: Page, state: MockApiState) {
             graphSha256: "e2e-graph-sha256",
             schemaVersion: "1.0",
             name: "E2E Workflow",
-            description: "Deterministic E2E workflow",
+            description: state.showRefreshedRegistryData
+              ? "Refreshed deterministic E2E workflow"
+              : "Deterministic E2E workflow",
             nodeCount: 1,
             edgeCount: 0,
           },
@@ -576,7 +716,7 @@ async function installApiMocks(page: Page, state: MockApiState) {
     }
     const typedRunWorkflowId = matchingTypedWorkflowId(path, "/runs");
     if (typedRunWorkflowId && method === "POST") {
-      return routeJson(route, runRecord("queued"), 201);
+      return routeJson(route, runRecord("queued", WORKFLOW_RUN_ID, typedRunWorkflowId), 201);
     }
     if (path === "/dag-workflow-runs" && method === "GET") {
       state.runListRequests += 1;
@@ -589,8 +729,10 @@ async function installApiMocks(page: Page, state: MockApiState) {
         ],
       });
     }
-    if (path === `/dag-workflow-runs/${WORKFLOW_RUN_ID}`) return routeJson(route, runRecord(state.runStatus));
-    if (path === `/dag-workflow-runs/${WORKFLOW_RUN_ID}/budget`) {
+    if (path === `/dag-workflow-runs/${WORKFLOW_RUN_ID}` && method === "GET") {
+      return routeJson(route, runRecord(state.runStatus));
+    }
+    if (path === `/dag-workflow-runs/${WORKFLOW_RUN_ID}/budget` && method === "GET") {
       return routeJson(route, {
         runId: WORKFLOW_RUN_ID,
         reservationCount: 0,
@@ -607,7 +749,7 @@ async function installApiMocks(page: Page, state: MockApiState) {
         fullChargeReservationCount: 0,
       });
     }
-    if (path === `/dag-workflow-runs/${WORKFLOW_RUN_ID}/events`) {
+    if (path === `/dag-workflow-runs/${WORKFLOW_RUN_ID}/events` && method === "GET") {
       return routeJson(route, {
         events: [
           { schemaVersion: 1, eventId: "event-1", runId: WORKFLOW_RUN_ID, seq: 1, ts: now, type: "run_started" },
@@ -655,7 +797,7 @@ async function installApiMocks(page: Page, state: MockApiState) {
         source,
       });
     }
-    if (path === "/console/runs") {
+    if (path === "/console/runs" && method === "GET") {
       return routeJson(route, [
           {
             id: "agent-run-e2e",
@@ -668,7 +810,7 @@ async function installApiMocks(page: Page, state: MockApiState) {
           },
         ]);
     }
-    if (path === "/console/loops") return routeJson(route, []);
+    if (path === "/console/loops" && method === "GET") return routeJson(route, []);
 
     state.unexpectedRequests.push(`${method} ${path}`);
     return routeJson(
@@ -691,6 +833,8 @@ export const test = base.extend<{
       graphError: false,
       uploadedFiles: [],
       runListRequests: 0,
+      requests: [],
+      showRefreshedRegistryData: false,
       showRefreshedRun: false,
       failTypedDefinitionRead: false,
       unexpectedRequests: [],
@@ -720,6 +864,18 @@ export const test = base.extend<{
 });
 
 export { expect };
+
+export function requestCount(state: MockApiState, method: string, path: string) {
+  return state.requests.filter(
+    (request) => request.method === method && request.path === path,
+  ).length;
+}
+
+export function lastRequestPostData(state: MockApiState, method: string, path: string) {
+  return state.requests.filter(
+    (request) => request.method === method && request.path === path,
+  ).at(-1)?.postData;
+}
 
 export async function selectWorkspaceTab(page: Page, name: string) {
   const navigation = page.getByRole("navigation", { name: "Project workspace" });
@@ -765,6 +921,29 @@ export async function openBuilderDraft(page: Page, workflowName = "e2e-builder-w
   await workflowNameInput.fill(workflowName);
   await expect(workflowNameInput).toHaveValue(workflowName);
   await expect(frame.getByRole("application")).toBeVisible();
+  return frame;
+}
+
+export async function openBoundBuilder(page: Page) {
+  await selectWorkspaceTab(page, "Scientific Pipelines");
+  await expect(page.getByRole("heading", { name: "Workflow registry" })).toBeVisible();
+  await page.getByRole("button", { name: "Edit E2E Workflow with vendored engine" }).click();
+  const navigation = page.getByRole("navigation", { name: "Project workspace" });
+  await expect(navigation.getByRole("button", { name: "Builder" })).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+  const iframe = page.getByTitle("DAG Builder");
+  await expect(iframe).toHaveAttribute(
+    "src",
+    /edit=e2e-vendored&codebaseId=e2e-codebase/,
+  );
+  const frame = page.frameLocator('iframe[title="DAG Builder"]');
+  await expect(frame.getByPlaceholder("workflow-name")).toHaveValue("E2E Workflow");
+  const promptNode = frame.locator(".react-flow__node").filter({ hasText: "Prompt" });
+  await expect(promptNode).toHaveCount(1);
+  await promptNode.click();
+  await expect(frame.getByRole("button", { name: "Expand full node details" })).toBeVisible();
   return frame;
 }
 

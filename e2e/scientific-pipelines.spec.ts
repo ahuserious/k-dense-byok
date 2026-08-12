@@ -2,6 +2,7 @@ import {
   WORKFLOW_RUN_ID,
   createTypedWorkflowFromTemplate,
   expect,
+  requestCount,
   selectWorkspaceTab,
   test,
 } from "./fixtures";
@@ -14,9 +15,10 @@ async function openPipelineRegistry(page: Parameters<typeof selectWorkspaceTab>[
 
 test.describe("scientific template launch controls", () => {
   for (const template of SCIENTIFIC_TEMPLATES) {
-    test(`${template.id} enforces its declared launch contract`, async ({ workspacePage }) => {
+    test(`${template.id} enforces its declared launch contract`, async ({ workspacePage, apiState }) => {
       const { details } = await createTypedWorkflowFromTemplate(workspacePage, template.id);
       const launch = details.getByRole("button", { name: "Run typed workflow" });
+      const launchPath = `/dag-workflows/${template.id}/runs`;
 
       if (template.blockingMessages.length > 0) {
         const alert = details.getByRole("alert");
@@ -29,11 +31,24 @@ test.describe("scientific template launch controls", () => {
           "title",
           "Complete the required workflow inputs before launch",
         );
+        expect(requestCount(apiState, "POST", launchPath)).toBe(0);
         return;
       }
 
       await expect(launch).toBeEnabled();
+      const launchResponsePromise = workspacePage.waitForResponse((response) => (
+        new URL(response.url()).pathname === launchPath &&
+        response.request().method() === "POST"
+      ));
       await launch.click();
+      const launchResponse = await launchResponsePromise;
+      expect(launchResponse.status()).toBe(201);
+      const launchedRun = await launchResponse.json() as {
+        manifest?: { graph?: { id?: string }; workflowId?: string };
+      };
+      expect(launchedRun.manifest?.workflowId).toBe(template.id);
+      expect(launchedRun.manifest?.graph?.id).toBe(template.id);
+      expect(requestCount(apiState, "POST", launchPath)).toBe(1);
       await expect(details.getByRole("status")).toHaveText(
         `Created run ${WORKFLOW_RUN_ID} with status queued. Open Console for runner progress.`,
       );
@@ -41,9 +56,9 @@ test.describe("scientific template launch controls", () => {
   }
 });
 
-test.describe("scientific template persisted topology", () => {
+test.describe("scientific template topology returned by the workflow API", () => {
   for (const template of SCIENTIFIC_TEMPLATES) {
-    test(`${template.id} persists a bounded sequential topology`, async ({ workspacePage }) => {
+    test(`${template.id} returns a bounded sequential topology`, async ({ workspacePage }) => {
       const { rawDefinition } = await createTypedWorkflowFromTemplate(workspacePage, template.id);
       const rawText = await rawDefinition.textContent();
       expect(rawText).not.toBeNull();
@@ -76,10 +91,18 @@ test.describe("scientific template persisted topology", () => {
 });
 
 test.describe("deduplicated workflow registry actions", () => {
-  test("matching typed and vendored topology has one row", async ({ workspacePage }) => {
+  test("matching typed and vendored topology has one row with both engine identities", async ({
+    workspacePage,
+    apiState,
+  }) => {
     await openPipelineRegistry(workspacePage);
     const registry = workspacePage.getByRole("list", { name: "Scientific pipeline workflows" });
-    await expect(registry.getByText("E2E Workflow", { exact: true })).toHaveCount(1);
+    await expect.poll(() => requestCount(apiState, "GET", "/pipelines")).toBeGreaterThan(0);
+    await expect.poll(() => requestCount(apiState, "GET", "/dag-workflows")).toBeGreaterThan(0);
+    const mergedRow = registry.getByRole("listitem").filter({ hasText: "E2E Workflow" });
+    await expect(mergedRow).toHaveCount(1);
+    await expect(mergedRow.getByText("Typed", { exact: true })).toBeVisible();
+    await expect(mergedRow.getByText("Vendored", { exact: true })).toBeVisible();
   });
 
   test("failed topology verification keeps both engine entries and explains why", async ({
@@ -96,11 +119,22 @@ test.describe("deduplicated workflow registry actions", () => {
     );
   });
 
-  test("Refresh reloads and preserves the single merged row", async ({ workspacePage }) => {
+  test("Refresh refetches both engines and renders changed registry data", async ({
+    workspacePage,
+    apiState,
+  }) => {
     await openPipelineRegistry(workspacePage);
+    await expect(workspacePage.getByText("Refreshed deterministic E2E workflow")).toHaveCount(0);
+    const typedRequestsBefore = requestCount(apiState, "GET", "/dag-workflows");
+    const vendoredRequestsBefore = requestCount(apiState, "GET", "/pipelines");
+    apiState.showRefreshedRegistryData = true;
     await workspacePage.getByRole("button", { name: "Refresh" }).click();
+    await expect.poll(() => requestCount(apiState, "GET", "/dag-workflows"))
+      .toBeGreaterThan(typedRequestsBefore);
+    await expect.poll(() => requestCount(apiState, "GET", "/pipelines"))
+      .toBeGreaterThan(vendoredRequestsBefore);
     await expect(workspacePage.getByText("E2E Workflow", { exact: true })).toHaveCount(1);
-    await expect(workspacePage.getByText("vendored engine online")).toBeVisible();
+    await expect(workspacePage.getByText("Refreshed deterministic E2E workflow")).toBeVisible();
   });
 
   test("Open details reveals the complete typed definition", async ({ workspacePage }) => {

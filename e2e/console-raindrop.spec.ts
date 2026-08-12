@@ -4,14 +4,17 @@ import {
   REFRESHED_WORKFLOW_RUN_ID,
   WORKFLOW_RUN_ID,
   expect,
+  lastRequestPostData,
+  requestCount,
   selectWorkspaceTab,
   test,
+  type MockApiState,
   type RunStatus,
 } from "./fixtures";
 
 async function openConsoleForStatus(
   page: Parameters<typeof selectWorkspaceTab>[0],
-  apiState: { runStatus: RunStatus },
+  apiState: MockApiState,
   status: RunStatus,
 ) {
   apiState.runStatus = status;
@@ -19,6 +22,12 @@ async function openConsoleForStatus(
   const workflowRuns = page.getByLabel("Workflow runs");
   await expect(workflowRuns).toBeVisible();
   await expect(workflowRuns.getByRole("button").first()).toContainText("e2e-workflow");
+  await expect.poll(() => requestCount(apiState, "GET", `/dag-workflow-runs/${WORKFLOW_RUN_ID}`))
+    .toBeGreaterThan(0);
+  await expect.poll(() => requestCount(apiState, "GET", `/dag-workflow-runs/${WORKFLOW_RUN_ID}/budget`))
+    .toBeGreaterThan(0);
+  await expect.poll(() => requestCount(apiState, "GET", `/dag-workflow-runs/${WORKFLOW_RUN_ID}/events`))
+    .toBeGreaterThan(0);
   return workflowRuns;
 }
 
@@ -44,7 +53,7 @@ test.describe("durable DAG Console", () => {
     });
   }
 
-  test("run_started renders before node_started in persisted order", async ({ workspacePage, apiState }) => {
+  test("run_started renders before node_started in API event order", async ({ workspacePage, apiState }) => {
     await openConsoleForStatus(workspacePage, apiState, "running");
     const eventRows = workspacePage.getByLabel("Authoritative workflow events").locator("ol > li");
     const renderedEvents = await eventRows.allTextContents();
@@ -76,21 +85,26 @@ test.describe("durable DAG Console", () => {
     );
   });
 
-  test("failed run surfaces its persisted error", async ({ workspacePage, apiState }) => {
+  test("failed run surfaces its API error", async ({ workspacePage, apiState }) => {
     const workflowRuns = await openConsoleForStatus(workspacePage, apiState, "failed");
     await expect(workflowRuns.getByRole("button").first()).toContainText("E2E_FAILURE: simulated failure");
   });
 
-  test("Agents & Loops feed is selectable", async ({ workspacePage }) => {
+  test("Agents & Loops feed is selectable", async ({ workspacePage, apiState }) => {
     await selectWorkspaceTab(workspacePage, "Console");
     await workspacePage.getByRole("button", { name: "Agents & Loops" }).click();
     await expect(workspacePage.getByRole("button", { name: "Agents & Loops" })).toHaveAttribute("aria-pressed", "true");
+    await expect.poll(() => requestCount(apiState, "GET", "/console/runs")).toBeGreaterThan(0);
+    await expect.poll(() => requestCount(apiState, "GET", "/console/loops")).toBeGreaterThan(0);
   });
 
-  test("agent feed shows native Kady run", async ({ workspacePage }) => {
+  test("agent feed shows a native Kady agent run", async ({ workspacePage, apiState }) => {
     await selectWorkspaceTab(workspacePage, "Console");
     await workspacePage.getByRole("button", { name: "Agents & Loops" }).click();
-    await expect(workspacePage.getByText("E2E analysis")).toBeVisible();
+    const agentRow = workspacePage.getByRole("row").filter({ hasText: "E2E analysis" });
+    await expect(agentRow).toHaveCount(1);
+    await expect(agentRow.getByText("agent", { exact: true })).toBeVisible();
+    await expect.poll(() => requestCount(apiState, "GET", "/console/runs")).toBeGreaterThan(0);
   });
 
 });
@@ -101,7 +115,7 @@ test.describe("thin Console inventory smoke — excluded from the substantive co
     await expect(workspacePage.getByLabel("Workflow runs")).toContainText("e2e-workflow");
   });
 
-  test("authoritative event stream is accessible", async ({ workspacePage, apiState }) => {
+  test("event stream region is accessible", async ({ workspacePage, apiState }) => {
     await openConsoleForStatus(workspacePage, apiState, "running");
     await expect(workspacePage.getByLabel("Authoritative workflow events")).toBeVisible();
   });
@@ -138,7 +152,7 @@ test.describe("thin Console inventory smoke — excluded from the substantive co
   });
 });
 
-test.describe("Raindrop saved-log interactions", () => {
+test.describe("Raindrop log interactions", () => {
   test("Refresh reloads the feed and reveals a newly discovered run", async ({ workspacePage, apiState }) => {
     await selectWorkspaceTab(workspacePage, "Raindrop");
     await expect(workspacePage.getByTitle(REFRESHED_WORKFLOW_RUN_ID)).toHaveCount(0);
@@ -164,11 +178,23 @@ test.describe("Raindrop saved-log interactions", () => {
     )).toBeVisible();
   });
 
-  test("session selection validates the session-specific bounded projection", async ({ workspacePage }) => {
+  test("session selection validates the session-specific bounded projection", async ({
+    workspacePage,
+    apiState,
+  }) => {
     await selectWorkspaceTab(workspacePage, "Raindrop");
     const session = workspacePage.getByTitle("session-e2e");
+    const contextRequestsBefore = requestCount(apiState, "POST", "/helper-sessions/raindrop/context");
     await session.click();
     await expect(session).toHaveAttribute("aria-current", "true");
+    await expect(session).toContainText("E2E chat");
+    await expect(session).toContainText("session-e2e");
+    await expect(session).toContainText("2 msgs");
+    await expect.poll(() => requestCount(apiState, "POST", "/helper-sessions/raindrop/context"))
+      .toBeGreaterThan(contextRequestsBefore);
+    expect(JSON.parse(
+      lastRequestPostData(apiState, "POST", "/helper-sessions/raindrop/context") ?? "null",
+    )).toEqual({ kind: "session", id: "session-e2e" });
     await expect(workspacePage.getByText(
       "Selected log projection is validated and complete within its recorded bounds.",
     )).toBeVisible();
@@ -203,7 +229,7 @@ test.describe("Raindrop saved-log interactions", () => {
 });
 
 test.describe("thin inventory smoke — excluded from the substantive count", () => {
-  test("Raindrop labels its saved-log and no-tools analyst surfaces", async ({ workspacePage }) => {
+  test("Raindrop labels its log and no-tools analyst surfaces", async ({ workspacePage }) => {
     await selectWorkspaceTab(workspacePage, "Raindrop");
     await expect(workspacePage.getByRole("heading", { name: "Raindrop" })).toBeVisible();
     await expect(workspacePage.getByText(/Autosaved DAG runs and chat sessions/)).toBeVisible();

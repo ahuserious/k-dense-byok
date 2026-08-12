@@ -223,12 +223,18 @@ export const NODE_SPEC_FIELDS = [
 export const NODE_SPEC_SELECTS = [
   { label: "Per-node reasoning effort", defaultValue: "", value: "high", saveOutcome: "accepted" },
   { label: "CLI / harness", defaultValue: "pi", value: "codex", saveOutcome: "S4" },
-  { label: "Billing mode", defaultValue: "inherit", value: "api", saveOutcome: "accepted" },
+  { label: "Billing mode", defaultValue: "inherit", value: "api", saveOutcome: "S4" },
   { label: "Skills mode", defaultValue: "auto", value: "manual", saveOutcome: "S4" },
   { label: "Subagents mode", defaultValue: "auto", value: "auto-manual", saveOutcome: "S4" },
   { label: "Autonomy", defaultValue: "strict", value: "loose", saveOutcome: "S4" },
   { label: "Mimeographs mode", defaultValue: "auto", value: "manual", saveOutcome: "S5" },
 ] as const;
+
+export const NODE_SPEC_MODEL_SAVE_OUTCOMES = {
+  "Model source": "accepted",
+  "Auth profile": "accepted",
+  Authentication: "accepted",
+} as const;
 
 export const STUDIO_SECTIONS = [
   "Typography",

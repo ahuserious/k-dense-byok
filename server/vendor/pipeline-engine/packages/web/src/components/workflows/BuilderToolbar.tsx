@@ -24,6 +24,7 @@ export interface BuilderToolbarProps {
   onViewModeChange: (mode: ViewMode) => void;
   onValidate: () => void;
   onSave: () => void;
+  saveDisabledReason?: string;
   onRun: () => void;
   onLoadWorkflow: (name: string) => void;
 }
@@ -49,6 +50,7 @@ export function BuilderToolbar({
   onViewModeChange,
   onValidate,
   onSave,
+  saveDisabledReason,
   onRun,
   onLoadWorkflow,
 }: BuilderToolbarProps): React.ReactElement {
@@ -225,7 +227,13 @@ export function BuilderToolbar({
             Validate
           </Button>
 
-          <Button variant="secondary" size="xs" onClick={onSave} disabled={!workflowName.trim()}>
+          <Button
+            variant="secondary"
+            size="xs"
+            onClick={onSave}
+            disabled={!workflowName.trim() || Boolean(saveDisabledReason)}
+            title={saveDisabledReason}
+          >
             Save
           </Button>
 
