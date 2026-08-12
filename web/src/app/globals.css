@@ -274,18 +274,14 @@
   }
 
   .scientific-dag-studio-launcher {
-    position: fixed;
-    z-index: 80;
-    right: 1rem;
-    bottom: 1rem;
+    position: static;
     border: 1px solid var(--studio-accent-deep);
     border-radius: 999px;
     background: var(--studio-surface);
     color: var(--studio-accent-bright);
-    padding: 0.65rem 1rem;
-    box-shadow: 0 12px 40px rgb(0 0 0 / 45%);
+    padding: 0.45rem 0.75rem;
     font-family: var(--fcta);
-    font-size: 0.72rem;
+    font-size: 0.66rem;
     font-weight: 700;
     letter-spacing: 0.06em;
     text-transform: uppercase;
