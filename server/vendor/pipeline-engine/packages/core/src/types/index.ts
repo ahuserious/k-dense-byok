@@ -1,7 +1,8 @@
 /**
  * Core type definitions for the Remote Coding Agent platform
  */
-import type { WorkflowDefinition } from '@archon/workflows/schemas/workflow';
+import type { WorkflowDefinition, WorkflowSource } from '@archon/workflows/schemas/workflow';
+import type { WorkflowRun } from '@archon/workflows/schemas/workflow-run';
 
 // MessageChunk + TokenUsage are used by IPlatformAdapter below.
 import type { MessageChunk, TokenUsage } from '@archon/providers/types';
@@ -46,6 +47,23 @@ export interface HandleMessageContext {
   readonly parentConversationId?: string;
   readonly isolationHints?: IsolationHints;
   readonly attachedFiles?: AttachedFile[];
+  /** Exact API-selected workflow; bypasses display-name rediscovery. */
+  readonly workflowOverride?: {
+    definition: WorkflowDefinition;
+    codebaseId: string;
+    args: string;
+    source?: WorkflowSource;
+    /** Validated server-owned admission metadata persisted with the run. */
+    runMetadata?: Record<string, unknown>;
+    /** Durable admission row created before the request is accepted. */
+    preCreatedRun?: WorkflowRun;
+    /** Deterministic integration-test failures at real async setup boundaries. */
+    dispatchFaultInjection?: {
+      beforeWorkerIsolation?: () => void | Promise<void>;
+      beforePreCreatedRunRebind?: () => void | Promise<void>;
+      beforeProviderAccess?: () => void | Promise<void>;
+    };
+  };
   /**
    * Pipeline Engine user UUID resolved from the inbound platform user identifier.
    * Chat/forge adapters resolve this via findOrCreateUserByPlatformIdentity

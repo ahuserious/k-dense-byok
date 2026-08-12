@@ -7637,6 +7637,56 @@ describe('executeDagWorkflow -- cost tracking', () => {
     expect(completeCalls[0][1]).not.toHaveProperty('total_cost_usd');
   });
 
+  it('does not emit a zero-cost Kady watermark when tokens are reported without cost', async () => {
+    mockSendQueryDag.mockImplementation(function* () {
+      yield { type: 'assistant', content: 'Some output' };
+      yield {
+        type: 'result',
+        sessionId: 'sid-tokens-without-cost',
+        tokens: { input: 120, output: 30 },
+      };
+    });
+
+    const store = createMockStore();
+    const mockDeps = createMockDeps(store);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('kady-unreported-cost', {
+      metadata: {
+        kadyProjectId: 'project-a',
+        kadyEngineAdmissionKey: 'kadypipe_11111111111111111111111111111111',
+        kadyAdmittedModelNodeIds: ['step'],
+      },
+    });
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag',
+      testDir,
+      { name: 'dag-unreported-cost', nodes: [{ id: 'step', prompt: 'Do thing.' }] },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    const completeCalls = (
+      store.completeWorkflowRun as Mock<
+        (id: string, metadata?: Record<string, unknown>) => Promise<void>
+      >
+    ).mock.calls;
+    expect(completeCalls).toHaveLength(1);
+    expect(completeCalls[0][1]).not.toHaveProperty('total_cost_usd');
+    expect(completeCalls[0][1]).not.toHaveProperty('kady_completion_watermark');
+    expect(mockCaptureWorkflowCompleted).toHaveBeenCalledWith(
+      expect.objectContaining({ tokensIn: 120, tokensOut: 30 })
+    );
+  });
+
   it('accumulates cost across loop iterations and includes in completeWorkflowRun', async () => {
     let callCount = 0;
     mockSendQueryDag.mockImplementation(function* () {

@@ -22,12 +22,20 @@ export interface VendoredWorkflowRegistrySource {
   engine: "vendored";
   sourceId: string;
   /** Exact engine identifier. Never normalize this value before routing. */
+  workflowId: string;
+  /** Exact engine codebase registration used for every edit read/write. */
+  codebaseId: string;
   workflowName: string;
   displayName: string;
   origin?: string;
   filename?: string;
   description: string;
   workflow: Record<string, unknown>;
+}
+
+export interface VendoredPipelineEditTarget {
+  workflowId: string;
+  codebaseId: string;
 }
 
 export interface ScientificPipelineRoutingAmbiguity {
@@ -37,16 +45,9 @@ export interface ScientificPipelineRoutingAmbiguity {
   message: string;
 }
 
-export const VENDORED_PROJECT_SCOPE_ADVISORY =
-  "Project scope unverified — the current proxy does not bind the engine list to this project's codebase.";
-
-export const AMBIGUOUS_VENDORED_WORKFLOW_NAME_REASON =
-  "Ambiguous vendored workflow name — not routable until the engine exposes stable ids.";
-
 export interface VendoredWorkflowRoutingState {
   routable: boolean;
-  projectScopeVerified: false;
-  scopeAdvisory: string;
+  projectScopeVerified: true;
   blockedReason?: string;
 }
 
@@ -149,7 +150,7 @@ export function typedWorkflowRegistrySource(
 
 export function vendoredWorkflowRegistrySource(
   workflow: Record<string, unknown>,
-  identity: { origin?: string; filename?: string } = {},
+  identity: { codebaseId: string; origin?: string; filename?: string; workflowId?: string },
 ): VendoredWorkflowRegistrySource | null {
   const workflowName = typeof workflow.name === "string" ? workflow.name : "";
   const displayName = workflowName.trim().replace(/\s+/g, " ");
@@ -157,7 +158,8 @@ export function vendoredWorkflowRegistrySource(
   const description = typeof workflow.description === "string"
     ? workflow.description.split("\n")[0] ?? ""
     : "";
-  const identityParts = [encodeURIComponent(workflowName)];
+  const workflowId = identity.workflowId ?? identity.filename ?? workflowName;
+  const identityParts = [encodeURIComponent(workflowId)];
   if (identity.origin !== undefined) {
     identityParts.push(`origin=${encodeURIComponent(identity.origin)}`);
   }
@@ -167,6 +169,8 @@ export function vendoredWorkflowRegistrySource(
   return {
     engine: "vendored",
     sourceId: `vendored:${identityParts.join(":")}`,
+    workflowId,
+    codebaseId: identity.codebaseId,
     workflowName,
     displayName,
     ...(identity.origin !== undefined ? { origin: identity.origin } : {}),
@@ -199,42 +203,61 @@ function sourceStructureHash(source: RegistrySource): string {
 }
 
 function sourceRouteIdentifier(source: RegistrySource): string {
-  return source.engine === "typed" ? source.workflowId : source.workflowName;
+  return source.workflowId;
 }
 
-function vendoredNameScopeKey(source: VendoredWorkflowRegistrySource): string {
-  return JSON.stringify([source.origin ?? null, source.workflowName]);
-}
-
-function flagSameEngineRoutingAmbiguity(
+function flagDuplicateEngineRouteIdentifiers(
   entries: Map<string, ScientificPipelineRegistryEntry>,
-  normalizedName: string,
-  structureHash: string,
   engine: ScientificPipelineEngine,
 ): void {
   const matchingEntries = [...entries.values()].filter((entry) =>
-    entry.normalizedName === normalizedName &&
-    entry.structureHash === structureHash &&
-    (engine === "typed" ? entry.typed !== undefined : entry.vendored !== undefined)
+    engine === "typed" ? entry.typed !== undefined : entry.vendored !== undefined
   );
   const routes = matchingEntries.map((entry) =>
     engine === "typed" ? entry.typed! : entry.vendored!
   );
-  if (routes.length < 2) return;
-
-  const sourceIds = routes.map((route) => route.sourceId);
   const identifiers = routes.map(sourceRouteIdentifier);
+  const duplicateIdentifiers = new Set(
+    identifiers.filter((identifier, index) => identifiers.indexOf(identifier) !== index),
+  );
+  for (const entry of matchingEntries) {
+    entry.routingAmbiguities = entry.routingAmbiguities?.filter(
+      (candidate) => candidate.engine !== engine,
+    );
+    if (entry.routingAmbiguities?.length === 0) delete entry.routingAmbiguities;
+    if (engine === "vendored") {
+      entry.vendoredRouting = {
+        routable: true,
+        projectScopeVerified: true,
+      };
+    }
+  }
+  if (duplicateIdentifiers.size === 0) return;
+
+  const ambiguousEntries = matchingEntries.filter((entry) => {
+    const route = engine === "typed" ? entry.typed! : entry.vendored!;
+    return duplicateIdentifiers.has(sourceRouteIdentifier(route));
+  });
+  const ambiguousRoutes = ambiguousEntries.map((entry) =>
+    engine === "typed" ? entry.typed! : entry.vendored!
+  );
+  const sourceIds = ambiguousRoutes.map((route) => route.sourceId);
+  const ambiguousIdentifiers = ambiguousRoutes.map(sourceRouteIdentifier);
   const ambiguity: ScientificPipelineRoutingAmbiguity = {
     engine,
     sourceIds,
-    identifiers,
-    message: `Ambiguous ${engine} routes share the same normalized name and structure: ${identifiers.map((identifier) => JSON.stringify(identifier)).join(", ")}. Exact identifiers remain separately routable.`,
+    identifiers: ambiguousIdentifiers,
+    message: `Ambiguous ${engine} routes share a duplicate stable identifier: ${[...duplicateIdentifiers].map((identifier) => JSON.stringify(identifier)).join(", ")}.`,
   };
-  for (const entry of matchingEntries) {
-    entry.routingAmbiguities = [
-      ...(entry.routingAmbiguities ?? []).filter((candidate) => candidate.engine !== engine),
-      ambiguity,
-    ];
+  for (const entry of ambiguousEntries) {
+    entry.routingAmbiguities = [...(entry.routingAmbiguities ?? []), ambiguity];
+    if (engine === "vendored") {
+      entry.vendoredRouting = {
+        routable: false,
+        projectScopeVerified: true,
+        blockedReason: ambiguity.message,
+      };
+    }
   }
 }
 
@@ -243,11 +266,6 @@ export function buildScientificPipelineRegistry(
   vendoredSources: VendoredWorkflowRegistrySource[],
 ): ScientificPipelineRegistryEntry[] {
   const entries = new Map<string, ScientificPipelineRegistryEntry>();
-  const vendoredNameCounts = new Map<string, number>();
-  for (const source of vendoredSources) {
-    const key = vendoredNameScopeKey(source);
-    vendoredNameCounts.set(key, (vendoredNameCounts.get(key) ?? 0) + 1);
-  }
   const sourceOccurrences = new Map<string, number>();
 
   for (const source of [...typedSources, ...vendoredSources]) {
@@ -281,24 +299,14 @@ export function buildScientificPipelineRegistry(
       next.description = source.summary.description ?? next.description;
     } else {
       next.vendored = source;
-      const duplicateName = (vendoredNameCounts.get(vendoredNameScopeKey(source)) ?? 0) > 1;
       next.vendoredRouting = {
-        routable: !duplicateName,
-        projectScopeVerified: false,
-        scopeAdvisory: VENDORED_PROJECT_SCOPE_ADVISORY,
-        ...(duplicateName
-          ? { blockedReason: AMBIGUOUS_VENDORED_WORKFLOW_NAME_REASON }
-          : {}),
+        routable: true,
+        projectScopeVerified: true,
       };
       if (!next.description) next.description = source.description;
     }
     entries.set(id, next);
-    flagSameEngineRoutingAmbiguity(
-      entries,
-      normalizedName,
-      structureHash,
-      source.engine,
-    );
+    flagDuplicateEngineRouteIdentifiers(entries, source.engine);
   }
 
   return [...entries.values()].sort((left, right) =>
@@ -394,9 +402,14 @@ export async function listVendoredWorkflowRegistrySources(
     const workflow = recordOf(candidateRecord?.workflow);
     const origin = candidateRecord?.source ?? workflow?.origin;
     const filename = candidateRecord?.filename ?? workflow?.filename;
+    const workflowId = candidateRecord?.workflowId;
+    const codebaseId = candidateRecord?.codebaseId;
+    if (typeof codebaseId !== "string" || codebaseId.length === 0) return [];
     const source = workflow ? vendoredWorkflowRegistrySource(workflow, {
+      codebaseId,
       ...(typeof origin === "string" ? { origin } : {}),
       ...(typeof filename === "string" ? { filename } : {}),
+      ...(typeof workflowId === "string" ? { workflowId } : {}),
     }) : null;
     return source ? [source] : [];
   });

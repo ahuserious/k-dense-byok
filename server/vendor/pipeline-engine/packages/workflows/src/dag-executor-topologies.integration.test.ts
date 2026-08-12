@@ -79,7 +79,7 @@ const platform: IWorkflowPlatform = {
   sendStructuredEvent: mock(() => Promise.resolve()),
 };
 
-function runRecord(id: string): WorkflowRun {
+function runRecord(id: string, metadata: Record<string, unknown> = {}): WorkflowRun {
   return {
     id,
     workflow_name: id,
@@ -88,7 +88,7 @@ function runRecord(id: string): WorkflowRun {
     codebase_id: null,
     status: 'running',
     user_message: 'integration test',
-    metadata: {},
+    metadata,
     started_at: new Date(),
     completed_at: null,
     last_activity_at: null,
@@ -99,7 +99,8 @@ function runRecord(id: string): WorkflowRun {
 async function executePersistedFixture(
   name: string,
   source: string,
-  sendQuery: IAgentProvider['sendQuery']
+  sendQuery: IAgentProvider['sendQuery'],
+  runMetadata: Record<string, unknown> = {}
 ): Promise<IWorkflowStore> {
   const root = await mkdtemp(join(tmpdir(), 'pipeline-topology-public-'));
   temporaryRoots.push(root);
@@ -127,7 +128,7 @@ async function executePersistedFixture(
     `conversation-${name}`,
     root,
     persisted.workflow,
-    runRecord(`run-${name}`),
+    runRecord(`run-${name}`, runMetadata),
     'claude',
     undefined,
     artifacts,
@@ -148,7 +149,10 @@ describe('persisted fusion topology reachability', () => {
     'plan-debate',
     'auto-validate',
     'draco-fusion',
-  ])('executes persisted %s through the public production API', async kind => {
+    'council',
+    'fusion',
+    'best-of-n',
+  ])('executes and watermarks persisted %s through the public production API', async kind => {
     const phases: string[] = [];
     const sendQuery = mock(async function* (prompt: string) {
       const phase = prompt.match(/^Phase: (.+)$/m)?.[1] ?? 'unknown';
@@ -160,6 +164,8 @@ describe('persisted fusion topology reachability', () => {
       yield {
         type: 'result' as const,
         sessionId: `session-${phase}`,
+        cost: 0.01,
+        tokens: { input: 10, output: 5 },
         ...(phase === 'auto-validate-check'
           ? { structuredOutput: { passed: true, findings: [] } }
           : {}),
@@ -179,12 +185,36 @@ nodes:
         role: Lead scientist
       - id: beta
         role: Evidence auditor
-`, sendQuery);
+`, sendQuery, {
+      kadyProjectId: `project-${kind}`,
+      kadyEngineAdmissionKey: `admission-${kind}`,
+      kadyAdmittedModelNodeIds: ['deliberate'],
+    });
 
     expect(phases.length).toBeGreaterThan(0);
     expect(phases.some(phase => phase === 'opinion' || phase.includes(kind.split('-')[0])))
       .toBe(true);
     expect(workflowStore.completeWorkflowRun).toHaveBeenCalledTimes(1);
+    const completionMetadata = workflowStore.completeWorkflowRun.mock.calls[0]?.[1] as {
+      kady_completion_watermark?: {
+        nodeIds?: string[];
+        usageByNode?: Record<string, { costUsd: number; tokensIn: number; tokensOut: number }>;
+      };
+    };
+    const actualUsage = completionMetadata.kady_completion_watermark?.usageByNode?.deliberate;
+    expect(actualUsage?.costUsd).toBeGreaterThan(0);
+    expect(actualUsage?.tokensIn).toBeGreaterThan(0);
+    expect(actualUsage?.tokensOut).toBeGreaterThan(0);
+    expect(completionMetadata.kady_completion_watermark).toMatchObject({
+      nodeIds: ['deliberate'],
+      usageByNode: {
+        deliberate: {
+          costUsd: expect.any(Number),
+          tokensIn: expect.any(Number),
+          tokensOut: expect.any(Number),
+        },
+      },
+    });
   });
 
   it('shares one aggregate cap across every successful plan-debate invocation', async () => {

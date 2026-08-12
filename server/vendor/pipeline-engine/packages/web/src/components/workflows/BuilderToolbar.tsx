@@ -87,7 +87,7 @@ export function BuilderToolbar({
           >
             <option value="">{workflowsError ? 'Load failed' : 'Load pipeline…'}</option>
             {(workflows ?? []).map(entry => (
-              <option key={entry.workflow.name} value={entry.workflow.name}>
+              <option key={entry.workflowId} value={entry.workflowId}>
                 {entry.workflow.name}
               </option>
             ))}

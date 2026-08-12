@@ -48,8 +48,12 @@ import * as db from '../db/conversations';
 import { createIsolationStore } from '../db/isolation-environments';
 import { toError } from '../utils/error';
 import { getCodebase } from '../db/codebases';
-import { executeWorkflow } from '@archon/workflows/executor';
+import {
+  executeWorkflow,
+  WorkflowPreProviderAccessError,
+} from '@archon/workflows/executor';
 import type { WorkflowDefinition, WorkflowSource } from '@archon/workflows/schemas/workflow';
+import type { WorkflowRun } from '@archon/workflows/schemas/workflow-run';
 import { createWorkflowDeps } from '../workflows/store-adapter';
 import {
   cleanupToMakeRoom,
@@ -59,6 +63,7 @@ import {
 import { loadRepoConfig } from '../config/config-loader';
 import { isPerUserGitHubEnabled } from '../github-auth/config';
 import { getUserGithubNoreplyEmail } from '../db/user-github-token-store';
+import * as workflowDb from '../db/workflows';
 
 type IsolationResolution =
   | { status: 'existing'; cwd: string; env: IsolationEnvironmentRow }
@@ -279,6 +284,50 @@ export interface WorkflowRoutingContext {
    * to the privacy-safe "custom" treatment when not provided.
    */
   readonly source?: WorkflowSource;
+  /** Validated admission metadata supplied by the exact run endpoint. */
+  readonly runMetadata?: Record<string, unknown>;
+  /** Durable admission row created before the HTTP request was accepted. */
+  readonly preCreatedRun?: WorkflowRun;
+  /** Deterministic integration-test failures at real async setup boundaries. */
+  readonly dispatchFaultInjection?: {
+    beforeWorkerIsolation?: () => void | Promise<void>;
+    beforePreCreatedRunRebind?: () => void | Promise<void>;
+    beforeProviderAccess?: () => void | Promise<void>;
+  };
+}
+
+function detachedDispatchFailureMetadata(
+  run: WorkflowRun,
+  zeroUsageIsProven: boolean
+): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {
+    kadyDispatchFailureStage: 'execution-setup',
+  };
+  if (!zeroUsageIsProven) return metadata;
+  const projectId = run.metadata.kadyProjectId;
+  const engineAdmissionKey = run.metadata.kadyEngineAdmissionKey;
+  const admittedNodeIds = run.metadata.kadyAdmittedModelNodeIds;
+  if (
+    typeof projectId !== 'string' ||
+    typeof engineAdmissionKey !== 'string' ||
+    !Array.isArray(admittedNodeIds) ||
+    admittedNodeIds.some(nodeId => typeof nodeId !== 'string')
+  ) {
+    return metadata;
+  }
+  const nodeIds = [...new Set(admittedNodeIds as string[])];
+  return {
+    ...metadata,
+    kady_completion_watermark: {
+      version: 1,
+      projectId,
+      engineAdmissionKey,
+      nodeIds,
+      usageByNode: Object.fromEntries(
+        nodeIds.map(nodeId => [nodeId, { costUsd: 0, tokensIn: 0, tokensOut: 0 }])
+      ),
+    },
+  };
 }
 
 /**
@@ -324,12 +373,19 @@ export async function dispatchBackgroundWorkflow(
         `Cannot dispatch workflow "${workflow.name}": codebase ${ctx.codebaseId} not found`
       );
     }
+    await ctx.dispatchFaultInjection?.beforeWorkerIsolation?.();
     const result = await validateAndResolveIsolation(
       workerConv,
       codebase,
       ctx.platform,
       workerPlatformId,
-      { workflowType: 'thread', workflowId: workerPlatformId },
+      {
+        workflowType: 'thread',
+        workflowId: workerPlatformId,
+        ...(ctx.isolationHints?.snapshotSha
+          ? { snapshotSha: ctx.isolationHints.snapshotSha }
+          : {}),
+      },
       false,
       ctx.userId
     );
@@ -383,22 +439,58 @@ export async function dispatchBackgroundWorkflow(
   // Without this, navigating to the execution page before executeWorkflow's
   // async setup completes would 404 (row doesn't exist yet for 1-5 seconds).
   const workflowDeps = createWorkflowDeps();
-  let preCreatedRun: Awaited<ReturnType<typeof workflowDeps.store.createWorkflowRun>> | undefined;
+  let preCreatedRun = ctx.preCreatedRun;
   try {
-    preCreatedRun = await workflowDeps.store.createWorkflowRun({
-      workflow_name: workflow.name,
-      conversation_id: workerConv.id,
-      codebase_id: ctx.codebaseId,
-      user_message: ctx.originalMessage,
-      working_path: workerCwd,
-      metadata: ctx.issueContext ? { github_context: ctx.issueContext } : {},
-      parent_conversation_id: ctx.conversationDbId,
-      user_id: ctx.userId,
-    });
+    if (preCreatedRun) {
+      await ctx.dispatchFaultInjection?.beforePreCreatedRunRebind?.();
+      await workflowDeps.store.updateWorkflowRun(preCreatedRun.id, {
+        conversation_id: workerConv.id,
+        working_path: workerCwd,
+        parent_conversation_id: ctx.conversationDbId,
+        metadata: { kadyDispatchState: 'running' },
+      });
+      preCreatedRun = {
+        ...preCreatedRun,
+        conversation_id: workerConv.id,
+        working_path: workerCwd,
+        parent_conversation_id: ctx.conversationDbId,
+        metadata: { ...preCreatedRun.metadata, kadyDispatchState: 'running' },
+      };
+    } else {
+      preCreatedRun = await workflowDeps.store.createWorkflowRun({
+        workflow_name: workflow.name,
+        conversation_id: workerConv.id,
+        codebase_id: ctx.codebaseId,
+        user_message: ctx.originalMessage,
+        working_path: workerCwd,
+        metadata: {
+          ...(ctx.issueContext ? { github_context: ctx.issueContext } : {}),
+          ...ctx.runMetadata,
+        },
+        parent_conversation_id: ctx.conversationDbId,
+        user_id: ctx.userId,
+      });
+      if (preCreatedRun.idempotency_replayed) {
+        getLog().info(
+          {
+            workflowName: workflow.name,
+            workflowRunId: preCreatedRun.id,
+            kadyProjectId: preCreatedRun.kady_project_id,
+            kadyEngineAdmissionKey: preCreatedRun.kady_engine_admission_key,
+          },
+          'workflow_admission_replayed'
+        );
+        return;
+      }
+    }
   } catch (error) {
     const err = error as Error;
     getLog().error({ err, workflowName: workflow.name }, 'pre_create_workflow_run_failed');
-    // Non-fatal: executeWorkflow will create its own row as fallback
+    // A caller-supplied admission row is the durable execution identity. Do not
+    // create a second row if rebinding it to the worker fails.
+    if (ctx.preCreatedRun) throw error;
+    // Non-fatal for non-admission callers: executeWorkflow creates its own row.
+    preCreatedRun = undefined;
   }
 
   // 8. Fire-and-forget: run workflow in background
@@ -421,6 +513,8 @@ export async function dispatchBackgroundWorkflow(
             preCreatedRun,
             userId: ctx.userId,
             source: ctx.source,
+            runMetadata: ctx.runMetadata,
+            beforeProviderAccess: ctx.dispatchFaultInjection?.beforeProviderAccess,
           }
         );
         // Surface workflow output to parent conversation as a result card
@@ -466,6 +560,39 @@ export async function dispatchBackgroundWorkflow(
         }
       } catch (error) {
         const err = toError(error);
+        if (preCreatedRun) {
+          const processId = preCreatedRun.metadata.kadyDispatchProcessId;
+          const claimId = preCreatedRun.metadata.kadyDispatchClaimId;
+          if (typeof processId === 'string' && typeof claimId === 'string') {
+            try {
+              const terminalized = await workflowDb.failKadyWorkflowDispatch(
+                preCreatedRun.id,
+                err.message,
+                detachedDispatchFailureMetadata(
+                  preCreatedRun,
+                  error instanceof WorkflowPreProviderAccessError
+                ),
+                { processId, claimId, state: 'running' }
+              );
+              if (!terminalized) {
+                getLog().warn(
+                  { workflowRunId: preCreatedRun.id, processId, claimId },
+                  'background_workflow_failure_claim_lost'
+                );
+              }
+            } catch (terminalizeError) {
+              getLog().error(
+                { err: toError(terminalizeError), workflowRunId: preCreatedRun.id },
+                'background_workflow_failure_terminalize_failed'
+              );
+            }
+          } else {
+            getLog().error(
+              { workflowRunId: preCreatedRun.id },
+              'background_workflow_failure_claim_missing'
+            );
+          }
+        }
         getLog().error(
           {
             err,

@@ -45,6 +45,7 @@ import {
 } from "@/lib/modal-jobs";
 import { isJunkFilePath } from "@/lib/utils";
 import { runPipeline } from "@/lib/pipelines";
+import type { VendoredPipelineEditTarget } from "@/lib/scientific-pipeline-registry";
 import {
   PanelLeftIcon,
   PanelRightIcon,
@@ -343,7 +344,12 @@ function WorkspacePage({
   } = usePersistentWorkspaceView(initialState?.view ?? "chat");
   // Vendored pipeline the visual builder should deep-link open (?edit=), set by
   // the Scientific Pipelines list's Edit affordance.
-  const [pipelineEditWorkflow, setPipelineEditWorkflow] = useState<string | null>(null);
+  const [pipelineEditTarget, setPipelineEditTarget] = useState<
+    (VendoredPipelineEditTarget & { projectId: string }) | null
+  >(null);
+  useEffect(() => {
+    setPipelineEditTarget(null);
+  }, [projectId]);
   // The Builder chat rail (collapsible far-right pipeline-compose chat).
   const [railOpen, setRailOpen] = useState(false);
   const [tabWorkspaceStates, setTabWorkspaceStates] = useState<
@@ -727,11 +733,11 @@ function WorkspacePage({
   // "Edit" on a pipeline row opens the Builder with the pipeline deep-linked
   // (?edit=) into the vendored visual builder iframe.
   const handleEditPipeline = useCallback(
-    (name: string) => {
-      setPipelineEditWorkflow(name);
+    (target: VendoredPipelineEditTarget) => {
+      setPipelineEditTarget({ ...target, projectId });
       setView("dag-builder");
     },
-    [setView],
+    [projectId, setView],
   );
 
   const handleFileSelect = useCallback((path: string) => {
@@ -1230,13 +1236,16 @@ function WorkspacePage({
                 projectId={projectId}
                 activeSessionId={activeSessionId}
                 budgetBlocked={budgetBlocked}
+                uploadedFiles={allFiles.filter((filePath) => filePath.startsWith("user_data/"))}
                 onRunPipeline={handleRunPipeline}
                 onEditPipeline={handleEditPipeline}
               />
             ),
             "dag-builder": (
               <DagBuilderSurface
-                workflowName={pipelineEditWorkflow ?? undefined}
+                editTarget={pipelineEditTarget?.projectId === projectId
+                  ? pipelineEditTarget
+                  : undefined}
               />
             ),
             console: (

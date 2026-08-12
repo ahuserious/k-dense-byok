@@ -65,7 +65,7 @@ import * as messageDb from '../db/messages';
 import * as workflowDb from '../db/workflows';
 import * as workflowEventDb from '../db/workflow-events';
 import { getCodebaseEnvVars } from '../db/env-vars';
-import type { ApprovalContext } from '@archon/workflows/schemas/workflow-run';
+import type { ApprovalContext, WorkflowRun } from '@archon/workflows/schemas/workflow-run';
 import {
   buildAiProfile,
   isLiteralSpec,
@@ -498,7 +498,10 @@ async function dispatchOrchestratorWorkflow(
    * report their real name, custom ones report "custom"). Optional: callers
    * that don't have it readily in scope omit it and the run reports "custom".
    */
-  source?: WorkflowSource
+  source?: WorkflowSource,
+  runMetadata?: Record<string, unknown>,
+  preCreatedRun?: WorkflowRun,
+  dispatchFaultInjection?: NonNullable<HandleMessageContext['workflowOverride']>['dispatchFaultInjection']
 ): Promise<void> {
   // Capability gate: hard-fail before any worktree/clone/AI cost if the
   // workflow declares `requires: [github]` and the originating user hasn't
@@ -514,6 +517,7 @@ async function dispatchOrchestratorWorkflow(
           'workflow.requirement_unmet'
         );
         await platform.sendMessage(conversationId, err.message);
+        if (preCreatedRun) throw err;
         return;
       }
       throw err;
@@ -560,6 +564,7 @@ async function dispatchOrchestratorWorkflow(
           },
           'isolation_blocked'
         );
+        if (preCreatedRun) throw error;
         return;
       }
       throw error;
@@ -571,11 +576,13 @@ async function dispatchOrchestratorWorkflow(
   // is in a resumable state (paused/failed-by-approval) in this conversation+codebase
   // before dispatching fresh. This ensures chat platforms (slack, discord,
   // github) resume after approval gates just like web does.
-  const resumableRun = await workflowDb.findResumableRunByParentConversation(
-    workflow.name,
-    conversation.id,
-    codebase.id
-  );
+  const resumableRun = runMetadata
+    ? null
+    : await workflowDb.findResumableRunByParentConversation(
+        workflow.name,
+        conversation.id,
+        codebase.id
+      );
   if (resumableRun?.working_path) {
     getLog().info(
       {
@@ -628,6 +635,7 @@ async function dispatchOrchestratorWorkflow(
           parentConversationId: conversation.id,
           userId,
           source,
+          runMetadata,
           ...prepared,
         }
       );
@@ -649,6 +657,7 @@ async function dispatchOrchestratorWorkflow(
           parentConversationId: conversation.id,
           userId,
           source,
+          runMetadata,
         }
       );
     }
@@ -666,6 +675,9 @@ async function dispatchOrchestratorWorkflow(
         isolationHints,
         userId,
         source,
+        runMetadata,
+        preCreatedRun,
+        dispatchFaultInjection,
       },
       workflow
     );
@@ -684,6 +696,8 @@ async function dispatchOrchestratorWorkflow(
         parentConversationId: conversation.id,
         userId,
         source,
+        runMetadata,
+        preCreatedRun,
       }
     );
   }
@@ -872,6 +886,7 @@ export async function handleMessage(
     isolationHints,
     attachedFiles,
     userId,
+    workflowOverride,
   } = context ?? {};
   try {
     getLog().debug({ conversationId, userId }, 'orchestrator_message_received');
@@ -1037,6 +1052,32 @@ export async function handleMessage(
       ];
 
       if (deterministicCommands.includes(command)) {
+        if (command === 'workflow' && workflowOverride) {
+          const codebase = await codebaseDb.getCodebase(workflowOverride.codebaseId);
+          if (!codebase) {
+            await platform.sendMessage(conversationId, 'Codebase not found.');
+            return;
+          }
+          await platform.sendMessage(
+            conversationId,
+            `Starting workflow: \`${workflowOverride.definition.name}\``
+          );
+          await dispatchOrchestratorWorkflow(
+            platform,
+            conversationId,
+            conversation,
+            codebase,
+            workflowOverride.definition,
+            workflowOverride.args,
+            isolationHints,
+            userId,
+            workflowOverride.source,
+            workflowOverride.runMetadata,
+            workflowOverride.preCreatedRun,
+            workflowOverride.dispatchFaultInjection
+          );
+          return;
+        }
         if (command === 'register-project') {
           getLog().debug({ command, conversationId }, 'deterministic_command');
           const result = await handleRegisterProject(message, platform, conversationId);
@@ -1475,6 +1516,9 @@ export async function handleMessage(
     } catch (sendError) {
       getLog().error({ err: toError(sendError), conversationId }, 'error_notification_failed');
     }
+    // Exact Kady admissions already own a durable pending row. Let the route's
+    // async failure boundary terminalize it instead of swallowing setup errors.
+    if (workflowOverride?.preCreatedRun) throw err;
   }
 }
 

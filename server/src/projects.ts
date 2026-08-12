@@ -20,6 +20,7 @@
  *         .kady/workflows/budget/reservations/ durable DAG budget records
  */
 import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { DEFAULT_PROJECT_ID, PROJECTS_ROOT } from "./config.ts";
@@ -262,6 +263,221 @@ export interface CreateProjectInput {
   spendLimitUsd?: number | null;
 }
 
+function hasProjectRepositoryCommit(sandbox: string): boolean {
+  // Do not let Git walk upward into Kady's own checkout: the sandbox itself
+  // must own the repository used for engine worktree isolation.
+  if (!fs.existsSync(path.join(sandbox, ".git"))) return false;
+  try {
+    execFileSync("git", ["-C", sandbox, "rev-parse", "--verify", "HEAD"], {
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function processIsRunning(processId: number): boolean {
+  try {
+    process.kill(processId, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+function acquireProjectRepositoryLock(sandbox: string): () => void {
+  const lockPath = path.join(path.dirname(sandbox), ".git-init.lock");
+  const waitBuffer = new Int32Array(new SharedArrayBuffer(4));
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      const descriptor = fs.openSync(lockPath, "wx", 0o600);
+      fs.writeFileSync(descriptor, `${process.pid}\n`, "utf-8");
+      return () => {
+        fs.closeSync(descriptor);
+        fs.rmSync(lockPath, { force: true });
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      let ownerProcessId = Number.NaN;
+      try {
+        ownerProcessId = Number.parseInt(fs.readFileSync(lockPath, "utf-8").trim(), 10);
+      } catch {
+        // An interrupted writer left an unreadable lock; remove it below.
+      }
+      if (!Number.isSafeInteger(ownerProcessId) || !processIsRunning(ownerProcessId)) {
+        fs.rmSync(lockPath, { force: true });
+        continue;
+      }
+      Atomics.wait(waitBuffer, 0, 0, 25);
+    }
+  }
+  throw new Error(`Timed out initializing project repository: ${sandbox}`);
+}
+
+const BASELINE_EXCLUDED_DIRECTORIES = new Set([
+  ".git",
+  ".kady",
+  ".pi",
+  ".venv",
+  "node_modules",
+]);
+
+function isBaselineCredentialName(name: string): boolean {
+  const lowerName = name.toLowerCase();
+  return (
+    lowerName.startsWith(".env") ||
+    /(^|[._-])credentials?([._-]|$)/.test(lowerName)
+  );
+}
+
+/** Enumerate only privacy-safe regular files/symlinks for the bootstrap commit. */
+function privacySafeProjectSnapshotPaths(sandbox: string): string[] {
+  const permittedPaths: string[] = [];
+  const visit = (absoluteDirectory: string, relativeDirectory: string): void => {
+    for (const entry of fs.readdirSync(absoluteDirectory, { withFileTypes: true })) {
+      const isAllowedEngineDataRoot = relativeDirectory === "" && entry.name === ".archon";
+      if (
+        BASELINE_EXCLUDED_DIRECTORIES.has(entry.name) ||
+        isBaselineCredentialName(entry.name) ||
+        (entry.name.startsWith(".") && !isAllowedEngineDataRoot)
+      ) {
+        continue;
+      }
+      const relativePath = relativeDirectory
+        ? path.posix.join(relativeDirectory, entry.name)
+        : entry.name;
+      const absolutePath = path.join(absoluteDirectory, entry.name);
+      if (entry.isDirectory()) {
+        visit(absolutePath, relativePath);
+      } else if (entry.isFile() || entry.isSymbolicLink()) {
+        permittedPaths.push(relativePath);
+      }
+    }
+  };
+  visit(sandbox, "");
+  return permittedPaths;
+}
+
+function ensureProjectRepository(sandbox: string): void {
+  if (hasProjectRepositoryCommit(sandbox)) return;
+  const releaseLock = acquireProjectRepositoryLock(sandbox);
+  try {
+    if (hasProjectRepositoryCommit(sandbox)) return;
+    if (!fs.existsSync(path.join(sandbox, ".git"))) {
+      execFileSync("git", ["init", "--quiet", sandbox], { stdio: "ignore" });
+    }
+    execFileSync("git", ["-C", sandbox, "config", "user.name", "Kady"], { stdio: "ignore" });
+    execFileSync(
+      "git",
+      ["-C", sandbox, "config", "user.email", "kady@localhost"],
+      { stdio: "ignore" },
+    );
+    const temporaryDirectory = fs.mkdtempSync(path.join(path.dirname(sandbox), ".git-baseline-"));
+    const temporaryIndex = path.join(temporaryDirectory, "index");
+    const gitEnvironment = {
+      ...process.env,
+      GIT_INDEX_FILE: temporaryIndex,
+      GIT_LITERAL_PATHSPECS: "1",
+    };
+    try {
+      execFileSync("git", ["-C", sandbox, "read-tree", "--empty"], {
+        env: gitEnvironment,
+        stdio: "ignore",
+      });
+      const permittedPaths = privacySafeProjectSnapshotPaths(sandbox);
+      if (permittedPaths.length > 0) {
+        execFileSync(
+          "git",
+          ["-C", sandbox, "add", "--force", "--", ...permittedPaths],
+          { env: gitEnvironment, stdio: "ignore" },
+        );
+      }
+      const tree = execFileSync("git", ["-C", sandbox, "write-tree"], {
+        env: gitEnvironment,
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+      const commit = execFileSync(
+        "git",
+        ["-C", sandbox, "commit-tree", tree, "-m", "Initialize Kady project"],
+        {
+          env: gitEnvironment,
+          encoding: "utf-8",
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      ).trim();
+      execFileSync("git", ["-C", sandbox, "update-ref", "HEAD", commit], {
+        stdio: "ignore",
+      });
+    } finally {
+      fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  } finally {
+    releaseLock();
+  }
+}
+
+/**
+ * Materialize the sandbox inputs visible to a workflow as an unreachable-by-branch
+ * Git commit, then retain it under a Kady-owned ref for the lifetime of the run.
+ * A temporary index keeps the user's checkout, index, and current branch untouched.
+ */
+export function createProjectRunSnapshot(projectId: string, runIdentity: string): string {
+  // TODO(#33-hardening): bound retained snapshot refs/manifests and add safe GC in the hardening lane.
+  validateId(projectId);
+  const paths = ensureProjectExists(projectId);
+  const temporaryDirectory = fs.mkdtempSync(path.join(paths.root, ".run-snapshot-"));
+  const temporaryIndex = path.join(temporaryDirectory, "index");
+  const gitEnvironment = {
+    ...process.env,
+    GIT_INDEX_FILE: temporaryIndex,
+    GIT_LITERAL_PATHSPECS: "1",
+  };
+  try {
+    execFileSync("git", ["-C", paths.sandbox, "read-tree", "--empty"], {
+      env: gitEnvironment,
+      stdio: "ignore",
+    });
+    const permittedPaths = privacySafeProjectSnapshotPaths(paths.sandbox);
+    if (permittedPaths.length > 0) {
+      execFileSync(
+        "git",
+        ["-C", paths.sandbox, "add", "--force", "--", ...permittedPaths],
+        { env: gitEnvironment, stdio: "ignore" },
+      );
+    }
+    const tree = execFileSync("git", ["-C", paths.sandbox, "write-tree"], {
+      env: gitEnvironment,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    const parent = execFileSync("git", ["-C", paths.sandbox, "rev-parse", "HEAD"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    const snapshot = execFileSync(
+      "git",
+      ["-C", paths.sandbox, "commit-tree", tree, "-p", parent, "-m", `Kady run snapshot ${runIdentity}`],
+      {
+        env: gitEnvironment,
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    ).trim();
+    const snapshotRef = crypto.createHash("sha256").update(runIdentity).digest("hex");
+    execFileSync(
+      "git",
+      ["-C", paths.sandbox, "update-ref", `refs/kady/run-snapshots/${snapshotRef}`, snapshot],
+      { stdio: "ignore" },
+    );
+    return snapshot;
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+}
+
 export function createProject(input: CreateProjectInput): ProjectMeta {
   const name = (input.name || "").trim() || "Untitled project";
   const projectId = input.projectId ?? mintProjectId(name);
@@ -291,9 +507,15 @@ export function createProject(input: CreateProjectInput): ProjectMeta {
     archived: false,
     spendLimitUsd: limit,
   };
-  fs.mkdirSync(paths.sandbox, { recursive: true });
-  seedSandboxFiles(paths);
-  writeProjectJson(paths, meta);
+  try {
+    fs.mkdirSync(paths.sandbox, { recursive: true });
+    seedSandboxFiles(paths);
+    ensureProjectRepository(paths.sandbox);
+    writeProjectJson(paths, meta);
+  } catch (error) {
+    fs.rmSync(paths.root, { recursive: true, force: true });
+    throw error;
+  }
 
   const index = loadIndex();
   index.projects[meta.id] = meta as unknown as Record<string, unknown>;
@@ -380,6 +602,9 @@ export function ensureProjectExists(projectId: string): ProjectPaths {
   fs.mkdirSync(paths.kadyDir, { recursive: true });
   // Covers projects that predate sandbox seeding; no-op once the files exist.
   seedSandboxFiles(paths);
+  // Project workspaces are execution repositories. This also upgrades the
+  // default project and sandboxes created before Git initialization existed.
+  ensureProjectRepository(paths.sandbox);
 
   if (!fs.existsSync(paths.projectJson)) {
     const now = nowIso();

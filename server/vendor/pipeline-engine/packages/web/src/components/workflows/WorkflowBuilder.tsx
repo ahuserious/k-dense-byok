@@ -16,6 +16,7 @@ import {
 } from '@/lib/api';
 import type { CommandEntry } from '@/lib/api';
 import { dagNodesToReactFlow } from '@/lib/dag-layout';
+import { resolveWorkflowBuilderBinding } from '@/lib/workflow-builder-binding';
 import { useBuilderKeyboard } from '@/hooks/useBuilderKeyboard';
 import { useBuilderUndo } from '@/hooks/useBuilderUndo';
 import { useBuilderValidation } from '@/hooks/useBuilderValidation';
@@ -118,12 +119,18 @@ function NodeLibraryPanel({
 function WorkflowBuilderInner(): React.ReactElement {
   const [searchParams] = useSearchParams();
   const editName = searchParams.get('edit');
+  const boundCodebaseId = searchParams.get('codebaseId');
   const navigate = useNavigate();
 
   const { codebases, selectedProjectId } = useProject();
-  const cwd = selectedProjectId
-    ? codebases?.find(cb => cb.id === selectedProjectId)?.default_cwd
-    : undefined;
+  const projectBinding = resolveWorkflowBuilderBinding(
+    boundCodebaseId,
+    selectedProjectId,
+    codebases
+  );
+  const activeCodebaseId = projectBinding?.codebaseId;
+  const cwd = projectBinding?.cwd;
+  const bindingKey = `${editName ?? ''}\u0000${activeCodebaseId ?? ''}\u0000${cwd ?? ''}`;
 
   // Core state
   const [workflowName, setWorkflowName] = useState('');
@@ -131,6 +138,7 @@ function WorkflowBuilderInner(): React.ReactElement {
   const [provider, setProvider] = useState<string | undefined>(undefined);
   const [model, setModel] = useState<string | undefined>(undefined);
   const [workflowSource, setWorkflowSource] = useState<WorkflowSource | undefined>(undefined);
+  const [loadedWorkflowId, setLoadedWorkflowId] = useState<string | undefined>(undefined);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
 
@@ -143,6 +151,7 @@ function WorkflowBuilderInner(): React.ReactElement {
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-arguments -- TSC infers never[] without explicit Edge
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const activeBindingKey = useRef(bindingKey);
 
   // Loop state
 
@@ -201,14 +210,20 @@ function WorkflowBuilderInner(): React.ReactElement {
   }, [workflowName, workflowDescription, provider, model, nodes, edges]);
 
   const loadWorkflow = useCallback(
-    async (name: string): Promise<void> => {
+    async (name: string, requestedBindingKey: string): Promise<void> => {
+      if (!activeCodebaseId || !cwd) {
+        setValidationErrors(['Select a project before loading a workflow.']);
+        return;
+      }
       try {
-        const { workflow, source } = await getWorkflow(name, cwd);
+        const { workflow, source, workflowId } = await getWorkflow(name, cwd, activeCodebaseId);
+        if (activeBindingKey.current !== requestedBindingKey) return;
         setWorkflowName(workflow.name);
         setWorkflowDescription(workflow.description);
         setProvider(workflow.provider);
         setModel(workflow.model);
         setWorkflowSource(source);
+        setLoadedWorkflowId(workflowId);
         setValidationErrors([]);
 
         const { nodes: rfNodes, edges: rfEdges } = dagNodesToReactFlow(workflow.nodes);
@@ -217,26 +232,37 @@ function WorkflowBuilderInner(): React.ReactElement {
 
         setHasUnsavedChanges(false);
       } catch (err) {
+        if (activeBindingKey.current !== requestedBindingKey) return;
         const error = err instanceof Error ? err : new Error(String(err));
         console.error('[workflow-builder] workflow.load_failed', {
           workflowName: name,
+          codebaseId: activeCodebaseId,
           cwd,
           error,
         });
         setValidationErrors([`Failed to load workflow: ${error.message}`]);
       }
     },
-    [cwd, setNodes, setEdges]
+    [activeCodebaseId, cwd, setNodes, setEdges]
   );
 
-  // Auto-load if ?edit= is present
-  const autoLoaded = useRef(false);
+  // A builder URL is bound to one exact codebase. Reset before loading a new
+  // binding so a slow response from the prior project cannot repopulate it.
   useEffect(() => {
-    if (editName && !autoLoaded.current) {
-      autoLoaded.current = true;
-      void loadWorkflow(editName);
-    }
-  }, [editName, loadWorkflow]);
+    activeBindingKey.current = bindingKey;
+    setWorkflowName('');
+    setWorkflowDescription('');
+    setProvider(undefined);
+    setModel(undefined);
+    setWorkflowSource(undefined);
+    setLoadedWorkflowId(undefined);
+    setHasUnsavedChanges(false);
+    setValidationErrors([]);
+    setNodes([]);
+    setEdges([]);
+    setSelectedNodeId(null);
+    if (editName) void loadWorkflow(editName, bindingKey);
+  }, [bindingKey, editName, loadWorkflow, setEdges, setNodes]);
 
   const handleToggleValidationPanel = useCallback((): void => {
     setValidationPanelOpen(v => !v);
@@ -291,30 +317,46 @@ function WorkflowBuilderInner(): React.ReactElement {
       setValidationErrors(['Workflow name is required']);
       return;
     }
+    if (!activeCodebaseId || !cwd) {
+      setValidationErrors(['Select a project before saving a workflow.']);
+      setValidationPanelOpen(true);
+      return;
+    }
+    const requestedBindingKey = activeBindingKey.current;
     try {
       const def = buildDefinition();
       const validation = await validateWorkflow(def);
+      if (activeBindingKey.current !== requestedBindingKey) return;
       if (!validation.valid) {
         setValidationErrors(validation.errors ?? ['Workflow is invalid']);
         return;
       }
       setValidationErrors([]);
-      await saveWorkflow(workflowName.trim(), def, cwd, workflowSource);
+      const saved = await saveWorkflow(
+        loadedWorkflowId ?? workflowName.trim(),
+        def,
+        cwd,
+        workflowSource,
+        activeCodebaseId
+      );
+      if (activeBindingKey.current !== requestedBindingKey) return;
+      setLoadedWorkflowId(saved.workflowId);
       setHasUnsavedChanges(false);
     } catch (err) {
+      if (activeBindingKey.current !== requestedBindingKey) return;
       const error = err instanceof Error ? err : new Error('Unknown error');
       console.error('[workflow-builder] workflow.save_failed', { workflowName, cwd, error });
       setValidationErrors([`Save failed: ${error.message}`]);
       setValidationPanelOpen(true);
     }
-  }, [buildDefinition, workflowName, cwd, workflowSource]);
+  }, [activeCodebaseId, buildDefinition, workflowName, cwd, workflowSource, loadedWorkflowId]);
 
   const handleRun = useCallback(async (): Promise<void> => {
     if (!workflowName.trim() || hasUnsavedChanges) return;
     try {
-      const result = await createConversation(selectedProjectId ?? undefined);
+      const result = await createConversation(activeCodebaseId ?? undefined);
       const conversationId = result.conversationId;
-      await runWorkflow(workflowName.trim(), conversationId, '');
+      await runWorkflow(loadedWorkflowId ?? workflowName.trim(), conversationId, '', cwd);
       navigate(`/legacy/chat/${conversationId}`);
     } catch (err) {
       const error = err instanceof Error ? err : new Error('Unknown error');
@@ -322,7 +364,7 @@ function WorkflowBuilderInner(): React.ReactElement {
       setValidationErrors([`Run failed: ${error.message}`]);
       setValidationPanelOpen(true);
     }
-  }, [workflowName, hasUnsavedChanges, selectedProjectId, navigate]);
+  }, [workflowName, loadedWorkflowId, hasUnsavedChanges, activeCodebaseId, navigate, cwd]);
 
   // Undo/redo handlers
   const handleUndo = useCallback((): void => {
@@ -475,7 +517,7 @@ function WorkflowBuilderInner(): React.ReactElement {
           void handleRun();
         }}
         onLoadWorkflow={(name): void => {
-          void loadWorkflow(name);
+          void loadWorkflow(name, bindingKey);
         }}
       />
 

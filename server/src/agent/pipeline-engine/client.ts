@@ -100,23 +100,66 @@ export async function pipelineEngineHealthy(): Promise<boolean> {
 
 // --- workflow CRUD ----------------------------------------------------------
 
-export async function listWorkflows(signal?: AbortSignal): Promise<unknown> {
-  return pipelineEngineFetch("/api/workflows", undefined, {
+export interface PipelineWorkflowScope {
+  cwd: string;
+  codebaseId: string;
+}
+
+function workflowScopeQuery(scope?: PipelineWorkflowScope): string {
+  if (!scope) return "";
+  const query = new URLSearchParams({ cwd: scope.cwd, codebaseId: scope.codebaseId });
+  return `?${query.toString()}`;
+}
+
+function isAbortSignal(value: unknown): value is AbortSignal {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    "aborted" in value &&
+    typeof (value as AbortSignal).addEventListener === "function",
+  );
+}
+
+export async function listWorkflows(
+  scopeOrSignal?: PipelineWorkflowScope | AbortSignal,
+  externalSignal?: AbortSignal,
+): Promise<unknown> {
+  const scope = isAbortSignal(scopeOrSignal) ? undefined : scopeOrSignal;
+  const signal = isAbortSignal(scopeOrSignal) ? scopeOrSignal : externalSignal;
+  return pipelineEngineFetch(`/api/workflows${workflowScopeQuery(scope)}`, undefined, {
     signal,
     timeoutMs: PIPELINE_ENGINE_LIST_TIMEOUT_MS,
   });
 }
-export async function getWorkflow(name: string): Promise<unknown> {
-  return pipelineEngineFetch(`/api/workflows/${encodeURIComponent(name)}`);
+export async function getWorkflow(
+  workflowId: string,
+  scope?: PipelineWorkflowScope,
+): Promise<unknown> {
+  return pipelineEngineFetch(
+    `/api/workflows/${encodeURIComponent(workflowId)}${workflowScopeQuery(scope)}`,
+  );
 }
-export async function saveWorkflow(name: string, definition: unknown): Promise<unknown> {
-  return pipelineEngineFetch(`/api/workflows/${encodeURIComponent(name)}`, {
-    method: "PUT",
-    body: JSON.stringify(definition),
-  });
+export async function saveWorkflow(
+  workflowId: string,
+  definition: unknown,
+  scope?: PipelineWorkflowScope,
+): Promise<unknown> {
+  return pipelineEngineFetch(
+    `/api/workflows/${encodeURIComponent(workflowId)}${workflowScopeQuery(scope)}`,
+    {
+      method: "PUT",
+      body: JSON.stringify(definition),
+    },
+  );
 }
-export async function deleteWorkflow(name: string): Promise<unknown> {
-  return pipelineEngineFetch(`/api/workflows/${encodeURIComponent(name)}`, { method: "DELETE" });
+export async function deleteWorkflow(
+  workflowId: string,
+  scope?: PipelineWorkflowScope,
+): Promise<unknown> {
+  return pipelineEngineFetch(
+    `/api/workflows/${encodeURIComponent(workflowId)}${workflowScopeQuery(scope)}`,
+    { method: "DELETE" },
+  );
 }
 export async function validateWorkflow(definition: unknown): Promise<unknown> {
   return pipelineEngineFetch("/api/workflows/validate", {
@@ -138,7 +181,10 @@ export async function listCodebases(): Promise<unknown> {
  * a codebase already points at `localPath`. The list shape is loose, so we walk
  * each entry and treat any string field equal to `localPath` as a match.
  */
-export async function registerCodebase(localPath: string): Promise<unknown> {
+export async function registerCodebase(
+  localPath: string,
+  options: { name?: string } = {},
+): Promise<unknown> {
   const existing = await listCodebases();
   if (Array.isArray(existing)) {
     const alreadyRegistered = existing.some((entry) => {
@@ -154,20 +200,33 @@ export async function registerCodebase(localPath: string): Promise<unknown> {
   }
   return pipelineEngineFetch("/api/codebases", {
     method: "POST",
-    body: JSON.stringify({ path: localPath }),
+    body: JSON.stringify({ path: localPath, ...options }),
   });
 }
 
 // --- run lifecycle ----------------------------------------------------------
 
-export async function runWorkflow(name: string, body: unknown): Promise<unknown> {
-  return pipelineEngineFetch(`/api/workflows/${encodeURIComponent(name)}/run`, {
-    method: "POST",
-    body: JSON.stringify(body ?? {}),
-  });
+export async function runWorkflow(
+  workflowId: string,
+  body: unknown,
+  scope?: PipelineWorkflowScope,
+): Promise<unknown> {
+  return pipelineEngineFetch(
+    `/api/workflows/${encodeURIComponent(workflowId)}/run${workflowScopeQuery(scope)}`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        ...((body && typeof body === "object" && !Array.isArray(body)) ? body : {}),
+        ...(scope ? { cwd: scope.cwd, codebaseId: scope.codebaseId, workflowId } : {}),
+      }),
+    },
+  );
 }
-export async function listRuns(): Promise<unknown> {
-  return pipelineEngineFetch("/api/dashboard/runs");
+export async function listRuns(codebaseId?: string): Promise<unknown> {
+  const query = codebaseId
+    ? `?${new URLSearchParams({ codebaseId }).toString()}`
+    : "";
+  return pipelineEngineFetch(`/api/dashboard/runs${query}`);
 }
 export async function getRun(runId: string): Promise<unknown> {
   return pipelineEngineFetch(`/api/workflows/runs/${encodeURIComponent(runId)}`);

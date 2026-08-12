@@ -170,6 +170,7 @@ export interface WorkflowRunManifestV1 {
   input: {
     goal?: string;
     variables?: Record<string, unknown>;
+    files?: Record<string, string[]>;
   };
   effectiveLimits: WorkflowLimits;
   /** Exact normalized graph executed by this run. Later definition edits cannot alter it. */

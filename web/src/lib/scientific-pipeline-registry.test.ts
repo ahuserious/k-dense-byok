@@ -3,13 +3,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DagWorkflowDefinitionSummary, WorkflowGraphDocument } from "./dag-workflows";
 import { apiFetch } from "./projects";
 import {
-  AMBIGUOUS_VENDORED_WORKFLOW_NAME_REASON,
   buildScientificPipelineRegistry,
   listVendoredWorkflowRegistrySources,
   typedWorkflowRegistrySource,
   vendoredPipelineEngineHealth,
   vendoredWorkflowRegistrySource,
-  VENDORED_PROJECT_SCOPE_ADVISORY,
   workflowRouteForEngine,
 } from "./scientific-pipeline-registry";
 
@@ -97,7 +95,7 @@ describe("scientific pipeline registry", () => {
         { id: "review", depends_on: ["collect"], prompt: "Review evidence." },
         { id: "collect", prompt: "Collect evidence." },
       ],
-    });
+    }, { codebaseId: "codebase-a" });
 
     expect(vendored).not.toBeNull();
     const registry = buildScientificPipelineRegistry([typed], [vendored!]);
@@ -118,7 +116,7 @@ describe("scientific pipeline registry", () => {
         { id: "collect", prompt: "Collect evidence." },
         { id: "publish", depends_on: ["collect"], prompt: "Publish evidence." },
       ],
-    });
+    }, { codebaseId: "codebase-a" });
     const differentNameSameStructure = vendoredWorkflowRegistrySource({
       name: "Another Workflow",
       description: "Same topology, different identity",
@@ -126,7 +124,7 @@ describe("scientific pipeline registry", () => {
         { id: "collect", prompt: "Collect evidence." },
         { id: "review", depends_on: ["collect"], prompt: "Review evidence." },
       ],
-    });
+    }, { codebaseId: "codebase-a" });
 
     const registry = buildScientificPipelineRegistry(
       [typedWorkflowRegistrySource(
@@ -152,7 +150,7 @@ describe("scientific pipeline registry", () => {
         { id: "collect", prompt: "Collect evidence." },
         { id: "review", depends_on: ["collect"], prompt: "Review evidence." },
       ],
-    });
+    }, { codebaseId: "codebase-a" });
     const [entry] = buildScientificPipelineRegistry([typed], [vendored!]);
 
     expect(workflowRouteForEngine(entry, "typed")).toMatchObject({
@@ -165,31 +163,53 @@ describe("scientific pipeline registry", () => {
     });
   });
 
-  it("keeps distinct whitespace-bearing engine identifiers exact and flags their normalized route ambiguity", () => {
+  it("routes normalized display-name collisions independently by stable filename", () => {
     const padded = vendoredWorkflowRegistrySource({
       name: " foo ",
       nodes: [{ id: "collect", prompt: "Collect evidence." }],
-    }, { origin: "project", filename: "padded.yaml" });
+    }, { codebaseId: "codebase-a", origin: "project", filename: "padded.yaml" });
     const plain = vendoredWorkflowRegistrySource({
       name: "foo",
       nodes: [{ id: "collect", prompt: "Collect evidence." }],
-    }, { origin: "catalogue", filename: "plain.yaml" });
+    }, { codebaseId: "codebase-a", origin: "catalogue", filename: "plain.yaml" });
 
     const registry = buildScientificPipelineRegistry([], [padded!, plain!]);
 
     expect(registry).toHaveLength(2);
-    expect(registry.map((entry) => workflowRouteForEngine(entry, "vendored").workflowName))
-      .toEqual([" foo ", "foo"]);
+    expect(registry.map((entry) => workflowRouteForEngine(entry, "vendored").workflowId))
+      .toEqual(["padded.yaml", "plain.yaml"]);
     expect(padded?.sourceId).toContain("origin=project");
     expect(padded?.sourceId).toContain("filename=padded.yaml");
     expect(plain?.sourceId).toContain("origin=catalogue");
     for (const entry of registry) {
-      expect(entry.routingAmbiguities).toEqual([
-        expect.objectContaining({
-          engine: "vendored",
-          identifiers: [" foo ", "foo"],
-        }),
-      ]);
+      expect(entry.routingAmbiguities).toBeUndefined();
+    }
+  });
+
+  it("fails closed when the engine returns a genuinely duplicate stable workflow id", () => {
+    const first = vendoredWorkflowRegistrySource({
+      name: "First display name",
+      nodes: [{ id: "collect" }],
+    }, { codebaseId: "codebase-a", origin: "project", filename: "duplicate.yaml" });
+    const second = vendoredWorkflowRegistrySource({
+      name: "Second display name",
+      nodes: [{ id: "review" }],
+    }, { codebaseId: "codebase-a", origin: "project", filename: "duplicate.yaml" });
+
+    const registry = buildScientificPipelineRegistry([], [first!, second!]);
+
+    expect(registry).toHaveLength(2);
+    for (const entry of registry) {
+      expect(entry.vendoredRouting).toEqual(expect.objectContaining({
+        routable: false,
+        projectScopeVerified: true,
+      }));
+      expect(entry.routingAmbiguities?.[0]).toEqual(expect.objectContaining({
+        engine: "vendored",
+        identifiers: ["duplicate.yaml", "duplicate.yaml"],
+      }));
+      expect(() => workflowRouteForEngine(entry, "vendored"))
+        .toThrow("duplicate stable identifier");
     }
   });
 
@@ -241,6 +261,7 @@ describe("scientific pipeline registry", () => {
         workflow: { name: "source-aware", nodes: [{ id: "collect" }] },
         source: "project",
         filename: "source-aware.yaml",
+        codebaseId: "codebase-a",
       }],
     }), { status: 200 }));
 
@@ -251,12 +272,13 @@ describe("scientific pipeline registry", () => {
       displayName: "source-aware",
       origin: "project",
       filename: "source-aware.yaml",
+      codebaseId: "codebase-a",
     });
     expect(source.sourceId).toContain("origin=project");
     expect(source.sourceId).toContain("filename=source-aware.yaml");
   });
 
-  it("fails closed on duplicate names from the real engine list shape while distinct names remain routable", async () => {
+  it("routes duplicate names independently by the stable ids from the scoped engine list", async () => {
     apiFetchMock.mockResolvedValue(new Response(JSON.stringify({
       workflows: [
         {
@@ -266,6 +288,9 @@ describe("scientific pipeline registry", () => {
             nodes: [{ id: "collect" }],
           },
           source: "project",
+          filename: "first.yaml",
+          workflowId: "workflow_11111111111111111111111111111111",
+          codebaseId: "codebase-a",
         },
         {
           workflow: {
@@ -274,6 +299,9 @@ describe("scientific pipeline registry", () => {
             nodes: [{ id: "collect" }],
           },
           source: "project",
+          filename: "second.yaml",
+          workflowId: "workflow_22222222222222222222222222222222",
+          codebaseId: "codebase-a",
         },
         {
           workflow: {
@@ -282,6 +310,9 @@ describe("scientific pipeline registry", () => {
             nodes: [{ id: "review" }],
           },
           source: "project",
+          filename: "distinct.yaml",
+          workflowId: "workflow_33333333333333333333333333333333",
+          codebaseId: "codebase-a",
         },
       ],
     }), { status: 200 }));
@@ -295,26 +326,26 @@ describe("scientific pipeline registry", () => {
       (entry) => entry.vendored?.workflowName === "distinct-name",
     );
 
-    expect(sources[0].sourceId).toBe(sources[1].sourceId);
+    expect(sources[0].sourceId).not.toBe(sources[1].sourceId);
     expect(duplicates).toHaveLength(2);
     expect(new Set(duplicates.map((entry) => entry.id)).size).toBe(2);
     for (const entry of duplicates) {
       expect(entry.vendoredRouting).toEqual({
-        routable: false,
-        projectScopeVerified: false,
-        scopeAdvisory: VENDORED_PROJECT_SCOPE_ADVISORY,
-        blockedReason: AMBIGUOUS_VENDORED_WORKFLOW_NAME_REASON,
+        routable: true,
+        projectScopeVerified: true,
       });
-      expect(() => workflowRouteForEngine(entry, "vendored"))
-        .toThrow(AMBIGUOUS_VENDORED_WORKFLOW_NAME_REASON);
     }
     expect(distinct?.vendoredRouting).toEqual({
       routable: true,
-      projectScopeVerified: false,
-      scopeAdvisory: VENDORED_PROJECT_SCOPE_ADVISORY,
+      projectScopeVerified: true,
     });
-    expect(workflowRouteForEngine(distinct!, "vendored").workflowName)
-      .toBe("distinct-name");
+    expect(duplicates.map((entry) => workflowRouteForEngine(entry, "vendored").workflowId))
+      .toEqual([
+        "workflow_11111111111111111111111111111111",
+        "workflow_22222222222222222222222222222222",
+      ]);
+    expect(workflowRouteForEngine(distinct!, "vendored").workflowId)
+      .toBe("workflow_33333333333333333333333333333333");
   });
 
   it("keeps the timeout active while a vendored response body is stalled", async () => {

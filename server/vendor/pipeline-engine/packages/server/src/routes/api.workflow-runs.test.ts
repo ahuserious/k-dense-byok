@@ -135,6 +135,10 @@ mock.module('@archon/paths', () => ({
 
 mockAllWorkflowModules();
 
+import { discoverWorkflowsWithConfig } from '@archon/workflows/workflow-discovery';
+
+const mockDiscoverWorkflowsWithConfig = discoverWorkflowsWithConfig as ReturnType<typeof mock>;
+
 mock.module('@archon/git', () => ({
   removeWorktree: mock(async () => {}),
   toRepoPath: (p: string) => p,
@@ -316,6 +320,30 @@ describe('POST /api/workflows/:name/run', () => {
     mockHandleMessage.mockReset();
     mockAddMessage.mockReset();
     mockGenerateAndSetTitle.mockReset();
+    mockDiscoverWorkflowsWithConfig.mockReset();
+    mockDiscoverWorkflowsWithConfig.mockImplementation(async () => ({
+      workflows: [
+        {
+          workflow: {
+            name: 'deploy',
+            description: 'Deploy workflow',
+            nodes: [{ id: 'deploy', prompt: 'Deploy.' }],
+          },
+          source: 'project',
+          filename: 'deploy.yaml',
+        },
+        {
+          workflow: {
+            name: 'test-suite',
+            description: 'Test workflow',
+            nodes: [{ id: 'test', prompt: 'Test.' }],
+          },
+          source: 'project',
+          filename: 'test-suite.yaml',
+        },
+      ],
+      errors: [],
+    }));
   });
 
   test('dispatches workflow run to orchestrator and returns accepted', async () => {
@@ -479,7 +507,7 @@ describe('POST /api/workflows/:name/run', () => {
     expect(response.status).toBe(400);
 
     const body = (await response.json()) as { error: string };
-    expect(body.error).toContain('Invalid workflow name');
+    expect(body.error).toContain('Invalid workflow identifier');
   });
 
   test('returns 400 for malformed JSON body', async () => {
@@ -720,6 +748,62 @@ describe('GET /api/workflows/runs', () => {
 
     const [[callArgs]] = mockListWorkflowRuns.mock.calls as [[{ codebaseId?: string }]][];
     expect(callArgs?.codebaseId).toBe('cb-uuid-1');
+  });
+
+  test('returns an authoritative project admission lookup even when no run exists', async () => {
+    mockListWorkflowRuns.mockImplementationOnce(async () => []);
+
+    const { app } = makeApp();
+    const response = await app.request(
+      '/api/workflows/runs?projectId=project-a&admissionId=kadypipe_11111111111111111111111111111111'
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      runs: [],
+      admissionQuery: {
+        projectId: 'project-a',
+        admissionId: 'kadypipe_11111111111111111111111111111111',
+        authoritative: true,
+      },
+    });
+    expect(mockListWorkflowRuns).toHaveBeenCalledWith(expect.objectContaining({
+      kadyProjectId: 'project-a',
+      kadyAdmissionId: 'kadypipe_11111111111111111111111111111111',
+    }));
+  });
+
+  test('exposes the durable dispatch state for an exact admission lookup', async () => {
+    mockListWorkflowRuns.mockImplementationOnce(async () => [{
+      ...MOCK_PENDING_RUN,
+      metadata: {
+        ...MOCK_PENDING_RUN.metadata,
+        kadyDispatchState: 'pre_dispatch',
+      },
+    }]);
+
+    const { app } = makeApp();
+    const response = await app.request(
+      '/api/workflows/runs?projectId=project-a&admissionId=kadypipe_11111111111111111111111111111111'
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      admissionQuery: {
+        projectId: 'project-a',
+        admissionId: 'kadypipe_11111111111111111111111111111111',
+        authoritative: true,
+        dispatchState: 'pre_dispatch',
+      },
+    });
+  });
+
+  test('rejects a one-sided admission lookup', async () => {
+    const { app } = makeApp();
+    const response = await app.request('/api/workflows/runs?projectId=project-a');
+
+    expect(response.status).toBe(400);
+    expect(mockListWorkflowRuns).not.toHaveBeenCalled();
   });
 
   test('caps limit at 200', async () => {

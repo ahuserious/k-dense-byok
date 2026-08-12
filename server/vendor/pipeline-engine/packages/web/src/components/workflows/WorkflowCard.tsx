@@ -41,6 +41,8 @@ const ICON_MAP: Record<WorkflowIconName, LucideIcon> = {
 
 interface WorkflowCardProps {
   workflow: WorkflowDefinition;
+  workflowId: string;
+  codebaseId: string;
   isSelected: boolean;
   onToggle: (name: string) => void;
   onRun: (name: string) => void;
@@ -48,6 +50,8 @@ interface WorkflowCardProps {
 
 export function WorkflowCard({
   workflow,
+  workflowId,
+  codebaseId,
   isSelected,
   onToggle,
   onRun,
@@ -179,16 +183,18 @@ export function WorkflowCard({
           ))}
         </div>
         <div className="flex items-center gap-1">
-          <Link
-            to={`/legacy/workflows/builder?edit=${encodeURIComponent(workflow.name)}`}
-            onClick={(e): void => {
-              e.stopPropagation();
-            }}
-            className="p-1.5 rounded-md text-text-tertiary hover:text-text-primary hover:bg-surface-elevated transition-colors"
-            title="Edit in builder"
-          >
-            <Pencil className="size-3.5" />
-          </Link>
+          {codebaseId && (
+            <Link
+              to={`/legacy/workflows/builder?edit=${encodeURIComponent(workflowId)}&codebaseId=${encodeURIComponent(codebaseId)}`}
+              onClick={(e): void => {
+                e.stopPropagation();
+              }}
+              className="p-1.5 rounded-md text-text-tertiary hover:text-text-primary hover:bg-surface-elevated transition-colors"
+              title="Edit in builder"
+            >
+              <Pencil className="size-3.5" />
+            </Link>
+          )}
           <button
             onClick={(e): void => {
               e.stopPropagation();

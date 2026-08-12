@@ -35,9 +35,13 @@ import {
 } from "../cost/billing.ts";
 import { currentProjectId } from "../scope.ts";
 import { corsResponseHeaders } from "../cors.ts";
-import { listProjects, resolvePaths } from "../projects.ts";
+import { createProjectRunSnapshot, listProjects, resolvePaths } from "../projects.ts";
 import { resolveWorkflowModel } from "../agent/workflow-model-resolution.ts";
 import type { ModelRequest } from "../workflows/schema.ts";
+import {
+  dagNodeSchema,
+  providerCallCountForDagNode,
+} from "../../vendor/pipeline-engine/packages/workflows/src/schemas/dag-node.ts";
 import {
   completePipelineAdmissionSettlement,
   findPipelineAdmission,
@@ -136,6 +140,7 @@ function workflowRevisionSha256(definition: unknown): string {
 
 interface UnresolvedPipelineNodeBudgetHook {
   nodeId: string;
+  modelCallCount: number;
   maxTokens: number;
   maxCostUsd: number;
   declaredBillingMode: "inherit" | "api" | "subscription";
@@ -157,11 +162,6 @@ function legacyBilling(provider: string, model: string): ReturnType<typeof billi
   return billingForProvider(modelProvider, authType);
 }
 
-function executablePipelineNode(node: Record<string, unknown>): boolean {
-  return typeof node.command === "string" || typeof node.prompt === "string" ||
-    recordOf(node.loop) !== undefined;
-}
-
 /** Extract settings-bearing hooks, falling back to the current engine's legacy fields. */
 export function unresolvedPipelineNodeBudgetHooks(
   definition: unknown,
@@ -180,7 +180,25 @@ export function unresolvedPipelineNodeBudgetHooks(
   const hooks: UnresolvedPipelineNodeBudgetHook[] = [];
   for (const [index, candidate] of nodes.entries()) {
     const node = recordOf(candidate);
-    if (!node || !executablePipelineNode(node)) continue;
+    if (!node) {
+      throw new WorkflowBudgetError(
+        "INVALID_ARGUMENT",
+        `Pipeline node ${String(index)} is not an object accepted by the engine schema.`,
+      );
+    }
+    const parsedNode = dagNodeSchema.safeParse(node);
+    if (!parsedNode.success) {
+      const providerShaped = typeof node.kind === "string" || typeof node.prompt === "string" ||
+        typeof node.command === "string" || recordOf(node.loop) !== undefined;
+      throw new WorkflowBudgetError(
+        "INVALID_ARGUMENT",
+        providerShaped
+          ? `Provider-backed pipeline node ${String(node.id ?? index)} is not supported by the engine node schema.`
+          : `Pipeline node ${String(node.id ?? index)} is not accepted by the engine node schema.`,
+      );
+    }
+    const modelCallCount = providerCallCountForDagNode(parsedNode.data);
+    if (modelCallCount === 0) continue;
     const settings = recordOf(node?.settings);
     const budget = recordOf(settings?.budget);
     const legacyMaxCostUsd = finiteNonNegative(node.maxBudgetUsd);
@@ -238,6 +256,7 @@ export function unresolvedPipelineNodeBudgetHooks(
     }
     hooks.push({
       nodeId: String(node?.id ?? `node-${index}`),
+      modelCallCount,
       maxTokens,
       maxCostUsd,
       declaredBillingMode: billingMode,
@@ -288,6 +307,7 @@ export async function pipelineNodeBudgetHooks(
     }
     return {
       nodeId: hook.nodeId,
+      modelCallCount: hook.modelCallCount,
       maxTokens: hook.maxTokens,
       maxCostUsd: hook.maxCostUsd,
       declaredBillingMode: hook.declaredBillingMode,
@@ -315,10 +335,54 @@ function mapError(reply: FastifyReply, err: unknown): { detail: string; engine: 
   return { detail: (err as Error).message, engine: "error" };
 }
 
+function engineRunRecord(snapshot: unknown): Record<string, unknown> | undefined {
+  const root = recordOf(snapshot);
+  return recordOf(root?.run) ?? root;
+}
+
+function engineRunBelongsToCodebase(snapshot: unknown, codebaseId: string): boolean {
+  const run = engineRunRecord(snapshot);
+  return run?.codebase_id === codebaseId || run?.codebaseId === codebaseId;
+}
+
+function scopedRunNotFound(reply: FastifyReply): { detail: string } {
+  reply.code(404);
+  return { detail: "Pipeline run not found." };
+}
+
 export type AdmissionQueryResult =
-  | { status: "found"; runId: string; run: Record<string, unknown> }
+  | { status: "found"; runId: string; run: Record<string, unknown>; dispatchState?: string }
   | { status: "not-found" }
   | { status: "unknown" };
+
+const CLAIMED_ENGINE_DISPATCH_STATES = new Set(["queued", "running", "dispatched"]);
+
+function engineDispatchState(run: Record<string, unknown>): string | undefined {
+  const metadata = recordOf(run.metadata);
+  const value = metadata?.kadyDispatchState ?? metadata?.kady_dispatch_state;
+  return typeof value === "string" ? value : undefined;
+}
+
+function engineRunHasDurableDispatchClaim(query: Extract<AdmissionQueryResult, { status: "found" }>): boolean {
+  const runStatus = String(query.run.status ?? query.run.state ?? "").toLowerCase();
+  return TERMINAL_RUN_STATUSES.has(runStatus) ||
+    runStatus === "running" || runStatus === "paused" ||
+    (runStatus === "pending" && query.dispatchState !== undefined &&
+      CLAIMED_ENGINE_DISPATCH_STATES.has(query.dispatchState));
+}
+
+function engineRunNeedsIdempotentReplay(
+  query: Extract<AdmissionQueryResult, { status: "found" }>,
+): boolean {
+  const runStatus = String(query.run.status ?? query.run.state ?? "").toLowerCase();
+  return runStatus === "pending" && query.dispatchState === "pre_dispatch";
+}
+
+function engineRunSnapshotSha(run: Record<string, unknown>): string | undefined {
+  const metadata = recordOf(run.metadata);
+  const value = metadata?.kadyRunSnapshotSha ?? metadata?.kady_run_snapshot_sha;
+  return typeof value === "string" && /^[a-f0-9]{40,64}$/.test(value) ? value : undefined;
+}
 
 /** A paginated legacy response can prove presence, but only the merge-time
  * authoritative admission-query watermark can prove absence. */
@@ -361,7 +425,16 @@ export async function queryEngineRunByAdmissionId(
     if (typeof matches[0].id !== "string" || matches[0].id.length < 1) {
       throw new Error(`Pipeline engine admission ${projectId}/${engineAdmissionKey} has no run id.`);
     }
-    return { status: "found", runId: matches[0].id, run: matches[0] };
+    const query = recordOf(root.admissionQuery ?? root.admission_query);
+    const queryDispatchState = query?.dispatchState ?? query?.dispatch_state;
+    const dispatchState = engineDispatchState(matches[0]) ??
+      (typeof queryDispatchState === "string" ? queryDispatchState : undefined);
+    return {
+      status: "found",
+      runId: matches[0].id,
+      run: matches[0],
+      ...(dispatchState === undefined ? {} : { dispatchState }),
+    };
   }
   const query = recordOf(root.admissionQuery ?? root.admission_query);
   return query?.authoritative === true &&
@@ -504,7 +577,11 @@ export async function reconcilePipelineTerminalSnapshot(
     throw new WorkflowBudgetError("NOT_FOUND", "Pipeline run admission key is not owned by this project.");
   }
   const admissionId = recovered.record.admissionId;
-  if ((run.workflow_name ?? run.workflowName) !== recovered.record.workflowName) {
+  const runMetadata = recordOf(run.metadata);
+  const workflowIdentity = typeof runMetadata?.kadyWorkflowId === "string"
+    ? runMetadata.kadyWorkflowId
+    : run.workflow_name ?? run.workflowName;
+  if (workflowIdentity !== recovered.record.workflowName) {
     throw new WorkflowBudgetError("CONFLICT", "Pipeline run workflow does not match its admission owner.");
   }
   if (recovered.record.status === "intent") {
@@ -614,6 +691,10 @@ export class PipelineReconciliationWorker {
                 record.engineAdmissionKey,
               );
               if (query.status === "found") {
+                if (!engineRunHasDurableDispatchClaim(query)) {
+                  await this.renewIfNeeded(project.id, record.admissionId);
+                  continue;
+                }
                 engineRunId = query.runId;
                 updatePipelineAdmission(project.id, record.admissionId, {
                   status: "dispatched",
@@ -670,7 +751,30 @@ export interface PipelineRouteOverrides {
   runWorkflow?: typeof pipelineEngine.runWorkflow;
   queryAdmission?: typeof queryEngineRunByAdmissionId;
   getRun?: typeof pipelineEngine.getRun;
+  listRuns?: typeof pipelineEngine.listRuns;
+  resumeRun?: typeof pipelineEngine.resumeRun;
+  cancelRun?: typeof pipelineEngine.cancelRun;
+  resolveWorkflowScope?: (
+    projectId: string,
+  ) => Promise<pipelineEngine.PipelineWorkflowScope>;
   reconciliationWorker?: PipelineReconciliationWorker | false;
+}
+
+async function resolveProjectWorkflowScope(
+  projectId: string,
+): Promise<pipelineEngine.PipelineWorkflowScope> {
+  const cwd = resolvePaths(projectId).sandbox;
+  const registered = recordOf(await pipelineEngine.registerCodebase(cwd, {
+    name: `kady/${projectId}`,
+  }));
+  const codebaseId = registered?.id;
+  const registeredCwd = registered?.default_cwd;
+  if (typeof codebaseId !== "string" || registeredCwd !== cwd) {
+    throw new PipelineEngineUnavailableError(
+      `Pipeline engine did not return an exact codebase registration for project ${projectId}.`,
+    );
+  }
+  return { cwd, codebaseId };
 }
 
 export async function registerPipelineRoutes(
@@ -682,6 +786,10 @@ export async function registerPipelineRoutes(
   const runWorkflow = overrides.runWorkflow ?? pipelineEngine.runWorkflow;
   const queryAdmission = overrides.queryAdmission ?? queryEngineRunByAdmissionId;
   const getRun = overrides.getRun ?? pipelineEngine.getRun;
+  const listRuns = overrides.listRuns ?? pipelineEngine.listRuns;
+  const resumeRun = overrides.resumeRun ?? pipelineEngine.resumeRun;
+  const cancelRun = overrides.cancelRun ?? pipelineEngine.cancelRun;
+  const resolveWorkflowScope = overrides.resolveWorkflowScope ?? resolveProjectWorkflowScope;
   if (overrides.reconciliationWorker !== false) {
     const worker = overrides.reconciliationWorker ?? new PipelineReconciliationWorker({
       queryAdmission,
@@ -698,17 +806,41 @@ export async function registerPipelineRoutes(
   app.get("/pipelines/health", async () => ({ healthy: await pipelineEngine.pipelineEngineHealthy() }));
 
   // --- workflow CRUD (proxied) ---
-  app.get("/pipelines", async (_req, reply) => {
+  app.get("/pipelines", async (req, reply) => {
+    const requestAbortController = new AbortController();
+    const abortForClosedRequest = () => requestAbortController.abort();
+    req.raw.once("close", abortForClosedRequest);
     try {
-      return await pipelineEngine.listWorkflows();
+      const scope = await resolveWorkflowScope(currentProjectId());
+      const result = await pipelineEngine.listWorkflows(scope, requestAbortController.signal);
+      const resultRecord = recordOf(result);
+      const workflows = resultRecord?.workflows;
+      if (!Array.isArray(workflows)) return result;
+      return {
+        ...resultRecord,
+        workflows: workflows.map((candidate) => {
+          const workflow = recordOf(candidate);
+          return workflow ? { ...workflow, codebaseId: scope.codebaseId } : candidate;
+        }),
+      };
     } catch (err) {
       return mapError(reply, err);
+    } finally {
+      req.raw.off("close", abortForClosedRequest);
     }
   });
 
   app.get("/pipelines/runs", async (_req, reply) => {
     try {
-      return await pipelineEngine.listRuns();
+      const scope = await resolveWorkflowScope(currentProjectId());
+      const result = await listRuns(scope.codebaseId);
+      const resultRecord = recordOf(result);
+      const runs = resultRecord?.runs;
+      if (!Array.isArray(runs)) return result;
+      return {
+        ...resultRecord,
+        runs: runs.filter((run) => engineRunBelongsToCodebase(run, scope.codebaseId)),
+      };
     } catch (err) {
       return mapError(reply, err);
     }
@@ -716,7 +848,8 @@ export async function registerPipelineRoutes(
 
   app.get<{ Params: { name: string } }>("/pipelines/:name", async (req, reply) => {
     try {
-      return await pipelineEngine.getWorkflow(req.params.name);
+      const scope = await resolveWorkflowScope(currentProjectId());
+      return await pipelineEngine.getWorkflow(req.params.name, scope);
     } catch (err) {
       return mapError(reply, err);
     }
@@ -724,7 +857,8 @@ export async function registerPipelineRoutes(
 
   app.put<{ Params: { name: string } }>("/pipelines/:name", async (req, reply) => {
     try {
-      return await pipelineEngine.saveWorkflow(req.params.name, req.body);
+      const scope = await resolveWorkflowScope(currentProjectId());
+      return await pipelineEngine.saveWorkflow(req.params.name, req.body, scope);
     } catch (err) {
       return mapError(reply, err);
     }
@@ -732,7 +866,8 @@ export async function registerPipelineRoutes(
 
   app.delete<{ Params: { name: string } }>("/pipelines/:name", async (req, reply) => {
     try {
-      return await pipelineEngine.deleteWorkflow(req.params.name);
+      const scope = await resolveWorkflowScope(currentProjectId());
+      return await pipelineEngine.deleteWorkflow(req.params.name, scope);
     } catch (err) {
       return mapError(reply, err);
     }
@@ -752,6 +887,7 @@ export async function registerPipelineRoutes(
     let admissionRecord: PipelineAdmissionRecordV1 | undefined;
     let ownershipPersisted = false;
     let dispatchAttempted = false;
+    let replayRunSnapshotSha: string | undefined;
     try {
       const body = recordOf(req.body) ?? {};
       const conversationId = body.conversationId;
@@ -779,7 +915,8 @@ export async function registerPipelineRoutes(
       const admissionId = typeof requestedAdmissionId === "string"
         ? requestedAdmissionId
         : pipelineAdmissionId(crypto.randomUUID());
-      const definition = await getWorkflowForAdmission(req.params.name);
+      const workflowScope = await resolveWorkflowScope(projectId);
+      const definition = await getWorkflowForAdmission(req.params.name, workflowScope);
       const admittedWorkflowRevision = workflowRevisionSha256(definition);
       const hooks = await resolveBudgetHooks(definition, {
         projectId,
@@ -793,6 +930,7 @@ export async function registerPipelineRoutes(
       });
       const existing = findPipelineAdmission(projectId, admissionId);
       if (existing) {
+        let replayingUnclaimedEngineRun = false;
         if (existing.record.workflowName !== req.params.name ||
           existing.record.requestSha256 !== requestSha256) {
           throw new WorkflowBudgetError("CONFLICT", `Pipeline admission ${admissionId} belongs to another request.`);
@@ -808,8 +946,33 @@ export async function registerPipelineRoutes(
           const query = await queryAdmission(projectId, existing.record.engineAdmissionKey)
             .catch((): AdmissionQueryResult => ({ status: "unknown" }));
           if (query.status === "found") {
-            updatePipelineAdmission(projectId, admissionId, { status: "dispatched", engineRunId: query.runId });
-            return { accepted: true, status: String(query.run.status ?? "accepted"), kadyAdmissionId: admissionId, recovered: true };
+            if (engineRunNeedsIdempotentReplay(query)) {
+              replayRunSnapshotSha = engineRunSnapshotSha(query.run);
+              if (!replayRunSnapshotSha) {
+                throw new WorkflowBudgetError(
+                  "CORRUPT",
+                  `Pipeline admission ${admissionId} has an unclaimed engine row without its bound snapshot.`,
+                );
+              }
+              admission = existing.admission;
+              admissionRecord = existing.record;
+              ownershipPersisted = true;
+              replayingUnclaimedEngineRun = true;
+            } else if (engineRunHasDurableDispatchClaim(query)) {
+              updatePipelineAdmission(projectId, admissionId, {
+                status: "dispatched",
+                engineRunId: query.runId,
+              });
+              return {
+                accepted: true,
+                status: String(query.run.status ?? "accepted"),
+                kadyAdmissionId: admissionId,
+                recovered: true,
+              };
+            } else {
+              reply.code(503);
+              return { accepted: false, status: "indeterminate", kadyAdmissionId: admissionId };
+            }
           }
           if ((existing.record.status === "dispatching" || existing.record.status === "indeterminate") &&
             query.status === "not-found") {
@@ -820,24 +983,28 @@ export async function registerPipelineRoutes(
             });
             throw new WorkflowBudgetError("CONFLICT", `Pipeline admission ${admissionId} was not accepted and has been released.`);
           }
-          reply.code(503);
-          return { accepted: false, status: "indeterminate", kadyAdmissionId: admissionId };
+          if (!replayingUnclaimedEngineRun) {
+            reply.code(503);
+            return { accepted: false, status: "indeterminate", kadyAdmissionId: admissionId };
+          }
         }
-        if (existing.record.ownerInstanceId === PIPELINE_ADMISSION_OWNER_INSTANCE_ID) {
-          reply.code(503);
-          return { accepted: false, status: "admission-pending", kadyAdmissionId: admissionId };
+        if (!replayingUnclaimedEngineRun) {
+          if (existing.record.ownerInstanceId === PIPELINE_ADMISSION_OWNER_INSTANCE_ID) {
+            reply.code(503);
+            return { accepted: false, status: "admission-pending", kadyAdmissionId: admissionId };
+          }
+          if (existing.record.workflowRevisionSha256 !== admittedWorkflowRevision) {
+            await settlePipelineAdmission(projectId, admissionId, {
+              status: "failed",
+              usage: ZERO_PIPELINE_USAGE,
+              reason: "workflow revision changed before recovered admission dispatch",
+            });
+            throw new WorkflowBudgetError("CONFLICT", "Pipeline workflow revision changed before dispatch.");
+          }
+          admission = existing.admission;
+          admissionRecord = existing.record;
+          ownershipPersisted = true;
         }
-        if (existing.record.workflowRevisionSha256 !== admittedWorkflowRevision) {
-          await settlePipelineAdmission(projectId, admissionId, {
-            status: "failed",
-            usage: ZERO_PIPELINE_USAGE,
-            reason: "workflow revision changed before recovered admission dispatch",
-          });
-          throw new WorkflowBudgetError("CONFLICT", "Pipeline workflow revision changed before dispatch.");
-        }
-        admission = existing.admission;
-        admissionRecord = existing.record;
-        ownershipPersisted = true;
       } else {
         admission = await reservePipelineNodeBudgets({
           projectId,
@@ -858,10 +1025,13 @@ export async function registerPipelineRoutes(
         );
         ownershipPersisted = true;
       }
-      if (!admissionRecord) {
-        throw new WorkflowBudgetError("CORRUPT", "Pipeline admission record was not persisted before dispatch.");
+      if (!admission || !admissionRecord) {
+        throw new WorkflowBudgetError(
+          "CORRUPT",
+          "Pipeline admission and its durable record were not available before dispatch.",
+        );
       }
-      const latestDefinition = await getWorkflowForAdmission(req.params.name);
+      const latestDefinition = await getWorkflowForAdmission(req.params.name, workflowScope);
       if (workflowRevisionSha256(latestDefinition) !== admissionRecord.workflowRevisionSha256) {
         throw new WorkflowBudgetError("CONFLICT", "Pipeline workflow revision changed between admission and dispatch.");
       }
@@ -882,6 +1052,8 @@ export async function registerPipelineRoutes(
               },
             }
           : body;
+      const runSnapshotSha = replayRunSnapshotSha ??
+        createProjectRunSnapshot(projectId, admissionRecord.engineAdmissionKey);
       const runBody = {
         ...baseRunBody,
         message: `${message}\n\n${projectLabel}\n${correlationLabel}`,
@@ -890,19 +1062,22 @@ export async function registerPipelineRoutes(
         kadyEngineAdmissionKey: admissionRecord.engineAdmissionKey,
         idempotencyKey: admissionRecord.engineAdmissionKey,
         workflowRevisionSha256: admissionRecord.workflowRevisionSha256,
+        kadyRunSnapshotSha: runSnapshotSha,
         metadata: {
           ...(recordOf(baseRunBody.metadata) ?? {}),
           kadyProjectId: projectId,
           kadyAdmissionId: admission.admissionId,
           kadyEngineAdmissionKey: admissionRecord.engineAdmissionKey,
           kadyWorkflowRevisionSha256: admissionRecord.workflowRevisionSha256,
+          kadyWorkflowId: req.params.name,
           kadyWorkflowNodeCount: admission.workflowNodeCount,
+          kadyRunSnapshotSha: runSnapshotSha,
         },
       };
       // Write-ahead dispatch intent before crossing the process boundary.
       updatePipelineAdmission(projectId, admission.admissionId, { status: "dispatching" });
       dispatchAttempted = true;
-      const result = await runWorkflow(req.params.name, runBody);
+      const result = await runWorkflow(req.params.name, runBody, workflowScope);
       const resultRecord = recordOf(result);
       if (resultRecord?.accepted === false && typeof resultRecord.status === "string") {
         await settlePipelineAdmission(projectId, admission.admissionId, {
@@ -916,8 +1091,40 @@ export async function registerPipelineRoutes(
       if (resultRecord?.accepted !== true || typeof resultRecord.status !== "string") {
         throw new Error("Pipeline engine returned an indeterminate run response.");
       }
+      const resultDispatchState = typeof resultRecord.dispatchState === "string"
+        ? resultRecord.dispatchState
+        : typeof resultRecord.dispatch_state === "string"
+          ? resultRecord.dispatch_state
+          : undefined;
+      const resultRunId = typeof resultRecord.runId === "string"
+        ? resultRecord.runId
+        : typeof resultRecord.run_id === "string"
+          ? resultRecord.run_id
+          : undefined;
+      let claimedRunId = resultRunId;
+      let dispatchClaimDurable = resultDispatchState !== undefined &&
+        CLAIMED_ENGINE_DISPATCH_STATES.has(resultDispatchState);
+      if (!dispatchClaimDurable) {
+        const query = await queryAdmission(projectId, admissionRecord.engineAdmissionKey)
+          .catch((): AdmissionQueryResult => ({ status: "unknown" }));
+        if (query.status === "found" && engineRunHasDurableDispatchClaim(query)) {
+          dispatchClaimDurable = true;
+          claimedRunId = query.runId;
+        }
+      }
+      if (!dispatchClaimDurable) {
+        reply.code(503);
+        return {
+          accepted: false,
+          status: "indeterminate",
+          kadyAdmissionId: admission.admissionId,
+        };
+      }
       try {
-        updatePipelineAdmission(projectId, admission.admissionId, { status: "dispatched" });
+        updatePipelineAdmission(projectId, admission.admissionId, {
+          status: "dispatched",
+          ...(claimedRunId === undefined ? {} : { engineRunId: claimedRunId }),
+        });
       } catch (error) {
         // The already-fsynced `dispatching` mapping proves uncertainty.
         // Never release its reservation after the engine has accepted work.
@@ -931,12 +1138,16 @@ export async function registerPipelineRoutes(
         if (!engineAdmissionKey) return mapPipelineRunError(reply, err);
         const query = await queryAdmission(admission.handle.record.projectId, engineAdmissionKey)
           .catch((): AdmissionQueryResult => ({ status: "unknown" }));
-        if (query.status === "found") {
+        if (query.status === "found" && engineRunHasDurableDispatchClaim(query)) {
           updatePipelineAdmission(admission.handle.record.projectId, admission.admissionId, {
             status: "dispatched",
             engineRunId: query.runId,
           });
           return { accepted: true, status: String(query.run.status ?? "accepted"), kadyAdmissionId: admission.admissionId, recovered: true };
+        }
+        if (query.status === "found") {
+          reply.code(503);
+          return { accepted: false, status: "indeterminate", kadyAdmissionId: admission.admissionId };
         }
         if (query.status === "not-found") {
           try {
@@ -988,7 +1199,10 @@ export async function registerPipelineRoutes(
 
   app.get<{ Params: { runId: string } }>("/pipelines/runs/:runId", async (req, reply) => {
     try {
-      return await pipelineEngine.getRun(req.params.runId);
+      const scope = await resolveWorkflowScope(currentProjectId());
+      const snapshot = await getRun(req.params.runId);
+      if (!engineRunBelongsToCodebase(snapshot, scope.codebaseId)) return scopedRunNotFound(reply);
+      return snapshot;
     } catch (err) {
       return mapError(reply, err);
     }
@@ -996,7 +1210,10 @@ export async function registerPipelineRoutes(
 
   app.post<{ Params: { runId: string } }>("/pipelines/runs/:runId/resume", async (req, reply) => {
     try {
-      return await pipelineEngine.resumeRun(req.params.runId, req.body);
+      const scope = await resolveWorkflowScope(currentProjectId());
+      const snapshot = await getRun(req.params.runId);
+      if (!engineRunBelongsToCodebase(snapshot, scope.codebaseId)) return scopedRunNotFound(reply);
+      return await resumeRun(req.params.runId, req.body);
     } catch (err) {
       return mapError(reply, err);
     }
@@ -1004,7 +1221,10 @@ export async function registerPipelineRoutes(
 
   app.post<{ Params: { runId: string } }>("/pipelines/runs/:runId/cancel", async (req, reply) => {
     try {
-      return await pipelineEngine.cancelRun(req.params.runId);
+      const scope = await resolveWorkflowScope(currentProjectId());
+      const snapshot = await getRun(req.params.runId);
+      if (!engineRunBelongsToCodebase(snapshot, scope.codebaseId)) return scopedRunNotFound(reply);
+      return await cancelRun(req.params.runId);
     } catch (err) {
       return mapError(reply, err);
     }
@@ -1017,7 +1237,9 @@ export async function registerPipelineRoutes(
     "/pipelines/runs/:runId/reconcile-cost",
     async (req, reply) => {
       try {
+        const scope = await resolveWorkflowScope(currentProjectId());
         const snapshot = await getRun(req.params.runId);
+        if (!engineRunBelongsToCodebase(snapshot, scope.codebaseId)) return scopedRunNotFound(reply);
         return await reconcilePipelineTerminalSnapshot(
           currentProjectId(),
           req.params.runId,
@@ -1046,6 +1268,17 @@ export async function registerPipelineRoutes(
     "/pipelines/runs/:runId/stream",
     async (req, reply) => {
       const runId = req.params.runId;
+      let scopedCodebaseId: string;
+      try {
+        const scope = await resolveWorkflowScope(currentProjectId());
+        const initialSnapshot = await getRun(runId);
+        if (!engineRunBelongsToCodebase(initialSnapshot, scope.codebaseId)) {
+          return scopedRunNotFound(reply);
+        }
+        scopedCodebaseId = scope.codebaseId;
+      } catch (err) {
+        return mapError(reply, err);
+      }
       // Clamp the poll period to a sane band: fast enough to feel live, slow
       // enough not to hammer a flaky SQLite engine. Default 2s.
       const requestedPollMs = Number(req.query.pollMs);
@@ -1088,7 +1321,11 @@ export async function registerPipelineRoutes(
         for (let poll = 0; poll < MAX_POLLS && !closed; poll++) {
           let snapshot: unknown;
           try {
-            snapshot = await pipelineEngine.getRun(runId);
+            snapshot = await getRun(runId);
+            if (!engineRunBelongsToCodebase(snapshot, scopedCodebaseId)) {
+              write({ type: "error", engine: "error", message: "Pipeline run not found." });
+              break;
+            }
           } catch (err) {
             // Engine down or a flaky read. Surface it as an `error` frame; if the
             // engine is simply unavailable we close (no point polling a dead

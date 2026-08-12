@@ -181,6 +181,7 @@ export function validateWorkflowGraphSemantics(
     "duplicate-artifact-id",
     issues,
   );
+  validateScientificWorkflowPreconditionKeys(document, issues);
 
   for (const finding of pendingWorkflowSettingsEnforcements(document.settings)) {
     issues.push({
@@ -282,6 +283,30 @@ export function validateWorkflowGraphSemantics(
 
   validateGraphTopology(document, nodeById, issues);
   return issues;
+}
+
+function validateScientificWorkflowPreconditionKeys(
+  document: WorkflowGraphDocument,
+  issues: WorkflowValidationIssue[],
+): void {
+  if (!document.preconditions) return;
+  const keyedRequirements = [
+    ["/preconditions/requiredInputs", document.preconditions.requiredInputs],
+    ["/preconditions/requiredFiles", document.preconditions.requiredFiles],
+  ] as const;
+  for (const [requirementPath, requirements] of keyedRequirements) {
+    const seenKeys = new Set<string>();
+    for (const [index, requirement] of requirements.entries()) {
+      if (seenKeys.has(requirement.key)) {
+        issues.push({
+          code: "duplicate-precondition-key",
+          path: `${requirementPath}/${index}/key`,
+          message: `Duplicate precondition key ${requirement.key}.`,
+        });
+      }
+      seenKeys.add(requirement.key);
+    }
+  }
 }
 
 function normalizeNode(node: WorkflowNode): WorkflowNode {

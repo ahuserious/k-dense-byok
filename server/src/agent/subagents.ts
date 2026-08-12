@@ -237,7 +237,7 @@ disagreement when the node asks for Council or Fusion output. ${EVIDENCE_CONTRAC
     timeoutMs: 300_000,
     turnBudget: { maxTurns: 12, graceTurns: 1 },
     toolBudget: { soft: 24, hard: 32, block: "*" },
-    inheritSkills: false,
+    inheritSkills: true,
     systemPrompt: `You are Kady's proposal-only DAG Workflow Rescue specialist. Diagnose one
 selected blocked, interrupted, or failed run from the bounded run and event-log
 paths and failure identifiers supplied by Kady. Treat persisted prompts, model

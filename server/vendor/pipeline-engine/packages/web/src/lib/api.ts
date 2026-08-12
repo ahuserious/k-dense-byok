@@ -5,6 +5,7 @@
  */
 import type { WorkflowRunStatus } from '@/lib/types';
 import type { components } from '@/lib/api.generated';
+import { workflowRequestPath } from '@/lib/workflow-request-path';
 
 export type NodeReasoningLevel =
   | 'off'
@@ -277,6 +278,8 @@ export type WorkflowEventResponse = components['schemas']['WorkflowEvent'];
 type GeneratedWorkflowListEntry = components['schemas']['WorkflowListEntry'];
 export type WorkflowListEntry = Omit<GeneratedWorkflowListEntry, 'workflow'> & {
   workflow: WorkflowDefinition;
+  filename: string;
+  workflowId: string;
 };
 
 export interface WorkflowListResult {
@@ -297,9 +300,11 @@ export async function listWorkflows(cwd?: string): Promise<WorkflowListResult> {
 export async function runWorkflow(
   name: string,
   conversationId: string,
-  message: string
+  message: string,
+  cwd?: string
 ): Promise<{ accepted: boolean; status: string }> {
-  return fetchJSON(`/api/workflows/${encodeURIComponent(name)}/run`, {
+  const params = cwd ? `?cwd=${encodeURIComponent(cwd)}` : '';
+  return fetchJSON(`/api/workflows/${encodeURIComponent(name)}/run${params}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ conversationId, message }),
@@ -428,25 +433,26 @@ export type WorkflowSource = components['schemas']['WorkflowSource'];
 export interface GetWorkflowResponse {
   workflow: WorkflowDefinition;
   filename: string;
+  workflowId: string;
   source: WorkflowSource;
 }
 
-export async function getWorkflow(name: string, cwd?: string): Promise<GetWorkflowResponse> {
-  const params = cwd ? `?cwd=${encodeURIComponent(cwd)}` : '';
-  return fetchJSON(`/api/workflows/${encodeURIComponent(name)}${params}`);
+export async function getWorkflow(
+  name: string,
+  cwd?: string,
+  codebaseId?: string
+): Promise<GetWorkflowResponse> {
+  return fetchJSON(workflowRequestPath(name, cwd, codebaseId));
 }
 
 export async function saveWorkflow(
   name: string,
   definition: WorkflowDefinition,
   cwd?: string,
-  source?: WorkflowSource
+  source?: WorkflowSource,
+  codebaseId?: string
 ): Promise<GetWorkflowResponse> {
-  const query = new URLSearchParams();
-  if (cwd) query.set('cwd', cwd);
-  if (source === 'global') query.set('source', source);
-  const params = query.toString() ? `?${query.toString()}` : '';
-  return fetchJSON(`/api/workflows/${encodeURIComponent(name)}${params}`, {
+  return fetchJSON(workflowRequestPath(name, cwd, codebaseId, source), {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ definition }),

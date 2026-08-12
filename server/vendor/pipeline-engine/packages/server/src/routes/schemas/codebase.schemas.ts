@@ -23,9 +23,22 @@ export const addCodebaseBodySchema = z
   .object({
     url: z.string().min(1).optional(),
     path: z.string().min(1).optional(),
+    registrationMode: z.literal('git').optional(),
+    name: z.string().min(1).max(255).optional(),
   })
-  .refine(b => (b.url !== undefined) !== (b.path !== undefined), {
-    message: 'Provide either "url" or "path", not both and not neither',
+  .superRefine((body, ctx) => {
+    if ((body.url !== undefined) === (body.path !== undefined)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'Provide either "url" or "path", not both and not neither',
+      });
+    }
+    if (body.name !== undefined && body.path === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'name is only supported for local path registration',
+      });
+    }
   })
   .openapi('AddCodebaseBody');
 

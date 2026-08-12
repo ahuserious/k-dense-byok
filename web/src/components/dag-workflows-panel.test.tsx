@@ -24,26 +24,29 @@ function mockVendoredWorkflows(
     workflows.map((workflow) => registryApi.vendoredWorkflowRegistrySource({
       ...workflow,
       nodes: workflow.nodes ?? [{ id: `${workflow.name}-node`, prompt: "Run workflow." }],
-    })!),
+    }, { codebaseId: "codebase-a" })!),
   );
 }
 
 function renderPanel({
   activeSessionId = null,
   budgetBlocked = false,
+  uploadedFiles = [],
   onRunPipeline = vi.fn(),
   onEditPipeline = vi.fn(),
 }: {
   activeSessionId?: string | null;
   budgetBlocked?: boolean;
+  uploadedFiles?: readonly string[];
   onRunPipeline?: (name: string) => Promise<unknown>;
-  onEditPipeline?: (name: string) => void;
+  onEditPipeline?: (target: registryApi.VendoredPipelineEditTarget) => void;
 } = {}) {
   return render(
     <DagWorkflowsPanel
       projectId="project-a"
       activeSessionId={activeSessionId}
       budgetBlocked={budgetBlocked}
+      uploadedFiles={uploadedFiles}
       onRunPipeline={onRunPipeline}
       onEditPipeline={onEditPipeline}
     />,
@@ -103,7 +106,10 @@ describe("DagWorkflowsPanel", () => {
     await userEvent.click(screen.getByRole("button", {
       name: "Run microscopy-qc with vendored engine",
     }));
-    expect(onEditPipeline).toHaveBeenCalledWith("microscopy-qc");
+    expect(onEditPipeline).toHaveBeenCalledWith({
+      workflowId: "microscopy-qc",
+      codebaseId: "codebase-a",
+    });
     expect(onRunPipeline).toHaveBeenCalledWith("microscopy-qc");
 
     await userEvent.click(screen.getByRole("button", {
@@ -232,7 +238,7 @@ describe("DagWorkflowsPanel", () => {
         prompt: "Run workflow.",
         depends_on: graph.edges.filter((edge) => edge.to === node.id).map((edge) => edge.from),
       })),
-    });
+    }, { codebaseId: "codebase-a" });
     await act(async () => resolveVendored([vendored!]));
 
     await waitFor(() => {
@@ -305,19 +311,29 @@ describe("DagWorkflowsPanel", () => {
     );
   });
 
-  it("shows duplicate vendored names as scope-unverified and non-routable", async () => {
+  it("routes duplicate vendored names independently by stable workflow id", async () => {
     vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
     vi.mocked(registryApi.listVendoredWorkflowRegistrySources).mockResolvedValue([
       registryApi.vendoredWorkflowRegistrySource({
         name: "duplicate-name",
         description: "First record",
         nodes: [{ id: "collect" }],
-      }, { origin: "project" })!,
+      }, {
+        codebaseId: "codebase-a",
+        origin: "project",
+        filename: "first.yaml",
+        workflowId: "workflow_11111111111111111111111111111111",
+      })!,
       registryApi.vendoredWorkflowRegistrySource({
         name: "duplicate-name",
         description: "Second record",
         nodes: [{ id: "collect" }],
-      }, { origin: "project" })!,
+      }, {
+        codebaseId: "codebase-a",
+        origin: "project",
+        filename: "second.yaml",
+        workflowId: "workflow_22222222222222222222222222222222",
+      })!,
     ]);
     const onEditPipeline = vi.fn();
     const onRunPipeline = vi.fn();
@@ -326,12 +342,6 @@ describe("DagWorkflowsPanel", () => {
 
     const list = await screen.findByRole("list", { name: "Scientific pipeline workflows" });
     expect(within(list).getAllByRole("listitem")).toHaveLength(2);
-    expect(within(list).getAllByText("Project scope unverified")).toHaveLength(2);
-    expect(within(list).getAllByText("Not routable")).toHaveLength(2);
-    expect(within(list).getAllByText(
-      registryApi.AMBIGUOUS_VENDORED_WORKFLOW_NAME_REASON,
-    )).toHaveLength(2);
-
     const editButtons = within(list).getAllByRole("button", {
       name: "Edit duplicate-name with vendored engine",
     });
@@ -339,24 +349,36 @@ describe("DagWorkflowsPanel", () => {
       name: "Run duplicate-name with vendored engine",
     });
     for (const button of [...editButtons, ...runButtons]) {
-      expect(button).toBeDisabled();
+      expect(button).toBeEnabled();
       await userEvent.click(button);
     }
-    expect(onEditPipeline).not.toHaveBeenCalled();
-    expect(onRunPipeline).not.toHaveBeenCalled();
+    expect(onEditPipeline.mock.calls.map(([target]) => target)).toEqual([
+      {
+        workflowId: "workflow_11111111111111111111111111111111",
+        codebaseId: "codebase-a",
+      },
+      {
+        workflowId: "workflow_22222222222222222222222222222222",
+        codebaseId: "codebase-a",
+      },
+    ]);
+    expect(onRunPipeline.mock.calls.map(([id]) => id)).toEqual([
+      "workflow_11111111111111111111111111111111",
+      "workflow_22222222222222222222222222222222",
+    ]);
   });
 
-  it("routes normalized-name collisions with exact identifiers and surfaces ambiguity", async () => {
+  it("routes normalized display-name collisions independently by stable filename", async () => {
     vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
     vi.mocked(registryApi.listVendoredWorkflowRegistrySources).mockResolvedValue([
       registryApi.vendoredWorkflowRegistrySource({
         name: " foo ",
         nodes: [{ id: "collect", prompt: "Collect evidence." }],
-      }, { origin: "project", filename: "padded.yaml" })!,
+      }, { codebaseId: "codebase-a", origin: "project", filename: "padded.yaml" })!,
       registryApi.vendoredWorkflowRegistrySource({
         name: "foo",
         nodes: [{ id: "collect", prompt: "Collect evidence." }],
-      }, { origin: "catalogue", filename: "plain.yaml" })!,
+      }, { codebaseId: "codebase-a", origin: "catalogue", filename: "plain.yaml" })!,
     ]);
     const onEditPipeline = vi.fn();
     const onRunPipeline = vi.fn().mockResolvedValue({ accepted: true, status: "started" });
@@ -371,19 +393,20 @@ describe("DagWorkflowsPanel", () => {
       name: "Run foo with vendored engine",
     });
     expect(within(list).getAllByRole("listitem")).toHaveLength(2);
-    expect(within(list).getAllByRole("alert")[0]).toHaveTextContent(
-      "Ambiguous vendored routes",
-    );
+    expect(within(list).queryByRole("alert")).not.toBeInTheDocument();
 
     await userEvent.click(editButtons[0]);
     await userEvent.click(editButtons[1]);
     await userEvent.click(runButtons[0]);
     await userEvent.click(runButtons[1]);
 
-    expect(onEditPipeline.mock.calls.map(([identifier]) => identifier))
-      .toEqual([" foo ", "foo"]);
+    expect(onEditPipeline.mock.calls.map(([target]) => target))
+      .toEqual([
+        { workflowId: "padded.yaml", codebaseId: "codebase-a" },
+        { workflowId: "plain.yaml", codebaseId: "codebase-a" },
+      ]);
     await waitFor(() => expect(onRunPipeline.mock.calls.map(([identifier]) => identifier))
-      .toEqual([" foo ", "foo"]));
+      .toEqual(["padded.yaml", "plain.yaml"]));
   });
 
   it("routes the selected vendored pipeline directly without invoking typed admission or Builder", async () => {
@@ -595,6 +618,65 @@ describe("DagWorkflowsPanel", () => {
     expect(await screen.findByRole("status")).toHaveTextContent(
       "Created run wrun_created with status queued",
     );
+  });
+
+  it("binds distinct uploaded files to each named required-file input", async () => {
+    const graph = {
+      ...createDefaultWorkflowGraph("file-review", "File review"),
+      preconditions: {
+        requiredInputs: [],
+        requiredFiles: [
+          { key: "dataset", label: "Dataset", minimumCount: 1 },
+          { key: "protocol", label: "Protocol", minimumCount: 1 },
+        ],
+        requiredCapabilities: ["prompt-analysis", "read-uploaded-files"],
+      },
+    } satisfies dagApi.WorkflowGraphDocument;
+    vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([{
+      id: graph.id,
+      revision: 1,
+      createdAt: 1,
+      updatedAt: 1,
+      graphSha256: "file-sha",
+      schemaVersion: graph.schemaVersion,
+      name: graph.name,
+      description: graph.description ?? null,
+      nodeCount: graph.nodes.length,
+      edgeCount: graph.edges.length,
+    }]);
+    vi.spyOn(dagApi, "readDagWorkflowDefinition").mockResolvedValue({
+      etag: '"1"',
+      definition: {
+        storageVersion: 1,
+        id: graph.id,
+        revision: 1,
+        createdAt: 1,
+        updatedAt: 1,
+        graphSha256: "file-sha",
+        graph,
+      },
+    });
+    const createRun = vi.spyOn(dagApi, "createDagWorkflowRun")
+      .mockImplementation(() => new Promise<dagApi.WorkflowRunRecord>(() => undefined));
+
+    renderPanel({
+      uploadedFiles: ["user_data/dataset.csv", "user_data/protocol.md"],
+    });
+    await userEvent.click(await screen.findByRole("button", { name: "Open File review details" }));
+    await userEvent.type(screen.getByLabelText("Typed workflow run goal"), "Review inputs");
+    await userEvent.click(screen.getByLabelText("Dataset: user_data/dataset.csv"));
+    await userEvent.click(screen.getByLabelText("Protocol: user_data/protocol.md"));
+    await userEvent.click(screen.getByRole("button", { name: "Run typed workflow" }));
+
+    expect(createRun).toHaveBeenCalledWith("project-a", graph.id, expect.objectContaining({
+      input: {
+        goal: "Review inputs",
+        files: {
+          dataset: ["user_data/dataset.csv"],
+          protocol: ["user_data/protocol.md"],
+        },
+      },
+    }));
   });
 
   it("reuses an ambiguous admission request id after remount until the run intent changes", async () => {

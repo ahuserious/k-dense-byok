@@ -84,7 +84,7 @@ describe("Scientific DAG workflow template validation", () => {
   );
 });
 
-describe.skip("POST-INTEGRATION(S10)", () => {
+describe("POST-INTEGRATION(S10)", () => {
   const templatesRequiringFiles = SCIENTIFIC_WORKFLOW_TEMPLATES.filter(
     (template) => template.requiredFiles.length > 0,
   );
@@ -109,16 +109,14 @@ describe.skip("POST-INTEGRATION(S10)", () => {
 
     try {
       if (scenario !== "missing-file") {
-        const minimumFiles = Math.max(
-          0,
-          ...template.requiredFiles.map((file) => file.minimumCount),
-        );
         fs.mkdirSync(paths.uploadDir, { recursive: true });
-        for (let index = 0; index < minimumFiles; index += 1) {
-          fs.writeFileSync(
-            path.join(paths.uploadDir, `input-${index + 1}.dat`),
-            "user supplied\n",
-          );
+        for (const requirement of template.requiredFiles) {
+          for (let index = 0; index < requirement.minimumCount; index += 1) {
+            fs.writeFileSync(
+              path.join(paths.uploadDir, `${requirement.key}-${index + 1}.dat`),
+              "user supplied\n",
+            );
+          }
         }
       }
 
@@ -159,6 +157,15 @@ describe.skip("POST-INTEGRATION(S10)", () => {
           input: {
             goal: scenario === "empty-goal" ? "" : "Bounded analysis goal",
             variables,
+            files: scenario === "missing-file"
+              ? {}
+              : Object.fromEntries(template.requiredFiles.map((requirement) => [
+                  requirement.key,
+                  Array.from(
+                    { length: requirement.minimumCount },
+                    (_, index) => `user_data/${requirement.key}-${index + 1}.dat`,
+                  ),
+                ])),
           },
         },
       });
@@ -193,4 +200,234 @@ describe.skip("POST-INTEGRATION(S10)", () => {
     "POST rejects a missing required variable for $id before createRun",
     (template) => expectAdmissionRejected(template, "missing-variable"),
   );
+
+  it("returns the original run on an exact lost-response retry without re-validating changed preconditions", async () => {
+    const [{ buildApp }, { ensureProjectExists, resolvePaths }] = await Promise.all([
+      import("../src/index.ts"),
+      import("../src/projects.ts"),
+    ]);
+    projectSequence += 1;
+    const projectId = `s10-preconditions-${projectSequence}`;
+    ensureProjectExists(projectId);
+    const paths = resolvePaths(projectId);
+    const app = await buildApp({ workflowController: null });
+    const template = SCIENTIFIC_WORKFLOW_TEMPLATES[0];
+    const templateGraph = createDagWorkflowTemplateGraph(
+      template.id,
+      template.suggestedWorkflowId,
+      template.name,
+      template.description,
+    );
+    const { preconditions: _initialPreconditions, ...graph } = templateGraph;
+    const requestPayload = {
+      requestId: "lost-response-retry",
+      expectedWorkflowRevision: 1,
+      input: { goal: "Original admitted goal", variables: {} },
+    };
+
+    try {
+      const saved = await app.inject({
+        method: "PUT",
+        url: `/dag-workflows/${graph.id}`,
+        headers: { "x-project-id": projectId },
+        payload: graph,
+      });
+      expect(saved.statusCode).toBe(201);
+
+      const first = await app.inject({
+        method: "POST",
+        url: `/dag-workflows/${graph.id}/runs`,
+        headers: { "x-project-id": projectId },
+        payload: requestPayload,
+      });
+      expect(first.statusCode).toBe(202);
+
+      const changedGraph = {
+        ...graph,
+        name: "Changed after admission",
+        preconditions: {
+          requiredInputs: [{ key: "new_required_value", label: "New required value" }],
+          requiredFiles: [],
+          requiredCapabilities: [],
+        },
+      };
+      const changed = await app.inject({
+        method: "PUT",
+        url: `/dag-workflows/${graph.id}`,
+        headers: {
+          "x-project-id": projectId,
+          "if-match": "1",
+        },
+        payload: changedGraph,
+      });
+      expect(changed.statusCode).toBe(200);
+
+      const retry = await app.inject({
+        method: "POST",
+        url: `/dag-workflows/${graph.id}/runs`,
+        headers: { "x-project-id": projectId },
+        payload: requestPayload,
+      });
+      expect(retry.statusCode).toBe(202);
+      expect(retry.json().manifest).toEqual(first.json().manifest);
+      expect(retry.json().manifest).toMatchObject({
+        workflowRevision: 1,
+        graph: { name: graph.name },
+      });
+    } finally {
+      await app.close();
+      fs.rmSync(paths.root, { recursive: true, force: true });
+    }
+  });
+
+  it("serializes a definition update with run admission so no run validates an old graph then snapshots the new graph", async () => {
+    const [{ WorkflowStore, WorkflowPreconditionError }, { ensureProjectExists, resolvePaths }] = await Promise.all([
+      import("../src/workflows/store.ts"),
+      import("../src/projects.ts"),
+    ]);
+    projectSequence += 1;
+    const projectId = `s10-preconditions-${projectSequence}`;
+    ensureProjectExists(projectId);
+    const paths = resolvePaths(projectId);
+    const store = new WorkflowStore();
+    const template = SCIENTIFIC_WORKFLOW_TEMPLATES[0];
+    const generatedOldGraph = createDagWorkflowTemplateGraph(
+      template.id,
+      template.suggestedWorkflowId,
+      "Old admissible graph",
+      template.description,
+    );
+    const { preconditions: _oldPreconditions, ...oldGraph } = generatedOldGraph;
+    const newGraph = {
+      ...oldGraph,
+      name: "New guarded graph",
+      preconditions: {
+        requiredInputs: [{ key: "new_required_value", label: "New required value" }],
+        requiredFiles: [],
+        requiredCapabilities: [],
+      },
+    };
+    store.saveDefinition(projectId, oldGraph.id, oldGraph);
+
+    try {
+      const update = Promise.resolve().then(() =>
+        store.saveDefinition(projectId, oldGraph.id, newGraph, { expectedRevision: 1 })
+      );
+      const admission = Promise.resolve().then(() => {
+        try {
+          return store.createRun(projectId, {
+            workflowId: oldGraph.id,
+            requestId: "definition-admission-race",
+            requestedBy: "user",
+            input: { goal: "Goal valid only for the old graph", variables: {} },
+          });
+        } catch (error) {
+          if (error instanceof WorkflowPreconditionError) return error;
+          throw error;
+        }
+      });
+      const [, outcome] = await Promise.all([update, admission]);
+
+      if (outcome instanceof WorkflowPreconditionError) {
+        expect(outcome.issues).toEqual(expect.arrayContaining([
+          expect.objectContaining({ kind: "variable", key: "new_required_value" }),
+        ]));
+      } else {
+        expect(outcome).toMatchObject({
+          workflowRevision: 1,
+          graph: { name: "Old admissible graph" },
+        });
+      }
+    } finally {
+      fs.rmSync(paths.root, { recursive: true, force: true });
+    }
+  });
+
+  it("requires readable run-scoped files independently for every required-file key", async () => {
+    const [{ WorkflowStore, WorkflowPreconditionError }, { ensureProjectExists, resolvePaths }] = await Promise.all([
+      import("../src/workflows/store.ts"),
+      import("../src/projects.ts"),
+    ]);
+    projectSequence += 1;
+    const projectId = `s10-file-bindings-${projectSequence}`;
+    ensureProjectExists(projectId);
+    const paths = resolvePaths(projectId);
+    const store = new WorkflowStore();
+    const template = SCIENTIFIC_WORKFLOW_TEMPLATES[0];
+    const graph = {
+      ...createDagWorkflowTemplateGraph(
+        template.id,
+        `scientific-file-bindings-${projectSequence}`,
+        "Independent file bindings",
+        template.description,
+      ),
+      preconditions: {
+        requiredInputs: [],
+        requiredFiles: [
+          { key: "dataset", label: "Dataset", minimumCount: 1 },
+          { key: "specification", label: "Specification", minimumCount: 1 },
+        ],
+        requiredCapabilities: [],
+      },
+    };
+    fs.mkdirSync(paths.uploadDir, { recursive: true });
+    fs.writeFileSync(path.join(paths.uploadDir, "stale.dat"), "stale\n");
+    fs.writeFileSync(path.join(paths.uploadDir, "dataset.dat"), "dataset\n");
+    fs.writeFileSync(path.join(paths.uploadDir, "specification.dat"), "specification\n");
+    store.saveDefinition(projectId, graph.id, graph);
+
+    try {
+      expect(() => store.createRun(projectId, {
+        workflowId: graph.id,
+        requestId: "unbound-stale-upload",
+        requestedBy: "user",
+        input: { goal: "Analyze", files: {} },
+      })).toThrow(WorkflowPreconditionError);
+
+      expect(() => store.createRun(projectId, {
+        workflowId: graph.id,
+        requestId: "same-file-two-keys",
+        requestedBy: "user",
+        input: {
+          goal: "Analyze",
+          files: {
+            dataset: ["user_data/dataset.dat"],
+            specification: ["user_data/dataset.dat"],
+          },
+        },
+      })).toThrow(WorkflowPreconditionError);
+
+      expect(() => store.createRun(projectId, {
+        workflowId: graph.id,
+        requestId: "directory-is-not-a-file",
+        requestedBy: "user",
+        input: {
+          goal: "Analyze",
+          files: {
+            dataset: ["user_data"],
+            specification: ["user_data/specification.dat"],
+          },
+        },
+      })).toThrow(WorkflowPreconditionError);
+
+      const admitted = store.createRun(projectId, {
+        workflowId: graph.id,
+        requestId: "distinct-file-bindings",
+        requestedBy: "user",
+        input: {
+          goal: "Analyze",
+          files: {
+            dataset: ["user_data/dataset.dat"],
+            specification: ["user_data/specification.dat"],
+          },
+        },
+      });
+      expect(admitted.input.files).toEqual({
+        dataset: ["user_data/dataset.dat"],
+        specification: ["user_data/specification.dat"],
+      });
+    } finally {
+      fs.rmSync(paths.root, { recursive: true, force: true });
+    }
+  });
 });

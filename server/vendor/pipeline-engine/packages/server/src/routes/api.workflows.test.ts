@@ -98,8 +98,17 @@ mock.module('@archon/core/db/workflow-events', () => ({}));
 mock.module('@archon/core/db/messages', () => ({}));
 
 const mockListCodebases = mock(async () => [{ default_cwd: '/tmp/project' }]);
+const mockGetCodebase = mock(async (id: string) => ({
+  id,
+  default_cwd: '/tmp/project',
+}));
 mock.module('@archon/core/db/codebases', () => ({
   listCodebases: mockListCodebases,
+  findCodebaseByDefaultCwd: mock(async (defaultCwd: string) => ({
+    id: 'codebase-test',
+    default_cwd: defaultCwd,
+  })),
+  getCodebase: mockGetCodebase,
 }));
 
 import { registerApiRoutes } from './api';
@@ -124,6 +133,95 @@ describe('GET /api/workflows', () => {
     expect(mockDiscoverWorkflows).toHaveBeenCalledWith('/tmp/project', expect.any(Function));
     expect(body.errors).toBeDefined();
     expect(Array.isArray(body.errors)).toBe(true);
+  });
+
+  test('round-trips same-name workflows through distinct stable ids', async () => {
+    const duplicateWorkflows = {
+      workflows: [
+        makeTestWorkflowWithSource(
+          { name: 'same-name', description: 'First workflow' },
+          'project',
+          'first.yaml'
+        ),
+        makeTestWorkflowWithSource(
+          { name: 'same-name', description: 'Second workflow' },
+          'project',
+          'nested/second.yaml'
+        ),
+      ],
+      errors: [],
+    };
+    mockDiscoverWorkflows
+      .mockResolvedValueOnce(duplicateWorkflows)
+      .mockResolvedValueOnce(duplicateWorkflows)
+      .mockResolvedValueOnce(duplicateWorkflows);
+    const app = createTestApp();
+    registerApiRoutes(app, {} as WebAdapter, {} as ConversationLockManager);
+
+    const listResponse = await app.request('/api/workflows');
+    const list = (await listResponse.json()) as {
+      workflows: Array<{ workflowId: string; filename: string }>;
+    };
+    expect(list.workflows.map(entry => entry.workflowId)).toHaveLength(2);
+    expect(new Set(list.workflows.map(entry => entry.workflowId)).size).toBe(2);
+
+    const first = await app.request(`/api/workflows/${list.workflows[0]?.workflowId ?? ''}`);
+    const second = await app.request(`/api/workflows/${list.workflows[1]?.workflowId ?? ''}`);
+    expect((await first.json()) as { filename: string }).toMatchObject({ filename: 'first.yaml' });
+    expect((await second.json()) as { filename: string }).toMatchObject({
+      filename: 'nested/second.yaml',
+    });
+  });
+
+  test('isolates workflow discovery by exact codebase scope', async () => {
+    mockGetCodebase
+      .mockResolvedValueOnce({ id: 'codebase-a', default_cwd: '/tmp/project-a' })
+      .mockResolvedValueOnce({ id: 'codebase-b', default_cwd: '/tmp/project-b' });
+    mockDiscoverWorkflows
+      .mockResolvedValueOnce({
+        workflows: [makeTestWorkflowWithSource(
+          { name: 'project-a-only', description: 'Project A workflow' },
+          'project',
+          'project-a.yaml'
+        )],
+        errors: [],
+      })
+      .mockResolvedValueOnce({
+        workflows: [makeTestWorkflowWithSource(
+          { name: 'project-b-only', description: 'Project B workflow' },
+          'project',
+          'project-b.yaml'
+        )],
+        errors: [],
+      });
+    const app = createTestApp();
+    registerApiRoutes(app, {} as WebAdapter, {} as ConversationLockManager);
+
+    const projectA = await app.request(
+      '/api/workflows?cwd=%2Ftmp%2Fproject-a&codebaseId=codebase-a'
+    );
+    const projectB = await app.request(
+      '/api/workflows?cwd=%2Ftmp%2Fproject-b&codebaseId=codebase-b'
+    );
+    const projectAWorkflows = (await projectA.json()) as {
+      workflows: Array<{ workflow: { name: string } }>;
+    };
+    const projectBWorkflows = (await projectB.json()) as {
+      workflows: Array<{ workflow: { name: string } }>;
+    };
+
+    expect(projectA.status).toBe(200);
+    expect(projectB.status).toBe(200);
+    expect(projectAWorkflows.workflows.map(entry => entry.workflow.name)).toEqual([
+      'project-a-only',
+    ]);
+    expect(projectBWorkflows.workflows.map(entry => entry.workflow.name)).toEqual([
+      'project-b-only',
+    ]);
+    expect(mockDiscoverWorkflows.mock.calls.slice(-2).map(([cwd]) => cwd)).toEqual([
+      '/tmp/project-a',
+      '/tmp/project-b',
+    ]);
   });
 
   test('falls back to null cwd when no cwd query and no codebases registered', async () => {

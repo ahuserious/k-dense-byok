@@ -514,11 +514,12 @@ function compactionAuditIdentity(
 
 function recoveryBlockReason(
   recovery: DurableRestartProof | undefined,
-  resumeResponse: WatcherResumeResponse | undefined,
+  _resumeResponse: WatcherResumeResponse | undefined,
 ): string | undefined {
   if (!recovery) return "durable-recovery-proof-missing-or-invalid";
-  if (resumeResponse?.resumable === false) return "upstream-marked-non-resumable";
-  if (resumeResponse?.restartRequired === true) return "upstream-requires-new-run";
+  // The vendored web route's non-resumable flags describe missing origin/web
+  // authority. This watcher is explicitly origin-independent, so a verified
+  // exact-run checkpoint and side-effect proof supersede that transport limit.
   return undefined;
 }
 

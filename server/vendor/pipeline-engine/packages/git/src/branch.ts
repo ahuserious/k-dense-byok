@@ -64,10 +64,21 @@ export async function getDefaultBranch(repoPath: RepoPath): Promise<BranchName> 
       errorText.includes('Needed a single revision') ||
       errorText.includes('unknown revision')
     ) {
+      try {
+        const { stdout } = await execFileAsync(
+          'git',
+          ['-C', repoPath, 'symbolic-ref', '--short', 'HEAD'],
+          { timeout: 10000 }
+        );
+        return toBranchName(stdout.trim());
+      } catch {
+        // A detached local checkout has no safe branch start point. Preserve
+        // the established actionable error below.
+      }
       getLog().warn({ repoPath }, 'default_branch_detection_failed');
       throw new Error(
-        `Cannot detect default branch for ${repoPath}: neither origin/HEAD nor origin/main exist. ` +
-          'Set worktree.baseBranch in .archon/config.yaml to specify the branch explicitly.'
+        `Cannot detect default branch for ${repoPath}: neither origin/HEAD, origin/main, nor a local HEAD branch exist. ` +
+        'Set worktree.baseBranch in .archon/config.yaml to specify the branch explicitly.'
       );
     }
 

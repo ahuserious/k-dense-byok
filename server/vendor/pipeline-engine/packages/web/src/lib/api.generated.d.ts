@@ -1196,6 +1196,7 @@ export interface paths {
       parameters: {
         query?: {
           cwd?: string;
+          codebaseId?: string;
         };
         header?: never;
         path?: never;
@@ -1251,11 +1252,14 @@ export interface paths {
     put?: never;
     /**
      * Run a workflow via the orchestrator (JSON or multipart with file uploads)
-     * @description Accepts `application/json` with `{ conversationId, message }` or `multipart/form-data` with `conversationId`, `message`, and optional file attachments (max 5 files, 10 MB each).
+     * @description Accepts `application/json` with `{ conversationId, message }` plus optional all-or-none Kady admission fields, or `multipart/form-data` with `conversationId`, `message`, and optional file attachments (max 5 files, 10 MB each).
      */
     post: {
       parameters: {
-        query?: never;
+        query?: {
+          cwd?: string;
+          codebaseId?: string;
+        };
         header?: never;
         path: {
           name: string;
@@ -1864,6 +1868,8 @@ export interface paths {
           conversationId?: string;
           status?: string;
           codebaseId?: string;
+          projectId?: string;
+          admissionId?: string;
           limit?: string;
           mine?: 'true' | 'false';
         };
@@ -1880,6 +1886,15 @@ export interface paths {
           };
           content: {
             'application/json': components['schemas']['WorkflowRunListResponse'];
+          };
+        };
+        /** @description Bad request */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
           };
         };
         /** @description Server error */
@@ -2027,6 +2042,7 @@ export interface paths {
       parameters: {
         query?: {
           cwd?: string;
+          codebaseId?: string;
         };
         header?: never;
         path: {
@@ -2079,6 +2095,7 @@ export interface paths {
       parameters: {
         query?: {
           cwd?: string;
+          codebaseId?: string;
           source?: 'project' | 'global';
         };
         header?: never;
@@ -2128,6 +2145,7 @@ export interface paths {
       parameters: {
         query?: {
           cwd?: string;
+          codebaseId?: string;
           source?: 'project' | 'global';
         };
         header?: never;
@@ -2813,6 +2831,8 @@ export interface components {
     WorkflowListEntry: {
       workflow: components['schemas']['WorkflowDefinition'];
       source: components['schemas']['WorkflowSource'];
+      filename: string;
+      workflowId: string;
     };
     WorkflowDefinition: {
       name: string;
@@ -3327,6 +3347,12 @@ export interface components {
     };
     WorkflowRunListResponse: {
       runs: components['schemas']['WorkflowRun'][];
+      admissionQuery?: {
+        projectId: string;
+        admissionId: string;
+        /** @constant */
+        authoritative: true;
+      };
     };
     WorkflowRun: {
       id: string;
@@ -3345,6 +3371,11 @@ export interface components {
       last_activity_at: string | null;
       working_path: string | null;
       user_id: string | null;
+      kady_project_id?: string | null;
+      kady_admission_id?: string | null;
+      kady_engine_admission_key?: string | null;
+      workflow_revision_sha256?: string | null;
+      idempotency_replayed?: boolean;
     };
     WorkflowRunByWorkerResponse: {
       run: components['schemas']['WorkflowRun'];
@@ -3381,6 +3412,7 @@ export interface components {
     GetWorkflowResponse: {
       workflow: components['schemas']['WorkflowDefinition'];
       filename: string;
+      workflowId: string;
       source: components['schemas']['WorkflowSource'];
     };
     SaveWorkflowBody: {

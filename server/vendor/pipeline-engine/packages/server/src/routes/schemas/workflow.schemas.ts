@@ -33,6 +33,8 @@ export const workflowListEntrySchema = z
   .object({
     workflow: workflowDefinitionSchema,
     source: workflowSourceSchema,
+    filename: z.string(),
+    workflowId: z.string(),
   })
   .openapi('WorkflowListEntry');
 
@@ -55,6 +57,7 @@ export const getWorkflowResponseSchema = z
   .object({
     workflow: workflowDefinitionSchema,
     filename: z.string(),
+    workflowId: z.string(),
     source: workflowSourceSchema,
   })
   .openapi('GetWorkflowResponse');
@@ -114,7 +117,16 @@ export const workflowRunSchema = engineWorkflowRunSchema
 
 /** GET /api/workflows/runs response. */
 export const workflowRunListResponseSchema = z
-  .object({ runs: z.array(workflowRunSchema) })
+  .object({
+    runs: z.array(workflowRunSchema),
+    admissionQuery: z
+      .object({
+        projectId: z.string(),
+        admissionId: z.string(),
+        authoritative: z.literal(true),
+      })
+      .optional(),
+  })
   .openapi('WorkflowRunListResponse');
 
 /** A workflow event record (wire shape). */
@@ -220,6 +232,12 @@ export const runWorkflowBodySchema = z
   .object({
     conversationId: z.string(),
     message: z.string(),
+    kadyProjectId: z.string().optional(),
+    kadyAdmissionId: z.string().optional(),
+    kadyEngineAdmissionKey: z.string().optional(),
+    idempotencyKey: z.string().optional(),
+    workflowRevisionSha256: z.string().optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
   })
   .openapi('RunWorkflowBody');
 
@@ -257,6 +275,8 @@ export const workflowRunsQuerySchema = z.object({
   // z.string() — handler validates the enum value and ignores invalid values
   status: z.string().optional(),
   codebaseId: z.string().optional(),
+  projectId: z.string().optional(),
+  admissionId: z.string().optional(),
   limit: z.string().optional(),
   // Non-enforcing "mine" filter: 'true' restricts to the caller's own runs
   // when an identity resolves. Default lists everything. Enum makes the boolean

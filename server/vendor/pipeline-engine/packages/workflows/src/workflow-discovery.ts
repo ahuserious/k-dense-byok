@@ -17,7 +17,7 @@
  * Same-named files at a higher scope override those at lower scopes.
  */
 import { readFile, readdir, access, stat } from 'fs/promises';
-import { join } from 'path';
+import { join, posix } from 'path';
 import type {
   WorkflowDefinition,
   WorkflowLoadError,
@@ -93,7 +93,11 @@ const MAX_DISCOVERY_DEPTH = 1;
  * folders deep. Files deeper than the cap are silently skipped.
  * Failures are per-file: one broken file does not abort loading the rest.
  */
-async function loadWorkflowsFromDir(dirPath: string, depth = 0): Promise<DirLoadResult> {
+async function loadWorkflowsFromDir(
+  dirPath: string,
+  depth = 0,
+  relativeDir = ''
+): Promise<DirLoadResult> {
   const workflows = new Map<string, WorkflowDefinition>();
   const errors: WorkflowLoadError[] = [];
 
@@ -102,6 +106,7 @@ async function loadWorkflowsFromDir(dirPath: string, depth = 0): Promise<DirLoad
 
     for (const entry of entries) {
       const entryPath = join(dirPath, entry);
+      const relativePath = relativeDir ? posix.join(relativeDir, entry) : entry;
 
       try {
         const entryStat = await stat(entryPath);
@@ -111,17 +116,17 @@ async function loadWorkflowsFromDir(dirPath: string, depth = 0): Promise<DirLoad
           // subdirectories are ignored (same convention as the paths-package
           // `findMarkdownFilesRecursive` depth cap).
           if (depth >= MAX_DISCOVERY_DEPTH) continue;
-          const subResult = await loadWorkflowsFromDir(entryPath, depth + 1);
+          const subResult = await loadWorkflowsFromDir(entryPath, depth + 1, relativePath);
           for (const [filename, workflow] of subResult.workflows) {
             workflows.set(filename, workflow);
           }
           errors.push(...subResult.errors);
         } else if (entry.endsWith('.yaml') || entry.endsWith('.yml')) {
           const content = await readFile(entryPath, 'utf-8');
-          const result = parseWorkflow(content, entry);
+          const result = parseWorkflow(content, relativePath);
 
           if (result.workflow) {
-            workflows.set(entry, result.workflow);
+            workflows.set(relativePath, result.workflow);
             getLog().debug({ workflowName: result.workflow.name, dirPath }, 'workflow_loaded');
           } else {
             errors.push(result.error);
@@ -131,7 +136,7 @@ async function loadWorkflowsFromDir(dirPath: string, depth = 0): Promise<DirLoad
         const err = error as NodeJS.ErrnoException;
         getLog().warn({ err, entryPath }, 'workflow_file_read_error');
         errors.push({
-          filename: entry,
+          filename: relativePath,
           error: `File read error: ${err.message} (${err.code ?? 'unknown'})`,
           errorType: 'read_error',
         });
@@ -218,7 +223,7 @@ export async function discoverWorkflows(
       getLog().debug('loading_bundled_default_workflows');
       const bundledResult = loadBundledWorkflows();
       for (const [filename, workflow] of bundledResult.workflows) {
-        workflowsByFile.set(filename, { workflow, source: 'bundled' });
+        workflowsByFile.set(filename, { workflow, source: 'bundled', filename });
       }
       allErrors.push(...bundledResult.errors);
       getLog().info({ count: bundledResult.workflows.size }, 'bundled_default_workflows_loaded');
@@ -230,7 +235,7 @@ export async function discoverWorkflows(
         await access(appDefaultsPath);
         const appResult = await loadWorkflowsFromDir(appDefaultsPath);
         for (const [filename, workflow] of appResult.workflows) {
-          workflowsByFile.set(filename, { workflow, source: 'bundled' });
+          workflowsByFile.set(filename, { workflow, source: 'bundled', filename });
         }
         if (appResult.errors.length > 0) {
           getLog().warn(
@@ -263,7 +268,7 @@ export async function discoverWorkflows(
       if (workflowsByFile.has(filename)) {
         getLog().debug({ filename }, 'home_workflow_overrides_bundled');
       }
-      workflowsByFile.set(filename, { workflow, source: 'global' });
+      workflowsByFile.set(filename, { workflow, source: 'global', filename });
     }
     allErrors.push(...homeResult.errors);
     getLog().info({ count: homeResult.workflows.size }, 'home_workflows_loaded');
@@ -301,12 +306,16 @@ export async function discoverWorkflows(
     // Preserve 'bundled' source for workflows loaded from the defaults/ subdirectory
     // that were already registered as bundled in step 1.
     for (const [filename, workflow] of repoResult.workflows) {
-      const existing = workflowsByFile.get(filename);
+      const bundledFilename = filename.startsWith('defaults/')
+        ? filename.slice('defaults/'.length)
+        : filename;
+      const existing = workflowsByFile.get(filename) ?? workflowsByFile.get(bundledFilename);
       if (existing?.source === 'bundled') {
         // This file was already loaded as a bundled default — the repo's defaults/
         // subdirectory is re-discovering it. Keep the bundled source label.
         getLog().debug({ filename }, 'repo_default_preserves_bundled_source');
-        workflowsByFile.set(filename, { workflow, source: 'bundled' });
+        if (bundledFilename !== filename) workflowsByFile.delete(bundledFilename);
+        workflowsByFile.set(filename, { workflow, source: 'bundled', filename });
       } else {
         if (existing) {
           getLog().debug(
@@ -314,7 +323,7 @@ export async function discoverWorkflows(
             'repo_workflow_overrides_lower_scope'
           );
         }
-        workflowsByFile.set(filename, { workflow, source: 'project' });
+        workflowsByFile.set(filename, { workflow, source: 'project', filename });
       }
     }
 

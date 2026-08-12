@@ -8,6 +8,7 @@ import {
   LegacyPipelineImportError,
   MAX_WORKFLOW_EVENT_PAGE_SIZE,
   MAX_WORKFLOW_RUN_LIST_SIZE,
+  WorkflowPreconditionError,
   WorkflowStoreError,
   WorkflowRunControllerError,
   previewLegacyPipelineWorkflow,
@@ -67,6 +68,14 @@ function workflowRunSummary(run: WorkflowRunRecord) {
 }
 
 function errorResponse(reply: FastifyReply, error: unknown) {
+  if (error instanceof WorkflowPreconditionError) {
+    reply.code(422);
+    return {
+      code: "WORKFLOW_PRECONDITION_FAILED",
+      detail: error.message,
+      issues: error.issues.slice(0, 256),
+    };
+  }
   if (error instanceof WorkflowRunControllerError) {
     const status = {
       RUN_NOT_FOUND: 404,
@@ -106,6 +115,7 @@ function errorResponse(reply: FastifyReply, error: unknown) {
     CANCEL_REQUESTED: 409,
     CORRUPT: 500,
     UNSUPPORTED_VERSION: 500,
+    PRECONDITION_FAILED: 422,
   }[error.code];
   reply.code(status);
   return { detail: error.message, code: error.code };
@@ -340,7 +350,8 @@ export async function registerDagWorkflowRoutes(
       if (body.input !== undefined && !isRecord(body.input)) {
         throw new WorkflowStoreError("INVALID_DEFINITION", "input must be an object.");
       }
-      const manifest = workflowStore.createRun(currentProjectId(), {
+      const projectId = currentProjectId();
+      const manifest = workflowStore.createRun(projectId, {
         workflowId: request.params.workflowId,
         requestId: body.requestId,
         requestedBy: "user",
@@ -353,14 +364,15 @@ export async function registerDagWorkflowRoutes(
               input: body.input as {
                 goal?: string;
                 variables?: Record<string, unknown>;
+                files?: Record<string, string[]>;
               },
             }
           : {}),
       });
-      const run = workflowStore.readRun(currentProjectId(), manifest.id);
+      const run = workflowStore.readRun(projectId, manifest.id);
       if (!run) throw new WorkflowStoreError("CORRUPT", "Created run is unreadable.");
-      options.controller?.start(currentProjectId(), manifest.id);
-      const scheduled = workflowStore.readRun(currentProjectId(), manifest.id) ?? run;
+      options.controller?.start(projectId, manifest.id);
+      const scheduled = workflowStore.readRun(projectId, manifest.id) ?? run;
       reply.code(202);
       reply.header("Cache-Control", "no-store");
       reply.header("Location", `/dag-workflow-runs/${encodeURIComponent(manifest.id)}`);
@@ -558,6 +570,9 @@ export async function registerDagWorkflowRoutes(
               error: source.state.lastError ?? null,
             },
           },
+          ...(source.manifest.input.files
+            ? { files: source.manifest.input.files }
+            : {}),
         },
       });
       options.controller.start(projectId, manifest.id);

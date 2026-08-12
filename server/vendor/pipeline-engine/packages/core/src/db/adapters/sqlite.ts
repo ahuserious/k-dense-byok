@@ -245,9 +245,41 @@ export class SqliteAdapter implements IDatabase {
           'ALTER TABLE remote_agent_workflow_runs ADD COLUMN user_id TEXT REFERENCES remote_agent_users(id) ON DELETE SET NULL'
         );
       }
+      if (!wfColNames.has('kady_project_id')) {
+        this.db.run(
+          'ALTER TABLE remote_agent_workflow_runs ADD COLUMN kady_project_id TEXT'
+        );
+      }
+      if (!wfColNames.has('kady_admission_id')) {
+        this.db.run(
+          'ALTER TABLE remote_agent_workflow_runs ADD COLUMN kady_admission_id TEXT'
+        );
+      }
+      if (!wfColNames.has('kady_engine_admission_key')) {
+        this.db.run(
+          'ALTER TABLE remote_agent_workflow_runs ADD COLUMN kady_engine_admission_key TEXT'
+        );
+      }
+      if (!wfColNames.has('workflow_revision_sha256')) {
+        this.db.run(
+          'ALTER TABLE remote_agent_workflow_runs ADD COLUMN workflow_revision_sha256 TEXT'
+        );
+      }
       // Same rationale as idx_conversations_user_id above.
       this.db.run(
         'CREATE INDEX IF NOT EXISTS idx_workflow_runs_user_id ON remote_agent_workflow_runs(user_id) WHERE user_id IS NOT NULL'
+      );
+      // Migration 024 admission indexes must be created only after the ALTERs
+      // above. createSchema() runs first and CREATE TABLE IF NOT EXISTS cannot
+      // add these columns to an existing database.
+      this.db.run(
+        `CREATE UNIQUE INDEX IF NOT EXISTS unique_workflow_run_kady_admission
+         ON remote_agent_workflow_runs(kady_project_id, kady_engine_admission_key)
+         WHERE kady_project_id IS NOT NULL AND kady_engine_admission_key IS NOT NULL`
+      );
+      this.db.run(
+        `CREATE INDEX IF NOT EXISTS idx_workflow_runs_kady_admission_lookup
+         ON remote_agent_workflow_runs(kady_project_id, kady_admission_id)`
       );
     } catch (e: unknown) {
       getLog().warn({ err: e as Error }, 'db.sqlite_migration_workflow_runs_columns_failed');
@@ -504,7 +536,11 @@ export class SqliteAdapter implements IDatabase {
         started_at TEXT DEFAULT (datetime('now')),
         completed_at TEXT,
         last_activity_at TEXT DEFAULT (datetime('now')),
-        working_path TEXT
+        working_path TEXT,
+        kady_project_id TEXT,
+        kady_admission_id TEXT,
+        kady_engine_admission_key TEXT,
+        workflow_revision_sha256 TEXT
       );
 
       -- Workflow events table

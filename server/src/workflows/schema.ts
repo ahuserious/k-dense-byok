@@ -522,6 +522,44 @@ export const WorkflowArtifactSchema = Type.Object(
   { additionalProperties: false },
 );
 
+const ScientificWorkflowRequiredInputSchema = Type.Object(
+  {
+    key: Type.String({ minLength: 1, maxLength: 64 }),
+    label: Type.String({ minLength: 1, maxLength: 256 }),
+  },
+  { additionalProperties: false },
+);
+
+const ScientificWorkflowRequiredFileSchema = Type.Object(
+  {
+    key: Type.String({ minLength: 1, maxLength: 64 }),
+    label: Type.String({ minLength: 1, maxLength: 256 }),
+    minimumCount: Type.Integer({ minimum: 1, maximum: 10_000 }),
+  },
+  { additionalProperties: false },
+);
+
+export const ScientificWorkflowPreconditionsSchema = Type.Object(
+  {
+    requiredInputs: Type.Array(ScientificWorkflowRequiredInputSchema, {
+      maxItems: 256,
+      uniqueItems: true,
+    }),
+    requiredFiles: Type.Array(ScientificWorkflowRequiredFileSchema, {
+      maxItems: 256,
+      uniqueItems: true,
+    }),
+    requiredCapabilities: Type.Array(
+      Type.Union([
+        Type.Literal("prompt-analysis"),
+        Type.Literal("read-uploaded-files"),
+      ]),
+      { maxItems: 2, uniqueItems: true },
+    ),
+  },
+  { additionalProperties: false },
+);
+
 export const WorkflowGraphDocumentSchema = Type.Object(
   {
     schemaVersion: Type.Literal(WORKFLOW_GRAPH_SCHEMA_VERSION),
@@ -537,6 +575,7 @@ export const WorkflowGraphDocumentSchema = Type.Object(
     artifacts: Type.Optional(
       Type.Array(WorkflowArtifactSchema, { maxItems: MAX_WORKFLOW_ARTIFACTS }),
     ),
+    preconditions: Type.Optional(ScientificWorkflowPreconditionsSchema),
     nodes: Type.Array(WorkflowNodeSchema, {
       minItems: 1,
       maxItems: MAX_WORKFLOW_NODES,
@@ -558,4 +597,7 @@ export type NodeWorkspacePolicy = Static<typeof NodeWorkspacePolicySchema>;
 export type WorkflowNode = Static<typeof WorkflowNodeSchema>;
 export type WorkflowEdge = Static<typeof WorkflowEdgeSchema>;
 export type WorkflowArtifact = Static<typeof WorkflowArtifactSchema>;
+export type ScientificWorkflowPreconditions = Static<
+  typeof ScientificWorkflowPreconditionsSchema
+>;
 export type WorkflowGraphDocument = Static<typeof WorkflowGraphDocumentSchema>;

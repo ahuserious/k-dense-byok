@@ -100,7 +100,7 @@ describe("agent files CRUD + seeding", () => {
     for (const helper of helpers) {
       expect(helper.tools).toBe("read, grep, find, ls");
       expect(helper.thinking).toBe("high");
-      expect(helper.inheritSkills).toBe(false);
+      expect(helper.inheritSkills).toBe(helper.name === "dag-workflow-rescue");
       expect(helper.extra).toMatchObject({
         timeoutMs: "300000",
       });
@@ -152,6 +152,39 @@ describe("agent files CRUD + seeding", () => {
     expect(deleteProjectAgent(paths, "dag-workflow-rescue")).toBe(true);
     expect(seedAgentFiles(paths)).toBe(0);
     expect(listProjectAgents(paths)).toEqual([]);
+  });
+
+  it("upgrades only the unchanged seeded rescue specialist to inherit skills", () => {
+    const paths = ensureProjectExists("dag-rescue-skill-migration-test");
+    seedAgentFiles(paths);
+    const agentDir = path.join(paths.sandbox, ".pi", "agents");
+    const rescueFile = path.join(agentDir, "dag-workflow-rescue.md");
+    fs.writeFileSync(
+      rescueFile,
+      fs.readFileSync(rescueFile, "utf-8").replace(
+        "inheritSkills: true",
+        "inheritSkills: false",
+      ),
+      "utf-8",
+    );
+    fs.rmSync(path.join(agentDir, ".seeded-dag-helpers-v4"));
+
+    expect(seedAgentFiles(paths)).toBe(1);
+    expect(listProjectAgents(paths).find((agent) => agent.name === "dag-workflow-rescue"))
+      .toMatchObject({ inheritSkills: true });
+    expect(seedAgentFiles(paths)).toBe(0);
+  });
+
+  it("preserves a rescue specialist deletion when only the skill upgrade is pending", () => {
+    const paths = ensureProjectExists("dag-rescue-skill-deletion-test");
+    seedAgentFiles(paths);
+    const agentDir = path.join(paths.sandbox, ".pi", "agents");
+    fs.rmSync(path.join(agentDir, "dag-workflow-rescue.md"));
+    fs.rmSync(path.join(agentDir, ".seeded-dag-helpers-v4"));
+
+    expect(seedAgentFiles(paths)).toBe(0);
+    expect(listProjectAgents(paths).some((agent) => agent.name === "dag-workflow-rescue"))
+      .toBe(false);
   });
 
   it("writes, lists, and validates project agents", () => {

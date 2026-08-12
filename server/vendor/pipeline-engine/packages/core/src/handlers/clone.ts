@@ -132,6 +132,11 @@ export interface RegisterResult {
   alreadyExisted: boolean;
 }
 
+export interface RegisterRepositoryOptions {
+  /** Stable caller-owned identity used instead of the sandbox directory basename. */
+  name?: string;
+}
+
 async function detectCurrentGitBranch(targetPath: string): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync(
@@ -152,13 +157,18 @@ async function detectCurrentGitBranch(targetPath: string): Promise<string | null
 async function registerRepoAtPath(
   targetPath: string,
   name: string,
-  repositoryUrl: string | null
+  repositoryUrl: string | null,
+  options: { detectGitMetadata?: boolean; dedupeByName?: boolean } = {}
 ): Promise<RegisterResult> {
   const suggestedAssistant = await resolveDefaultAssistant(targetPath);
-  const detectedBranch = await detectCurrentGitBranch(targetPath);
+  const detectedBranch = options.detectGitMetadata === false
+    ? null
+    : await detectCurrentGitBranch(targetPath);
 
   // Check if a codebase with this name already exists (dedup by project identity)
-  const existing = await codebaseDb.findCodebaseByName(name);
+  const existing = options.dedupeByName === false
+    ? null
+    : await codebaseDb.findCodebaseByName(name);
   if (existing) {
     // Determine if the new path is "better" (local > pipeline-managed clone)
     const isNewPathLocal = !targetPath.includes('/.archon/workspaces/');
@@ -396,8 +406,10 @@ export async function cloneRepository(repoUrl: string): Promise<RegisterResult> 
 /**
  * Register an existing local repository in the database (no git clone).
  */
-export async function registerRepository(localPath: string): Promise<RegisterResult> {
-  // Validate path exists and is a git repo
+export async function registerRepository(
+  localPath: string,
+  options: RegisterRepositoryOptions = {}
+): Promise<RegisterResult> {
   try {
     await execFileAsync('git', ['-C', localPath, 'rev-parse', '--git-dir']);
   } catch (error) {
@@ -431,7 +443,7 @@ export async function registerRepository(localPath: string): Promise<RegisterRes
   }
 
   // Extract repo name from directory name
-  const repoName = basename(localPath);
+  const repoName = options.name ?? basename(localPath);
 
   // Try to build owner/repo name from remote URL
   let name = repoName;

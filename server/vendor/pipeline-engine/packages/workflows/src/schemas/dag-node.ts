@@ -17,6 +17,7 @@ import { workflowNodeHooksSchema } from './hooks';
 import { isValidCommandName } from '../command-validation';
 import {
   FUSION_TOPOLOGY_KINDS,
+  fusionTopologyProviderCallCount,
   type FusionTopologyKind,
 } from '../dag-executor-topologies';
 
@@ -909,6 +910,24 @@ export function isScriptNode(node: DagNode): node is ScriptNode {
 
 export function isFusionTopologyNode(node: DagNode): node is FusionTopologyDagNode {
   return 'kind' in node && (FUSION_TOPOLOGY_KINDS as readonly string[]).includes(node.kind);
+}
+
+/**
+ * Shared engine classification for nodes that can initiate provider work.
+ * Admission callers must use this instead of inferring billability from raw
+ * object fields, so new schema variants cannot be silently omitted.
+ */
+export function providerCallCountForDagNode(node: DagNode): number {
+  if (isFusionTopologyNode(node)) {
+    return fusionTopologyProviderCallCount(
+      node.kind,
+      node.topology_agents.length,
+      node.max_rounds ?? 2
+    );
+  }
+  if (isLoopNode(node)) return node.loop.max_iterations;
+  if ('command' in node || 'prompt' in node) return 1;
+  return 0;
 }
 
 /** Type guard: validates a value is a known TriggerRule */
