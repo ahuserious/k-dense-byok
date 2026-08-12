@@ -3,12 +3,12 @@ import type { Locator, Page } from "@playwright/test";
 import { expect, test } from "./fixtures";
 import { STUDIO_FONT_SPECIMENS, STUDIO_SECTIONS, STUDIO_STATUS_ITEMS, STUDIO_SWATCHES } from "./inventory";
 
-const EXPECTED_FONT_FAMILIES: Record<(typeof STUDIO_FONT_SPECIMENS)[number], RegExp> = {
-  "Display / --fhero": /0xProto Nerd Font/i,
-  "Navigation / --fnav": /Inter/i,
-  "CTA + code / --fcta": /(FiraCode Nerd Font|Space Mono)/i,
-  "Figures / --ffig": /(Tinos Nerd Font|Tinos)/i,
-  "Annotations / --fann": /(Terminess Nerd Font|Space Mono)/i,
+const EXPECTED_FONT_FACES: Record<(typeof STUDIO_FONT_SPECIMENS)[number], string> = {
+  "Display / --fhero": "0xProto Nerd Font",
+  "Navigation / --fnav": "Inter",
+  "CTA + code / --fcta": "FiraCode Nerd Font",
+  "Figures / --ffig": "Tinos Nerd Font",
+  "Annotations / --fann": "Terminess Nerd Font",
 };
 
 const EXPECTED_SWATCH_COLORS: Record<(typeof STUDIO_SWATCHES)[number], string> = {
@@ -66,6 +66,41 @@ async function computedPaint(locator: Locator) {
       color: computed.color,
     };
   });
+}
+
+async function expectRoleFontFace(
+  workspacePage: Page,
+  specimen: (typeof STUDIO_FONT_SPECIMENS)[number],
+) {
+  const dialog = await openStudio(workspacePage);
+  const sample = dialog.getByText(specimen, { exact: true }).locator("..").locator("strong");
+  await expect(sample).toBeVisible();
+  const intendedFace = EXPECTED_FONT_FACES[specimen];
+  const font = await sample.evaluate(async (element, expectedFace) => {
+    await document.fonts.ready;
+    const computed = getComputedStyle(element);
+    const probe = document.createElement("canvas").getContext("2d");
+    if (!probe) throw new Error("Expected a 2D canvas context for font verification.");
+    const verificationText = "Scientific DAG 0123456789 MWil";
+    const widthWith = (family: string) => {
+      probe.font = `${computed.fontWeight} ${computed.fontSize} ${family}`;
+      return probe.measureText(verificationText).width;
+    };
+    const available = ["monospace", "serif"].some((fallback) => (
+      widthWith(`"${expectedFace}", ${fallback}`) !== widthWith(fallback)
+    ));
+    return {
+      available,
+      family: computed.fontFamily.split(",")[0]?.trim().replace(/^['"]|['"]$/g, ""),
+      loaded: document.fonts.check(
+        `${computed.fontWeight} ${computed.fontSize} "${expectedFace}"`,
+        element.textContent ?? "Scientific DAG",
+      ),
+    };
+  }, intendedFace);
+  expect(font.available).toBe(true);
+  expect(font.family).toBe(intendedFace);
+  expect(font.loaded).toBe(true);
 }
 
 async function openStudio(page: Page) {
@@ -129,12 +164,17 @@ test.describe("Scientific DAG Studio interaction and rendered visual contract", 
   }
 
   for (const specimen of STUDIO_FONT_SPECIMENS) {
-    test(`${specimen} resolves the intended role face`, async ({ workspacePage }) => {
-      const dialog = await openStudio(workspacePage);
-      const sample = dialog.getByText(specimen, { exact: true }).locator("..").locator("strong");
-      await expect(sample).toBeVisible();
-      const family = await sample.evaluate((element) => getComputedStyle(element).fontFamily);
-      expect(family).toMatch(EXPECTED_FONT_FAMILIES[specimen]);
+    const title = `${specimen} resolves the intended role face`;
+    if (specimen === "Navigation / --fnav") {
+      test.fixme(title, async ({ workspacePage }) => {
+        // globals.css:236 names Inter, but no Inter face is vendored. The deck's
+        // other missing face, AnonymicePro, is documented at LICENSES.md:31-32.
+        await expectRoleFontFace(workspacePage, specimen);
+      });
+      continue;
+    }
+    test(title, async ({ workspacePage }) => {
+      await expectRoleFontFace(workspacePage, specimen);
     });
   }
 
@@ -167,6 +207,15 @@ test.describe("Scientific DAG Studio interaction and rendered visual contract", 
     await expect(action).toHaveCSS("background-color", "rgb(28, 33, 38)");
   });
 
+  for (const actionName of ["Run graph", "Validate", "Save draft"] as const) {
+    test(`${actionName} is visibly and semantically disabled`, async ({ workspacePage }) => {
+      const dialog = await openStudio(workspacePage);
+      const action = dialog.getByRole("button", { name: actionName });
+      await expect(action).toBeDisabled();
+      await expect(action).toHaveCSS("cursor", "not-allowed");
+    });
+  }
+
   for (const card of [
     { name: "Literature synthesis", borderColor: "rgb(21, 149, 184)", status: "RUNNING" },
     { name: "Differential analysis", borderColor: "rgb(42, 49, 56)", status: "QUEUED" },
@@ -176,15 +225,6 @@ test.describe("Scientific DAG Studio interaction and rendered visual contract", 
       const article = dialog.getByText(card.name, { exact: true }).locator("..").locator("..");
       await expect(article).toContainText(card.status);
       await expect(article).toHaveCSS("border-color", card.borderColor);
-    });
-  }
-});
-
-test.describe("documented product gaps — excluded from the substantive count", () => {
-  for (const actionName of ["Run graph", "Validate", "Save draft"] as const) {
-    test.skip(`${actionName} needs an observable production handler`, async () => {
-      // scientific-dag-studio-buttons-ctas.tsx renders this enabled specimen
-      // without onClick or state. A passing E2E assertion would hide the gap.
     });
   }
 });

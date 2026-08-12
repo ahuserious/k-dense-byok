@@ -1,7 +1,22 @@
 import type { FrameLocator, Locator, Page } from "@playwright/test";
 
-import { addPromptNode, expect, inspectorControl, openBuilderDraft, test } from "./fixtures";
-import { NODE_DETAIL_SECTIONS, NODE_SPEC_FIELDS, NODE_SPEC_SELECTS } from "./inventory";
+import {
+  addPromptNode,
+  expect,
+  inspectorControl,
+  lastRequestPostData,
+  openBoundBuilder,
+  openBuilderDraft,
+  requestCount,
+  test,
+  type MockApiState,
+} from "./fixtures";
+import {
+  NODE_DETAIL_SECTIONS,
+  NODE_SPEC_FIELDS,
+  NODE_SPEC_MODEL_SAVE_OUTCOMES,
+  NODE_SPEC_SELECTS,
+} from "./inventory";
 
 async function openNodeSpec(frame: FrameLocator) {
   await frame.getByRole("tab", { name: "NodeSpec" }).click();
@@ -23,10 +38,6 @@ async function useExplicitFallback(frame: FrameLocator) {
   await expect(inspectorControl(frame, "Fallback alternatives (JSON)")).toBeVisible();
 }
 
-function workflowNameFor(title: string) {
-  return `e2e-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
-}
-
 async function selectChangedValue(control: Locator, defaultValue: string, value: string) {
   expect(value, "Every select case must exercise a non-default onChange path.").not.toBe(defaultValue);
   await expect(control).toHaveValue(defaultValue);
@@ -37,19 +48,37 @@ async function selectChangedValue(control: Locator, defaultValue: string, value:
 async function saveAndAssertOutcome(
   page: Page,
   frame: FrameLocator,
+  apiState: MockApiState,
   outcome: "accepted" | "S4" | "S5",
 ) {
+  const validationRequestsBefore = requestCount(apiState, "POST", "/api/workflows/validate");
+  const persistenceRequestsBefore = requestCount(apiState, "PUT", "/api/workflows/e2e-vendored");
   const validationResponsePromise = page.waitForResponse((response) => (
     new URL(response.url()).pathname === "/api/workflows/validate" &&
     response.request().method() === "POST"
   ));
+  const persistenceResponsePromise = outcome === "accepted"
+    ? page.waitForResponse((response) => (
+        new URL(response.url()).pathname === "/api/workflows/e2e-vendored" &&
+        response.request().method() === "PUT"
+      ))
+    : null;
   await frame.getByRole("button", { name: "Save", exact: true }).click();
   const validationResponse = await validationResponsePromise;
   expect(validationResponse.status()).toBe(200);
+  expect(requestCount(apiState, "POST", "/api/workflows/validate")).toBe(
+    validationRequestsBefore + 1,
+  );
   const validation = await validationResponse.json() as { valid: boolean; errors?: string[] };
 
   if (outcome === "accepted") {
     expect(validation).toEqual({ valid: true });
+    const persistenceResponse = await persistenceResponsePromise;
+    expect(persistenceResponse?.status()).toBe(200);
+    expect(requestCount(apiState, "PUT", "/api/workflows/e2e-vendored")).toBe(
+      persistenceRequestsBefore + 1,
+    );
+    await expect(frame.getByRole("button", { name: "Valid", exact: true })).toBeVisible();
     await expect(frame.getByRole("button", { name: "Run", exact: true })).toBeEnabled();
     await expect(frame.getByText("Unsaved", { exact: true })).toHaveCount(0);
     return;
@@ -58,11 +87,17 @@ async function saveAndAssertOutcome(
   const pendingUnitMessage = new RegExp(`Pending unit ${outcome}`);
   expect(validation.valid).toBe(false);
   expect(validation.errors?.join("\n")).toMatch(pendingUnitMessage);
-  const misleadingStatus = frame.getByRole("button", { name: "Valid", exact: true });
-  await expect(misleadingStatus).toBeVisible();
-  await misleadingStatus.click();
+  expect(requestCount(apiState, "PUT", "/api/workflows/e2e-vendored")).toBe(
+    persistenceRequestsBefore,
+  );
+  const status = frame.getByRole("button", { name: /\d+ errors/ });
+  await expect(status).toHaveAccessibleName(/\d+ errors/);
+  const validate = frame.getByRole("button", { name: "Validate", exact: true });
+  await expect(validate.locator("xpath=preceding-sibling::span[1]")).toHaveText("2");
+  await expect(frame.getByText("Unsaved", { exact: true })).toBeVisible();
+  await status.click();
   await expect(frame.getByText(pendingUnitMessage)).toBeVisible();
-  await expect(misleadingStatus).toBeVisible();
+  await expect(status).toBeVisible();
   await expect(frame.getByRole("button", { name: "Run", exact: true })).toBeDisabled();
 }
 
@@ -75,7 +110,6 @@ test.describe("thin inventory smoke — excluded from the substantive count", ()
     { kind: "button", value: "Split" },
     { kind: "button", value: "YAML" },
     { kind: "button", value: "Validate" },
-    { kind: "button", value: "Save" },
     { kind: "button", value: "Run" },
     { kind: "placeholder", value: "Search..." },
     { kind: "palette", value: "Prompt" },
@@ -168,6 +202,16 @@ test.describe("node card detail surface", () => {
 });
 
 test.describe("builder runtime rendering", () => {
+  test("unbound draft disables Save with a binding explanation", async ({ workspacePage }) => {
+    const frame = await openBuilderDraft(workspacePage);
+    const save = frame.getByRole("button", { name: "Save", exact: true });
+    await expect(save).toBeDisabled();
+    await expect(save).toHaveAttribute(
+      "title",
+      "Open a workflow from the registry before saving",
+    );
+  });
+
   test("computed canvas and prompt stripe colors resolve to the shipped palette", async ({ workspacePage }) => {
     const frame = await addPromptNode(workspacePage);
     const palette = await frame.locator("body").evaluate((body) => {
@@ -229,10 +273,10 @@ test.describe("NodeInspector tabs", () => {
 });
 
 test.describe("NodeInspector NodeSpec fields", () => {
-  // Product defect: WorkflowBuilder.tsx:327-332 returns from failed pre-validation without
+  // Product defect: WorkflowBuilder.tsx:332-334 returns from failed pre-validation without
   // opening the Problems panel, so Save does not reveal the server rejection on its own.
-  test.fixme("Save automatically surfaces a rejected NodeSpec message", async ({ workspacePage }) => {
-    const frame = await addPromptNode(workspacePage, { workflowName: "e2e-visible-save-rejection" });
+  test.fixme("rejected Save does not automatically open the Problems panel", async ({ workspacePage }) => {
+    const frame = await openBoundBuilder(workspacePage);
     await openNodeSpec(frame);
     await inspectorControl(frame, "Temperature (0-2)").fill("0.4");
     await frame.getByRole("button", { name: "Save", exact: true }).click();
@@ -247,84 +291,101 @@ test.describe("NodeInspector NodeSpec fields", () => {
     await expect(control).toBeDisabled();
   });
 
-  // Runtime measurement after clicking enabled Save on a dirty fresh draft:
-  // "Zero validate call. Zero PUT. No status text." Keep these assertions intact for the product fix.
   for (const field of NODE_SPEC_FIELDS) {
-    test.fixme(`${field.label} save enforces the frozen NodeSpec`, async ({ workspacePage }) => {
-      const frame = await addPromptNode(workspacePage, {
-        workflowName: workflowNameFor(field.label),
-      });
+    test(`${field.label} save enforces the frozen NodeSpec`, async ({ workspacePage, apiState }) => {
+      const frame = await openBoundBuilder(workspacePage);
       await openNodeSpec(frame);
       const control = inspectorControl(frame, field.label);
       await control.fill(field.value);
       await expect(control).toHaveValue(field.value);
-      await saveAndAssertOutcome(workspacePage, frame, field.saveOutcome);
+      await saveAndAssertOutcome(workspacePage, frame, apiState, field.saveOutcome);
+      if (field.label === "Temperature (0-2)") {
+        const validationRequest = JSON.parse(
+          lastRequestPostData(apiState, "POST", "/api/workflows/validate") ?? "null",
+        ) as {
+          definition?: { nodes?: Array<{ settings?: { hyperparameters?: { temperature?: number } } }> };
+        };
+        expect(
+          validationRequest.definition?.nodes?.[0]?.settings?.hyperparameters?.temperature,
+        ).toBe(0.4);
+        await expect(control).toHaveValue(field.value);
+      }
     });
   }
 
   for (const field of NODE_SPEC_SELECTS) {
-    test.fixme(`${field.label} save enforces a changed NodeSpec value`, async ({ workspacePage }) => {
-      const frame = await addPromptNode(workspacePage, {
-        workflowName: workflowNameFor(field.label),
-      });
+    test(`${field.label} save enforces a changed NodeSpec value`, async ({ workspacePage, apiState }) => {
+      const frame = await openBoundBuilder(workspacePage);
       await openNodeSpec(frame);
       const control = inspectorControl(frame, field.label);
       await selectChangedValue(control, field.defaultValue, field.value);
-      await saveAndAssertOutcome(workspacePage, frame, field.saveOutcome);
+      await saveAndAssertOutcome(workspacePage, frame, apiState, field.saveOutcome);
     });
   }
 
-  test.fixme("Model source selects Kady current", async ({ workspacePage }) => {
-    const frame = await addPromptNode(workspacePage, { workflowName: "e2e-model-source-kady-current" });
+  test("Model source selects Kady current", async ({ workspacePage, apiState }) => {
+    const frame = await openBoundBuilder(workspacePage);
     await openNodeSpec(frame);
     await selectChangedValue(inspectorControl(frame, "Model source"), "inherit", "kady-current");
-    await saveAndAssertOutcome(workspacePage, frame, "S4");
+    await saveAndAssertOutcome(
+      workspacePage,
+      frame,
+      apiState,
+      NODE_SPEC_MODEL_SAVE_OUTCOMES["Model source"],
+    );
   });
 
   for (const field of [
     { label: "Provider", value: "claude", saveOutcome: "accepted" },
     { label: "Model ID", value: "openai/gpt-5", saveOutcome: "accepted" },
-    { label: "Auth profile", value: "e2e-profile", saveOutcome: "S4" },
+    {
+      label: "Auth profile",
+      value: "e2e-profile",
+      saveOutcome: NODE_SPEC_MODEL_SAVE_OUTCOMES["Auth profile"],
+    },
   ] as const) {
-    test.fixme(`${field.label} save enforces a fixed requested model`, async ({ workspacePage }) => {
-      const frame = await addPromptNode(workspacePage, {
-        workflowName: workflowNameFor(`fixed-${field.label}`),
-      });
+    test(`${field.label} save enforces a fixed requested model`, async ({ workspacePage, apiState }) => {
+      const frame = await openBoundBuilder(workspacePage);
       await openNodeSpec(frame);
       await useFixedModel(frame);
       const control = inspectorControl(frame, field.label);
       await control.fill(field.value);
       await expect(control).toHaveValue(field.value);
-      await saveAndAssertOutcome(workspacePage, frame, field.saveOutcome);
+      await saveAndAssertOutcome(workspacePage, frame, apiState, field.saveOutcome);
     });
   }
 
-  test.fixme("Authentication edits a fixed requested model", async ({ workspacePage }) => {
-    const frame = await addPromptNode(workspacePage, { workflowName: "e2e-fixed-authentication" });
+  test("Authentication edits a fixed requested model", async ({ workspacePage, apiState }) => {
+    const frame = await openBoundBuilder(workspacePage);
     await openNodeSpec(frame);
     await useFixedModel(frame);
     await selectChangedValue(inspectorControl(frame, "Authentication"), "api-key", "oauth");
-    await saveAndAssertOutcome(workspacePage, frame, "S4");
+    await saveAndAssertOutcome(
+      workspacePage,
+      frame,
+      apiState,
+      NODE_SPEC_MODEL_SAVE_OUTCOMES.Authentication,
+    );
   });
 
-  test.fixme("Requested-model reasoning edits the requested model", async ({ workspacePage }) => {
-    const frame = await addPromptNode(workspacePage, { workflowName: "e2e-fixed-reasoning" });
+  test("Requested-model reasoning edits the requested model", async ({ workspacePage, apiState }) => {
+    const frame = await openBoundBuilder(workspacePage);
     await openNodeSpec(frame);
     await useFixedModel(frame);
     await selectChangedValue(inspectorControl(frame, "Requested-model reasoning"), "high", "xhigh");
-    await saveAndAssertOutcome(workspacePage, frame, "accepted");
+    await saveAndAssertOutcome(workspacePage, frame, apiState, "accepted");
   });
 
-  test.fixme("Resolution selects explicit fallback", async ({ workspacePage }) => {
-    const frame = await addPromptNode(workspacePage, { workflowName: "e2e-explicit-resolution" });
+  test("Resolution selects explicit fallback", async ({ workspacePage, apiState }) => {
+    const frame = await openBoundBuilder(workspacePage);
     await openNodeSpec(frame);
     await useExplicitFallback(frame);
     await expect(inspectorControl(frame, "Resolution")).toHaveValue("explicit-fallback");
-    await saveAndAssertOutcome(workspacePage, frame, "accepted");
+    await saveAndAssertOutcome(workspacePage, frame, apiState, "accepted");
   });
 
-  test.fixme("Fallback alternatives JSON edits the fallback list", async ({ workspacePage }) => {
-    const frame = await addPromptNode(workspacePage, { workflowName: "e2e-fallback-alternatives" });
+  test("Fallback alternatives JSON edits the fallback list", async ({ workspacePage, apiState }) => {
+    const frame = await openBoundBuilder(workspacePage);
     await openNodeSpec(frame);
     await useExplicitFallback(frame);
     const value = JSON.stringify([{
@@ -337,16 +398,16 @@ test.describe("NodeInspector NodeSpec fields", () => {
     const control = inspectorControl(frame, "Fallback alternatives (JSON)");
     await control.fill(value);
     await expect(control).toHaveValue(value);
-    await saveAndAssertOutcome(workspacePage, frame, "accepted");
+    await saveAndAssertOutcome(workspacePage, frame, apiState, "accepted");
   });
 
-  test.fixme("Fallback reason edits the explicit fallback rationale", async ({ workspacePage }) => {
-    const frame = await addPromptNode(workspacePage, { workflowName: "e2e-fallback-reason" });
+  test("Fallback reason edits the explicit fallback rationale", async ({ workspacePage, apiState }) => {
+    const frame = await openBoundBuilder(workspacePage);
     await openNodeSpec(frame);
     await useExplicitFallback(frame);
     const control = inspectorControl(frame, "Fallback reason");
     await control.fill("Fallback is bounded and explicit.");
     await expect(control).toHaveValue("Fallback is bounded and explicit.");
-    await saveAndAssertOutcome(workspacePage, frame, "accepted");
+    await saveAndAssertOutcome(workspacePage, frame, apiState, "accepted");
   });
 });

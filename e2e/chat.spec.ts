@@ -1,6 +1,6 @@
 import type { Page } from "@playwright/test";
 
-import { expect, selectWorkspaceTab, test } from "./fixtures";
+import { expect, requestCount, selectWorkspaceTab, test } from "./fixtures";
 
 const STEERING_COMPOSER_PLACEHOLDER = "Steer the run… (⌥↵ to run after)";
 
@@ -19,12 +19,9 @@ async function selectMiddlePaneTab(page: Page, name: "Conversation" | "Scientifi
   await expect(tab).toHaveAttribute("aria-selected", "true");
 }
 
-async function showConversation(page: Page) {
+async function showInitialConversation(page: Page) {
   await selectWorkspaceTab(page, "Chat");
-  const tablist = page.getByRole("tablist", { name: "Chat middle pane" });
-  if (await tablist.count()) {
-    await selectMiddlePaneTab(page, "Conversation");
-  }
+  await expect(page.getByRole("tablist", { name: "Chat middle pane" })).toHaveCount(0);
   await expect(chatComposer(page)).toBeVisible();
 }
 
@@ -42,7 +39,7 @@ async function activateButton(page: Page, name: string) {
 }
 
 async function startHeldRun(page: Page) {
-  await showConversation(page);
+  await showInitialConversation(page);
   await page.evaluate(() => localStorage.setItem("kady:e2e-run-mode", "streaming"));
   await submitComposer(page, "Hold this deterministic run");
   await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
@@ -86,7 +83,7 @@ async function showFailedLiveGraph(
   apiState: { graphError: boolean },
 ) {
   apiState.graphError = true;
-  await showConversation(page);
+  await showInitialConversation(page);
   await page.evaluate(() => localStorage.setItem("kady:e2e-run-mode", "error"));
   await submitComposer(page, "Route this deterministic failure");
   const routedError = page.getByRole("alert").filter({ hasText: "persisted provider failure" });
@@ -107,9 +104,16 @@ test.describe("chat live Scientific DAG", () => {
   });
 
   for (const tabName of ["Conversation", "Scientific DAG"] as const) {
-    test(`${tabName} is exposed in the middle pane`, async ({ workspacePage }) => {
-      const tablist = await showLiveGraph(workspacePage);
-      await expect(tablist.getByRole("tab", { name: tabName })).toBeVisible();
+    test(`${tabName} controls its middle pane surface`, async ({ workspacePage }) => {
+      await showLiveGraph(workspacePage);
+      if (tabName === "Conversation") {
+        await selectMiddlePaneTab(workspacePage, tabName);
+        await expect(chatComposer(workspacePage)).toBeVisible();
+      } else {
+        await selectMiddlePaneTab(workspacePage, "Conversation");
+        await selectMiddlePaneTab(workspacePage, tabName);
+        await expect(workspacePage.getByRole("region", { name: "Live workflow graph" })).toBeVisible();
+      }
     });
   }
 
@@ -166,13 +170,14 @@ test.describe("chat live Scientific DAG", () => {
 
   test("conversation can be selected from an active graph", async ({ workspacePage }) => {
     await showLiveGraph(workspacePage);
-    await showConversation(workspacePage);
+    await selectMiddlePaneTab(workspacePage, "Conversation");
+    await expect(chatComposer(workspacePage)).toBeVisible();
     await expect(workspacePage.getByRole("tab", { name: "Conversation" })).toHaveAttribute("aria-selected", "true");
   });
 
   test("Scientific DAG can be reselected", async ({ workspacePage }) => {
     await showLiveGraph(workspacePage);
-    await showConversation(workspacePage);
+    await selectMiddlePaneTab(workspacePage, "Conversation");
     await selectMiddlePaneTab(workspacePage, "Scientific DAG");
     await expect(workspacePage.getByRole("region", { name: "Live workflow graph" })).toBeVisible();
   });
@@ -181,19 +186,41 @@ test.describe("chat live Scientific DAG", () => {
 test.describe("chat send, stop, and queue", () => {
   test("send streams a deterministic assistant response", async ({ workspacePage }) => {
     const message = "Run local E2E";
-    await showConversation(workspacePage);
+    await showInitialConversation(workspacePage);
     await submitComposer(workspacePage, message);
     await waitForCompletedResponse(workspacePage, message);
     await expect(workspacePage.getByText(message, { exact: true })).toBeVisible();
     expect((await recordedRunRequests(workspacePage)).map((request) => request.message)).toEqual([message]);
   });
 
-  test("completed send returns the submit control", async ({ workspacePage }) => {
+  test("completed send returns the submit control", async ({ workspacePage, apiState }) => {
     const message = "Complete local E2E";
-    await showConversation(workspacePage);
+    await showInitialConversation(workspacePage);
+    const sandboxTreeRequestsBefore = requestCount(apiState, "GET", "/sandbox/tree");
+    const projectCostRequestsBefore = requestCount(apiState, "GET", "/projects/default/costs");
+    const sessionCostRequestsBefore = requestCount(
+      apiState,
+      "GET",
+      "/sessions/session-e2e/costs",
+    );
+    const workflowStateRequestsBefore = requestCount(
+      apiState,
+      "GET",
+      "/sessions/session-e2e/workflow-run-state",
+    );
     await submitComposer(workspacePage, message);
     await waitForCompletedResponse(workspacePage, message);
     await expect(workspacePage.getByRole("button", { name: "Submit", exact: true })).toBeVisible();
+    expect(await recordedRunRequests(workspacePage)).toEqual([{ message, sessionId: "session-e2e" }]);
+    await expect.poll(() => requestCount(apiState, "GET", "/sandbox/tree"))
+      .toBeGreaterThan(sandboxTreeRequestsBefore);
+    await expect.poll(() => requestCount(apiState, "GET", "/projects/default/costs"))
+      .toBeGreaterThan(projectCostRequestsBefore);
+    await expect.poll(() => requestCount(apiState, "GET", "/sessions/session-e2e/costs"))
+      .toBeGreaterThan(sessionCostRequestsBefore);
+    await expect.poll(
+      () => requestCount(apiState, "GET", "/sessions/session-e2e/workflow-run-state"),
+    ).toBeGreaterThan(workflowStateRequestsBefore);
   });
 
   test("held stream exposes Stop", async ({ workspacePage }) => {
@@ -314,12 +341,12 @@ test.describe("chat send, stop, and queue", () => {
 });
 
 test.describe("chat error routing", () => {
-  test("persisted stream error selects Scientific DAG", async ({ workspacePage, apiState }) => {
+  test("mocked stream error selects Scientific DAG", async ({ workspacePage, apiState }) => {
     await showFailedLiveGraph(workspacePage, apiState);
     await expect(workspacePage.getByRole("tab", { name: "Scientific DAG" })).toHaveAttribute("aria-selected", "true");
   });
 
-  test("persisted stream error is an alert", async ({ workspacePage, apiState }) => {
+  test("mocked stream error is an alert", async ({ workspacePage, apiState }) => {
     const routedError = await showFailedLiveGraph(workspacePage, apiState);
     await expect(routedError).toContainText("persisted provider failure");
   });
