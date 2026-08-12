@@ -61,6 +61,7 @@ import { OutputRefError } from './output-ref';
 import type { WorkflowDeps, IWorkflowPlatform, WorkflowConfig } from './deps';
 import type { IWorkflowStore } from './store';
 import { buildAiProfile } from './model-validation';
+import { BUNDLED_WORKFLOWS } from './defaults/bundled-defaults';
 
 // --- Mock helpers ---
 
@@ -8792,17 +8793,10 @@ describe('provider resolution -- regression for #1610', () => {
 
 describe('bundled opus nodes -- provider annotation invariant (#1610)', () => {
   it('every bundled node with an opus model has provider: claude at the node or workflow level', async () => {
-    // Resolve the defaults directory relative to this package (same logic as getAppPipelineEngineBasePath).
-    // import.meta.dir = packages/workflows/src → go up 3 levels to repo root → .archon/workflows/defaults
-    const repoRoot = join(import.meta.dir, '..', '..', '..');
-    const defaultsDir = join(repoRoot, '.archon', 'workflows', 'defaults');
-
-    const { readdir, readFile: readFileFs } = await import('fs/promises');
-    const files = (await readdir(defaultsDir)).filter(f => f.endsWith('.yaml'));
-    expect(files.length).toBeGreaterThan(0);
-
-    for (const file of files) {
-      const src = await readFileFs(join(defaultsDir, file), 'utf-8');
+    // The vendored distribution's runtime source of truth is the generated
+    // record, not an untracked .archon directory. Kady intentionally ships an
+    // empty record today; this invariant will inspect any defaults added later.
+    for (const [file, src] of Object.entries(BUNDLED_WORKFLOWS)) {
       const result = parseWorkflow(src, file);
       if (!('workflow' in result)) continue; // skip load errors
 
@@ -9572,6 +9566,7 @@ describe('executeDagWorkflow -- completion telemetry', () => {
     let started = 0;
     let abortedSiblings = 0;
     let terminalUsageUsd = 0;
+    const siblingSettlements: Promise<void>[] = [];
     let releaseStarted: (() => void) | undefined;
     const allStarted = new Promise<void>(resolve => {
       releaseStarted = resolve;
@@ -9583,6 +9578,12 @@ describe('executeDagWorkflow -- completion telemetry', () => {
       options?: { abortSignal?: AbortSignal }
     ) {
       const role = prompt.match(/^Agent role: (.+)$/m)?.[1] ?? 'unknown';
+      let releaseSiblingSettlement: (() => void) | undefined;
+      if (role !== 'Lead scientist') {
+        siblingSettlements.push(new Promise<void>(resolve => {
+          releaseSiblingSettlement = resolve;
+        }));
+      }
       active += 1;
       started += 1;
       if (started === 3) releaseStarted?.();
@@ -9614,6 +9615,7 @@ describe('executeDagWorkflow -- completion telemetry', () => {
         yield { type: 'result' as const, sessionId: `session-${role}`, cost };
       } finally {
         active -= 1;
+        releaseSiblingSettlement?.();
       }
     });
 
@@ -9630,6 +9632,12 @@ describe('executeDagWorkflow -- completion telemetry', () => {
         ],
       }],
     });
+
+    const siblingSettlementResults = await Promise.allSettled(siblingSettlements);
+    expect(siblingSettlementResults).toEqual([
+      { status: 'fulfilled', value: undefined },
+      { status: 'fulfilled', value: undefined },
+    ]);
 
     expect(active).toBe(0);
     expect(abortedSiblings).toBe(2);

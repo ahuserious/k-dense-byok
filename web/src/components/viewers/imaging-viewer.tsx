@@ -51,34 +51,42 @@ function fmtMetaValue(v: unknown): string {
 // ---------------------------------------------------------------------------
 
 export default function ImagingViewer({ path, projectId }: ViewerProps) {
-  const [summary, setSummary] = useState<ImagingSummary | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [activeAxis, setActiveAxis] = useState<string | null>(null);
-  const [index, setIndex] = useState(0);
+  const requestKey = `${projectId ?? ""}\0${path}`;
+  const [result, setResult] = useState<{
+    key: string;
+    summary: ImagingSummary;
+    activeAxis: string | null;
+    index: number;
+  } | null>(null);
+  const [failure, setFailure] = useState<{ key: string; message: string } | null>(null);
   const [failedSlice, setFailedSlice] = useState<string | null>(null);
 
   useEffect(() => {
     const ac = new AbortController();
-    setSummary(null);
-    setError(null);
-    setActiveAxis(null);
-    setIndex(0);
     fetchSciJson<ImagingSummary>(sciSummaryUrl(path, "imaging", projectId), {
       signal: ac.signal,
     })
       .then((d) => {
         if (ac.signal.aborted) return;
-        setSummary(d);
         const axis = d.default_axis ?? d.axes[0]?.name ?? null;
-        setActiveAxis(axis);
         const size = d.axes.find((a) => a.name === axis)?.size ?? d.axes[0]?.size ?? 1;
-        setIndex(Math.floor(size / 2));
+        setResult({
+          key: requestKey,
+          summary: d,
+          activeAxis: axis,
+          index: Math.floor(size / 2),
+        });
       })
       .catch((e) => {
-        if (!isAbortError(e)) setError(String(e.message ?? e));
+        if (!isAbortError(e)) setFailure({ key: requestKey, message: String(e.message ?? e) });
       });
     return () => ac.abort();
-  }, [path, projectId]);
+  }, [path, projectId, requestKey]);
+
+  const summary = result?.key === requestKey ? result.summary : null;
+  const activeAxis = result?.key === requestKey ? result.activeAxis : null;
+  const index = result?.key === requestKey ? result.index : 0;
+  const error = failure?.key === requestKey ? failure.message : null;
 
   if (error) {
     return (
@@ -102,14 +110,23 @@ export default function ImagingViewer({ path, projectId }: ViewerProps) {
   const metaEntries = Object.entries(summary.meta ?? {});
   // A broken <img> renders as nothing at all, which reads as "empty scan"
   // rather than "render failed"; the key scopes the failure to one slice.
-  const sliceKey = `${activeAxis}:${index}`;
+  const sliceKey = `${requestKey}:${activeAxis}:${index}`;
   const sliceFailed = failedSlice === sliceKey;
 
   function handleAxisChange(nextAxis: string) {
     if (!summary) return;
-    setActiveAxis(nextAxis);
     const size = summary.axes.find((a) => a.name === nextAxis)?.size ?? 1;
-    setIndex(Math.floor(size / 2));
+    setResult({
+      key: requestKey,
+      summary,
+      activeAxis: nextAxis,
+      index: Math.floor(size / 2),
+    });
+  }
+
+  function handleIndexChange(nextIndex: number) {
+    if (!summary || activeAxis == null) return;
+    setResult({ key: requestKey, summary, activeAxis, index: nextIndex });
   }
 
   return (
@@ -157,7 +174,7 @@ export default function ImagingViewer({ path, projectId }: ViewerProps) {
                 max={maxIndex}
                 step={1}
                 value={index}
-                onChange={(e) => setIndex(Number(e.target.value))}
+                onChange={(e) => handleIndexChange(Number(e.target.value))}
                 className="flex-1"
               />
               <span className="w-16 text-right font-mono text-xs text-muted-foreground">

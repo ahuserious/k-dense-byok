@@ -1147,27 +1147,27 @@ function TextEditor({
   // The sandbox poll refreshes `initialContent`, so comparing against the prop
   // made the dirty flag (and the Save button) flip off when the agent touched
   // the file — leaving real edits unsavable. Track what we last wrote instead.
-  const savedRef = useRef(initialContent);
-  const contentRef = useRef(content);
-  contentRef.current = content;
+  const [savedContent, setSavedContent] = useState(initialContent);
+  const observedInitialContentRef = useRef(initialContent);
   const [diskChanged, setDiskChanged] = useState(false);
-  const isDirty = content !== savedRef.current;
+  const isDirty = content !== savedContent;
 
+  /* eslint-disable react-hooks/set-state-in-effect -- The editor must reconcile an externally refreshed file while preserving unsaved local edits. */
   useEffect(() => {
-    if (initialContent === savedRef.current) return;
-    if (contentRef.current === savedRef.current) {
-      savedRef.current = initialContent;
+    if (initialContent === observedInitialContentRef.current) return;
+    observedInitialContentRef.current = initialContent;
+    if (content === savedContent) {
+      setSavedContent(initialContent);
       setContent(initialContent);
       setDiskChanged(false);
       return;
     }
     setDiskChanged(true);
-  }, [initialContent]);
+  }, [content, initialContent, savedContent]);
+  /* eslint-enable react-hooks/set-state-in-effect */
   const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.userAgent);
   const { resolvedTheme } = useTheme();
 
-  // Use a ref so the keymap closure never goes stale
-  const handleSaveRef = useRef<() => void>(() => {});
   const viewRef = useRef<EditorView | null>(null);
 
   const handleSave = useCallback(async () => {
@@ -1175,23 +1175,21 @@ function TextEditor({
     const ok = await onSave(content);
     setSaving(false);
     if (ok) {
-      savedRef.current = content;
+      setSavedContent(content);
       setDiskChanged(false);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     }
   }, [content, onSave]);
 
-  handleSaveRef.current = handleSave;
-
   const extensions = useMemo(() => {
     const lang = langExtension(name);
     return [
       ...(lang ? [lang] : []),
       EditorView.lineWrapping,
-      keymap.of([{ key: "Mod-s", run: () => { handleSaveRef.current(); return true; } }]),
+      keymap.of([{ key: "Mod-s", run: () => { void handleSave(); return true; } }]),
     ];
-  }, [name]);
+  }, [handleSave, name]);
 
   return (
     <div className="flex h-full flex-col">
@@ -1204,7 +1202,7 @@ function TextEditor({
         {diskChanged && (
           <button
             onClick={() => {
-              savedRef.current = initialContent;
+              setSavedContent(initialContent);
               setContent(initialContent);
               setDiskChanged(false);
             }}
@@ -1281,10 +1279,13 @@ function ImageAnnotator({
   const currentStrokeRef = useRef<Point[]>([]);
   const isDrawingRef = useRef(false);
   const [strokeCount, setStrokeCount] = useState(0);
-  const [loaded, setLoaded] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const imageKey = `${projectId}\0${path}`;
+  const [loadedImageKey, setLoadedImageKey] = useState<string | null>(null);
+  const [loadFailure, setLoadFailure] = useState<{ key: string; message: string } | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const loaded = loadedImageKey === imageKey;
+  const loadError = loadFailure?.key === imageKey ? loadFailure.message : null;
 
   const brushWidth = useCallback(() => {
     if (!canvasRef.current) return 4;
@@ -1314,7 +1315,6 @@ function ImageAnnotator({
 
   useEffect(() => {
     let cancelled = false;
-    setLoadError(null);
     const img = new window.Image();
     img.crossOrigin = "anonymous";
     img.src = `${rawFileUrl(path, projectId)}&_t=${Date.now()}`;
@@ -1326,20 +1326,20 @@ function ImageAnnotator({
         canvasRef.current.height = img.naturalHeight;
         redrawAll();
       }
-      setLoaded(true);
+      setLoadedImageKey(imageKey);
     };
     // Without this the panel sat on "Loading image…" forever whenever the file
     // was deleted, renamed, or not a decodable image.
     img.onerror = () => {
       if (cancelled) return;
-      setLoadError("Couldn't load this image for annotation.");
+      setLoadFailure({ key: imageKey, message: "Couldn't load this image for annotation." });
     };
     return () => {
       cancelled = true;
       img.onload = null;
       img.onerror = null;
     };
-  }, [path, projectId, redrawAll]);
+  }, [imageKey, path, projectId, redrawAll]);
 
   const getPos = useCallback((e: React.MouseEvent<HTMLCanvasElement>): Point => {
     const canvas = canvasRef.current!;

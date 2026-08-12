@@ -17,27 +17,24 @@ export interface Skill {
 export function useSkills(projectId?: string): { skills: Skill[]; loading: boolean } {
   const contextProjectId = useProjectScopeId();
   const scopedProjectId = projectId ?? contextProjectId;
-  const [skills, setSkills] = useState<Skill[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [result, setResult] = useState<{ projectId: string; skills: Skill[] } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
     apiFetch(`/skills`, {}, scopedProjectId)
       .then((r) => (r.ok ? r.json() : []))
       .then((data) => {
-        if (!cancelled && Array.isArray(data)) {
-          setSkills(data);
-        }
+        if (cancelled) return;
+        setResult({ projectId: scopedProjectId, skills: Array.isArray(data) ? data : [] });
       })
-      .catch(() => {})
-      .finally(() => {
-        if (!cancelled) setLoading(false);
+      .catch(() => {
+        if (!cancelled) setResult({ projectId: scopedProjectId, skills: [] });
       });
     return () => {
       cancelled = true;
     };
   }, [scopedProjectId]);
 
-  return { skills, loading };
+  if (result?.projectId !== scopedProjectId) return { skills: [], loading: true };
+  return { skills: result.skills, loading: false };
 }

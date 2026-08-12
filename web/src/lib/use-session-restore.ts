@@ -27,10 +27,7 @@ export function useSessionRestore({
   const [ready, setReady] = useState(!target);
 
   useEffect(() => {
-    if (!target) {
-      setReady(true);
-      return;
-    }
+    if (!target) return;
     let cancelled = false;
     void loadSession(target).then((outcome) => {
       if (cancelled) return;

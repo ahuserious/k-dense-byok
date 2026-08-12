@@ -578,7 +578,9 @@ function ChatInput({
   // back to chat on the same event. The controller is read through a ref
   // because its identity changes on every keystroke.
   const controllerRef = useRef(controller);
-  controllerRef.current = controller;
+  useEffect(() => {
+    controllerRef.current = controller;
+  }, [controller]);
   useEffect(() => {
     if (!isActiveTab) return;
     return onChatPrefill((text) => appendToComposer(controllerRef.current.textInput, text, "\n"));
@@ -616,6 +618,10 @@ function ChatInput({
     const t = window.setTimeout(() => setAttachError(null), 5000);
     return () => window.clearTimeout(t);
   }, [attachError]);
+
+  // Alt is read from keydown, not the form submit event, which carries no
+  // modifiers by the time the library's Enter handler calls requestSubmit().
+  const queueIntentRef = useRef(false);
 
   // Wrap onSubmit to convert inline image attachments and append attached
   // file paths and database/skills context, then clear chips. Returning
@@ -663,9 +669,6 @@ function ChatInput({
   const [mentionAtIdx, setMentionAtIdx] = useState(0);
   const [mentionSelIdx, setMentionSelIdx] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
-  // Alt is read from keydown, not the form submit event, which carries no
-  // modifiers by the time the library's Enter handler calls requestSubmit().
-  const queueIntentRef = useRef(false);
 
   const filteredFiles = useMemo(() => {
     if (mentionQuery === null) return [];
@@ -1363,7 +1366,9 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
   // Mirrored every render so async continuations (the steer fallback) read
   // the CURRENT queue length, not the one closed over before the await.
   const messageQueueLengthRef = useRef(0);
-  messageQueueLengthRef.current = messageQueue.length;
+  useEffect(() => {
+    messageQueueLengthRef.current = messageQueue.length;
+  }, [messageQueue.length]);
   const composerRestoreRef = useRef<((text: string) => void) | null>(null);
   // Whether this tab's preloadSkills directive has been injected yet — once
   // per tab lifetime, on the first outgoing message (see handleSend).
@@ -1389,6 +1394,7 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
   }, []);
   const clearAttachedFiles = useCallback(() => setAttachedFiles([]), []);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- Persisted file chips must be reconciled after the asynchronously loaded sandbox inventory changes. */
   useEffect(() => {
     if (!sandboxReady) return;
     const available = new Set(allFiles);
@@ -1407,7 +1413,9 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
       return changed ? next : current;
     });
   }, [allFiles, sandboxReady]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
+  /* eslint-disable react-hooks/set-state-in-effect -- Persisted skill chips must be reconciled after the asynchronously loaded catalogue changes. */
   useEffect(() => {
     if (!skillsReady || allSkills.length === 0) return;
     const available = new Set(allSkills.map((skill) => skill.id));
@@ -1426,6 +1434,7 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
       return changed ? next : current;
     });
   }, [allSkills, skillsReady]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const removeFromQueue = useCallback((id: string) => {
     setMessageQueue((prev) => prev.filter((item) => item.id !== id));
@@ -1496,11 +1505,6 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
     send,
     status,
   ]);
-
-  // A fresh submission is an explicit "keep going", so it lifts the pause.
-  useEffect(() => {
-    if (isStreaming) setQueuePaused(false);
-  }, [isStreaming]);
 
   useEffect(() => {
     onWorkspaceStateChange?.(tabId, {
@@ -1640,6 +1644,7 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
       if (selectedBudgetBlocked) return false;
       const trimmed = text.trim();
       if (!trimmed) return false;
+      setQueuePaused(false);
       // Force-load directive: on the FIRST message of a preload-configured tab
       // (the DAG Builder chat rail), prepend a one-time directive naming the
       // skills it should use. Flows into every route below (send/queue/steer).
@@ -1753,6 +1758,10 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
           );
           return;
         }
+        // A fresh imperative send resumes the queue exactly like a composer
+        // submit; otherwise Stop leaves queued prompts stranded (see the
+        // shared clear in the composer path).
+        setQueuePaused(false);
         if (selectedBudgetBlocked) return;
         await send(
           prompt,
@@ -1775,6 +1784,9 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
           return;
         }
         if (budgetState === "exceeded" && modelUsesBillableBudget(model)) return;
+        // Same rationale as sendQuick: a fresh launch clears a Stop-induced
+        // queue pause so pending prompts dispatch when this run completes.
+        setQueuePaused(false);
         setSelectedModel(model);
         const fileRefs = uploadedFiles.length > 0 ? "\n" + uploadedFiles.join("\n") : "";
         const skillsCtx = suggestedSkills.length > 0

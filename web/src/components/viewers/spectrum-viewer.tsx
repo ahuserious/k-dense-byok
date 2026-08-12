@@ -94,12 +94,11 @@ function barConfig(x: number[], y: number[], xLabel: string, yLabel: string) {
  *  cleanup/redraw so canvases don't leak across re-renders. */
 function SpectrumChart({ config }: { config: Record<string, unknown> }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [chartError, setChartError] = useState(false);
+  const [failedConfig, setFailedConfig] = useState<Record<string, unknown> | null>(null);
 
   useEffect(() => {
     let alive = true;
     let chart: ChartInstance | undefined;
-    setChartError(false);
     import("chart.js/auto")
       .then((mod) => {
         if (!alive || !canvasRef.current) return;
@@ -107,7 +106,7 @@ function SpectrumChart({ config }: { config: Record<string, unknown> }) {
         chart = new Chart(canvasRef.current, config);
       })
       .catch(() => {
-        if (alive) setChartError(true);
+        if (alive) setFailedConfig(config);
       });
     return () => {
       alive = false;
@@ -115,7 +114,7 @@ function SpectrumChart({ config }: { config: Record<string, unknown> }) {
     };
   }, [config]);
 
-  if (chartError) {
+  if (failedConfig === config) {
     return (
       <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
         (chart unavailable)
@@ -126,28 +125,32 @@ function SpectrumChart({ config }: { config: Record<string, unknown> }) {
 }
 
 export default function SpectrumViewer({ path, projectId }: ViewerProps) {
-  const [summary, setSummary] = useState<MassSpecSummary | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const requestKey = `${projectId ?? ""}\0${path}`;
+  const [result, setResult] = useState<{
+    key: string;
+    summary: MassSpecSummary;
+    selectedId: string | null;
+  } | null>(null);
+  const [failure, setFailure] = useState<{ key: string; message: string } | null>(null);
 
   useEffect(() => {
     const ac = new AbortController();
-    setSummary(null);
-    setError(null);
-    setSelectedId(null);
     fetchSciJson<MassSpecSummary>(sciSummaryUrl(path, "massspec", projectId), {
       signal: ac.signal,
     })
       .then((d) => {
         if (ac.signal.aborted) return;
-        setSummary(d);
-        setSelectedId(d.spectra[0]?.id ?? null);
+        setResult({ key: requestKey, summary: d, selectedId: d.spectra[0]?.id ?? null });
       })
       .catch((e) => {
-        if (!isAbortError(e)) setError(String(e.message ?? e));
+        if (!isAbortError(e)) setFailure({ key: requestKey, message: String(e.message ?? e) });
       });
     return () => ac.abort();
-  }, [path, projectId]);
+  }, [path, projectId, requestKey]);
+
+  const summary = result?.key === requestKey ? result.summary : null;
+  const selectedId = result?.key === requestKey ? result.selectedId : null;
+  const error = failure?.key === requestKey ? failure.message : null;
 
   if (error) {
     return (
@@ -206,7 +209,9 @@ export default function SpectrumViewer({ path, projectId }: ViewerProps) {
                 id="spectrum-select"
                 className="rounded-md border bg-background px-2 py-1 text-xs"
                 value={selected?.id ?? ""}
-                onChange={(e) => setSelectedId(e.target.value)}
+                onChange={(e) => {
+                  setResult({ key: requestKey, summary, selectedId: e.target.value });
+                }}
               >
                 {summary.spectra.map((s) => (
                   <option key={s.id} value={s.id}>

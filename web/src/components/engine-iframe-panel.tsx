@@ -58,7 +58,7 @@ export function EngineIframePanel({
     }
   }, []);
 
-  const probe = useCallback(async () => {
+  const probe = useCallback(async function probeEngine() {
     if (!healthCheck) return;
     const ok = await healthCheck().catch(() => false);
     if (!mountedRef.current) return;
@@ -70,7 +70,7 @@ export function EngineIframePanel({
     // Not up yet — keep the skeleton and retry until we exhaust the grace window.
     if (pollCount.current < MAX_POLLS) {
       pollCount.current += 1;
-      pollTimer.current = setTimeout(() => void probe(), POLL_INTERVAL_MS);
+      pollTimer.current = setTimeout(() => void probeEngine(), POLL_INTERVAL_MS);
     } else {
       setHealthy(false);
     }

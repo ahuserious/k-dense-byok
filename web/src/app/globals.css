@@ -111,8 +111,8 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--fnav);
+  --font-mono: var(--fcta);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -230,6 +230,7 @@
 }
 
 @layer components {
+  [data-product-typography],
   [data-scientific-dag-studio-theme] {
     --fhero: "0xProto Nerd Font", Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
     --fnav: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
@@ -254,6 +255,22 @@
     --studio-highlight: #ffe14d;
     color-scheme: dark;
     font-family: var(--fnav);
+  }
+
+  [data-product-typography] :where(h1, h2, h3) {
+    font-family: var(--fhero);
+  }
+
+  [data-product-typography] :where(button, [role="tab"], nav) {
+    font-family: var(--fcta);
+  }
+
+  [data-product-typography] :where(figcaption, caption) {
+    font-family: var(--ffig);
+  }
+
+  [data-product-typography] :where(small, kbd) {
+    font-family: var(--fann);
   }
 
   .scientific-dag-studio-launcher {

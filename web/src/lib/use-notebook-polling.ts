@@ -41,9 +41,12 @@ export function useNotebookPolling(opts: {
   const ticksRef = useRef(0);
   // Read through refs so a changing callback identity doesn't restart the timer.
   const refetchRef = useRef(refetch);
-  refetchRef.current = refetch;
   const outstandingRef = useRef(hasOutstandingWork);
-  outstandingRef.current = hasOutstandingWork;
+
+  useEffect(() => {
+    refetchRef.current = refetch;
+    outstandingRef.current = hasOutstandingWork;
+  }, [hasOutstandingWork, refetch]);
 
   useEffect(() => {
     if (signature !== sigRef.current) {
