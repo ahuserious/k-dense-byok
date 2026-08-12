@@ -68,3 +68,8 @@ TODO.md
 skills-lock.json
 AGENTS.md
 CLAUDE.md
+
+# Playwright/Stably local run artifacts
+/test-results/
+/.stably/test-results/
+/playwright-report/

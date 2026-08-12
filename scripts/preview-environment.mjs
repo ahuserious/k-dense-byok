@@ -20,13 +20,17 @@ export function previewEnvironment(
   for (const name of LEGACY_ENGINE_ENVIRONMENT_NAMES) delete environment[name];
 
   const piAgentDirectory = path.join(stateRoot, "pi-agent");
+  const backendUrl = `http://127.0.0.1:${ports.backend}`;
   const pipelineEngineUrl = `http://127.0.0.1:${ports.engine}`;
   return {
     ...environment,
+    HOME: path.join(stateRoot, "home"),
     PATH: `${shimDirectory}${path.delimiter}${environment.PATH ?? ""}`,
     KADY_PREVIEW: "1",
     KADY_PORT: String(ports.backend),
     KADY_FRONTEND_PORT: String(ports.frontend),
+    NEXT_PUBLIC_ADK_API_URL: backendUrl,
+    NEXT_PUBLIC_SCIENTIFIC_DAG_STUDIO: "1",
     KADY_PIPELINE_ENGINE_PORT: String(ports.engine),
     PIPELINE_ENGINE_BASE_URL: pipelineEngineUrl,
     NEXT_PUBLIC_PIPELINE_ENGINE_URL: pipelineEngineUrl,
@@ -43,9 +47,10 @@ export function previewEnvironment(
     GIT_ALLOW_PROTOCOL: "file",
     GIT_PROTOCOL_FROM_USER: "0",
     GIT_TERMINAL_PROMPT: "0",
-    npm_config_offline: "true",
     npm_config_audit: "false",
     npm_config_fund: "false",
+    npm_config_cache: path.join(stateRoot, "npm-cache"),
     KADY_PREVIEW_LAUNCH_ROOT: launchRoot,
+    KADY_PREVIEW_SERVICE_STATE_FILE: path.join(stateRoot, "services.json"),
   };
 }

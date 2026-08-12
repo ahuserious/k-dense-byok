@@ -5,6 +5,13 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { previewEnvironment } from "./preview-environment.mjs";
+import { instrumentPreviewLauncher } from "./preview-launcher-observer.mjs";
+import {
+  collectPreviewListenerGroups,
+  stopProcessGroups,
+  waitForPreviewPortsFree,
+} from "./preview-processes.mjs";
+import { waitForPreviewReadiness } from "./preview-readiness.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = fs.realpathSync(path.resolve(scriptDirectory, ".."));
@@ -46,9 +53,18 @@ function writeExecutable(targetPath, content) {
 
 function createLaunchOverlay(stateRoot, realNpm, realGit) {
   const launchRoot = path.join(stateRoot, "launch");
-  const shimDirectory = path.join(launchRoot, "bin");
+  const isolatedHome = path.join(stateRoot, "home");
+  // start.mjs prepends ~/.local/bin after its dependency checks. Put the
+  // shims there so that normalization cannot expose the host npm/git again.
+  const shimDirectory = path.join(isolatedHome, ".local", "bin");
+  fs.mkdirSync(launchRoot, { recursive: true, mode: 0o700 });
   fs.mkdirSync(shimDirectory, { recursive: true, mode: 0o700 });
-  fs.copyFileSync(path.join(repositoryRoot, "start.mjs"), path.join(launchRoot, "start.mjs"));
+  const launcherSource = fs.readFileSync(path.join(repositoryRoot, "start.mjs"), "utf-8");
+  fs.writeFileSync(
+    path.join(launchRoot, "start.mjs"),
+    instrumentPreviewLauncher(launcherSource),
+    { mode: 0o700 },
+  );
   fs.copyFileSync(path.join(repositoryRoot, "env-file.mjs"), path.join(launchRoot, "env-file.mjs"));
   fs.writeFileSync(path.join(launchRoot, ".env"), "# Intentionally blank preview environment.\n", {
     mode: 0o600,
@@ -118,35 +134,38 @@ async function waitForOwnedTree(processGroupId, timeoutMs) {
   return !processGroupAlive(processGroupId);
 }
 
-async function stopFailedLaunch(rootPid) {
-  if (!processGroupAlive(rootPid)) return;
-  process.kill(-rootPid, "SIGTERM");
-  if (await waitForOwnedTree(rootPid, 30_000)) return;
-  process.kill(-rootPid, "SIGTERM");
-  await waitForOwnedTree(rootPid, 10_000);
+async function stopFailedLaunch(rootPid, ports) {
+  if (processGroupAlive(rootPid)) {
+    process.kill(-rootPid, "SIGTERM");
+    if (!(await waitForOwnedTree(rootPid, 30_000))) {
+      process.kill(-rootPid, "SIGTERM");
+      await waitForOwnedTree(rootPid, 10_000);
+    }
+  }
+
+  const listenerGroups = collectPreviewListenerGroups(repositoryRoot, ports);
+  const survivors = await stopProcessGroups(listenerGroups);
+  if (survivors.length > 0) {
+    throw new Error(
+      `Preview listener process groups survived failed-launch cleanup: ${survivors.map(({ groupId }) => groupId).join(", ")}`,
+    );
+  }
+  const occupied = await waitForPreviewPortsFree(ports, 15_000);
+  if (occupied.length > 0) {
+    throw new Error(
+      `Preview ports did not become free after failed-launch cleanup: ${formatOccupiedPorts(occupied)}`,
+    );
+  }
 }
 
-async function waitForHealth(url, label, rootProcess, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError = "not ready";
-  while (Date.now() < deadline) {
-    if (rootProcess.exitCode !== null || rootProcess.signalCode !== null) {
-      throw new Error(`${label} did not start because the preview launcher exited.`);
-    }
-    try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(2_000) });
-      if (response.ok) return;
-      lastError = `HTTP ${response.status}`;
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-  throw new Error(`${label} health timed out: ${lastError}`);
+function formatOccupiedPorts(occupied) {
+  return occupied
+    .map(({ role, port, listeners }) => `${role} :${port} (${listeners.join(", ")})`)
+    .join("; ");
 }
 
 if (process.platform === "win32") {
-  fail("The preview lifecycle currently requires POSIX process-group and pgrep semantics.");
+  fail("The preview lifecycle currently requires POSIX process-group semantics.");
 }
 if (fs.existsSync(stateFile)) {
   fail(`Preview state already exists at ${stateFile}; run scripts/preview-down.mjs first.`);
@@ -170,6 +189,13 @@ if (!process.env.KADY_PIPELINE_ENGINE_PORT && process.env.KADY_ARCHON_PORT) {
   );
 }
 if (new Set(Object.values(ports)).size !== 3) fail("Preview ports must be distinct.");
+
+const initiallyOccupied = await waitForPreviewPortsFree(ports, 15_000);
+if (initiallyOccupied.length > 0) {
+  fail(
+    `Preview ports are still occupied after the startup free-port barrier: ${formatOccupiedPorts(initiallyOccupied)}`,
+  );
+}
 
 const requestedStateRoot = optionValue("--state-root", "");
 let stateRoot = requestedStateRoot
@@ -195,6 +221,10 @@ const realGit = commandPath("git");
 const { launchRoot, shimDirectory } = createLaunchOverlay(stateRoot, realNpm, realGit);
 const environment = previewEnvironment(stateRoot, launchRoot, shimDirectory, ports);
 const logPath = path.join(stateRoot, "preview.log");
+const serviceStatePath = environment.KADY_PREVIEW_SERVICE_STATE_FILE;
+fs.writeFileSync(serviceStatePath, `${JSON.stringify({ version: 1, services: {} }, null, 2)}\n`, {
+  mode: 0o600,
+});
 
 let rootProcess;
 try {
@@ -219,6 +249,7 @@ try {
     projectsRoot: environment.KADY_PROJECTS_ROOT,
     piAgentDirectory: environment.PI_CODING_AGENT_DIR,
     workflowSupervisorDirectory: environment.KADY_WORKFLOW_SUPERVISOR_DIR,
+    serviceStatePath,
     rootPid: rootProcess.pid,
     ports,
     logPath,
@@ -226,14 +257,31 @@ try {
   };
   fs.writeFileSync(stateFile, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
 
-  await waitForHealth(`http://127.0.0.1:${ports.backend}/health`, "backend", rootProcess, 180_000);
-  await waitForHealth(`http://127.0.0.1:${ports.frontend}/`, "web", rootProcess, 180_000);
-  await waitForHealth(
-    `http://127.0.0.1:${ports.engine}/api/health`,
-    "workflow engine",
-    rootProcess,
-    120_000,
-  );
+  await waitForPreviewReadiness({
+    launcherProcess: rootProcess,
+    serviceStatePath,
+    logPath,
+    services: [
+      {
+        role: "backend",
+        label: "backend",
+        url: `http://127.0.0.1:${ports.backend}/health`,
+        timeoutMs: 180_000,
+      },
+      {
+        role: "frontend",
+        label: "web",
+        url: `http://127.0.0.1:${ports.frontend}/`,
+        timeoutMs: 180_000,
+      },
+      {
+        role: "pipeline-engine",
+        label: "workflow engine",
+        url: `http://127.0.0.1:${ports.engine}/api/health`,
+        timeoutMs: 120_000,
+      },
+    ],
+  });
 
   rootProcess.unref();
   console.log("Preview ready:");
@@ -244,8 +292,20 @@ try {
   console.log(`  State:    ${stateRoot}`);
   console.log(`  Log:      ${logPath}`);
 } catch (error) {
-  if (rootProcess?.pid) await stopFailedLaunch(rootProcess.pid);
+  let cleanupError = null;
+  if (rootProcess?.pid) {
+    try {
+      await stopFailedLaunch(rootProcess.pid, ports);
+    } catch (caught) {
+      cleanupError = caught;
+    }
+  }
   console.error(`Preview failed: ${error instanceof Error ? error.message : String(error)}`);
+  if (cleanupError) {
+    console.error(
+      `Preview cleanup also failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+    );
+  }
   console.error(`Preview log: ${logPath}`);
   if (fs.existsSync(stateFile)) {
     console.error("Preview state was preserved; run scripts/preview-down.mjs to verify cleanup.");
