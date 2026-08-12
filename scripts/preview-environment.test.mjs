@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { previewEnvironment } from "./preview-environment.mjs";
 
-test("pins both engine clients to the preview port and scrubs legacy engine variables", () => {
+test("pins both engine clients to the preview port by default and scrubs legacy engine variables", () => {
   const environment = previewEnvironment(
     "/tmp/kady-preview-test",
     "/tmp/kady-preview-test/launch",
@@ -29,4 +29,68 @@ test("pins both engine clients to the preview port and scrubs legacy engine vari
   assert.equal("NEXT_PUBLIC_ARCHON_URL" in environment, false);
   assert.equal("KADY_ARCHON_PORT" in environment, false);
   assert.equal("npm_config_offline" in environment, false);
+});
+
+test("honours an explicit browser-facing pipeline engine origin", () => {
+  const environment = previewEnvironment(
+    "/tmp/kady-preview-test",
+    "/tmp/kady-preview-test/launch",
+    "/tmp/kady-preview-test/launch/bin",
+    { backend: 18000, frontend: 13000, engine: 13091 },
+    {
+      PATH: "/usr/bin",
+      NEXT_PUBLIC_PIPELINE_ENGINE_URL: "https://pipeline.example.test",
+    },
+  );
+
+  assert.equal(
+    environment.NEXT_PUBLIC_PIPELINE_ENGINE_URL,
+    "https://pipeline.example.test",
+  );
+  assert.equal(environment.PIPELINE_ENGINE_BASE_URL, "http://127.0.0.1:13091");
+});
+
+test("rejects a malformed browser-facing pipeline engine origin", () => {
+  assert.throws(
+    () =>
+      previewEnvironment(
+        "/tmp/kady-preview-test",
+        "/tmp/kady-preview-test/launch",
+        "/tmp/kady-preview-test/launch/bin",
+        { backend: 18000, frontend: 13000, engine: 13091 },
+        {
+          PATH: "/usr/bin",
+          NEXT_PUBLIC_PIPELINE_ENGINE_URL: "pipeline.example.test",
+        },
+      ),
+    /NEXT_PUBLIC_PIPELINE_ENGINE_URL must be an absolute http\(s\) origin/,
+  );
+});
+
+test("scrubs credentials when a browser-facing pipeline engine origin is present", () => {
+  const environment = previewEnvironment(
+    "/tmp/kady-preview-test",
+    "/tmp/kady-preview-test/launch",
+    "/tmp/kady-preview-test/launch/bin",
+    { backend: 18000, frontend: 13000, engine: 13091 },
+    {
+      PATH: "/usr/bin",
+      NEXT_PUBLIC_PIPELINE_ENGINE_URL: "https://pipeline.example.test",
+      OPENROUTER_API_KEY: "must-not-leak",
+      SESSION_TOKEN: "must-not-leak",
+      CLIENT_SECRET: "must-not-leak",
+      DATABASE_PASSWORD: "must-not-leak",
+      SERVICE_CREDENTIAL: "must-not-leak",
+    },
+  );
+
+  assert.equal(
+    environment.NEXT_PUBLIC_PIPELINE_ENGINE_URL,
+    "https://pipeline.example.test",
+  );
+  assert.equal("OPENROUTER_API_KEY" in environment, false);
+  assert.equal("SESSION_TOKEN" in environment, false);
+  assert.equal("CLIENT_SECRET" in environment, false);
+  assert.equal("DATABASE_PASSWORD" in environment, false);
+  assert.equal("SERVICE_CREDENTIAL" in environment, false);
 });
