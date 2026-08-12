@@ -152,7 +152,7 @@ interface TopologyBudgetReservation {
 }
 
 class TopologyBudgetTracker {
-  private spentUsd = 0;
+  private readonly settledCostsUsd: number[] = [];
   private reservedUsd = 0;
   private readonly groups = new Map<
     string,
@@ -163,7 +163,11 @@ class TopologyBudgetTracker {
   constructor(private readonly capUsd: number | undefined) {}
 
   get costUsd(): number {
-    return this.spentUsd;
+    // Parallel siblings settle in completion order. Sum a stable ordering so
+    // telemetry and cap checks do not vary with floating-point addition order.
+    return [...this.settledCostsUsd]
+      .sort((left, right) => left - right)
+      .reduce((total, costUsd) => total + costUsd, 0);
   }
 
   reserve(invocation: FusionTopologyInvocation): TopologyBudgetReservation {
@@ -173,7 +177,7 @@ class TopologyBudgetTracker {
     }
     let group = this.groups.get(invocation.batch.id);
     if (!group) {
-      const remainingUsd = this.capUsd - this.spentUsd - this.reservedUsd;
+      const remainingUsd = this.capUsd - this.costUsd - this.reservedUsd;
       if (remainingUsd <= Number.EPSILON) {
         const error = new Error(
           `Topology node '${invocation.nodeId}' exhausted its aggregate cost cap of $${this.capUsd.toFixed(2)}.`
@@ -223,10 +227,11 @@ class TopologyBudgetTracker {
       this.abortController.abort(error);
       throw error;
     }
-    this.spentUsd += reportedCostUsd;
+    this.settledCostsUsd.push(reportedCostUsd);
+    const spentUsd = this.costUsd;
     if (
       allowanceUsd !== undefined && reportedCostUsd > allowanceUsd + Number.EPSILON ||
-      this.capUsd !== undefined && this.spentUsd > this.capUsd + Number.EPSILON
+      this.capUsd !== undefined && spentUsd > this.capUsd + Number.EPSILON
     ) {
       const error = new Error(
         `Topology node '${invocation.nodeId}' exceeded its aggregate cost cap of $${this.capUsd?.toFixed(2)}.`
@@ -234,7 +239,7 @@ class TopologyBudgetTracker {
       this.abortController.abort(error);
       throw error;
     }
-    if (this.capUsd !== undefined && this.spentUsd >= this.capUsd - Number.EPSILON) {
+    if (this.capUsd !== undefined && spentUsd >= this.capUsd - Number.EPSILON) {
       this.abortController.abort(new Error(
         `Topology node '${invocation.nodeId}' exhausted its aggregate cost cap of $${this.capUsd.toFixed(2)}.`
       ));

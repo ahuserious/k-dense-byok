@@ -9566,6 +9566,7 @@ describe('executeDagWorkflow -- completion telemetry', () => {
     let started = 0;
     let abortedSiblings = 0;
     let terminalUsageUsd = 0;
+    const siblingSettlements: Promise<void>[] = [];
     let releaseStarted: (() => void) | undefined;
     const allStarted = new Promise<void>(resolve => {
       releaseStarted = resolve;
@@ -9577,6 +9578,12 @@ describe('executeDagWorkflow -- completion telemetry', () => {
       options?: { abortSignal?: AbortSignal }
     ) {
       const role = prompt.match(/^Agent role: (.+)$/m)?.[1] ?? 'unknown';
+      let releaseSiblingSettlement: (() => void) | undefined;
+      if (role !== 'Lead scientist') {
+        siblingSettlements.push(new Promise<void>(resolve => {
+          releaseSiblingSettlement = resolve;
+        }));
+      }
       active += 1;
       started += 1;
       if (started === 3) releaseStarted?.();
@@ -9608,6 +9615,7 @@ describe('executeDagWorkflow -- completion telemetry', () => {
         yield { type: 'result' as const, sessionId: `session-${role}`, cost };
       } finally {
         active -= 1;
+        releaseSiblingSettlement?.();
       }
     });
 
@@ -9624,6 +9632,12 @@ describe('executeDagWorkflow -- completion telemetry', () => {
         ],
       }],
     });
+
+    const siblingSettlementResults = await Promise.allSettled(siblingSettlements);
+    expect(siblingSettlementResults).toEqual([
+      { status: 'fulfilled', value: undefined },
+      { status: 'fulfilled', value: undefined },
+    ]);
 
     expect(active).toBe(0);
     expect(abortedSiblings).toBe(2);
