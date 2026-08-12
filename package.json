@@ -7,5 +7,9 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@stablyai/playwright-test": "^2.1.16"
   }
 }

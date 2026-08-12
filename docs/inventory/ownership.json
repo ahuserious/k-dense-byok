@@ -165,7 +165,9 @@
       "e2e/**",
       "playwright.config.*",
       ".stably/**",
-      "docs/e2e/**"
+      "docs/e2e/**",
+      "scripts/preview-*.mjs",
+      "deploy/preview/**"
     ]
   }
 }

@@ -1,19 +1,23 @@
 #!/usr/bin/env node
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  collectPreviewListenerGroups,
+  listenersOnPort,
+  processAlive,
+  processGroupAlive,
+  processWorkingDirectory,
+  stopProcessGroups,
+  waitForPreviewPortsFree,
+} from "./preview-processes.mjs";
+import { removePreviewStateFile } from "./preview-state.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = fs.realpathSync(path.resolve(scriptDirectory, ".."));
 const stateFile = path.join(repositoryRoot, "deploy", "preview", ".state.json");
 const keepState = process.argv.includes("--keep-state");
-const processPatterns = [
-  "kady-workflow-supervisor",
-  "tsx/dist/preflight.cjs",
-  "vendor/pipeline-engine",
-];
 
 function fail(message) {
   console.error(message);
@@ -47,37 +51,6 @@ function readState() {
   return state;
 }
 
-function processAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (error?.code === "ESRCH") return false;
-    throw error;
-  }
-}
-
-function processGroupAlive(processGroupId) {
-  try {
-    process.kill(-processGroupId, 0);
-    return true;
-  } catch (error) {
-    if (error?.code === "ESRCH") return false;
-    throw error;
-  }
-}
-
-function processWorkingDirectory(pid) {
-  const result = spawnSync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], {
-    encoding: "utf-8",
-  });
-  if (result.status !== 0) return "";
-  return result.stdout
-    .split("\n")
-    .find((line) => line.startsWith("n"))
-    ?.slice(1) ?? "";
-}
-
 function assertRootOwnership(state) {
   if (!processAlive(state.rootPid)) return;
   const workingDirectory = processWorkingDirectory(state.rootPid);
@@ -96,62 +69,30 @@ async function waitFor(test, timeoutMs) {
   return !test();
 }
 
-function pgrep(pattern) {
-  const result = spawnSync("pgrep", ["-f", pattern], { encoding: "utf-8" });
-  if (result.status === 1) return [];
-  if (result.status !== 0) {
-    throw new Error(`pgrep failed for ${pattern}: ${(result.stderr || result.stdout).trim()}`);
-  }
-  return result.stdout
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .map(Number)
-    .filter((pid) => Number.isSafeInteger(pid) && pid > 0 && pid !== process.pid);
-}
-
-function processCommandAndEnvironment(pid) {
-  const result = spawnSync("ps", ["eww", "-p", String(pid), "-o", "command="], {
-    encoding: "utf-8",
-  });
-  if (result.status !== 0) {
-    throw new Error(`ps could not inspect candidate PID ${pid}; refusing a false-zero proof.`);
-  }
-  return result.stdout;
-}
-
-function scopedMatches(state, pattern) {
-  const scopeMarkers = [
-    state.stateRoot,
-    state.launchRoot,
-    state.projectsRoot,
-    state.piAgentDirectory,
-    state.workflowSupervisorDirectory,
-  ];
-  return pgrep(pattern).filter((pid) => {
-    const processDescription = processCommandAndEnvironment(pid);
-    return scopeMarkers.some((marker) => marker && processDescription.includes(marker));
-  });
-}
-
-function printPgrepProof(state) {
-  console.log("Scoped pgrep verification:");
+function printListenerProof(state) {
+  console.log("Preview listener verification:");
   let total = 0;
-  for (const pattern of processPatterns) {
-    const matches = scopedMatches(state, pattern);
-    total += matches.length;
-    console.log(`  ${pattern}: ${matches.length}${matches.length ? ` (${matches.join(", ")})` : ""}`);
+  for (const [role, port] of Object.entries(state.ports)) {
+    const listeners = listenersOnPort(port);
+    total += listeners.length;
+    console.log(`  ${role} :${port}: ${listeners.length}${listeners.length ? ` (${listeners.join(", ")})` : ""}`);
   }
-  console.log(`Owned preview processes: ${total}`);
+  console.log(`Owned preview listeners: ${total}`);
   return total;
 }
 
 if (process.platform === "win32") {
-  fail("The preview lifecycle currently requires POSIX process-group and pgrep semantics.");
+  fail("The preview lifecycle currently requires POSIX process-group semantics.");
 }
 
 const state = readState();
 assertRootOwnership(state);
+let listenerGroups;
+try {
+  listenerGroups = collectPreviewListenerGroups(repositoryRoot, state.ports);
+} catch (error) {
+  fail(error instanceof Error ? error.message : String(error));
+}
 
 if (processGroupAlive(state.rootPid)) {
   process.kill(-state.rootPid, "SIGTERM");
@@ -164,19 +105,36 @@ if (processGroupAlive(state.rootPid)) {
   }
 }
 
-let remaining;
-try {
-  remaining = printPgrepProof(state);
-} catch (error) {
-  fail(error instanceof Error ? error.message : String(error));
+// The launcher owns detached child groups. Capturing groups from the actual
+// listeners before shutdown lets us reap a bun wrapper even if its server
+// closes the port first or escaped the launcher's normal child accounting.
+const refreshedGroups = collectPreviewListenerGroups(repositoryRoot, state.ports);
+const groupsById = new Map(
+  [...listenerGroups, ...refreshedGroups].map((group) => [group.groupId, group]),
+);
+const survivingGroups = await stopProcessGroups([...groupsById.values()]);
+if (survivingGroups.length > 0) {
+  fail(
+    `Preview process groups survived teardown: ${survivingGroups.map(({ groupId }) => groupId).join(", ")}`,
+  );
 }
-if (remaining !== 0) {
-  await new Promise((resolve) => setTimeout(resolve, 1_000));
-  remaining = printPgrepProof(state);
-}
-if (remaining !== 0) fail("Owned preview processes remain after teardown.");
 
-fs.rmSync(stateFile, { force: true });
+const occupiedAfterShutdown = await waitForPreviewPortsFree(state.ports, 15_000);
+if (occupiedAfterShutdown.length > 0) {
+  fail(
+    `Preview ports did not become free after teardown: ${occupiedAfterShutdown
+      .map(({ role, port, listeners }) => `${role} :${port} (${listeners.join(", ")})`)
+      .join("; ")}`,
+  );
+}
+
+const remaining = printListenerProof(state);
+if (remaining !== 0) fail("Preview listeners remain after teardown.");
+
+if (!(await removePreviewStateFile(stateFile))) {
+  fail(`Preview lifecycle state did not clear after teardown: ${stateFile}`);
+}
+console.log(`Removed preview lifecycle state: ${stateFile}`);
 if (!keepState) {
   fs.rmSync(state.stateRoot, { recursive: true, force: true });
   console.log(`Removed preview state tree: ${state.stateRoot}`);
