@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -40,5 +42,21 @@ describe("studio design tokens", () => {
         "--studio-text-muted": "#aebcc3",
       }
     `);
+  });
+
+  it("applies the role fonts to the shipped product root", () => {
+    const webRoot = fs.existsSync(path.resolve(process.cwd(), "src/app"))
+      ? process.cwd()
+      : path.resolve(process.cwd(), "web");
+    const layout = fs.readFileSync(path.join(webRoot, "src/app/layout.tsx"), "utf-8");
+    const globalStyles = fs.readFileSync(path.join(webRoot, "src/app/globals.css"), "utf-8");
+
+    expect(layout).toContain("<body data-product-typography");
+    expect(globalStyles).toMatch(/--font-sans:\s*var\(--fnav\)/);
+    expect(globalStyles).toMatch(/--font-mono:\s*var\(--fcta\)/);
+    expect(globalStyles).toMatch(/\[data-product-typography\][\s\S]*font-family:\s*var\(--fnav\)/);
+    expect(globalStyles).toMatch(/\[data-product-typography\] :where\(h1, h2, h3\)[\s\S]*font-family:\s*var\(--fhero\)/);
+    expect(globalStyles).toMatch(/\[data-product-typography\] :where\(figcaption, caption\)[\s\S]*font-family:\s*var\(--ffig\)/);
+    expect(globalStyles).toMatch(/\[data-product-typography\] :where\(small, kbd\)[\s\S]*font-family:\s*var\(--fann\)/);
   });
 });

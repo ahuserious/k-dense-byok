@@ -49,6 +49,9 @@ export function useUpdateCheck(): UpdateCheckResult {
       if (raw) {
         const cached: CachedCheck = JSON.parse(raw);
         if (cached.forVersion === APP_VERSION && Date.now() - cached.ts < CACHE_TTL_MS) {
+          // The cached value is browser-only state discovered after hydration;
+          // applying it here is the synchronization this effect is responsible for.
+          // eslint-disable-next-line react-hooks/set-state-in-effect
           setResult({ updateAvailable: cached.updateAvailable, latestVersion: cached.latestVersion });
           return;
         }

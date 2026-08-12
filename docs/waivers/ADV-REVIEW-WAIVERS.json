@@ -2,14 +2,6 @@
   "version": 1,
   "waivers": [
     {
-      "id": "S9-20260808-dag-builder-surface-cross-lane",
-      "file": "web/src/components/dag-builder-surface.tsx",
-      "severity": "P2",
-      "rationalePattern": "set-state-in-effect|setArchonVisited|synchronously within an effect",
-      "reason": "cross-lane: S1's rewrite of dag-builder-surface.tsx removes this line; verified at merge by the orchestrator's merge-gate lint run",
-      "approvedBy": "orchestrator"
-    },
-    {
       "id": "S2b-20260808-forge-marker-dual-accept",
       "file": "server/vendor/pipeline-engine/packages/adapters/src/forge/github/adapter.ts",
       "severity": "medium",

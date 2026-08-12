@@ -637,28 +637,24 @@ export function ChatLiveGraphTabs({
   projection: RunStateV1Projection | null;
   conversation: ReactNode;
 }) {
-  const [selected, setSelected] = useState<"conversation" | "dag">(
+  const selectionContext = projection
+    ? `${projection.runId}:${projection.errorRouting?.surface ? "error" : "normal"}`
+    : null;
+  const automaticSelection: "conversation" | "dag" =
     projection &&
-      (!isTerminalRunState(projection.status) || projection.errorRouting)
+      (projection.errorRouting?.surface || !isTerminalRunState(projection.status))
       ? "dag"
-      : "conversation",
-  );
-  const surfacedRunId = useRef<string | null>(null);
-  useEffect(() => {
-    if (!projection) return;
-    const isNewRun = surfacedRunId.current !== projection.runId;
-    if (
-      projection.errorRouting?.surface ||
-      (isNewRun && !isTerminalRunState(projection.status))
-    ) {
-      setSelected("dag");
-    }
-    surfacedRunId.current = projection.runId;
-  }, [
-    projection?.errorRouting?.surface,
-    projection?.runId,
-    projection?.status,
-  ]);
+      : "conversation";
+  const [selection, setSelection] = useState<{
+    context: string | null;
+    tab: "conversation" | "dag";
+  }>(() => ({ context: selectionContext, tab: automaticSelection }));
+  const selected = selection.context === selectionContext
+    ? selection.tab
+    : automaticSelection;
+  const selectTab = (tab: "conversation" | "dag") => {
+    setSelection({ context: selectionContext, tab });
+  };
 
   if (!projection) return <>{conversation}</>;
   return (
@@ -672,7 +668,7 @@ export function ChatLiveGraphTabs({
           type="button"
           role="tab"
           aria-selected={selected === "conversation"}
-          onClick={() => setSelected("conversation")}
+          onClick={() => selectTab("conversation")}
           className={cn(
             "rounded px-3 py-1 text-xs",
             selected === "conversation"
@@ -686,7 +682,7 @@ export function ChatLiveGraphTabs({
           type="button"
           role="tab"
           aria-selected={selected === "dag"}
-          onClick={() => setSelected("dag")}
+          onClick={() => selectTab("dag")}
           className={cn(
             "rounded px-3 py-1 text-xs",
             selected === "dag"

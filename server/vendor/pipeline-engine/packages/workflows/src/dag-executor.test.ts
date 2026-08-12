@@ -61,6 +61,7 @@ import { OutputRefError } from './output-ref';
 import type { WorkflowDeps, IWorkflowPlatform, WorkflowConfig } from './deps';
 import type { IWorkflowStore } from './store';
 import { buildAiProfile } from './model-validation';
+import { BUNDLED_WORKFLOWS } from './defaults/bundled-defaults';
 
 // --- Mock helpers ---
 
@@ -8792,17 +8793,10 @@ describe('provider resolution -- regression for #1610', () => {
 
 describe('bundled opus nodes -- provider annotation invariant (#1610)', () => {
   it('every bundled node with an opus model has provider: claude at the node or workflow level', async () => {
-    // Resolve the defaults directory relative to this package (same logic as getAppPipelineEngineBasePath).
-    // import.meta.dir = packages/workflows/src → go up 3 levels to repo root → .archon/workflows/defaults
-    const repoRoot = join(import.meta.dir, '..', '..', '..');
-    const defaultsDir = join(repoRoot, '.archon', 'workflows', 'defaults');
-
-    const { readdir, readFile: readFileFs } = await import('fs/promises');
-    const files = (await readdir(defaultsDir)).filter(f => f.endsWith('.yaml'));
-    expect(files.length).toBeGreaterThan(0);
-
-    for (const file of files) {
-      const src = await readFileFs(join(defaultsDir, file), 'utf-8');
+    // The vendored distribution's runtime source of truth is the generated
+    // record, not an untracked .archon directory. Kady intentionally ships an
+    // empty record today; this invariant will inspect any defaults added later.
+    for (const [file, src] of Object.entries(BUNDLED_WORKFLOWS)) {
       const result = parseWorkflow(src, file);
       if (!('workflow' in result)) continue; // skip load errors
 

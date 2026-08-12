@@ -29,7 +29,7 @@ import {
   ShieldCheckIcon,
   WrenchIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -308,30 +308,31 @@ export function ProvenancePanel({
   onOpenFile,
   onOpenNotebookEntry,
 }: ProvenancePanelProps) {
-  const [data, setData] = useState<ArtifactProvenance | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [refreshGeneration, setRefreshGeneration] = useState(0);
+  const requestKey = `${projectId ?? ""}\0${path}\0${refreshGeneration}`;
+  const [result, setResult] = useState<{ key: string; data: ArtifactProvenance } | null>(null);
+  const [failure, setFailure] = useState<{ key: string; message: string } | null>(null);
 
-  const load = useCallback(() => {
+  useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setError(null);
     getArtifactProvenance(path, projectId)
-      .then((result) => {
-        if (!cancelled) setData(result);
+      .then((data) => {
+        if (!cancelled) setResult({ key: requestKey, data });
       })
       .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setFailure({ key: requestKey, message: err instanceof Error ? err.message : String(err) });
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [path, projectId]);
+  }, [path, projectId, requestKey]);
 
-  useEffect(() => load(), [load]);
+  const data = result?.key === requestKey ? result.data : null;
+  const error = failure?.key === requestKey ? failure.message : null;
+  const loading = data == null && error == null;
+  const refresh = () => setRefreshGeneration((generation) => generation + 1);
 
   if (loading && !data) {
     return (
@@ -347,7 +348,7 @@ export function ProvenancePanel({
         <AlertTriangleIcon className="size-5 text-muted-foreground/40" />
         <p className="text-xs text-muted-foreground">{error}</p>
         <button
-          onClick={load}
+          onClick={refresh}
           className="flex items-center gap-1 rounded-md border px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
         >
           <RefreshCcwIcon className="size-3" /> Retry
@@ -376,7 +377,7 @@ export function ProvenancePanel({
             This version
           </p>
           <button
-            onClick={load}
+            onClick={refresh}
             disabled={loading}
             className="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
             title="Re-read from disk"

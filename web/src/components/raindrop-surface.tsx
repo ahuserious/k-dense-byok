@@ -36,9 +36,10 @@ export function RaindropSurface({
   const [workshopUp, setWorkshopUp] = useState<boolean | null>(null);
   // Mount the embed lazily, then keep it mounted across toggles.
   const [workshopVisited, setWorkshopVisited] = useState(false);
-  useEffect(() => {
-    if (mode === "workshop") setWorkshopVisited(true);
-  }, [mode]);
+  const selectMode = (nextMode: RaindropMode) => {
+    setMode(nextMode);
+    if (nextMode === "workshop") setWorkshopVisited(true);
+  };
 
   // One probe on mount. The Workshop is a manually-started sidecar; if it
   // comes up later, revisiting the view (remount) or reloading picks it up.
@@ -61,7 +62,7 @@ export function RaindropSurface({
             <button
               key={segment.id}
               type="button"
-              onClick={() => setMode(segment.id)}
+              onClick={() => selectMode(segment.id)}
               aria-pressed={mode === segment.id}
               className={cn(
                 "rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors",

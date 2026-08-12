@@ -14,7 +14,12 @@ import {
   unresolvedPipelineNodeBudgetHooks,
 } from "../src/api/pipelines.ts";
 import { projectCostSummary } from "../src/cost/ledger.ts";
-import { createProject, getProject, resolvePaths } from "../src/projects.ts";
+import {
+  createProject,
+  getProject,
+  projectRunSnapshotExists,
+  resolvePaths,
+} from "../src/projects.ts";
 import { withActiveProject } from "../src/scope.ts";
 import {
   listPipelineAdmissions,
@@ -337,6 +342,7 @@ describe("Tier A S4 dual-shape pipeline admission", () => {
         engineRunId: runId,
         nodeIds: ["deliberate"],
       });
+      expect(await projectRunSnapshotExists(projectId, recovered.record.engineAdmissionKey)).toBe(true);
       expect(reservedCostUsd).toBeGreaterThan(0.25);
       const reconciliation = await reconcilePipelineTerminalSnapshot(projectId, runId, {
         run: {
@@ -365,6 +371,7 @@ describe("Tier A S4 dual-shape pipeline admission", () => {
           settlement: { chargedCostUsd: 0.25, usageComplete: true },
         },
       });
+      expect(await projectRunSnapshotExists(projectId, recovered.record.engineAdmissionKey)).toBe(false);
       expect(projectCostSummary(projectId)).toMatchObject({
         workflowReservedUsd: 0,
         workflowSpentUsd: 0.25,
@@ -372,6 +379,42 @@ describe("Tier A S4 dual-shape pipeline admission", () => {
       await app.close();
     }
   }, 30_000);
+
+  it("settles and removes the retained snapshot before deleting a terminal engine run", async () => {
+    const projectId = "terminal-run-delete";
+    const runId = "run-terminal-delete";
+    createProject({ name: "Terminal run delete", projectId, spendLimitUsd: 10 });
+    let engineAdmissionKey = "";
+    const deleteRun = vi.fn(async () => ({ deleted: true }));
+    const app = await registerTestRoutes({
+      getWorkflow: async () => legacyWorkflow(),
+      runWorkflow: async (_workflowName, body) => {
+        engineAdmissionKey = String(recordOfForTest(body)?.kadyEngineAdmissionKey ?? "");
+        return { accepted: true, status: "pending", runId, dispatchState: "queued" };
+      },
+      getRun: async () => completionSnapshot(projectId, engineAdmissionKey, runId, 0.4),
+      deleteRun,
+    });
+    const start = await app.inject({
+      method: "POST",
+      url: "/pipelines/research/run",
+      headers: { "x-project-id": projectId },
+      payload: { conversationId: "delete-conversation", message: "Run then delete" },
+    });
+    expect(start.statusCode).toBe(200);
+    expect(engineAdmissionKey).not.toBe("");
+    expect(await projectRunSnapshotExists(projectId, engineAdmissionKey)).toBe(true);
+
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: `/pipelines/runs/${runId}`,
+      headers: { "x-project-id": projectId },
+    });
+    expect(deleted.statusCode).toBe(200);
+    expect(deleteRun).toHaveBeenCalledWith(runId);
+    expect(await projectRunSnapshotExists(projectId, engineAdmissionKey)).toBe(false);
+    await app.close();
+  });
 
   it("releases a topology reservation when dispatch fails before execution", async () => {
     const projectId = "topology-dispatch-failure";

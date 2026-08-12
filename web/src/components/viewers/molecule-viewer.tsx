@@ -11,17 +11,22 @@ interface MolInfo {
 interface ChemSummary { format: string; count: number; molecules: MolInfo[] }
 
 export default function MoleculeViewer({ path, projectId }: ViewerProps) {
-  const [summary, setSummary] = useState<ChemSummary | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const requestKey = `${projectId ?? ""}\0${path}`;
+  const [result, setResult] = useState<{ key: string; summary: ChemSummary } | null>(null);
+  const [failure, setFailure] = useState<{ key: string; message: string } | null>(null);
 
   useEffect(() => {
     const ac = new AbortController();
-    setSummary(null); setError(null);
     fetchSciJson<ChemSummary>(sciSummaryUrl(path, "chem", projectId), { signal: ac.signal })
-      .then((d) => { if (!ac.signal.aborted) setSummary(d); })
-      .catch((e) => { if (!isAbortError(e)) setError(String(e.message ?? e)); });
+      .then((d) => { if (!ac.signal.aborted) setResult({ key: requestKey, summary: d }); })
+      .catch((e) => {
+        if (!isAbortError(e)) setFailure({ key: requestKey, message: String(e.message ?? e) });
+      });
     return () => ac.abort();
-  }, [path, projectId]);
+  }, [path, projectId, requestKey]);
+
+  const summary = result?.key === requestKey ? result.summary : null;
+  const error = failure?.key === requestKey ? failure.message : null;
 
   if (error) {
     return (

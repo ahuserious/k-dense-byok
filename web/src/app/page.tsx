@@ -133,9 +133,11 @@ export default function HomePage() {
     [projectActivities, serverProjectActivities],
   );
 
-  useEffect(() => {
-    if (!projectsLoading) setProjectDirectoryHydrated(true);
-  }, [projectsLoading]);
+  if (!projectDirectoryHydrated && !projectsLoading) {
+    // This is a sticky render-time adjustment: later project refreshes must
+    // not unmount live workspaces just because the directory is reloading.
+    setProjectDirectoryHydrated(true);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -166,6 +168,16 @@ export default function HomePage() {
     setScreen("workspace");
   }, [rememberProject]);
 
+  if (
+    workspaceHydrated &&
+    screen === "workspace" &&
+    !openedProjectIds.includes(activeProjectId)
+  ) {
+    // ProjectSwitcher updates the external project selection. Adjust the
+    // mounted-workspace set before children render so its live streams stay mounted.
+    setOpenedProjectIds((previous) => [...previous, activeProjectId]);
+  }
+
   const handleProjectActivityChange = useCallback(
     (projectId: string, activity: ProjectActivitySummary) => {
       setProjectActivities((prev) => {
@@ -183,36 +195,35 @@ export default function HomePage() {
     [],
   );
 
-  // ProjectSwitcher changes the global selection from inside the currently
-  // visible workspace. Mount the destination workspace without unmounting the
-  // source, so any live SSE stream in the source keeps running.
-  useEffect(() => {
-    if (workspaceHydrated && screen === "workspace") rememberProject(activeProjectId);
-  }, [activeProjectId, rememberProject, screen, workspaceHydrated]);
-
   // A deleted project must release its mounted workspace and persisted shell
   // state. The DELETE endpoint explicitly aborts its server-owned runs first;
   // this unmount only disconnects browser-side event observers.
   useEffect(() => {
     if (projectsLoading || !workspaceHydrated) return;
     const existing = new Set(projects.map((project) => project.id));
-    setOpenedProjectIds((prev) => {
-      const next = prev.filter((id) => existing.has(id));
-      return next.length === prev.length ? prev : next;
+    let cancelled = false;
+    void pruneDeletedProjectState(existing).catch(() => {}).then(() => {
+      if (cancelled) return;
+      setOpenedProjectIds((prev) => {
+        const next = prev.filter((id) => existing.has(id));
+        return next.length === prev.length ? prev : next;
+      });
+      setProjectActivities((prev) => {
+        const next = Object.fromEntries(
+          Object.entries(prev).filter(([id]) => existing.has(id)),
+        );
+        return Object.keys(next).length === Object.keys(prev).length ? prev : next;
+      });
+      setRestoredProjects((prev) => {
+        const next = Object.fromEntries(
+          Object.entries(prev).filter(([id]) => existing.has(id)),
+        );
+        return Object.keys(next).length === Object.keys(prev).length ? prev : next;
+      });
     });
-    setProjectActivities((prev) => {
-      const next = Object.fromEntries(
-        Object.entries(prev).filter(([id]) => existing.has(id)),
-      );
-      return Object.keys(next).length === Object.keys(prev).length ? prev : next;
-    });
-    setRestoredProjects((prev) => {
-      const next = Object.fromEntries(
-        Object.entries(prev).filter(([id]) => existing.has(id)),
-      );
-      return Object.keys(next).length === Object.keys(prev).length ? prev : next;
-    });
-    void pruneDeletedProjectState(existing);
+    return () => {
+      cancelled = true;
+    };
   }, [projects, projectsLoading, workspaceHydrated]);
 
   useEffect(() => {

@@ -32,6 +32,7 @@ export interface TextShimmerProps {
   spread?: number;
 }
 
+/* eslint-disable react-hooks/static-components -- motion.create is cached by intrinsic tag at module scope, so the resolved component identity is stable across renders. */
 const ShimmerComponent = ({
   children,
   as: Component = "p",
@@ -74,5 +75,6 @@ const ShimmerComponent = ({
     </MotionComponent>
   );
 };
+/* eslint-enable react-hooks/static-components */
 
 export const Shimmer = memo(ShimmerComponent);

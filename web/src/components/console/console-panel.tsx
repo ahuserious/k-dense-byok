@@ -17,7 +17,7 @@
 
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import { KadyConsole } from "@/components/console/kady-console";
 
@@ -37,9 +37,10 @@ export function ConsolePanel({
   const [feed, setFeed] = useState<ConsoleFeed>("dag-runs");
   // Mount the Agent Console lazily, then keep it mounted across toggles.
   const [agentsVisited, setAgentsVisited] = useState(false);
-  useEffect(() => {
-    if (feed === "agents") setAgentsVisited(true);
-  }, [feed]);
+  const selectFeed = (nextFeed: ConsoleFeed) => {
+    setFeed(nextFeed);
+    if (nextFeed === "agents") setAgentsVisited(true);
+  };
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col">
@@ -48,7 +49,7 @@ export function ConsolePanel({
           <button
             key={segment.id}
             type="button"
-            onClick={() => setFeed(segment.id)}
+            onClick={() => selectFeed(segment.id)}
             aria-pressed={feed === segment.id}
             className={cn(
               "rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors",
