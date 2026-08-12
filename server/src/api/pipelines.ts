@@ -35,13 +35,7 @@ import {
 } from "../cost/billing.ts";
 import { currentProjectId } from "../scope.ts";
 import { corsResponseHeaders } from "../cors.ts";
-import {
-  createProjectRunSnapshot,
-  deleteProjectRunSnapshot,
-  listProjects,
-  ProjectRunSnapshotLimitError,
-  resolvePaths,
-} from "../projects.ts";
+import { createProjectRunSnapshot, listProjects, resolvePaths } from "../projects.ts";
 import { resolveWorkflowModel } from "../agent/workflow-model-resolution.ts";
 import type { ModelRequest } from "../workflows/schema.ts";
 import {
@@ -92,28 +86,6 @@ const ZERO_PIPELINE_USAGE = {
   cacheRead: 0,
   cacheWrite: 0,
 } as const;
-
-async function settlePipelineAdmissionAndReleaseSnapshot(
-  projectId: string,
-  admissionId: string,
-  settlement: Parameters<typeof settlePipelineAdmission>[2],
-  engineRunId?: string,
-): Promise<Awaited<ReturnType<typeof settlePipelineAdmission>>> {
-  const engineAdmissionKey = findPipelineAdmission(projectId, admissionId)?.record.engineAdmissionKey;
-  const entry = await settlePipelineAdmission(projectId, admissionId, settlement, engineRunId);
-  if (engineAdmissionKey) await deleteProjectRunSnapshot(projectId, engineAdmissionKey);
-  return entry;
-}
-
-async function completePipelineAdmissionSettlementAndReleaseSnapshot(
-  projectId: string,
-  admissionId: string,
-): Promise<Awaited<ReturnType<typeof completePipelineAdmissionSettlement>>> {
-  const engineAdmissionKey = findPipelineAdmission(projectId, admissionId)?.record.engineAdmissionKey;
-  const entry = await completePipelineAdmissionSettlement(projectId, admissionId);
-  if (engineAdmissionKey) await deleteProjectRunSnapshot(projectId, engineAdmissionKey);
-  return entry;
-}
 
 function positiveInteger(value: unknown): number | undefined {
   return Number.isSafeInteger(value) && (value as number) > 0
@@ -345,10 +317,6 @@ export async function pipelineNodeBudgetHooks(
 }
 
 function mapPipelineRunError(reply: FastifyReply, error: unknown): unknown {
-  if (error instanceof ProjectRunSnapshotLimitError) {
-    reply.code(413);
-    return { detail: error.message, snapshot: "rejected", code: "SNAPSHOT_LIMIT_EXCEEDED" };
-  }
   if (error instanceof WorkflowBudgetError) {
     reply.code(error.code === "LIMIT_EXCEEDED" ? 402 : error.code === "INVALID_ARGUMENT" ? 400 : 409);
     return { detail: error.message, budget: "rejected", code: error.code };
@@ -634,7 +602,7 @@ export async function reconcilePipelineTerminalSnapshot(
     );
   }
   const status = runStatusOf(snapshot);
-  const entry = await settlePipelineAdmissionAndReleaseSnapshot(projectId, admissionId, {
+  const entry = await settlePipelineAdmission(projectId, admissionId, {
     status: status === "completed" ? "completed" : status === "cancelled" ? "aborted" : "failed",
     ...(usage
       ? {
@@ -698,17 +666,10 @@ export class PipelineReconciliationWorker {
         recoverPipelineAdmissionIntents(project.id);
         const records = (this.options.admissions ?? listPipelineAdmissions)(project.id);
         for (const record of records) {
-          if (record.status === "settled") {
-            try {
-              await deleteProjectRunSnapshot(project.id, record.engineAdmissionKey);
-            } catch (error) {
-              this.options.onError?.(error, record);
-            }
-            continue;
-          }
+          if (record.status === "settled") continue;
           try {
             if (record.status === "settling") {
-              await completePipelineAdmissionSettlementAndReleaseSnapshot(project.id, record.admissionId);
+              await completePipelineAdmissionSettlement(project.id, record.admissionId);
               continue;
             }
             if (record.status === "intent") {
@@ -716,7 +677,7 @@ export class PipelineReconciliationWorker {
                 await this.renewIfNeeded(project.id, record.admissionId);
                 continue;
               }
-              await settlePipelineAdmissionAndReleaseSnapshot(project.id, record.admissionId, {
+              await settlePipelineAdmission(project.id, record.admissionId, {
                 status: "failed",
                 usage: ZERO_PIPELINE_USAGE,
                 reason: "admission owner exited before write-ahead dispatch intent",
@@ -741,7 +702,7 @@ export class PipelineReconciliationWorker {
                 });
               } else if (query.status === "not-found" &&
                 (record.status === "dispatching" || record.status === "indeterminate")) {
-                await settlePipelineAdmissionAndReleaseSnapshot(project.id, record.admissionId, {
+                await settlePipelineAdmission(project.id, record.admissionId, {
                   status: "failed",
                   usage: ZERO_PIPELINE_USAGE,
                   reason: "authoritative engine admission query reported not found",
@@ -793,7 +754,6 @@ export interface PipelineRouteOverrides {
   listRuns?: typeof pipelineEngine.listRuns;
   resumeRun?: typeof pipelineEngine.resumeRun;
   cancelRun?: typeof pipelineEngine.cancelRun;
-  deleteRun?: typeof pipelineEngine.deleteRun;
   resolveWorkflowScope?: (
     projectId: string,
   ) => Promise<pipelineEngine.PipelineWorkflowScope>;
@@ -829,7 +789,6 @@ export async function registerPipelineRoutes(
   const listRuns = overrides.listRuns ?? pipelineEngine.listRuns;
   const resumeRun = overrides.resumeRun ?? pipelineEngine.resumeRun;
   const cancelRun = overrides.cancelRun ?? pipelineEngine.cancelRun;
-  const deleteRun = overrides.deleteRun ?? pipelineEngine.deleteRun;
   const resolveWorkflowScope = overrides.resolveWorkflowScope ?? resolveProjectWorkflowScope;
   if (overrides.reconciliationWorker !== false) {
     const worker = overrides.reconciliationWorker ?? new PipelineReconciliationWorker({
@@ -977,7 +936,7 @@ export async function registerPipelineRoutes(
           throw new WorkflowBudgetError("CONFLICT", `Pipeline admission ${admissionId} belongs to another request.`);
         }
         if (existing.record.status === "settling") {
-          await completePipelineAdmissionSettlementAndReleaseSnapshot(projectId, admissionId);
+          await completePipelineAdmissionSettlement(projectId, admissionId);
           throw new WorkflowBudgetError("CONFLICT", `Pipeline admission ${admissionId} completed its pending settlement.`);
         }
         if (existing.record.status === "settled") {
@@ -1017,7 +976,7 @@ export async function registerPipelineRoutes(
           }
           if ((existing.record.status === "dispatching" || existing.record.status === "indeterminate") &&
             query.status === "not-found") {
-            await settlePipelineAdmissionAndReleaseSnapshot(projectId, admissionId, {
+            await settlePipelineAdmission(projectId, admissionId, {
               status: "failed",
               usage: ZERO_PIPELINE_USAGE,
               reason: "authoritative engine admission query reported not found",
@@ -1035,7 +994,7 @@ export async function registerPipelineRoutes(
             return { accepted: false, status: "admission-pending", kadyAdmissionId: admissionId };
           }
           if (existing.record.workflowRevisionSha256 !== admittedWorkflowRevision) {
-            await settlePipelineAdmissionAndReleaseSnapshot(projectId, admissionId, {
+            await settlePipelineAdmission(projectId, admissionId, {
               status: "failed",
               usage: ZERO_PIPELINE_USAGE,
               reason: "workflow revision changed before recovered admission dispatch",
@@ -1094,7 +1053,7 @@ export async function registerPipelineRoutes(
             }
           : body;
       const runSnapshotSha = replayRunSnapshotSha ??
-        await createProjectRunSnapshot(projectId, admissionRecord.engineAdmissionKey);
+        createProjectRunSnapshot(projectId, admissionRecord.engineAdmissionKey);
       const runBody = {
         ...baseRunBody,
         message: `${message}\n\n${projectLabel}\n${correlationLabel}`,
@@ -1121,7 +1080,7 @@ export async function registerPipelineRoutes(
       const result = await runWorkflow(req.params.name, runBody, workflowScope);
       const resultRecord = recordOf(result);
       if (resultRecord?.accepted === false && typeof resultRecord.status === "string") {
-        await settlePipelineAdmissionAndReleaseSnapshot(projectId, admission.admissionId, {
+        await settlePipelineAdmission(projectId, admission.admissionId, {
           status: "failed",
           usage: ZERO_PIPELINE_USAGE,
           reason: "pipeline engine rejected the idempotent invocation",
@@ -1192,7 +1151,7 @@ export async function registerPipelineRoutes(
         }
         if (query.status === "not-found") {
           try {
-            await settlePipelineAdmissionAndReleaseSnapshot(
+            await settlePipelineAdmission(
               admission.handle.record.projectId,
               admission.admissionId,
               {
@@ -1211,7 +1170,7 @@ export async function registerPipelineRoutes(
       } else if (admission) {
         try {
           if (ownershipPersisted) {
-            await settlePipelineAdmissionAndReleaseSnapshot(
+            await settlePipelineAdmission(
               admission.handle.record.projectId,
               admission.admissionId,
               {
@@ -1246,33 +1205,6 @@ export async function registerPipelineRoutes(
       return snapshot;
     } catch (err) {
       return mapError(reply, err);
-    }
-  });
-
-  app.delete<{ Params: { runId: string } }>("/pipelines/runs/:runId", async (req, reply) => {
-    try {
-      const projectId = currentProjectId();
-      const scope = await resolveWorkflowScope(projectId);
-      const snapshot = await getRun(req.params.runId);
-      if (!engineRunBelongsToCodebase(snapshot, scope.codebaseId)) return scopedRunNotFound(reply);
-      if (!isTerminalRunStatus(snapshot)) {
-        throw new WorkflowBudgetError("CONFLICT", "Only a terminal pipeline run can be deleted.");
-      }
-      const engineAdmissionKey = pipelineAdmissionIdFromEngineSnapshot(snapshot);
-      const snapshotProjectId = pipelineProjectIdFromEngineSnapshot(snapshot);
-      if (engineAdmissionKey && snapshotProjectId === projectId) {
-        const admission = findPipelineAdmissionByEngineKey(projectId, engineAdmissionKey);
-        if (admission && admission.record.status !== "settled") {
-          await reconcilePipelineTerminalSnapshot(projectId, req.params.runId, snapshot, "full-charge");
-        }
-      }
-      const result = await deleteRun(req.params.runId);
-      if (engineAdmissionKey && snapshotProjectId === projectId) {
-        await deleteProjectRunSnapshot(projectId, engineAdmissionKey);
-      }
-      return result;
-    } catch (err) {
-      return mapPipelineRunError(reply, err);
     }
   });
 

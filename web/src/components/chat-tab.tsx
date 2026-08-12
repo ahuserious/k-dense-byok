@@ -1758,6 +1758,10 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
           );
           return;
         }
+        // A fresh imperative send resumes the queue exactly like a composer
+        // submit; otherwise Stop leaves queued prompts stranded (see the
+        // shared clear in the composer path).
+        setQueuePaused(false);
         if (selectedBudgetBlocked) return;
         await send(
           prompt,
@@ -1780,6 +1784,9 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
           return;
         }
         if (budgetState === "exceeded" && modelUsesBillableBudget(model)) return;
+        // Same rationale as sendQuick: a fresh launch clears a Stop-induced
+        // queue pause so pending prompts dispatch when this run completes.
+        setQueuePaused(false);
         setSelectedModel(model);
         const fileRefs = uploadedFiles.length > 0 ? "\n" + uploadedFiles.join("\n") : "";
         const skillsCtx = suggestedSkills.length > 0

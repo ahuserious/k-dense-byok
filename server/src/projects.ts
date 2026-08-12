@@ -20,7 +20,7 @@
  *         .kady/workflows/budget/reservations/ durable DAG budget records
  */
 import crypto from "node:crypto";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { DEFAULT_PROJECT_ID, PROJECTS_ROOT } from "./config.ts";
@@ -419,270 +419,62 @@ function ensureProjectRepository(sandbox: string): void {
   }
 }
 
-export interface ProjectRunSnapshotLimits {
-  maxFiles: number;
-  maxBytes: number;
-}
-
-export interface ProjectRunSnapshotEntry {
-  path: string;
-  size: number;
-}
-
-export interface ProjectRunSnapshotManifest {
-  version: 1;
-  runIdentityHash: string;
-  snapshotRef: string;
-  snapshotSha: string;
-  createdAt: string;
-  fileCount: number;
-  totalBytes: number;
-  entries: ProjectRunSnapshotEntry[];
-}
-
-export const PROJECT_RUN_SNAPSHOT_LIMITS: ProjectRunSnapshotLimits = {
-  maxFiles: 20_000,
-  maxBytes: 1024 * 1024 * 1024,
-};
-
-export class ProjectRunSnapshotLimitError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "ProjectRunSnapshotLimitError";
-  }
-}
-
-const RUN_SNAPSHOT_MANIFEST_DIRECTORY = "run-snapshots";
-const MAX_GIT_CAPTURE_BYTES = 32 * 1024 * 1024;
-
-function snapshotIdentity(runIdentity: string): { hash: string; ref: string } {
-  const hash = crypto.createHash("sha256").update(runIdentity).digest("hex");
-  return { hash, ref: `refs/kady/run-snapshots/${hash}` };
-}
-
-function runSnapshotManifestPath(paths: ProjectPaths, identityHash: string): string {
-  return path.join(paths.kadyDir, RUN_SNAPSHOT_MANIFEST_DIRECTORY, `${identityHash}.json`);
-}
-
-function isPrivacySafeRunSnapshotPath(relativePath: string): boolean {
-  const segments = relativePath.split("/");
-  return segments.every((segment, index) => {
-    if (BASELINE_EXCLUDED_DIRECTORIES.has(segment) || isBaselineCredentialName(segment)) return false;
-    return !segment.startsWith(".") || (index === 0 && segment === ".archon");
-  });
-}
-
-async function runGit(
-  sandbox: string,
-  args: string[],
-  options: { env?: NodeJS.ProcessEnv; input?: Buffer } = {},
-): Promise<Buffer> {
-  return await new Promise((resolve, reject) => {
-    const child = spawn("git", ["-C", sandbox, ...args], {
-      env: options.env ?? process.env,
-      stdio: [options.input ? "pipe" : "ignore", "pipe", "pipe"],
-    });
-    const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    let capturedBytes = 0;
-    let captureExceeded = false;
-    const capture = (target: Buffer[], chunk: Buffer): void => {
-      capturedBytes += chunk.length;
-      if (capturedBytes > MAX_GIT_CAPTURE_BYTES) {
-        captureExceeded = true;
-        child.kill();
-        return;
-      }
-      target.push(chunk);
-    };
-    child.stdout!.on("data", (chunk: Buffer) => capture(stdout, chunk));
-    child.stderr!.on("data", (chunk: Buffer) => capture(stderr, chunk));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (captureExceeded) {
-        reject(new ProjectRunSnapshotLimitError("Snapshot file listing exceeded its bounded capture budget."));
-      } else if (code !== 0) {
-        reject(new Error(`git ${args[0] ?? "command"} failed: ${Buffer.concat(stderr).toString("utf-8").trim()}`));
-      } else {
-        resolve(Buffer.concat(stdout));
-      }
-    });
-    if (options.input) child.stdin!.end(options.input);
-  });
-}
-
-function assertSnapshotBounds(
-  entries: ProjectRunSnapshotEntry[],
-  limits: ProjectRunSnapshotLimits,
-): number {
-  if (entries.length > limits.maxFiles) {
-    throw new ProjectRunSnapshotLimitError(
-      `Run snapshot exceeds the ${limits.maxFiles}-file limit (${entries.length} files).`,
-    );
-  }
-  const totalBytes = entries.reduce((total, entry) => total + entry.size, 0);
-  if (totalBytes > limits.maxBytes) {
-    throw new ProjectRunSnapshotLimitError(
-      `Run snapshot exceeds the ${limits.maxBytes}-byte limit (${totalBytes} bytes).`,
-    );
-  }
-  return totalBytes;
-}
-
-/** Enumerate Git-visible, privacy-safe inputs and reject the request before staging if bounded limits are exceeded. */
-export async function buildProjectRunSnapshotManifest(
-  sandbox: string,
-  limits: ProjectRunSnapshotLimits = PROJECT_RUN_SNAPSHOT_LIMITS,
-): Promise<{ entries: ProjectRunSnapshotEntry[]; fileCount: number; totalBytes: number }> {
-  const output = await runGit(sandbox, [
-    "ls-files",
-    "--cached",
-    "--others",
-    "--exclude-standard",
-    "--deduplicate",
-    "-z",
-  ]);
-  const candidates = output.toString("utf-8").split("\0").filter(Boolean);
-  const entries: ProjectRunSnapshotEntry[] = [];
-  let totalBytes = 0;
-  for (const relativePath of candidates) {
-    if (!isPrivacySafeRunSnapshotPath(relativePath)) continue;
-    let stat: fs.Stats;
-    try {
-      stat = await fs.promises.lstat(path.join(sandbox, ...relativePath.split("/")));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-      throw error;
-    }
-    if (!stat.isFile() && !stat.isSymbolicLink()) continue;
-    entries.push({ path: relativePath, size: stat.size });
-    totalBytes += stat.size;
-    if (entries.length > limits.maxFiles) {
-      throw new ProjectRunSnapshotLimitError(
-        `Run snapshot exceeds the ${limits.maxFiles}-file limit (${entries.length} files).`,
-      );
-    }
-    if (totalBytes > limits.maxBytes) {
-      throw new ProjectRunSnapshotLimitError(
-        `Run snapshot exceeds the ${limits.maxBytes}-byte limit (${totalBytes} bytes).`,
-      );
-    }
-  }
-  entries.sort((left, right) => left.path.localeCompare(right.path));
-  return { entries, fileCount: entries.length, totalBytes };
-}
-
-function stagedSnapshotEntries(output: Buffer): ProjectRunSnapshotEntry[] {
-  const entries: ProjectRunSnapshotEntry[] = [];
-  for (const row of output.toString("utf-8").split("\0")) {
-    if (!row) continue;
-    const tab = row.indexOf("\t");
-    const header = row.slice(0, tab).split(/\s+/);
-    const size = Number(header[3]);
-    const entryPath = row.slice(tab + 1);
-    if (tab < 0 || !Number.isSafeInteger(size) || size < 0 || !entryPath) {
-      throw new Error("Git returned a malformed run snapshot tree entry.");
-    }
-    entries.push({ path: entryPath, size });
-  }
-  return entries;
-}
-
 /**
- * Materialize bounded workflow inputs as an unreachable-by-branch Git commit.
- * Git work runs asynchronously so snapshotting does not block the request event loop.
+ * Materialize the sandbox inputs visible to a workflow as an unreachable-by-branch
+ * Git commit, then retain it under a Kady-owned ref for the lifetime of the run.
+ * A temporary index keeps the user's checkout, index, and current branch untouched.
  */
-export async function createProjectRunSnapshot(
-  projectId: string,
-  runIdentity: string,
-  limits: ProjectRunSnapshotLimits = PROJECT_RUN_SNAPSHOT_LIMITS,
-): Promise<string> {
+export function createProjectRunSnapshot(projectId: string, runIdentity: string): string {
+  // TODO(#33-hardening): bound retained snapshot refs/manifests and add safe GC in the hardening lane.
   validateId(projectId);
   const paths = ensureProjectExists(projectId);
-  const planned = await buildProjectRunSnapshotManifest(paths.sandbox, limits);
-  const temporaryDirectory = await fs.promises.mkdtemp(path.join(paths.root, ".run-snapshot-"));
+  const temporaryDirectory = fs.mkdtempSync(path.join(paths.root, ".run-snapshot-"));
   const temporaryIndex = path.join(temporaryDirectory, "index");
   const gitEnvironment = {
     ...process.env,
     GIT_INDEX_FILE: temporaryIndex,
     GIT_LITERAL_PATHSPECS: "1",
   };
-  const identity = snapshotIdentity(runIdentity);
-  const manifestPath = runSnapshotManifestPath(paths, identity.hash);
   try {
-    await runGit(paths.sandbox, ["read-tree", "--empty"], { env: gitEnvironment });
-    if (planned.entries.length > 0) {
-      const pathspec = Buffer.from(`${planned.entries.map((entry) => entry.path).join("\0")}\0`);
-      await runGit(paths.sandbox, [
-        "add",
-        "--force",
-        "--pathspec-from-file=-",
-        "--pathspec-file-nul",
-      ], { env: gitEnvironment, input: pathspec });
+    execFileSync("git", ["-C", paths.sandbox, "read-tree", "--empty"], {
+      env: gitEnvironment,
+      stdio: "ignore",
+    });
+    const permittedPaths = privacySafeProjectSnapshotPaths(paths.sandbox);
+    if (permittedPaths.length > 0) {
+      execFileSync(
+        "git",
+        ["-C", paths.sandbox, "add", "--force", "--", ...permittedPaths],
+        { env: gitEnvironment, stdio: "ignore" },
+      );
     }
-    const tree = (await runGit(paths.sandbox, ["write-tree"], { env: gitEnvironment }))
-      .toString("utf-8").trim();
-    const stagedEntries = stagedSnapshotEntries(
-      await runGit(paths.sandbox, ["ls-tree", "-r", "-l", "-z", tree], { env: gitEnvironment }),
+    const tree = execFileSync("git", ["-C", paths.sandbox, "write-tree"], {
+      env: gitEnvironment,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    const parent = execFileSync("git", ["-C", paths.sandbox, "rev-parse", "HEAD"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    const snapshot = execFileSync(
+      "git",
+      ["-C", paths.sandbox, "commit-tree", tree, "-p", parent, "-m", `Kady run snapshot ${runIdentity}`],
+      {
+        env: gitEnvironment,
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    ).trim();
+    const snapshotRef = crypto.createHash("sha256").update(runIdentity).digest("hex");
+    execFileSync(
+      "git",
+      ["-C", paths.sandbox, "update-ref", `refs/kady/run-snapshots/${snapshotRef}`, snapshot],
+      { stdio: "ignore" },
     );
-    const totalBytes = assertSnapshotBounds(stagedEntries, limits);
-    const parent = (await runGit(paths.sandbox, ["rev-parse", "HEAD"]))
-      .toString("utf-8").trim();
-    const snapshot = (await runGit(paths.sandbox, [
-      "commit-tree",
-      tree,
-      "-p",
-      parent,
-      "-m",
-      `Kady run snapshot ${identity.hash}`,
-    ], { env: gitEnvironment })).toString("utf-8").trim();
-    await runGit(paths.sandbox, ["update-ref", identity.ref, snapshot]);
-    const manifest: ProjectRunSnapshotManifest = {
-      version: 1,
-      runIdentityHash: identity.hash,
-      snapshotRef: identity.ref,
-      snapshotSha: snapshot,
-      createdAt: nowIso(),
-      fileCount: stagedEntries.length,
-      totalBytes,
-      entries: stagedEntries,
-    };
-    await fs.promises.mkdir(path.dirname(manifestPath), { recursive: true });
-    const temporaryManifest = `${manifestPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
-    try {
-      await fs.promises.writeFile(temporaryManifest, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
-      await fs.promises.rename(temporaryManifest, manifestPath);
-    } catch (error) {
-      await fs.promises.rm(temporaryManifest, { force: true });
-      await runGit(paths.sandbox, ["update-ref", "-d", identity.ref]).catch(() => undefined);
-      throw error;
-    }
     return snapshot;
   } finally {
-    await fs.promises.rm(temporaryDirectory, { recursive: true, force: true });
-  }
-}
-
-/** Delete the only Kady-owned reachability root after terminal settlement or run deletion. */
-export async function deleteProjectRunSnapshot(projectId: string, runIdentity: string): Promise<void> {
-  validateId(projectId);
-  const paths = resolvePaths(projectId);
-  const identity = snapshotIdentity(runIdentity);
-  await runGit(paths.sandbox, ["update-ref", "-d", identity.ref]).catch((error) => {
-    if (fs.existsSync(path.join(paths.sandbox, ".git"))) throw error;
-  });
-  await fs.promises.rm(runSnapshotManifestPath(paths, identity.hash), { force: true });
-}
-
-export async function projectRunSnapshotExists(projectId: string, runIdentity: string): Promise<boolean> {
-  validateId(projectId);
-  const paths = resolvePaths(projectId);
-  const identity = snapshotIdentity(runIdentity);
-  try {
-    await runGit(paths.sandbox, ["show-ref", "--verify", "--quiet", identity.ref]);
-    return true;
-  } catch {
-    return false;
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
   }
 }
 
