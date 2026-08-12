@@ -6,6 +6,35 @@ const LEGACY_ENGINE_ENVIRONMENT_NAMES = [
   "KADY_ARCHON_PORT",
 ];
 
+function pipelineEngineBrowserOrigin(environment, fallbackUrl) {
+  const configuredUrl = environment.NEXT_PUBLIC_PIPELINE_ENGINE_URL;
+  if (configuredUrl === undefined) return fallbackUrl;
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(configuredUrl);
+  } catch {
+    throw new Error(
+      "NEXT_PUBLIC_PIPELINE_ENGINE_URL must be an absolute http(s) origin.",
+    );
+  }
+
+  if (
+    !["http:", "https:"].includes(parsedUrl.protocol) ||
+    parsedUrl.username ||
+    parsedUrl.password ||
+    parsedUrl.pathname !== "/" ||
+    parsedUrl.search ||
+    parsedUrl.hash
+  ) {
+    throw new Error(
+      "NEXT_PUBLIC_PIPELINE_ENGINE_URL must be an absolute http(s) origin.",
+    );
+  }
+
+  return parsedUrl.origin;
+}
+
 export function previewEnvironment(
   stateRoot,
   launchRoot,
@@ -22,6 +51,10 @@ export function previewEnvironment(
   const piAgentDirectory = path.join(stateRoot, "pi-agent");
   const backendUrl = `http://127.0.0.1:${ports.backend}`;
   const pipelineEngineUrl = `http://127.0.0.1:${ports.engine}`;
+  const pipelineEngineBrowserUrl = pipelineEngineBrowserOrigin(
+    environment,
+    pipelineEngineUrl,
+  );
   return {
     ...environment,
     HOME: path.join(stateRoot, "home"),
@@ -33,7 +66,7 @@ export function previewEnvironment(
     NEXT_PUBLIC_SCIENTIFIC_DAG_STUDIO: "1",
     KADY_PIPELINE_ENGINE_PORT: String(ports.engine),
     PIPELINE_ENGINE_BASE_URL: pipelineEngineUrl,
-    NEXT_PUBLIC_PIPELINE_ENGINE_URL: pipelineEngineUrl,
+    NEXT_PUBLIC_PIPELINE_ENGINE_URL: pipelineEngineBrowserUrl,
     KADY_PROJECTS_ROOT: path.join(stateRoot, "projects"),
     KADY_PI_AGENT_DIR: piAgentDirectory,
     PI_CODING_AGENT_DIR: piAgentDirectory,
