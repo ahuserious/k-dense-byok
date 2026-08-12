@@ -6,6 +6,9 @@ const stablyCredentialsPresent = Boolean(
 );
 
 export default defineConfig({
+  // Playwright config has no Page lifecycle. The automatic `runtimeErrors`
+  // fixture in e2e/fixtures.ts attaches console.error and pageerror listeners
+  // before navigation and fails the owning test after fixture teardown.
   testDir: "./e2e",
   outputDir: ".stably/test-results",
   fullyParallel: true,
@@ -14,13 +17,14 @@ export default defineConfig({
   workers: process.env.CI ? 4 : undefined,
   reporter: stablyCredentialsPresent
     ? [
+        ["./e2e/item-count-reporter.ts"],
         ["list"],
         stablyReporter({
           apiKey: process.env.STABLY_API_KEY,
           projectId: process.env.STABLY_PROJECT_ID,
         }),
       ]
-    : [["list"]],
+    : [["./e2e/item-count-reporter.ts"], ["list"]],
   use: {
     baseURL: process.env.KADY_E2E_BASE_URL ?? "http://127.0.0.1:13000",
     trace: "on",

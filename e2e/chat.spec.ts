@@ -59,7 +59,7 @@ async function showLiveGraph(page: Page) {
   return tablist;
 }
 
-async function waitForCompletedResponse(page: Page) {
+async function waitForCompletedResponse(page: Page, submittedMessage: string) {
   const tablist = page.getByRole("tablist", { name: "Chat middle pane" });
   await expect(tablist).toBeVisible();
   await expect(tablist.getByRole("tab", { name: "Scientific DAG" })).toHaveAttribute(
@@ -68,9 +68,17 @@ async function waitForCompletedResponse(page: Page) {
   );
   await expect(page.getByRole("button", { name: "Submit", exact: true })).toBeVisible();
   await selectMiddlePaneTab(page, "Conversation");
-  const response = page.getByText("E2E response", { exact: true });
+  const response = page.getByText(`Assistant confirmed: ${submittedMessage}`, { exact: true });
   await expect(response).toBeVisible();
   return response;
+}
+
+async function recordedRunRequests(page: Page) {
+  return page.evaluate(() => (
+    window as typeof window & {
+      __kadyE2eRunRequests: Array<{ message: string; sessionId: string }>;
+    }
+  ).__kadyE2eRunRequests);
 }
 
 async function showFailedLiveGraph(
@@ -87,6 +95,17 @@ async function showFailedLiveGraph(
 }
 
 test.describe("chat live Scientific DAG", () => {
+  // Product defect: chat-live-graph.tsx:643-647 selects the DAG for every non-terminal run;
+  // only a stream error should override the user's selected Conversation tab.
+  test.fixme("healthy in-flight turn keeps Conversation selected", async ({ workspacePage }) => {
+    await startHeldRun(workspacePage);
+    const tablist = workspacePage.getByRole("tablist", { name: "Chat middle pane" });
+    await expect(tablist.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+  });
+
   for (const tabName of ["Conversation", "Scientific DAG"] as const) {
     test(`${tabName} is exposed in the middle pane`, async ({ workspacePage }) => {
       const tablist = await showLiveGraph(workspacePage);
@@ -110,6 +129,16 @@ test.describe("chat live Scientific DAG", () => {
   test("live graph has an accessible region", async ({ workspacePage }) => {
     await showLiveGraph(workspacePage);
     await expect(workspacePage.getByRole("region", { name: "Live workflow graph" })).toBeVisible();
+  });
+
+  test("launched run binds the prepare and analyze node ids to its graph", async ({ workspacePage }) => {
+    await showLiveGraph(workspacePage);
+    expect((await recordedRunRequests(workspacePage)).map((request) => request.message)).toEqual([
+      "Hold this deterministic run",
+    ]);
+    const graph = workspacePage.getByRole("region", { name: "Live workflow graph" });
+    await expect(graph.locator('[data-node-id="prepare"]')).toBeVisible();
+    await expect(graph.locator('[data-node-id="analyze"]')).toBeVisible();
   });
 
   test("workflow identity and revision are visible", async ({ workspacePage }) => {
@@ -151,15 +180,19 @@ test.describe("chat live Scientific DAG", () => {
 
 test.describe("chat send, stop, and queue", () => {
   test("send streams a deterministic assistant response", async ({ workspacePage }) => {
+    const message = "Run local E2E";
     await showConversation(workspacePage);
-    await submitComposer(workspacePage, "Run local E2E");
-    await waitForCompletedResponse(workspacePage);
+    await submitComposer(workspacePage, message);
+    await waitForCompletedResponse(workspacePage, message);
+    await expect(workspacePage.getByText(message, { exact: true })).toBeVisible();
+    expect((await recordedRunRequests(workspacePage)).map((request) => request.message)).toEqual([message]);
   });
 
   test("completed send returns the submit control", async ({ workspacePage }) => {
+    const message = "Complete local E2E";
     await showConversation(workspacePage);
-    await submitComposer(workspacePage, "Complete local E2E");
-    await waitForCompletedResponse(workspacePage);
+    await submitComposer(workspacePage, message);
+    await waitForCompletedResponse(workspacePage, message);
     await expect(workspacePage.getByRole("button", { name: "Submit", exact: true })).toBeVisible();
   });
 
@@ -167,10 +200,58 @@ test.describe("chat send, stop, and queue", () => {
     await startHeldRun(workspacePage);
   });
 
-  test("Stop cancels the held stream", async ({ workspacePage }) => {
+  test("Stop halts streaming and leaves queued work resumable", async ({ workspacePage }) => {
     await startHeldRun(workspacePage);
+    const queuedMessage = "Resume after the stopped stream";
+    const composer = chatComposer(workspacePage);
+    await composer.fill(queuedMessage);
+    await composer.press("Alt+Enter");
     await activateButton(workspacePage, "Stop");
     await expect(workspacePage.getByRole("button", { name: "Submit" })).toBeVisible();
+    await expect(workspacePage.getByText("Paused — stopped", { exact: true })).toBeVisible();
+    await expect(workspacePage.getByText(queuedMessage, { exact: true })).toBeVisible();
+    expect((await recordedRunRequests(workspacePage)).map((request) => request.message)).toEqual([
+      "Hold this deterministic run",
+    ]);
+    const abortRequests = await workspacePage.evaluate(() => (
+      window as typeof window & { __kadyE2eAbortRequests: string[] }
+    ).__kadyE2eAbortRequests);
+    expect(abortRequests).toEqual(["session-e2e"]);
+
+    await workspacePage.evaluate(() => localStorage.setItem("kady:e2e-run-mode", "complete"));
+    await activateButton(workspacePage, "Resume");
+    await selectMiddlePaneTab(workspacePage, "Conversation");
+    await expect(workspacePage.getByText(`Assistant confirmed: ${queuedMessage}`, { exact: true }))
+      .toBeVisible();
+    expect((await recordedRunRequests(workspacePage)).map((request) => request.message)).toEqual([
+      "Hold this deterministic run",
+      queuedMessage,
+    ]);
+  });
+
+  test("queued prompt dispatches only after the active run ends", async ({ workspacePage }) => {
+    await startHeldRun(workspacePage);
+    const queuedMessage = "Dispatch after deterministic completion";
+    const composer = chatComposer(workspacePage);
+    await composer.fill(queuedMessage);
+    await composer.press("Alt+Enter");
+    expect((await recordedRunRequests(workspacePage)).map((request) => request.message)).toEqual([
+      "Hold this deterministic run",
+    ]);
+
+    await workspacePage.evaluate(() => {
+      localStorage.setItem("kady:e2e-run-mode", "complete");
+      (
+        window as typeof window & { __kadyE2eCompleteHeldRun: () => void }
+      ).__kadyE2eCompleteHeldRun();
+    });
+    await selectMiddlePaneTab(workspacePage, "Conversation");
+    await expect(workspacePage.getByText(`Assistant confirmed: ${queuedMessage}`, { exact: true }))
+      .toBeVisible();
+    expect((await recordedRunRequests(workspacePage)).map((request) => request.message)).toEqual([
+      "Hold this deterministic run",
+      queuedMessage,
+    ]);
   });
 
   test("Alt+Enter queues a second send", async ({ workspacePage }) => {
@@ -223,8 +304,12 @@ test.describe("chat send, stop, and queue", () => {
     await composer.fill("Release this queued message");
     await composer.press("Alt+Enter");
     await activateButton(workspacePage, "Stop");
+    await workspacePage.evaluate(() => localStorage.setItem("kady:e2e-run-mode", "complete"));
     await activateButton(workspacePage, "Resume");
     await expect(workspacePage.getByText("Paused — stopped", { exact: true })).toHaveCount(0);
+    await selectMiddlePaneTab(workspacePage, "Conversation");
+    await expect(workspacePage.getByText("Assistant confirmed: Release this queued message", { exact: true }))
+      .toBeVisible();
   });
 });
 

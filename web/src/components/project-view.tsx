@@ -21,6 +21,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { SettingsDialog } from "@/components/settings-dialog";
+import { ScientificDagStudioLauncher } from "@/components/scientific-dag-studio";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -71,6 +72,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { DEFAULT_PROJECT_ID, type Project } from "@/lib/projects";
+import { isScientificDagStudioEnabled } from "@/lib/studio-design-tokens";
 import type { ProjectActivitySummary } from "@/lib/project-activity";
 import { useProjects } from "@/lib/use-projects";
 import { cn } from "@/lib/utils";
@@ -182,6 +184,7 @@ export function ProjectView({
     remove,
   } = useProjects();
   const { resolvedTheme, setTheme } = useTheme();
+  const studioEnabled = isScientificDagStudioEnabled();
   const [mounted, setMounted] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -363,6 +366,7 @@ export function ProjectView({
         </a>
 
         <div className="flex items-center gap-1">
+          {studioEnabled ? <ScientificDagStudioLauncher /> : null}
           <Button
             variant="ghost"
             size="icon-sm"

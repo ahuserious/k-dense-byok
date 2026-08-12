@@ -23,6 +23,7 @@ import { ProjectSwitcher } from "@/components/project-switcher";
 import { ProjectView } from "@/components/project-view";
 import { SessionCostPill } from "@/components/session-cost-pill";
 import { ResourceMonitor } from "@/components/resource-monitor";
+import { ScientificDagStudioLauncher } from "@/components/scientific-dag-studio";
 import { useSessionCost } from "@/lib/use-session-cost";
 import { useProjectCost } from "@/lib/use-project-cost";
 import { useProjectActivities } from "@/lib/use-project-activities";
@@ -45,6 +46,7 @@ import {
 } from "@/lib/modal-jobs";
 import { isJunkFilePath } from "@/lib/utils";
 import { runPipeline } from "@/lib/pipelines";
+import { isScientificDagStudioEnabled } from "@/lib/studio-design-tokens";
 import type { VendoredPipelineEditTarget } from "@/lib/scientific-pipeline-registry";
 import {
   PanelLeftIcon,
@@ -315,6 +317,7 @@ function WorkspacePage({
   const { skills: allSkills, loading: skillsLoading } = useSkills();
   const { projects: projectDirectory } = useProjects();
   const { resolvedTheme, setTheme } = useTheme();
+  const studioEnabled = isScientificDagStudioEnabled();
   const [mounted, setMounted] = useState(false);
   const [sandboxOpen, setSandboxOpen] = useState(
     () => initialState?.sandboxOpen ?? true,
@@ -1045,6 +1048,7 @@ function WorkspacePage({
             </InfoTooltip>
             </div>
           ) : null}
+          {studioEnabled ? <ScientificDagStudioLauncher /> : null}
           <InfoTooltip
             content={
               <>

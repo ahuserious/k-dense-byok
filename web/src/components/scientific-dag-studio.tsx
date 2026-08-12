@@ -151,6 +151,7 @@ export function ScientificDagStudioLauncher({
         <button
           className="scientific-dag-studio-launcher"
           data-scientific-dag-studio-theme
+          style={{ position: "static", inset: "auto", zIndex: "auto", boxShadow: "none" }}
           type="button"
         >
           Components studio

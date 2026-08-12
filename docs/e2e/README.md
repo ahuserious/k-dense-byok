@@ -40,17 +40,21 @@ The orchestrator's 2026-08-12 live proof completed three consecutive cycles: eve
 
 ## Test inventory
 
-Playwright expands the parameterized declarations into 239 independent test items:
+Playwright expands the parameterized declarations into 246 independent test items. A local reporter
+fails collection if any per-file count or the substantive/thin split changes without an intentional update:
 
 | Surface | Items |
 |---|---:|
-| Workspace tabs and workflow library | 32 |
-| Scientific Pipelines and 23 templates | 55 |
-| Chat lifecycle and live Scientific DAG | 25 |
-| DAG Builder, node cards, and every NodeSpec field | 55 |
-| Console and Raindrop | 38 |
+| Workspace tabs and workflow library | 37 |
+| Scientific Pipelines and 23 templates | 54 |
+| Chat lifecycle and live Scientific DAG | 28 |
+| DAG Builder, node cards, and every NodeSpec field | 60 |
+| Console and Raindrop | 33 |
 | Scientific DAG Studio popup | 34 |
-| **Total** | **239** |
+| **Total** | **246** |
+
+Of those 246 items, 210 are substantive behavior checks and 36 are explicitly labelled thin inventory
+or documented-product-gap items. The split is checked at collection time as well as the per-file totals.
 
 Each item establishes the state required by its surface. Builder items open a named draft before using the canvas; live Scientific DAG items submit a run before expecting a projection; typed-pipeline items create and open their stored definition; Console and Raindrop items wait for durable records. Assertions use Playwright's signal-based locator waits and do not contain fixed sleeps.
 

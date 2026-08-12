@@ -19,6 +19,23 @@
   ],
   "vendorInternalIdentifiers": [
     {
+      "path": "e2e/builder.spec.ts",
+      "identifiers": [
+        "retired Archon",
+        "/archon/i"
+      ],
+      "comment": "test-only: absence assertion must name the retired token it verifies"
+    },
+    {
+      "path": "e2e/workspace.spec.ts",
+      "identifiers": [
+        "\"Archon\"",
+        "retired Archon",
+        "/archon/i"
+      ],
+      "comment": "test-only: absence assertions must name the retired token they verify"
+    },
+    {
       "path": "server/vendor/pipeline-engine/**",
       "identifiers": [
         ".archon",

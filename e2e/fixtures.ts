@@ -1,5 +1,7 @@
 import { expect, test as base } from "@stablyai/playwright-test";
-import type { FrameLocator, Page, Route } from "@playwright/test";
+import type { FrameLocator, Locator, Page, Route } from "@playwright/test";
+
+import { SCIENTIFIC_TEMPLATES } from "./inventory";
 
 export type RunStatus =
   | "queued"
@@ -17,11 +19,69 @@ export interface MockApiState {
   graphStatus: RunStatus;
   graphError: boolean;
   uploadedFiles: string[];
+  runListRequests: number;
+  showRefreshedRun: boolean;
+  failTypedDefinitionRead: boolean;
+  unexpectedRequests: string[];
 }
 
 const BACKEND_PATTERN = /^http:\/\/(?:127\.0\.0\.1|localhost):18000\//;
 const now = Date.now();
-const workflowRunId = `wrun_${"1".repeat(32)}`;
+export const WORKFLOW_RUN_ID = `wrun_${"1".repeat(32)}`;
+export const REFRESHED_WORKFLOW_RUN_ID = `wrun_${"2".repeat(32)}`;
+type HelperSessionProfile = "raindrop" | "workflow-rescue";
+type HelperSessionSource = { kind: "run" | "session"; id: string };
+
+function helperSessionId(profile: HelperSessionProfile, source: HelperSessionSource) {
+  return `helper-${profile}-${source.kind}-${source.id.replace(/^wrun_/, "")}`;
+}
+
+const RAINDROP_RUN_SOURCE = { kind: "run", id: WORKFLOW_RUN_ID } as const;
+const RAINDROP_SESSION_SOURCE = { kind: "session", id: "session-e2e" } as const;
+const WORKFLOW_RESCUE_SOURCE = { kind: "run", id: WORKFLOW_RUN_ID } as const;
+const RAINDROP_RUN_HELPER_SESSION_ID = helperSessionId("raindrop", RAINDROP_RUN_SOURCE);
+const FIXTURE_SESSION_IDS = new Set([
+  "session-e2e",
+  RAINDROP_RUN_HELPER_SESSION_ID,
+  helperSessionId("raindrop", RAINDROP_SESSION_SOURCE),
+  helperSessionId("workflow-rescue", WORKFLOW_RESCUE_SOURCE),
+]);
+const TYPED_WORKFLOW_IDS = new Set([
+  "e2e-workflow",
+  ...SCIENTIFIC_TEMPLATES.map((template) => template.id),
+]);
+export const RAINDROP_ANALYST_QUESTION = "Which persisted event identifies the failed node?";
+export const RAINDROP_ANALYST_RESPONSE =
+  `Run ${WORKFLOW_RUN_ID} reached run_started before node analyze entered node_started.`;
+
+function matchingTypedWorkflowId(path: string, suffix = "") {
+  for (const workflowId of TYPED_WORKFLOW_IDS) {
+    if (path === `/dag-workflows/${encodeURIComponent(workflowId)}${suffix}`) return workflowId;
+  }
+  return null;
+}
+
+function matchingFixtureSessionId(path: string, suffix: string) {
+  for (const sessionId of FIXTURE_SESSION_IDS) {
+    if (path === `/sessions/${encodeURIComponent(sessionId)}${suffix}`) return sessionId;
+  }
+  return null;
+}
+
+function isExpectedHelperSource(
+  profile: HelperSessionProfile,
+  source: { kind?: string; id?: string },
+): source is HelperSessionSource {
+  return (
+    profile === "raindrop" &&
+    ((source.kind === RAINDROP_SESSION_SOURCE.kind && source.id === RAINDROP_SESSION_SOURCE.id) ||
+      (source.kind === RAINDROP_RUN_SOURCE.kind && source.id === RAINDROP_RUN_SOURCE.id))
+  ) || (
+    profile === "workflow-rescue" &&
+    source.kind === WORKFLOW_RESCUE_SOURCE.kind &&
+    source.id === WORKFLOW_RESCUE_SOURCE.id
+  );
+}
 
 function emptyBudget() {
   return {
@@ -86,9 +146,9 @@ function storedDefinition(id = "e2e-workflow", name = "E2E Workflow", graph = gr
   };
 }
 
-function runSummary(status: RunStatus) {
+function runSummary(status: RunStatus, id = WORKFLOW_RUN_ID) {
   return {
-    id: workflowRunId,
+    id,
     workflowId: "e2e-workflow",
     workflowRevision: 1,
     graphSha256: "e2e-graph-sha256",
@@ -109,12 +169,12 @@ function runSummary(status: RunStatus) {
   };
 }
 
-function runRecord(status: RunStatus) {
+function runRecord(status: RunStatus, id = WORKFLOW_RUN_ID) {
   const graph = graphDocument();
   return {
     manifest: {
       storageVersion: 1,
-      id: workflowRunId,
+      id,
       projectId: "default",
       workflowId: "e2e-workflow",
       workflowRevision: 1,
@@ -129,7 +189,7 @@ function runRecord(status: RunStatus) {
       graph,
     },
     state: {
-      runId: workflowRunId,
+      runId: id,
       status,
       lastSeq: 2,
       executions: {},
@@ -152,30 +212,63 @@ function routeJson(route: Route, body: unknown, status = 200, headers: Record<st
 }
 
 async function installStreamingFetch(page: Page) {
-  await page.addInitScript(() => {
+  await page.addInitScript((fixtureSessions) => {
     const nativeFetch = window.fetch.bind(window);
     let heldRunController: ReadableStreamDefaultController<Uint8Array> | null = null;
+    const e2eWindow = window as typeof window & {
+      __kadyE2eAbortRequests: string[];
+      __kadyE2eCompleteHeldRun: () => void;
+      __kadyE2eRunRequests: Array<{ message: string; sessionId: string }>;
+    };
+    e2eWindow.__kadyE2eAbortRequests = [];
+    e2eWindow.__kadyE2eRunRequests = [];
     const encode = (frame: Record<string, unknown>) =>
       new TextEncoder().encode(`data: ${JSON.stringify(frame)}\n\n`);
+    e2eWindow.__kadyE2eCompleteHeldRun = () => {
+      if (!heldRunController) throw new Error("No held E2E stream is available to complete.");
+      heldRunController.enqueue(encode({ seq: 4, type: "turn_end" }));
+      heldRunController.enqueue(encode({ seq: 5, type: "done" }));
+      heldRunController.close();
+      heldRunController = null;
+    };
 
     window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       const requestUrl = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       const url = new URL(requestUrl, window.location.href);
       const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
-      if (method === "POST" && /\/sessions\/[^/]+\/run$/.test(url.pathname)) {
+      const runPaths = new Set(
+        fixtureSessions.sessionIds.map((sessionId) => `/sessions/${encodeURIComponent(sessionId)}/run`),
+      );
+      if (method === "POST" && runPaths.has(url.pathname)) {
+        const sessionId = decodeURIComponent(url.pathname.split("/")[2] ?? "");
+        const requestBody = JSON.parse(String(init?.body ?? "{}")) as { message?: unknown };
+        const message = typeof requestBody.message === "string" ? requestBody.message : "";
+        e2eWindow.__kadyE2eRunRequests.push({ message, sessionId });
+        if (
+          sessionId === fixtureSessions.raindropRunSessionId &&
+          message !== "Which persisted event identifies the failed node?"
+        ) {
+          return new Response(JSON.stringify({ detail: "Unexpected Raindrop source or analyst question." }), {
+            status: 422,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
         const mode = window.localStorage.getItem("kady:e2e-run-mode") ?? "complete";
+        const responseText = sessionId === fixtureSessions.raindropRunSessionId
+          ? `Run wrun_${"1".repeat(32)} reached run_started before node analyze entered node_started.`
+          : `Assistant confirmed: ${message}`;
         const body = new ReadableStream<Uint8Array>({
           start(controller) {
             controller.enqueue(encode({ seq: 1, type: "run_start", runId: "run-e2e" }));
             controller.enqueue(encode({ seq: 2, type: "turn_start" }));
-            controller.enqueue(encode({ seq: 3, type: "text_delta", delta: "E2E response" }));
+            controller.enqueue(encode({ seq: 3, type: "text_delta", delta: responseText }));
             if (mode === "streaming") {
               heldRunController = controller;
               return;
             }
             if (mode === "error") {
               controller.enqueue(
-                encode({ seq: 4, type: "error", error: "simulated provider failure" }),
+                encode({ seq: 4, type: "error", message: "simulated provider failure" }),
               );
             }
             controller.enqueue(encode({ seq: 5, type: "turn_end" }));
@@ -188,7 +281,11 @@ async function installStreamingFetch(page: Page) {
         });
         return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
       }
-      if (method === "POST" && /\/sessions\/[^/]+\/abort$/.test(url.pathname)) {
+      const abortPaths = new Set(
+        fixtureSessions.sessionIds.map((sessionId) => `/sessions/${encodeURIComponent(sessionId)}/abort`),
+      );
+      if (method === "POST" && abortPaths.has(url.pathname)) {
+        e2eWindow.__kadyE2eAbortRequests.push(decodeURIComponent(url.pathname.split("/")[2] ?? ""));
         heldRunController?.close();
         heldRunController = null;
         return new Response(JSON.stringify({ restored: ["restored steering"] }), {
@@ -198,6 +295,9 @@ async function installStreamingFetch(page: Page) {
       }
       return nativeFetch(input, init);
     };
+  }, {
+    sessionIds: [...FIXTURE_SESSION_IDS],
+    raindropRunSessionId: RAINDROP_RUN_HELPER_SESSION_ID,
   });
 }
 
@@ -223,8 +323,8 @@ async function installApiMocks(page: Page, state: MockApiState) {
         },
       ]);
     }
-    if (path === "/projects/activity") return routeJson(route, { activities: {} });
-    if (path === "/projects/default/costs") {
+    if (path === "/projects/activity" && method === "GET") return routeJson(route, { activities: {} });
+    if (path === "/projects/default/costs" && method === "GET") {
       return routeJson(route, {
         projectId: "default",
         totalUsd: 0,
@@ -234,7 +334,7 @@ async function installApiMocks(page: Page, state: MockApiState) {
         budget: emptyBudget(),
       });
     }
-    if (path === "/sandbox/tree") {
+    if (path === "/sandbox/tree" && method === "GET") {
       return routeJson(route, {
         name: "sandbox",
         path: "",
@@ -255,32 +355,103 @@ async function installApiMocks(page: Page, state: MockApiState) {
           : [],
       });
     }
-    if (path === "/skills") return routeJson(route, []);
-    if (path === "/model-providers") return routeJson(route, { providers: [] });
-    if (path === "/model-providers/models") return routeJson(route, { models: [] });
-    if (path === "/credentials") return routeJson(route, { openrouter: { set: true } });
-    if (path === "/ollama/models") return routeJson(route, { available: false, models: [] });
-    if (path === "/openai-compatible/models") {
+    if (path === "/skills" && method === "GET") {
+      return routeJson(route, [{
+        id: "scientific-dag-studio",
+        name: "scientific-dag-studio",
+        description: "Design and inspect bounded scientific DAG workflows.",
+      }]);
+    }
+    if (path === "/skills/all" && method === "GET") {
+      return routeJson(route, {
+        scope: url.searchParams.get("scope") === "global" ? "global" : "project",
+        enabled: [{
+          id: "scientific-dag-studio",
+          name: "scientific-dag-studio",
+          description: "Design and inspect bounded scientific DAG workflows.",
+          origin: "catalogue",
+        }],
+        disabled: [],
+        problems: [],
+        shadowed: [],
+      });
+    }
+    if (path === "/model-providers" && method === "GET") return routeJson(route, { providers: [] });
+    if (path === "/model-providers/models" && method === "GET") return routeJson(route, { models: [] });
+    if (path === "/credentials" && method === "GET") return routeJson(route, { openrouter: { set: true } });
+    if (path === "/ollama/models" && method === "GET") return routeJson(route, { available: false, models: [] });
+    if (path === "/openai-compatible/models" && method === "GET") {
       return routeJson(route, { available: false, configured: false, models: [] });
     }
-    if (path === "/nvidia/models") return routeJson(route, { configured: false, models: [] });
-    if (path === "/system/resources") return route.fulfill({ status: 204 });
-    if (path === "/modal/jobs") return routeJson(route, { jobs: [], total: 0 });
+    if (path === "/nvidia/models" && method === "GET") {
+      return routeJson(route, { configured: false, models: [] });
+    }
+    if (path === "/system/resources" && method === "GET") return route.fulfill({ status: 204 });
+    if (path === "/modal/instances" && method === "GET") {
+      return routeJson(route, {
+        modalConfigured: false,
+        instances: [
+          {
+            id: "cpu",
+            label: "CPU · 1 core",
+            kind: "cpu",
+            gpu: null,
+            gpuCount: 1,
+            cpu: 1,
+            memoryMiB: 2048,
+            pricePerHour: 0.05,
+            defaultImage: "python:3.13-slim",
+            maxGpuCount: 1,
+            estimatedBilling: true,
+            pricing: {
+              estimated: true,
+              unit: "USD/hour",
+              totalPerHour: 0.05,
+              multiplier: "per preset",
+            },
+            legacy: true,
+          },
+        ],
+        defaults: {
+          instanceId: "cpu",
+          gpuCount: 1,
+          fallback: null,
+          cache: "project",
+        },
+        estimatedBilling: true,
+        pricing: {
+          updatedAt: "2026-07-20",
+          source: "K-Dense curated Modal resource estimates",
+          estimated: true,
+          unit: "USD/hour",
+        },
+      });
+    }
+    if (path === "/modal/jobs" && method === "GET") return routeJson(route, { jobs: [], total: 0 });
+    if (path === "/raindrop/health" && method === "GET") {
+      return routeJson(route, { healthy: false });
+    }
+    if (path === "/version/latest" && method === "GET") {
+      return routeJson(route, { latestVersion: null });
+    }
     if (path === "/sessions" && method === "POST") return routeJson(route, { id: "session-e2e" });
     if (path === "/sessions" && method === "GET") {
       return routeJson(route, [
         { id: "session-e2e", title: "E2E chat", created: now, modified: now, messageCount: 2 },
       ]);
     }
-    if (/^\/sessions\/[^/]+\/run\/state$/.test(path)) {
+    const runStateSessionId = matchingFixtureSessionId(path, "/run/state");
+    if (runStateSessionId) {
       return routeJson(route, { status: "none", run: null });
     }
-    if (/^\/sessions\/[^/]+\/history$/.test(path)) {
+    const historySessionId = matchingFixtureSessionId(path, "/history");
+    if (historySessionId) {
       return routeJson(route, { messages: [], contextUsage: null });
     }
-    if (/^\/sessions\/[^/]+\/costs$/.test(path)) {
+    const costsSessionId = matchingFixtureSessionId(path, "/costs");
+    if (costsSessionId) {
       return routeJson(route, {
-        sessionId: "session-e2e",
+        sessionId: costsSessionId,
         totalUsd: 0,
         totalTokens: 0,
         agentUsd: 0,
@@ -289,12 +460,12 @@ async function installApiMocks(page: Page, state: MockApiState) {
         entries: [],
       });
     }
-    if (/^\/sessions\/[^/]+\/workflow-run-state$/.test(path)) {
+    if (path === "/sessions/session-e2e/workflow-run-state") {
       const failed = state.graphError;
       return routeJson(route, {
         state: {
           schemaVersion: 1,
-          runId: workflowRunId,
+          runId: WORKFLOW_RUN_ID,
           workflowId: "chat-e2e-workflow",
           workflowRevision: 2,
           status: failed ? "failed" : state.graphStatus,
@@ -331,13 +502,18 @@ async function installApiMocks(page: Page, state: MockApiState) {
         },
       });
     }
-    if (/^\/sessions\/[^/]+\/(notebook|interview)$/.test(path)) {
+    if (
+      matchingFixtureSessionId(path, "/notebook") ||
+      matchingFixtureSessionId(path, "/interview")
+    ) {
       return routeJson(route, path.endsWith("interview") ? { pending: null } : { entries: [] });
     }
-    if (/^\/sessions\/[^/]+\/steer$/.test(path)) return routeJson(route, { pending: ["steering"] });
+    if (matchingFixtureSessionId(path, "/steer")) {
+      return routeJson(route, { pending: ["steering"] });
+    }
 
-    if (path === "/pipelines/health") return routeJson(route, { healthy: true });
-    if (path === "/pipelines") {
+    if (path === "/pipelines/health" && method === "GET") return routeJson(route, { healthy: true });
+    if (path === "/pipelines" && method === "GET") {
       return routeJson(route, {
         workflows: [
           {
@@ -354,7 +530,7 @@ async function installApiMocks(page: Page, state: MockApiState) {
         ],
       });
     }
-    if (/^\/pipelines\/[^/]+\/run$/.test(path)) {
+    if (path === "/pipelines/e2e-vendored/run" && method === "POST") {
       return routeJson(route, {
         accepted: true,
         status: "queued",
@@ -380,27 +556,43 @@ async function installApiMocks(page: Page, state: MockApiState) {
         ],
       });
     }
-    const definitionMatch = path.match(/^\/dag-workflows\/([^/]+)$/);
-    if (definitionMatch && method === "PUT") {
+    const definitionId = matchingTypedWorkflowId(path);
+    if (definitionId && method === "PUT") {
       const graph = JSON.parse(request.postData() ?? "{}") as ReturnType<typeof graphDocument>;
       return routeJson(
         route,
-        storedDefinition(decodeURIComponent(definitionMatch[1]), graph.name, graph),
+        storedDefinition(definitionId, graph.name, graph),
         200,
         { ETag: '"1"' },
       );
     }
-    if (definitionMatch && method === "GET") {
-      return routeJson(route, storedDefinition(decodeURIComponent(definitionMatch[1])), 200, { ETag: '"1"' });
+    if (definitionId && method === "GET") {
+      if (definitionId === "e2e-workflow" && state.failTypedDefinitionRead) {
+        // A malformed success exercises the panel's caught topology-read failure without
+        // intentionally adding an HTTP 503 browser-console error to this runtime-clean test.
+        return routeJson(route, null);
+      }
+      return routeJson(route, storedDefinition(definitionId), 200, { ETag: '"1"' });
     }
-    if (/^\/dag-workflows\/[^/]+\/runs$/.test(path) && method === "POST") {
+    const typedRunWorkflowId = matchingTypedWorkflowId(path, "/runs");
+    if (typedRunWorkflowId && method === "POST") {
       return routeJson(route, runRecord("queued"), 201);
     }
-    if (path === "/dag-workflow-runs") return routeJson(route, { runs: [runSummary(state.runStatus)] });
-    if (path === `/dag-workflow-runs/${workflowRunId}`) return routeJson(route, runRecord(state.runStatus));
-    if (path === `/dag-workflow-runs/${workflowRunId}/budget`) {
+    if (path === "/dag-workflow-runs" && method === "GET") {
+      state.runListRequests += 1;
       return routeJson(route, {
-        runId: workflowRunId,
+        runs: [
+          runSummary(state.runStatus),
+          ...(state.showRefreshedRun
+            ? [runSummary("queued", REFRESHED_WORKFLOW_RUN_ID)]
+            : []),
+        ],
+      });
+    }
+    if (path === `/dag-workflow-runs/${WORKFLOW_RUN_ID}`) return routeJson(route, runRecord(state.runStatus));
+    if (path === `/dag-workflow-runs/${WORKFLOW_RUN_ID}/budget`) {
+      return routeJson(route, {
+        runId: WORKFLOW_RUN_ID,
         reservationCount: 0,
         ceilings: null,
         modelCallCount: 0,
@@ -415,37 +607,51 @@ async function installApiMocks(page: Page, state: MockApiState) {
         fullChargeReservationCount: 0,
       });
     }
-    if (path === `/dag-workflow-runs/${workflowRunId}/events`) {
+    if (path === `/dag-workflow-runs/${WORKFLOW_RUN_ID}/events`) {
       return routeJson(route, {
         events: [
-          { schemaVersion: 1, eventId: "event-1", runId: workflowRunId, seq: 1, ts: now, type: "run_started" },
-          { schemaVersion: 1, eventId: "event-2", runId: workflowRunId, seq: 2, ts: now + 1, type: "node_started", nodeId: "analyze" },
+          { schemaVersion: 1, eventId: "event-1", runId: WORKFLOW_RUN_ID, seq: 1, ts: now, type: "run_started" },
+          { schemaVersion: 1, eventId: "event-2", runId: WORKFLOW_RUN_ID, seq: 2, ts: now + 1, type: "node_started", nodeId: "analyze" },
         ],
         lastSeq: 2,
         hasMore: false,
         diagnostics: [],
       });
     }
-    const controlMatch = path.match(/^\/dag-workflow-runs\/[^/]+\/(cancel|resume|rescue)$/);
+    const controlMatch = path.match(
+      new RegExp(`^/dag-workflow-runs/${WORKFLOW_RUN_ID}/(cancel|resume|rescue)$`),
+    );
     if (controlMatch && method === "POST") {
       const status = controlMatch[1] === "cancel" ? "cancelled" : "running";
       return routeJson(route, runRecord(status));
     }
     if (path === "/helper-sessions/raindrop/context" && method === "POST") {
       const source = JSON.parse(request.postData() ?? "{}") as { kind?: string; id?: string };
+      const expectedSource =
+        (source.kind === "session" && source.id === "session-e2e") ||
+        (source.kind === "run" && source.id === WORKFLOW_RUN_ID);
+      if (!expectedSource) {
+        return routeJson(route, { detail: "Unexpected Raindrop context source." }, 422);
+      }
       return routeJson(route, {
         source,
-        context: `Observed E2E ${source.kind ?? "unknown"} context for ${source.id ?? "unknown"}.`,
+        context: source.kind === "run"
+          ? `Run ${WORKFLOW_RUN_ID}: run_started, then node_started for analyze.`
+          : "Session session-e2e: user request followed by an assistant answer.",
         truncated: false,
         observedEntries: 2,
         totalEntries: 2,
       });
     }
-    const helperSession = path.match(/^\/helper-sessions\/([^/]+)$/);
+    const helperSession = path.match(/^\/helper-sessions\/(raindrop|workflow-rescue)$/);
     if (helperSession && method === "POST") {
+      const profile = helperSession[1] as HelperSessionProfile;
       const source = JSON.parse(request.postData() ?? "{}") as { kind?: string; id?: string };
+      if (!isExpectedHelperSource(profile, source)) {
+        return routeJson(route, { detail: "Unexpected helper-session source binding." }, 422);
+      }
       return routeJson(route, {
-        id: `helper-${helperSession[1]}-e2e`,
+        id: helperSessionId(profile, source),
         source,
       });
     }
@@ -464,12 +670,18 @@ async function installApiMocks(page: Page, state: MockApiState) {
     }
     if (path === "/console/loops") return routeJson(route, []);
 
-    return routeJson(route, {});
+    state.unexpectedRequests.push(`${method} ${path}`);
+    return routeJson(
+      route,
+      { detail: `Unexpected E2E request: ${method} ${path}` },
+      501,
+    );
   });
 }
 
 export const test = base.extend<{
   apiState: MockApiState;
+  runtimeErrors: void;
   workspacePage: Page;
 }>({
   apiState: async ({}, use) => {
@@ -478,8 +690,25 @@ export const test = base.extend<{
       graphStatus: "running",
       graphError: false,
       uploadedFiles: [],
+      runListRequests: 0,
+      showRefreshedRun: false,
+      failTypedDefinitionRead: false,
+      unexpectedRequests: [],
     });
   },
+  runtimeErrors: [async ({ page, apiState }, use) => {
+    const failures: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") failures.push(`console.error: ${message.text()}`);
+    });
+    page.on("pageerror", (error) => failures.push(`pageerror: ${error.message}`));
+    await use();
+    expect(
+      apiState.unexpectedRequests,
+      `Unexpected E2E backend requests:\n${apiState.unexpectedRequests.map((request) => `- ${request}`).join("\n")}`,
+    ).toEqual([]);
+    expect(failures, "Browser runtime errors must fail the owning Playwright test.").toEqual([]);
+  }, { auto: true }],
   workspacePage: async ({ page, apiState }, use) => {
     await installApiMocks(page, apiState);
     await page.goto("/");
@@ -501,6 +730,26 @@ export async function selectWorkspaceTab(page: Page, name: string) {
   );
 }
 
+export async function createTypedWorkflowFromTemplate(
+  page: Page,
+  templateId: string,
+): Promise<{ details: Locator; rawDefinition: Locator; workflowName: string }> {
+  await selectWorkspaceTab(page, "Scientific Pipelines");
+  await expect(page.getByRole("heading", { name: "Workflow registry" })).toBeVisible();
+  await page.getByRole("button", { name: "New typed workflow" }).click();
+  await page.getByLabel("Workflow template").selectOption(templateId);
+  await expect(page.getByLabel("New workflow id")).toHaveValue(templateId);
+  const workflowNameInput = page.getByLabel("New workflow name");
+  const workflowName = await workflowNameInput.inputValue();
+  expect(workflowName).not.toBe("");
+  await page.getByRole("button", { name: "Create and open" }).click();
+  const details = page.getByRole("region", { name: workflowName, exact: true });
+  await expect(details).toBeVisible();
+  const rawDefinition = details.getByTestId("raw-typed-definition");
+  await expect(rawDefinition).toBeVisible();
+  return { details, rawDefinition, workflowName };
+}
+
 export async function openBuilderFrame(page: Page) {
   await selectWorkspaceTab(page, "Builder");
   const iframe = page.getByTitle("DAG Builder");
@@ -510,17 +759,20 @@ export async function openBuilderFrame(page: Page) {
   return frame;
 }
 
-export async function openBuilderDraft(page: Page) {
+export async function openBuilderDraft(page: Page, workflowName = "e2e-builder-workflow") {
   const frame = await openBuilderFrame(page);
-  const workflowName = frame.getByPlaceholder("workflow-name");
-  await workflowName.fill("e2e-builder-workflow");
-  await expect(workflowName).toHaveValue("e2e-builder-workflow");
+  const workflowNameInput = frame.getByPlaceholder("workflow-name");
+  await workflowNameInput.fill(workflowName);
+  await expect(workflowNameInput).toHaveValue(workflowName);
   await expect(frame.getByRole("application")).toBeVisible();
   return frame;
 }
 
-export async function addPromptNode(page: Page) {
-  const frame = await openBuilderDraft(page);
+export async function addPromptNode(
+  page: Page,
+  options: { prompt?: string; workflowName?: string } = {},
+) {
+  const frame = await openBuilderDraft(page, options.workflowName);
   const canvas = frame.locator(".react-flow");
   await expect(canvas).toBeVisible();
   await canvas.dblclick({ position: { x: 640, y: 360 } });
@@ -528,6 +780,10 @@ export async function addPromptNode(page: Page) {
   await expect(promptChoice).toBeVisible();
   await promptChoice.click();
   await expect(frame.getByRole("button", { name: "Expand full node details" })).toBeVisible();
+  const prompt = options.prompt ?? "Inspect the evidence.\nCompare every source.\nReport the bounded result.";
+  const promptInput = frame.getByPlaceholder("Enter inline prompt...");
+  await promptInput.fill(prompt);
+  await expect(promptInput).toHaveValue(prompt);
   return frame;
 }
 
