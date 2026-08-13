@@ -33,8 +33,20 @@ export interface MockApiState {
 }
 
 const BACKEND_PATTERN = /^http:\/\/(?:127\.0\.0\.1|localhost):18000\//;
-const PIPELINE_ENGINE_API_PATTERN =
-  /^http:\/\/(?:127\.0\.0\.1|localhost):(?!18000(?:\/|$))\d+\/api\//;
+const localPipelineEnginePort = process.env.KADY_PIPELINE_ENGINE_PORT ?? "13091";
+const configuredPipelineEngineUrl =
+  process.env.NEXT_PUBLIC_PIPELINE_ENGINE_URL ?? process.env.KADY_E2E_BASE_URL;
+// S11 cloud runs proxy the engine through the public app origin, so mocks must allow that origin.
+const pipelineEngineOrigins = new Set([
+  `http://127.0.0.1:${localPipelineEnginePort}`,
+  `http://localhost:${localPipelineEnginePort}`,
+  ...(configuredPipelineEngineUrl ? [new URL(configuredPipelineEngineUrl).origin] : []),
+]);
+const PIPELINE_ENGINE_API_PATTERN = new RegExp(
+  `^(?:${[...pipelineEngineOrigins]
+    .map((origin) => origin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|")})/api/`,
+);
 const E2E_CODEBASE_CWD = "/tmp/kady-e2e-codebase";
 const now = Date.now();
 export const WORKFLOW_RUN_ID = `wrun_${"1".repeat(32)}`;
