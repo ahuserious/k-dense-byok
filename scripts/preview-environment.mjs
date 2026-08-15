@@ -6,8 +6,8 @@ const LEGACY_ENGINE_ENVIRONMENT_NAMES = [
   "KADY_ARCHON_PORT",
 ];
 
-function pipelineEngineBrowserOrigin(environment, fallbackUrl) {
-  const configuredUrl = environment.NEXT_PUBLIC_PIPELINE_ENGINE_URL;
+function browserOrigin(environment, environmentName, fallbackUrl) {
+  const configuredUrl = environment[environmentName];
   if (configuredUrl === undefined) return fallbackUrl;
 
   let parsedUrl;
@@ -15,7 +15,7 @@ function pipelineEngineBrowserOrigin(environment, fallbackUrl) {
     parsedUrl = new URL(configuredUrl);
   } catch {
     throw new Error(
-      "NEXT_PUBLIC_PIPELINE_ENGINE_URL must be an absolute http(s) origin.",
+      `${environmentName} must be an absolute http(s) origin.`,
     );
   }
 
@@ -28,7 +28,7 @@ function pipelineEngineBrowserOrigin(environment, fallbackUrl) {
     parsedUrl.hash
   ) {
     throw new Error(
-      "NEXT_PUBLIC_PIPELINE_ENGINE_URL must be an absolute http(s) origin.",
+      `${environmentName} must be an absolute http(s) origin.`,
     );
   }
 
@@ -51,8 +51,14 @@ export function previewEnvironment(
   const piAgentDirectory = path.join(stateRoot, "pi-agent");
   const backendUrl = `http://127.0.0.1:${ports.backend}`;
   const pipelineEngineUrl = `http://127.0.0.1:${ports.engine}`;
-  const pipelineEngineBrowserUrl = pipelineEngineBrowserOrigin(
+  const backendBrowserUrl = browserOrigin(
     environment,
+    "NEXT_PUBLIC_ADK_API_URL",
+    backendUrl,
+  );
+  const pipelineEngineBrowserUrl = browserOrigin(
+    environment,
+    "NEXT_PUBLIC_PIPELINE_ENGINE_URL",
     pipelineEngineUrl,
   );
   return {
@@ -62,7 +68,7 @@ export function previewEnvironment(
     KADY_PREVIEW: "1",
     KADY_PORT: String(ports.backend),
     KADY_FRONTEND_PORT: String(ports.frontend),
-    NEXT_PUBLIC_ADK_API_URL: backendUrl,
+    NEXT_PUBLIC_ADK_API_URL: backendBrowserUrl,
     NEXT_PUBLIC_SCIENTIFIC_DAG_STUDIO: "1",
     KADY_PIPELINE_ENGINE_PORT: String(ports.engine),
     PIPELINE_ENGINE_BASE_URL: pipelineEngineUrl,
