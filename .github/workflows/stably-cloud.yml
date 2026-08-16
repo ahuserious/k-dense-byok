@@ -1,0 +1,309 @@
+# Job A runs the repository's Playwright process on a GitHub-hosted runner and records a runner
+# fingerprint. It is the hosted-runner proof path; it deliberately does not use `--browser cloud`.
+#
+# Job B is exploratory. The Stably action claims Stably Cloud execution, but its public contract does
+# not explain how this checkout, dependencies, or the three-process localhost preview reach that
+# environment. A pass is a signal to inspect the reported run for the checkout SHA, item count, and
+# app startup evidence; it is not sufficient by itself. A failure records which implicit assumption
+# (checkout materialization, dependency installation, preview startup, or localhost reachability)
+# the action does not satisfy. Job B is non-blocking while this spike remains unresolved.
+name: Stably hosted-runner E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      grep:
+        description: Optional Playwright grep expression
+        required: false
+        type: string
+      workers:
+        description: Playwright worker count
+        required: false
+        default: "2"
+        type: string
+  push:
+    branches:
+      - "integration/**"
+
+permissions:
+  contents: read
+
+jobs:
+  github-runner:
+    name: GitHub-hosted runner
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+            web/package-lock.json
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.x
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install backend dependencies
+        working-directory: server
+        run: npm ci
+
+      - name: Install frontend dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Install vendored engine dependencies
+        working-directory: server/vendor/pipeline-engine
+        run: bun install --frozen-lockfile
+
+      - name: Build vendored builder dist
+        run: npm run build:vendored-dist
+
+      - name: Check vendored builder dist
+        run: npm run check:vendored-dist
+
+      - name: Install Chromium with Stably
+        id: stably-browser-install
+        continue-on-error: true
+        run: npx stably install --with-deps > stably-install.log 2>&1
+
+      - name: Install Chromium with Playwright fallback
+        id: playwright-browser-install
+        if: steps.stably-browser-install.outcome == 'failure'
+        run: npx playwright install --with-deps chromium > playwright-install.log 2>&1
+
+      - name: Record browser installation method
+        id: browser-install
+        if: always()
+        env:
+          STABLY_INSTALL_OUTCOME: ${{ steps.stably-browser-install.outcome }}
+          PLAYWRIGHT_INSTALL_OUTCOME: ${{ steps.playwright-browser-install.outcome }}
+        run: |
+          if [[ "$STABLY_INSTALL_OUTCOME" == "success" ]]; then
+            install_method="stably"
+          else
+            install_method="playwright-fallback"
+          fi
+          {
+            echo "selected=$install_method"
+            echo "stably_outcome=$STABLY_INSTALL_OUTCOME"
+            echo "playwright_outcome=$PLAYWRIGHT_INSTALL_OUTCOME"
+          } > browser-install-method.txt
+          cat stably-install.log
+          if [[ -f playwright-install.log ]]; then
+            cat playwright-install.log
+          fi
+          echo "method=$install_method" >> "$GITHUB_OUTPUT"
+
+      - name: Collect runner fingerprint fields
+        run: |
+          {
+            echo "RUNNER_HOSTNAME=$(hostname)"
+            echo "RUNNER_UNAME=$(uname -a)"
+            echo "RUNNER_EGRESS_IPV4=$(curl -4 -fsS --max-time 20 https://api.ipify.org)"
+            echo "RUNNER_EGRESS_IPV6=$(curl -6 -fsS --max-time 20 https://api64.ipify.org 2>/dev/null || true)"
+            echo "RUNNER_NODE_VERSION=$(node --version)"
+            echo "RUNNER_BUN_VERSION=$(bun --version)"
+          } >> "$GITHUB_ENV"
+
+      - name: Record runner fingerprint
+        run: |
+          jq -n '{
+            hostname: env.RUNNER_HOSTNAME,
+            uname: env.RUNNER_UNAME,
+            egressIpv4: env.RUNNER_EGRESS_IPV4,
+            egressIpv6: (if env.RUNNER_EGRESS_IPV6 == "" then null else env.RUNNER_EGRESS_IPV6 end),
+            GITHUB_RUN_ID: env.GITHUB_RUN_ID,
+            GITHUB_SHA: env.GITHUB_SHA,
+            nodeVersion: env.RUNNER_NODE_VERSION,
+            bunVersion: env.RUNNER_BUN_VERSION
+          }' > runner-fingerprint.json
+          cat runner-fingerprint.json
+
+      - name: Start hermetic preview
+        id: preview
+        shell: bash
+        run: |
+          set +e
+          node scripts/preview-up.mjs \
+            --backend-port 18000 \
+            --frontend-port 13000 \
+            --engine-port 13091 \
+            --no-build-dist > preview-up.log 2>&1
+          preview_exit=$?
+          set -e
+          cat preview-up.log
+          exit "$preview_exit"
+
+      - name: Warm the main page
+        run: curl --fail --silent --show-error http://127.0.0.1:13000/ > /dev/null
+
+      - name: Validate suite inputs
+        env:
+          INPUT_WORKERS: ${{ inputs.workers || '2' }}
+        run: |
+          worker_count="${INPUT_WORKERS:-2}"
+          if [[ ! "$worker_count" =~ ^[1-9][0-9]*$ ]]; then
+            echo "workers must be a positive integer, got: $worker_count" >&2
+            exit 2
+          fi
+          echo "E2E_WORKERS=$worker_count" >> "$GITHUB_ENV"
+
+      - name: Run complete Stably Playwright suite
+        id: suite-all
+        if: inputs.grep == ''
+        env:
+          CI: "1"
+          KADY_E2E_BASE_URL: http://127.0.0.1:13000
+          STABLY_API_KEY: ${{ secrets.STABLY_API_KEY }}
+          STABLY_PROJECT_ID: ${{ secrets.STABLY_PROJECT_ID }}
+        run: npx stably test --workers="$E2E_WORKERS" --suiteName "sds-outer-loop-ci-${GITHUB_RUN_NUMBER}" > stably-test.log 2>&1
+
+      - name: Run filtered Stably Playwright suite
+        id: suite-grep
+        if: inputs.grep != ''
+        env:
+          CI: "1"
+          KADY_E2E_BASE_URL: http://127.0.0.1:13000
+          STABLY_API_KEY: ${{ secrets.STABLY_API_KEY }}
+          STABLY_PROJECT_ID: ${{ secrets.STABLY_PROJECT_ID }}
+          INPUT_GREP: ${{ inputs.grep }}
+        run: npx stably test --workers="$E2E_WORKERS" --grep "$INPUT_GREP" --suiteName "sds-outer-loop-ci-${GITHUB_RUN_NUMBER}" > stably-test.log 2>&1
+
+      - name: Print Stably Playwright log
+        if: always()
+        run: |
+          if [[ -f stably-test.log ]]; then
+            cat stably-test.log
+          else
+            echo "stably-test.log was not created."
+          fi
+
+      - name: Stop hermetic preview
+        if: always()
+        run: node scripts/preview-down.mjs
+
+      - name: Extract suite counts
+        if: always()
+        run: |
+          passed="$(grep -Eo '[0-9]+ passed' stably-test.log 2>/dev/null | tail -1 | cut -d' ' -f1 || true)"
+          failed="$(grep -Eo '[0-9]+ failed' stably-test.log 2>/dev/null | tail -1 | cut -d' ' -f1 || true)"
+          skipped="$(grep -Eo '[0-9]+ (skipped|fixme)' stably-test.log 2>/dev/null | tail -1 | cut -d' ' -f1 || true)"
+          {
+            echo "E2E_PASSED=${passed:-not detected}"
+            echo "E2E_FAILED=${failed:-not detected}"
+            echo "E2E_SKIPPED=${skipped:-not detected}"
+          } >> "$GITHUB_ENV"
+
+      - name: Record suite outcome
+        if: always()
+        env:
+          SUITE_ALL_OUTCOME: ${{ steps.suite-all.outcome }}
+          SUITE_GREP_OUTCOME: ${{ steps.suite-grep.outcome }}
+        run: |
+          suite_outcome="$SUITE_ALL_OUTCOME"
+          if [[ "$SUITE_GREP_OUTCOME" != "skipped" ]]; then suite_outcome="$SUITE_GREP_OUTCOME"; fi
+          echo "E2E_SUITE_OUTCOME=${suite_outcome:-not run}" >> "$GITHUB_ENV"
+          if [[ "$suite_outcome" == "success" && "$E2E_FAILED" == "not detected" ]]; then echo "E2E_FAILED=0" >> "$GITHUB_ENV"; fi
+
+      - name: Extract Stably run metadata
+        if: always()
+        run: |
+          run_url="$(grep -Eo 'https://[^[:space:]]*stably\.ai[^[:space:]]*' stably-test.log 2>/dev/null | tail -1 || true)"
+          run_id="$(grep -Eio '(runId|run ID|testSuiteRunId)[^A-Za-z0-9_-]+[A-Za-z0-9_-]+' stably-test.log 2>/dev/null | tail -1 | grep -Eo '[A-Za-z0-9_-]+$' || true)"
+          {
+            echo "E2E_RUN_URL=${run_url:-not detected}"
+            echo "E2E_RUN_ID=${run_id:-not detected}"
+          } >> "$GITHUB_ENV"
+
+      - name: Write GitHub-runner result summary
+        if: always()
+        run: |
+          {
+            echo "## GitHub-hosted Stably E2E"
+            echo
+            echo "- Outcome: $E2E_SUITE_OUTCOME"
+            echo "- Passed: $E2E_PASSED"
+            echo "- Failed: $E2E_FAILED"
+            echo "- Skipped/fixme: $E2E_SKIPPED"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Write GitHub-runner evidence summary
+        if: always()
+        env:
+          BROWSER_INSTALL_METHOD: ${{ steps.browser-install.outputs.method }}
+        run: |
+          {
+            echo "- Stably run ID: $E2E_RUN_ID"
+            echo "- Stably run URL: $E2E_RUN_URL"
+            echo "- Browser installer: ${BROWSER_INSTALL_METHOD:-not completed}"
+            echo "- Execution host evidence: runner-fingerprint.json artifact"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload GitHub-runner evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stably-github-runner-${{ github.run_id }}
+          if-no-files-found: warn
+          include-hidden-files: true
+          path: |
+            playwright-report/
+            test-results/
+            .stably/test-results/
+            stably-install.log
+            playwright-install.log
+            browser-install-method.txt
+            preview-up.log
+            stably-test.log
+            runner-fingerprint.json
+
+  stably-cloud:
+    name: Stably Cloud action spike
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    # No `needs` dependency: this spike starts in parallel with Job A.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run exploratory Stably Cloud action
+        id: stably
+        uses: stablyai/stably-runner-action@v4
+        with:
+          api-key: ${{ secrets.STABLY_API_KEY }}
+          project-id: ${{ secrets.STABLY_PROJECT_ID }}
+          playwright-project-name: chromium
+          env-overrides: |
+            KADY_E2E_BASE_URL: http://127.0.0.1:13000
+          async: false
+          github-comment: false
+
+      - name: Write Stably Cloud spike summary
+        if: always()
+        env:
+          ACTION_OUTCOME: ${{ steps.stably.outcome }}
+          STABLY_SUCCESS: ${{ steps.stably.outputs.success }}
+          STABLY_RUN_ID: ${{ steps.stably.outputs.runId }}
+          STABLY_TEST_SUITE_RUN_ID: ${{ steps.stably.outputs.testSuiteRunId }}
+        run: |
+          {
+            echo "## Stably Cloud action spike"
+            echo
+            printf '%s\n' "- Action outcome: ${ACTION_OUTCOME:-not recorded}"
+            printf '%s\n' "- success: ${STABLY_SUCCESS:-not recorded}"
+            printf '%s\n' "- runId: ${STABLY_RUN_ID:-not recorded}"
+            printf '%s\n' "- testSuiteRunId: ${STABLY_TEST_SUITE_RUN_ID:-not recorded}"
+            echo "- Interpretation: exploratory only; inspect the Stably run before making any checkout, startup, item-count, or localhost-reachability claim."
+          } >> "$GITHUB_STEP_SUMMARY"
