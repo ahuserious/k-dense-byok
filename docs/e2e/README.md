@@ -123,11 +123,11 @@ npx playwright test --config playwright.cloud.config.ts --grep-invert @live
 
 Run server-truth evidence through the complete default or alternate local preview legs above.
 
-The conditional reporter in `playwright.config.ts` uploads results only when both credentials exist. Cloud run evidence lands in the Stably project/suite dashboard; local trace, screenshot, video, and result material remains under `.stably/test-results/`.
+The conditional reporter in `playwright.config.ts` uploads results only when both credentials exist. It resolves credentials from the environment and serializes only the non-secret `E2E_SUITE_NAME` option. Cloud run evidence lands in the Stably project/suite dashboard; local trace, screenshot, video, and result material remains under `.stably/test-results/`.
 
 ## Hosted-runner (CI) evidence
 
-The real remote path is the `github-runner` job in [`.github/workflows/stably-cloud.yml`](../../.github/workflows/stably-cloud.yml). It runs the complete default `playwright.config.ts` suite, including the three `@live` items, on a GitHub-hosted runner; it does not use the public-URL overlay above. CI pins Stably CLI `4.12.28` and reporter `2.1.16`. The retained `hosted-evidence-manifest.json` must contain:
+The real remote path is the `github-runner` job in [`.github/workflows/stably-cloud.yml`](../../.github/workflows/stably-cloud.yml). It runs the complete default `playwright.config.ts` suite, including the three `@live` items, on a GitHub-hosted runner; it does not use the public-URL overlay above. CI pins Stably CLI `4.12.28` for browser installation only and reporter `2.1.16`. The suite itself runs through `npx playwright test --trace on`: the Stably CLI test wrapper is deliberately excluded because it generates credential-bearing reporter options. Direct Playwright preserves always-on traces and the base reporter's suite/result/trace uploads without replacing the audited config; only wrapper-specific CLI source/version metadata is absent. The retained `hosted-evidence-manifest.json` must contain:
 
 - the exact test command and relevant environment (`CI`, `KADY_E2E_BASE_URL`, workers, and `KADY_E2E_WORKERS` when set), with `STABLY_API_KEY` and `STABLY_PROJECT_ID` recorded only as variable names;
 - the tested commit SHA and GitHub run ID;

@@ -249,17 +249,13 @@ function writeScrubbedLogs(workingDirectory, environment) {
 }
 
 function suiteCommand(environment) {
-  const suiteName =
-    environment.E2E_SUITE_NAME ??
-    `sds-outer-loop-ci-${environment.GITHUB_RUN_NUMBER ?? ""}`;
   const workers = environment.E2E_WORKERS ?? "";
   const grep = environment.INPUT_GREP ?? "";
   if (grep !== "") {
-    return `npx --yes stably@${STABLY_CLI_VERSION} test --workers="${workers}" --grep "${grep}" ` +
-      `--suiteName "${suiteName}" > stably-test.log 2>&1`;
+    return `npx playwright test --workers="${workers}" --grep "${grep}" ` +
+      `--trace on > stably-test.log 2>&1`;
   }
-  return `npx --yes stably@${STABLY_CLI_VERSION} test --workers="${workers}" ` +
-    `--suiteName "${suiteName}" > stably-test.log 2>&1`;
+  return `npx playwright test --workers="${workers}" --trace on > stably-test.log 2>&1`;
 }
 
 export function buildHostedEvidenceManifest({
@@ -282,6 +278,9 @@ export function buildHostedEvidenceManifest({
       KADY_E2E_BASE_URL: "http://127.0.0.1:13000",
       workers: environment.E2E_WORKERS ?? "",
       KADY_E2E_WORKERS: environment.KADY_E2E_WORKERS || null,
+      E2E_SUITE_NAME:
+        environment.E2E_SUITE_NAME ??
+        `sds-outer-loop-ci-${environment.GITHUB_RUN_NUMBER ?? ""}`,
       STABLY_CLI_VERSION,
       STABLY_REPORTER_VERSION,
       secretVariableNames: ["STABLY_API_KEY", "STABLY_PROJECT_ID"],

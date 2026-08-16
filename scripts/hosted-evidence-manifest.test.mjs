@@ -88,7 +88,7 @@ test("writes stable not-detected evidence when input files are missing", () => {
     assert.deepEqual(JSON.parse(result.stdout), manifest);
     assert.equal(
       manifest.command,
-      'npx --yes stably@4.12.28 test --workers="2" --suiteName "sds-outer-loop-ci-77" > stably-test.log 2>&1',
+      'npx playwright test --workers="2" --trace on > stably-test.log 2>&1',
     );
     assert.deepEqual(manifest.runnerFingerprint, {});
     assert.equal(manifest.inventory, null);
@@ -147,7 +147,7 @@ test("grep mode parses a genuine multiline Playwright epilogue", () => {
     const manifest = JSON.parse(manifestText);
     assert.equal(
       manifest.command,
-      'npx --yes stably@4.12.28 test --workers="3" --grep "@live" --suiteName "sds-outer-loop-ci-88" > stably-test.log 2>&1',
+      'npx playwright test --workers="3" --grep "@live" --trace on > stably-test.log 2>&1',
     );
     assert.equal(
       manifest.inventoryLine,
@@ -177,6 +177,7 @@ test("grep mode parses a genuine multiline Playwright epilogue", () => {
       KADY_E2E_BASE_URL: "http://127.0.0.1:13000",
       workers: "3",
       KADY_E2E_WORKERS: "4",
+      E2E_SUITE_NAME: suiteName,
       STABLY_CLI_VERSION: "4.12.28",
       STABLY_REPORTER_VERSION: "2.1.16",
       secretVariableNames: ["STABLY_API_KEY", "STABLY_PROJECT_ID"],

@@ -4,6 +4,8 @@ const EXPLICIT_SECRET_ENVIRONMENT_NAMES = new Set([
   "STABLY_API_KEY",
   "STABLY_PROJECT_ID",
 ]);
+const MAX_CANONICALIZATION_PASSES = 3;
+const MAX_CANONICAL_VARIANTS = 32;
 
 function lowerPercentEscapes(value) {
   return value.replace(/%[0-9A-F]{2}/g, (escape) => escape.toLowerCase());
@@ -207,15 +209,78 @@ export function scrubText(value, representations) {
   return value.replace(pattern, (match) => byValue.get(match));
 }
 
-export function findSecretRepresentation(buffer, byteRepresentations) {
-  for (const representation of byteRepresentations) {
-    if (buffer.includes(representation.bytes)) return true;
-  }
+function decodePercentRuns(value, plusAsSpace) {
+  const source = plusAsSpace ? value.replace(/\+/g, "%20") : value;
+  return source.replace(/(?:%[0-9A-Fa-f]{2})+/g, (encoded) => {
+    try {
+      return decodeURIComponent(encoded);
+    } catch {
+      return encoded;
+    }
+  });
+}
 
-  const normalizedText = lowerPercentEscapes(buffer.toString("utf8"));
-  for (const representation of byteRepresentations) {
-    const text = representation.bytes.toString("utf8");
-    if (text.includes("%") && normalizedText.includes(lowerPercentEscapes(text))) {
+function decodeJsonEscapes(value) {
+  const simpleEscapes = {
+    '"': '"',
+    "\\": "\\",
+    "/": "/",
+    b: "\b",
+    f: "\f",
+    n: "\n",
+    r: "\r",
+    t: "\t",
+  };
+  return value.replace(
+    /\\(?:u([0-9A-Fa-f]{4})|(["\\/bfnrt]))/g,
+    (_match, unicodeCodeUnit, simpleEscape) =>
+      unicodeCodeUnit === undefined
+        ? simpleEscapes[simpleEscape]
+        : String.fromCharCode(Number.parseInt(unicodeCodeUnit, 16)),
+  );
+}
+
+function canonicalTextVariants(buffer) {
+  const initial = buffer.toString("utf8");
+  const seen = new Set([initial]);
+  let frontier = [initial];
+  for (
+    let pass = 0;
+    pass < MAX_CANONICALIZATION_PASSES && frontier.length > 0;
+    pass += 1
+  ) {
+    const next = [];
+    for (const value of frontier) {
+      for (const candidate of [
+        decodePercentRuns(value, false),
+        decodePercentRuns(value, true),
+        decodeJsonEscapes(value),
+      ]) {
+        if (candidate === value || seen.has(candidate)) continue;
+        seen.add(candidate);
+        next.push(candidate);
+        if (seen.size >= MAX_CANONICAL_VARIANTS) {
+          return [...seen].slice(1);
+        }
+      }
+    }
+    frontier = next;
+  }
+  return [...seen].slice(1);
+}
+
+function containsSecretBytes(buffer, byteRepresentations) {
+  return byteRepresentations.some((representation) =>
+    buffer.includes(representation.bytes),
+  );
+}
+
+export function findSecretRepresentation(buffer, byteRepresentations) {
+  if (containsSecretBytes(buffer, byteRepresentations)) return true;
+  for (const canonicalText of canonicalTextVariants(buffer)) {
+    if (
+      containsSecretBytes(Buffer.from(canonicalText, "utf8"), byteRepresentations)
+    ) {
       return true;
     }
   }

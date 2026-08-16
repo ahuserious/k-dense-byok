@@ -33,10 +33,10 @@ export default defineConfig({
     ? [
         ["./e2e/item-count-reporter.ts"],
         ["list"],
-        // Reporter 2.1.16 resolves both credentials from process.env in its
-        // constructor (dist/index-D8lS6VkX.mjs:9438-9441). Passing values here
-        // leaks them through FullConfig.reporter into projectSettings.
-        stablyReporter(),
+        // Reporter 2.1.16 resolves credentials from process.env and accepts
+        // suiteName as a non-secret option (dist/index-D8lS6VkX.mjs:9438-9441).
+        // Credentials in this object leak through FullConfig.reporter.
+        stablyReporter({ suiteName: process.env.E2E_SUITE_NAME }),
       ]
     : [["./e2e/item-count-reporter.ts"], ["list"]],
   use: {

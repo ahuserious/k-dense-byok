@@ -186,6 +186,38 @@ function writeRequiredPayloadArtifacts(directory) {
   );
 }
 
+test("seal path rejects mixed literal and recursively encoded secrets", () => {
+  const secret = "alpha/beta gamma";
+  const partialJsonEscape = String.raw`alpha\/\u0062eta gamma`;
+  const fixtures = [
+    ["encodeURI", encodeURI(secret)],
+    ["partial JSON escape", partialJsonEscape],
+    ["percent-encoded partial JSON escape", encodeURIComponent(partialJsonEscape)],
+  ];
+  for (const [fixtureName, fixture] of fixtures) {
+    withTemporaryDirectory((directory) => {
+      writeRequiredPayloadArtifacts(directory);
+      fs.writeFileSync(
+        path.join(directory, "stably-test.scrubbed.log"),
+        `prefix:${fixture}:suffix`,
+      );
+      assert.throws(
+        () =>
+          sealHostedEvidenceBundle({
+            workingDirectory: directory,
+            environment: { STABLY_API_KEY: secret },
+          }),
+        /^Error: secret representation detected in artifact\[4\]#[a-f0-9]{12}$/,
+        fixtureName,
+      );
+      assert.equal(
+        fs.existsSync(path.join(directory, HOSTED_EVIDENCE_BUNDLE_NAME)),
+        false,
+      );
+    });
+  }
+});
+
 test("seals, scans, hashes, and records one upload bundle", () => {
   withTemporaryDirectory((directory) => {
     writeRequiredPayloadArtifacts(directory);

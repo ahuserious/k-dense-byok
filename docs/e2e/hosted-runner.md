@@ -34,21 +34,30 @@ system dependencies, and starts the hermetic preview on backend `18000`, fronten
 `13091`. The preview readiness barrier already checks all three health endpoints; the job then makes
 one additional request to the main page before starting the suite.
 
-The test command is `npx stably test`, with `CI=1`, two workers by default, the localhost frontend as
-`KADY_E2E_BASE_URL`, and a run-specific suite name. It deliberately does not use `--browser cloud`:
-the Playwright process and Chromium execute on the GitHub-hosted runner. Stably credentials enable the
-reporter, so results and traces can also appear in the Stably dashboard.
+The test command is `npx playwright test --trace on`, with `CI=1`, two workers by default, the
+localhost frontend as `KADY_E2E_BASE_URL`, and a run-specific `E2E_SUITE_NAME`. It deliberately does
+not use `--browser cloud`: the Playwright process and Chromium execute on the GitHub-hosted runner.
+Stably credentials enable the reporter from the repository's base config, so results and traces can
+also appear in the Stably dashboard. Reporter `2.1.16` resolves credentials from the environment and
+receives only the non-secret suite name as an option.
 
-The job always attempts the owned preview teardown and uploads available evidence, including:
+The pinned `stably@4.12.28` CLI remains only on the Chromium installation step. Its `test` wrapper is
+not used because that wrapper replaces the audited base reporter with credential-bearing options.
+Direct Playwright retains the config's always-on tracing, and `--trace on` makes that evidence policy
+explicit in the hosted command; the Stably reporter still handles suite/result/trace dashboard uploads.
+Only wrapper-specific CLI source/version metadata is absent from those reports.
+
+The job always attempts the owned preview teardown and requires, scans, and seals evidence including:
 
 - `runner-fingerprint.json`;
-- the Stably/Playwright console log and browser-install method;
+- the scrubbed Stably/Playwright console log and browser-install method;
 - the preview readiness log;
 - `.stably/test-results/`, plus conventional `test-results/` and `playwright-report/` paths when they
   exist.
 
-The step summary extracts pass, fail, and skipped/fixme counts plus any Stably run identifier or URL
-printed by the reporter. The raw log remains authoritative if a future reporter changes its formatting.
+Only `hosted-evidence-bundle.tar` is uploaded. Its manifest records structured pass, fail, and
+skipped/fixme counts plus the freshness-validated Stably run identifier and URL; raw logs are removed
+after scrubbing and never uploaded.
 
 ### What Job A proves
 
