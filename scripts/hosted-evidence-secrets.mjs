@@ -1,3 +1,5 @@
+import { constants as bufferConstants } from "node:buffer";
+
 const SECRET_ENVIRONMENT_NAME_PATTERN =
   /API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|(?:^|_)PAT(?:_|$)/i;
 const EXPLICIT_SECRET_ENVIRONMENT_NAMES = new Set([
@@ -5,6 +7,15 @@ const EXPLICIT_SECRET_ENVIRONMENT_NAMES = new Set([
   "STABLY_PROJECT_ID",
 ]);
 const MIN_BASE64_SPAN_LENGTH = 16;
+const MIN_BASE64_SCRATCH_BYTES = 64;
+// Every view this module searches materializes a JS string somewhere: the tolerant percent
+// decoder's latin1 `value`, the JSON view's `toString("latin1")`, the UTF-8 round trip in
+// `searchBufferViews`, `TextDecoder.decode` in `isValidUtf8`, and `toString("ascii")` on a
+// base64 span. Node caps a string at `buffer.constants.MAX_STRING_LENGTH` (536,870,888 bytes
+// on Node 22), so a member larger than that cannot be inspected at all. Such a member fails
+// closed as an uninspectable-size artifact instead of aborting the seal with an unclassified
+// `Cannot create a string longer than 0x1fffffe8 characters` RangeError.
+export const MAX_INSPECTABLE_BYTES = bufferConstants.MAX_STRING_LENGTH;
 const HEX_VALUE = (() => {
   const values = new Int16Array(256).fill(-1);
   for (let index = 0; index < 10; index += 1) values[0x30 + index] = index;
@@ -230,9 +241,11 @@ function decodeBase64Span(spanBytes) {
 
 export function extractBase64DecodedSpans(buffer) {
   const decodedSpans = [];
-  // One reusable byte-wide scratch span, sized for the whole buffer: a span can be at most
-  // as long as its input, and decodeBase64Span copies out of it before the next span starts.
-  const spanScratch = Buffer.allocUnsafe(buffer.length);
+  // One reusable byte-wide scratch span, allocated only when a first span byte is actually
+  // collected and grown to the largest span seen so far: a span-free binary member (the common
+  // case for trace payloads) allocates nothing. decodeBase64Span copies out of the scratch
+  // before the next span starts, so reuse across spans is safe.
+  let spanScratch = null;
   let index = 0;
   while (index < buffer.length) {
     while (
@@ -256,6 +269,15 @@ export function extractBase64DecodedSpans(buffer) {
         continue;
       }
       if (isBase64AlphabetOrPadByte(byte)) {
+        if (spanScratch === null || collectedLength >= spanScratch.length) {
+          const grownCapacity = Math.min(
+            buffer.length,
+            Math.max(MIN_BASE64_SCRATCH_BYTES, (spanScratch?.length ?? 0) * 2),
+          );
+          const grownScratch = Buffer.allocUnsafe(grownCapacity);
+          if (spanScratch !== null) spanScratch.copy(grownScratch, 0, 0, collectedLength);
+          spanScratch = grownScratch;
+        }
         spanScratch[collectedLength] = byte;
         collectedLength += 1;
         index += 1;
@@ -325,7 +347,16 @@ export function findSecretRepresentation(
   byteRepresentations,
   artifactReference = "content",
   warnings = [],
+  maxInspectableBytes = MAX_INSPECTABLE_BYTES,
 ) {
+  // Checked before any decode: every view below would materialize a JS string of this buffer.
+  if (buffer.length > maxInspectableBytes) {
+    throw new Error(
+      `uninspectable-size member in ${artifactReference}: ` +
+        `bytes=${buffer.length} limit=${maxInspectableBytes}`,
+    );
+  }
+
   if (byteRepresentations.length === 0) {
     if (!isValidUtf8(buffer)) {
       warnings.push(`invalid UTF-8 in ${artifactReference}`);

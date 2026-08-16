@@ -8,6 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
 import {
+  MAX_INSPECTABLE_BYTES,
   collectSecretByteRepresentations,
   findSecretRepresentation,
   scrubAndVerifyText,
@@ -17,7 +18,15 @@ const MANIFEST_FILE_NAME = "hosted-evidence-manifest.json";
 const PAYLOAD_ARCHIVE_NAME = "hosted-evidence-payload.tar";
 export const HOSTED_EVIDENCE_BUNDLE_NAME = "hosted-evidence-bundle.tar";
 export const MAX_ARCHIVE_DEPTH = 4;
-export const MAX_DECOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024;
+// Sized from a measured clean hosted-shaped run rather than guessed. This clone's
+// `.stably/test-results` is 1,503,534,700 bytes on disk (245 trace.zip, 24,359 entries,
+// 2,732,241,234 uncompressed bytes), and a live scan accounts exactly 4,235,775,934 bytes:
+// 2.82x the on-disk payload, because both the top-level archive file and every expanded member
+// count. A retry storm (every test retried twice, `trace: "on"`) is bounded by roughly 3x that,
+// about 12.7 GB accounted, so 24 GiB keeps ~1.9x headroom above the storm while still bounding
+// decompression far below the runner's disk. `accountedBytes` on the scan/seal result is the
+// counter this bounds; hosted-evidence-scan.test.mjs pins the formula it sums.
+export const MAX_DECOMPRESSED_BYTES = 24 * 1024 * 1024 * 1024;
 
 const PAYLOAD_ARTIFACTS = [
   { path: ".stably/test-results", required: true },
@@ -113,6 +122,7 @@ function searchBytes(bytes, artifactRef, byteRepresentations, context) {
     byteRepresentations,
     artifactRef,
     warnings,
+    context.maxInspectableBytes,
   );
   for (const warning of warnings) emitWarning(warning, context);
   if (found) {
@@ -135,18 +145,35 @@ function validateArchiveEntries(entries, artifactRef, byteRepresentations, conte
   }
 }
 
+// `projectedTotal` is a total the counter either has reached or would reach, so this also
+// enforces a ZIP's pre-extraction reservation, which is checked without being charged.
+function enforceDecompressedBound(projectedTotal, artifactRef, context) {
+  if (projectedTotal > context.maxDecompressedBytes) {
+    throw new Error(
+      `decompressed-bytes bound exceeded for ${artifactRef}: ` +
+        `bound=${context.maxDecompressedBytes} observed=${projectedTotal}`,
+    );
+  }
+}
+
 // The counter object is shared by every frame of one seal: nested contexts are shallow
 // copies, so a number field would only ever be incremented on the child. Holding the total
 // in an object makes the bound global across all top-level artifacts and all nested members.
 function accountDecompressedBytes(size, artifactRef, context) {
   const counter = context.decompressedByteCounter;
   counter.total += size;
-  if (counter.total > context.maxDecompressedBytes) {
-    throw new Error(
-      `decompressed-bytes bound exceeded for ${artifactRef}: ` +
-        `bound=${context.maxDecompressedBytes} observed=${counter.total}`,
-    );
-  }
+  enforceDecompressedBound(counter.total, artifactRef, context);
+}
+
+// The central directory carries every member's uncompressed size, so a ZIP's expansion is known
+// before a single byte is written to disk. `unzip -Z -t` prints those totals as
+// "<n> files, <bytes> bytes uncompressed, ...". Returns null when the totals line is absent, in
+// which case only the post-extraction per-member accounting applies.
+function zipUncompressedTotalBytes(archivePath) {
+  const listed = spawnSync("unzip", ["-Z", "-t", archivePath], { encoding: "utf8" });
+  if (listed.status !== 0) return null;
+  const totals = listed.stdout.match(/^\s*\d+ files?, (\d+) bytes uncompressed/m);
+  return totals ? Number(totals[1]) : null;
 }
 
 function extractZipOrTar(archivePath, kind, artifactRef, byteRepresentations, context) {
@@ -162,6 +189,20 @@ function extractZipOrTar(archivePath, kind, artifactRef, byteRepresentations, co
     const entries = listed.stdout.split(/\r?\n/).filter(Boolean);
     validateArchiveEntries(entries, artifactRef, byteRepresentations, context);
 
+    // A ZIP's expansion is enforced against the bound before extraction; TAR has no size index we
+    // trust to parse, so a TAR's members are only accounted as the extracted tree is walked.
+    // The reservation is checked, not charged: charging it and then charging each extracted member
+    // would double-count the same bytes and inflate the running total above the seal's real
+    // accounting. The shortfall below reconciles the two so the counter keeps the larger.
+    const reservedBytes = kind === "zip" ? zipUncompressedTotalBytes(archivePath) : null;
+    if (reservedBytes !== null) {
+      enforceDecompressedBound(
+        context.decompressedByteCounter.total + reservedBytes,
+        artifactRef,
+        context,
+      );
+    }
+
     const extractCommand = kind === "zip"
       ? ["unzip", ["-qq", archivePath, "-d", temporaryDirectory]]
       : ["tar", ["-xf", archivePath, "-C", temporaryDirectory]];
@@ -169,12 +210,22 @@ function extractZipOrTar(archivePath, kind, artifactRef, byteRepresentations, co
       encoding: "utf8",
     });
     if (extracted.status !== 0) throw new Error(`unreadable member in ${artifactRef}`);
+    const totalBeforeMembers = context.decompressedByteCounter.total;
     scanExtractedTree(
       temporaryDirectory,
       artifactRef,
       byteRepresentations,
       context,
     );
+    // The reservation and the per-member walk measure the same bytes. When the central directory
+    // claims more than extraction produced, charge only the shortfall so the counter ends at the
+    // larger of the two accountings; when they agree (the normal case) nothing is added.
+    if (reservedBytes !== null) {
+      const memberBytes = context.decompressedByteCounter.total - totalBeforeMembers;
+      if (reservedBytes > memberBytes) {
+        accountDecompressedBytes(reservedBytes - memberBytes, artifactRef, context);
+      }
+    }
   } finally {
     fs.rmSync(temporaryDirectory, { recursive: true, force: true });
   }
@@ -326,12 +377,14 @@ function normalizeArtifactSpecs(artifactPaths) {
 
 function createScanContext({
   maxDecompressedBytes = MAX_DECOMPRESSED_BYTES,
+  maxInspectableBytes = MAX_INSPECTABLE_BYTES,
   collectDigests = false,
 } = {}) {
   return {
     depth: 0,
     decompressedByteCounter: { total: 0 },
     maxDecompressedBytes,
+    maxInspectableBytes,
     collectDigests,
     digests: [],
     topLevelRef: "",
@@ -344,11 +397,16 @@ export function scanHostedEvidenceArtifacts({
   environment = process.env,
   artifactPaths = PAYLOAD_ARTIFACTS,
   maxDecompressedBytes = MAX_DECOMPRESSED_BYTES,
+  maxInspectableBytes = MAX_INSPECTABLE_BYTES,
   collectDigests = false,
 } = {}) {
   const byteRepresentations = collectSecretByteRepresentations(environment);
   const includedPaths = [];
-  const context = createScanContext({ maxDecompressedBytes, collectDigests });
+  const context = createScanContext({
+    maxDecompressedBytes,
+    maxInspectableBytes,
+    collectDigests,
+  });
   for (const artifact of normalizeArtifactSpecs(artifactPaths)) {
     const artifactRef = artifactReference(artifact.index, artifact.path);
     const resolvedPath = path.resolve(workingDirectory, artifact.path);
@@ -366,7 +424,11 @@ export function scanHostedEvidenceArtifacts({
     );
     includedPaths.push(artifact.path);
   }
-  return { includedPaths, artifactDigests: context.digests };
+  return {
+    includedPaths,
+    artifactDigests: context.digests,
+    accountedBytes: context.decompressedByteCounter.total,
+  };
 }
 
 function createTar(workingDirectory, archiveName, entries) {
@@ -436,6 +498,10 @@ export function sealHostedEvidenceBundle({
   JSON.parse(serializedManifest);
   fs.writeFileSync(manifestPath, serializedManifest);
   const manifestRef = artifactReference(PAYLOAD_ARTIFACTS.length, MANIFEST_FILE_NAME);
+  // Deliberately a second, accounting-free context: this re-scan is one in-memory search over the
+  // serialized manifest, whose bytes were already accounted as payload files and whose size is
+  // bounded by the manifest itself. The global decompressed-bytes total belongs to the payload
+  // scan above; keep this context out of it so that total stays the payload's accounting.
   const manifestContext = createScanContext({ maxDecompressedBytes });
   manifestContext.topLevelRef = manifestRef;
   searchBytes(
@@ -457,6 +523,7 @@ export function sealHostedEvidenceBundle({
     bundleSha256,
     payloadSha256,
     artifactDigests: scanned.artifactDigests,
+    accountedBytes: scanned.accountedBytes,
   };
 }
 

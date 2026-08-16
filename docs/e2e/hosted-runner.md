@@ -63,14 +63,30 @@ after scrubbing and never uploaded.
 
 The final artifact scan is one linear pass over each payload file while the upload tar is assembled.
 Each file is classified by magic bytes, hashed once, and searched with a fixed set of views. ZIP, TAR,
-and GZIP members are recursed (depth ≤ 4 per descent path; 8 GiB of inspected bytes for the whole
-seal, counted as a single global total across every payload file and every nested member, else the
+and GZIP members are recursed (depth ≤ 4 per descent path; 24 GiB of inspected bytes for the payload
+scan, counted as a single global total across every payload file and every nested member, else the
 artifact is rejected). Members whose magic identifies zstd, xz, 7z, rar, or bz2 fail closed and the
 rejection names that codec. Brotli and raw DEFLATE have no magic and are undetectable: they are
 searched on the latin1 view and otherwise left untouched. The payload tar and the outer bundle tar
 are not re-scanned; the seal is the recorded per-file SHA-256 digests plus the hash of the assembled
 payload tar. Malformed percent syntax, invalid UTF-8, and unknown binary content emit a WARN line
 and stay fail-open.
+
+The 24 GiB bound is sized from a measurement, not a guess. On a clean hosted-shaped run in this
+clone, `.stably/test-results` was 1,503,534,700 bytes on disk (245 `trace.zip`, 24,359 entries,
+2,732,241,234 uncompressed bytes) and the scan accounted exactly 4,235,775,934 bytes — a 2.82×
+multiplier over the on-disk payload, because both the top-level archive file and every expanded
+member are charged. That is 16.44 % of the 24 GiB bound; it took 232.4 s before ZIP pre-accounting
+and 251.9 s after (one extra `unzip -Z -t` per archive), against 65.3–81.3 s for the synthetic 1 GiB
+fixture. A retry storm (`trace: "on"` with every test retried twice) produces roughly 3× the traces,
+so about 12.7 GB accounted; 24 GiB leaves ~1.9× headroom above that storm while still bounding
+decompression far below the runner's disk. The previous 8 GiB bound left only ~2× headroom over a
+single clean run, so a mass-failure run — exactly when the evidence matters most — would have failed
+the scan step closed and uploaded nothing. `scanHostedEvidenceArtifacts` and
+`sealHostedEvidenceBundle` return that counter as `accountedBytes`, and
+`scripts/hosted-evidence-scan.test.mjs` pins the formula it sums — every top-level payload file's
+on-disk size plus every nested member's decompressed size — so a change to what the scanner charges
+surfaces in review rather than in CI.
 
 Reporter `2.1.16` prints the server-returned `createdSuiteRun.url` directly (the pinned CJS dist at
 `index-CdLJi9uc.cjs:9593-9594`). This evidence tool documents its checked-in Stably dashboard contract
@@ -97,8 +113,11 @@ in the secrets set) must not appear in uploaded evidence produced by our tooling
 inclusion, not adversarial obfuscation.
 
 Views searched, per file (recursing into ZIP, TAR, and GZIP members only; depth ≤ 4 per descent
-path; inspected bytes bounded at 8 GiB as one global total for the whole seal — every top-level
-payload file plus every nested member counts against the same counter — else reject):
+path; inspected bytes bounded at 24 GiB as one global total for the payload scan — every top-level
+payload file plus every nested member counts against the same counter — else reject). The post-seal
+manifest re-scan is deliberately outside that counter: it is one in-memory search over the serialized
+manifest, whose bytes were already accounted as payload files and whose size is bounded by the
+manifest itself. Views:
 
 1. raw bytes (latin1 view);
 2. percent-decoded view — tolerant: any `%HH` run is decoded byte-wise; malformed or incomplete
@@ -118,10 +137,29 @@ rar, and bz2; member paths stay hashed. Brotli and raw DEFLATE have no magic and
 undetectable; they are out of scope and are not treated as a silent acceptance of a recognised
 framing. Unreadable members and the decompressed-bytes bound fail closed.
 
+Where the decompressed-bytes bound is enforced differs by container, and the difference is real. For
+ZIP the central directory's uncompressed total is read with `unzip -Z -t` and checked against the
+bound *before* a single byte is extracted, so an over-large ZIP is rejected naming the archive rather
+than an extracted member; that reservation is checked, not charged, and each extracted member is then
+charged as the tree is walked, so the same bytes are never counted twice. If the central directory
+claims more than extraction produced, only the shortfall is charged afterwards, so the counter keeps
+the larger of the two accountings. For TAR there is no size index this tool parses, so the bound is
+enforced only *post-extraction*, as the extracted tree is walked.
+
+Per-file inspection ceiling: every view this scanner searches materializes a JS string of the whole
+buffer (the tolerant percent decode, the JSON-unescaped view, the UTF-8 round trip, the UTF-8
+validity check, and a base64 span's ASCII form). Node caps a string at
+`buffer.constants.MAX_STRING_LENGTH` — 536,870,888 bytes on Node 22 — so a single payload file or
+nested member larger than that cannot be inspected at all. It is rejected before any decode as
+`uninspectable-size member in <hashed member ref>: bytes=<n> limit=<n>` rather than aborting the seal
+with an unclassified `Cannot create a string longer than 0x1fffffe8 characters` RangeError. A real
+Playwright `trace.zip` is orders of magnitude below this ceiling; a member above it is a
+tooling-change signal, not an expected artifact.
+
 Fail closed only on: a credential match, an unsupported-compression member with recognisable magic,
-the decompressed-bytes bound, or an unreadable member. Fail open (with a WARN line) on: malformed
-percent syntax, invalid UTF-8, and unknown binary content — these are searched on the latin1 view and
-left otherwise untouched.
+the decompressed-bytes bound, a member above the per-file inspection ceiling, or an unreadable
+member. Fail open (with a WARN line) on: malformed percent syntax, invalid UTF-8, and unknown binary
+content — these are searched on the latin1 view and left otherwise untouched.
 
 Performance: one streaming pass over the final upload payload while it is assembled (scan each file
 once, record its SHA-256, write the tar). The seal is those recorded digests plus one hash of the

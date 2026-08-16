@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { constants as bufferConstants } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import { randomFillSync } from "node:crypto";
 import fs from "node:fs";
@@ -15,8 +16,11 @@ import {
   sealHostedEvidenceBundle,
 } from "./hosted-evidence-scan.mjs";
 import {
+  MAX_INSPECTABLE_BYTES,
+  collectSecretByteRepresentations,
   decodePercentTolerant,
   extractBase64DecodedSpans,
+  findSecretRepresentation,
   scrubAndVerifyText,
 } from "./hosted-evidence-secrets.mjs";
 
@@ -265,9 +269,11 @@ test("percent-encoded base64 of a credential fails closed on scrub, scan, and se
   const secret = "Percent~Base64~Credential~Alpha";
   const base64 = Buffer.from(secret, "utf8").toString("base64");
   const fixture = `prefix:${encodeURIComponent(base64)}:suffix`;
-  // The percent layer escapes "+" and "=" inside the base64, so neither the literal base64
-  // nor any raw base64 span of the fixture carries the credential: only the composed
-  // percent-then-base64 view does.
+  // The percent layer escapes "+" and "=" inside the base64, so neither the raw bytes nor any
+  // raw base64 span of the fixture carries the credential. This is NOT a negative control for
+  // the composed percent-then-base64 view: base64(secret) is itself a registered representation,
+  // so the percent-decoded view alone already matches it. The offset variant below is the
+  // control that isolates the composed view.
   assert.match(base64, /\+/);
   assert.equal(fixture.includes(base64), false);
   assert.equal(
@@ -289,6 +295,79 @@ test("percent-encoded base64 of a credential fails closed on scrub, scan, and se
           workingDirectory: directory,
           environment: { STABLY_API_KEY: secret },
           artifactPaths: ["percent-of-base64.log"],
+        }),
+      "scan path",
+    );
+  });
+  withTemporaryDirectory((directory) => {
+    writeRequiredPayloadArtifacts(directory);
+    fs.writeFileSync(path.join(directory, "stably-test.scrubbed.log"), fixture);
+    assert.throws(
+      () =>
+        sealHostedEvidenceBundle({
+          workingDirectory: directory,
+          environment: { STABLY_API_KEY: secret },
+        }),
+      /^Error: secret representation detected in artifact\[4\]#[a-f0-9]{12}$/,
+    );
+  });
+});
+
+test("offset percent-encoded base64 isolates the composed percent-then-base64 view", () => {
+  const secret = "Offset~Percent~Base64~Credential~Alpha";
+  // Base64 of a two-byte prefix plus the credential: the byte offset shifts every base64 group,
+  // so base64(secret) and base64url(secret) — both registered representations — do not appear
+  // anywhere in this span. Only decoding the span and searching the plaintext finds the secret.
+  const offsetBase64 = Buffer.from(`xx${secret}`, "utf8").toString("base64");
+  const fixture = `prefix:${encodeURIComponent(offsetBase64)}:suffix`;
+  const secretBytes = Buffer.from(secret, "utf8");
+  const representations = collectSecretByteRepresentations({ STABLY_API_KEY: secret });
+
+  assert.match(offsetBase64, /[+/]/);
+  assert.notEqual(encodeURIComponent(offsetBase64), offsetBase64);
+  assert.equal(offsetBase64.includes(Buffer.from(secret, "utf8").toString("base64")), false);
+  assert.equal(offsetBase64.includes(Buffer.from(secret, "utf8").toString("base64url")), false);
+  // Neither the raw fixture nor the percent-decoded view carries any registered representation,
+  // and no raw base64 span of the fixture decodes to the credential.
+  assert.equal(
+    representations.some((representation) =>
+      Buffer.from(fixture, "utf8").includes(representation.bytes),
+    ),
+    false,
+  );
+  assert.equal(
+    representations.some((representation) =>
+      Buffer.from(offsetBase64, "utf8").includes(representation.bytes),
+    ),
+    false,
+  );
+  assert.equal(
+    extractBase64DecodedSpans(Buffer.from(fixture, "utf8")).some((span) =>
+      span.includes(secretBytes),
+    ),
+    false,
+  );
+  // The composed view is what carries it: percent-decode first, then decode the base64 span.
+  assert.equal(
+    extractBase64DecodedSpans(
+      decodePercentTolerant(Buffer.from(fixture, "utf8")).bytes,
+    ).some((span) => span.includes(secretBytes)),
+    true,
+  );
+
+  assert.equal(findSecretRepresentation(Buffer.from(fixture, "utf8"), representations), true);
+  assert.throws(
+    () => scrubAndVerifyText(fixture, { STABLY_API_KEY: secret }),
+    /secret representation remained after scrubbing/,
+  );
+  withTemporaryDirectory((directory) => {
+    fs.writeFileSync(path.join(directory, "offset-percent-of-base64.log"), fixture);
+    assertSecretDetected(
+      () =>
+        scanHostedEvidenceArtifacts({
+          workingDirectory: directory,
+          environment: { STABLY_API_KEY: secret },
+          artifactPaths: ["offset-percent-of-base64.log"],
         }),
       "scan path",
     );
@@ -758,7 +837,7 @@ test("seal path accepts deep percent encoding of benign text", () => {
   });
 });
 
-test("decompressed-bytes bound fails closed", () => {
+test("the ZIP decompressed-bytes bound fails closed before extraction", () => {
   withTemporaryDirectory((directory) => {
     const sourceDirectory = path.join(directory, "bound-source");
     fs.mkdirSync(sourceDirectory);
@@ -770,7 +849,8 @@ test("decompressed-bytes bound fails closed", () => {
     });
     assert.equal(zipped.status, 0, zipped.stderr);
     // The archive file itself is accounted first, so the bound admits it and leaves less
-    // than the 64-byte member: the member is what trips it.
+    // than the 64-byte member. The central directory's uncompressed total is enforced before
+    // a single byte is extracted, so the rejection names the archive, not an extracted member.
     const boundAdmittingOnlyTheArchive = fs.statSync(archivePath).size + 8;
     assert.throws(
       () =>
@@ -780,7 +860,69 @@ test("decompressed-bytes bound fails closed", () => {
           artifactPaths: ["bound.zip"],
           maxDecompressedBytes: boundAdmittingOnlyTheArchive,
         }),
-      /decompressed-bytes bound exceeded for artifact\[0\]#[a-f0-9]{12}\/entry\[\d+\]#[a-f0-9]{12}/,
+      (error) => {
+        assert.match(
+          error.message,
+          /^decompressed-bytes bound exceeded for artifact\[0\]#[a-f0-9]{12}: bound=\d+ observed=\d+$/,
+        );
+        assert.equal(
+          error.message.includes(`observed=${fs.statSync(archivePath).size + 64}`),
+          true,
+          error.message,
+        );
+        return true;
+      },
+    );
+  });
+});
+
+test("the TAR decompressed-bytes bound fails closed on the extracted member", () => {
+  withTemporaryDirectory((directory) => {
+    const sourceDirectory = path.join(directory, "tar-bound-source");
+    fs.mkdirSync(sourceDirectory);
+    fs.writeFileSync(path.join(sourceDirectory, "inner.txt"), "x".repeat(64));
+    const archivePath = path.join(directory, "bound.tar");
+    const tarred = spawnSync("tar", ["-cf", archivePath, "inner.txt"], {
+      cwd: sourceDirectory,
+      encoding: "utf8",
+    });
+    assert.equal(tarred.status, 0, tarred.stderr);
+    // TAR has no pre-read size index here, so the bound is enforced only as the extracted tree
+    // is walked: the rejection names the extracted member.
+    assert.throws(
+      () =>
+        scanHostedEvidenceArtifacts({
+          workingDirectory: directory,
+          environment: {},
+          artifactPaths: ["bound.tar"],
+          maxDecompressedBytes: fs.statSync(archivePath).size + 8,
+        }),
+      /^Error: decompressed-bytes bound exceeded for artifact\[0\]#[a-f0-9]{12}\/entry\[\d+\]#[a-f0-9]{12}: bound=\d+ observed=\d+$/,
+    );
+  });
+});
+
+test("a ZIP's expansion is accounted once, not once per accounting pass", () => {
+  withTemporaryDirectory((directory) => {
+    const sourceDirectory = path.join(directory, "single-count-source");
+    fs.mkdirSync(sourceDirectory);
+    const memberBytes = 4096;
+    fs.writeFileSync(path.join(sourceDirectory, "member.txt"), "z".repeat(memberBytes));
+    const archivePath = path.join(directory, "single-count.zip");
+    const zipped = spawnSync("zip", ["-q", "-0", archivePath, "member.txt"], {
+      cwd: sourceDirectory,
+      encoding: "utf8",
+    });
+    assert.equal(zipped.status, 0, zipped.stderr);
+    const scanned = scanHostedEvidenceArtifacts({
+      workingDirectory: directory,
+      environment: {},
+      artifactPaths: ["single-count.zip"],
+    });
+    // The pre-extraction reservation and the per-member walk measure the same 4096 bytes.
+    assert.equal(
+      scanned.accountedBytes,
+      fs.statSync(archivePath).size + memberBytes,
     );
   });
 });
@@ -847,6 +989,151 @@ test("the top-level payload file is accounted against the global bound", () => {
       /^Error: decompressed-bytes bound exceeded for artifact\[0\]#[a-f0-9]{12}: bound=512 observed=1024$/,
     );
   });
+});
+
+test("the accounted total is top-level file sizes plus every nested member's decompressed size", () => {
+  withTemporaryDirectory((directory) => {
+    // A payload of known on-disk size with a known nested layout: one plain file, one gzip, and
+    // one stored ZIP that itself carries a plain member and a gzip member.
+    const payloadDirectory = path.join(directory, "payload");
+    const zipSourceDirectory = path.join(directory, "zip-source");
+    fs.mkdirSync(payloadDirectory);
+    fs.mkdirSync(zipSourceDirectory);
+
+    const plainBytes = 1024;
+    const gzipInnerBytes = 4096;
+    const zipMemberBytes = 2048;
+    const zipGzipInnerBytes = 8192;
+    fs.writeFileSync(path.join(payloadDirectory, "plain.log"), "y".repeat(plainBytes));
+    fs.writeFileSync(
+      path.join(payloadDirectory, "inner.gz"),
+      zlib.gzipSync(Buffer.alloc(gzipInnerBytes, 0x67)),
+    );
+    fs.writeFileSync(
+      path.join(zipSourceDirectory, "member.txt"),
+      "m".repeat(zipMemberBytes),
+    );
+    fs.writeFileSync(
+      path.join(zipSourceDirectory, "nested.gz"),
+      zlib.gzipSync(Buffer.alloc(zipGzipInnerBytes, 0x6e)),
+    );
+    const storedZipPath = path.join(payloadDirectory, "stored.zip");
+    const zipped = spawnSync(
+      "zip",
+      ["-q", "-0", storedZipPath, "member.txt", "nested.gz"],
+      { cwd: zipSourceDirectory, encoding: "utf8" },
+    );
+    assert.equal(zipped.status, 0, zipped.stderr);
+
+    const topLevelFileBytes = ["plain.log", "inner.gz", "stored.zip"].reduce(
+      (total, name) => total + fs.statSync(path.join(payloadDirectory, name)).size,
+      0,
+    );
+    const nestedMemberBytes =
+      gzipInnerBytes +
+      zipMemberBytes +
+      fs.statSync(path.join(zipSourceDirectory, "nested.gz")).size +
+      zipGzipInnerBytes;
+    const documentedTotal = topLevelFileBytes + nestedMemberBytes;
+
+    const scanned = scanHostedEvidenceArtifacts({
+      workingDirectory: directory,
+      environment: {},
+      artifactPaths: ["payload"],
+    });
+    // The documented formula: every top-level payload file's on-disk size, plus every nested
+    // member's decompressed size. A change to what the scanner charges shows up here.
+    assert.equal(scanned.accountedBytes, documentedTotal);
+
+    // Independently: the bound observes exactly that total, so `accountedBytes` is the counter
+    // MAX_DECOMPRESSED_BYTES bounds and not a separately maintained number.
+    assert.throws(
+      () =>
+        scanHostedEvidenceArtifacts({
+          workingDirectory: directory,
+          environment: {},
+          artifactPaths: ["payload"],
+          maxDecompressedBytes: documentedTotal - 1,
+        }),
+      (error) => {
+        assert.match(
+          error.message,
+          new RegExp(
+            `^decompressed-bytes bound exceeded for artifact\\[0\\]#[a-f0-9]{12}(/entry\\[\\d+\\]#[a-f0-9]{12})*: ` +
+              `bound=${documentedTotal - 1} observed=${documentedTotal}$`,
+          ),
+          error.message,
+        );
+        return true;
+      },
+    );
+    assert.doesNotThrow(() =>
+      scanHostedEvidenceArtifacts({
+        workingDirectory: directory,
+        environment: {},
+        artifactPaths: ["payload"],
+        maxDecompressedBytes: documentedTotal,
+      }),
+    );
+  });
+});
+
+test("a member larger than the string ceiling fails closed as uninspectable", () => {
+  withTemporaryDirectory((directory) => {
+    const artifactBytes = 4096;
+    fs.writeFileSync(path.join(directory, "oversized.bin"), "b".repeat(artifactBytes));
+    assert.throws(
+      () =>
+        scanHostedEvidenceArtifacts({
+          workingDirectory: directory,
+          environment: { STABLY_API_KEY: "uninspectable-size-secret-sentinel" },
+          artifactPaths: ["oversized.bin"],
+          maxInspectableBytes: artifactBytes - 1,
+        }),
+      (error) => {
+        assert.match(
+          error.message,
+          new RegExp(
+            `^uninspectable-size member in artifact\\[0\\]#[a-f0-9]{12}: ` +
+              `bytes=${artifactBytes} limit=${artifactBytes - 1}$`,
+          ),
+        );
+        assert.equal(error.message.includes("oversized.bin"), false);
+        return true;
+      },
+    );
+    assert.doesNotThrow(() =>
+      scanHostedEvidenceArtifacts({
+        workingDirectory: directory,
+        environment: { STABLY_API_KEY: "uninspectable-size-secret-sentinel" },
+        artifactPaths: ["oversized.bin"],
+        maxInspectableBytes: artifactBytes,
+      }),
+    );
+  });
+});
+
+test("the real string ceiling classifies an over-long buffer instead of raising RangeError", () => {
+  // A backslash makes the JSON view decode the whole buffer; before this classification that
+  // path raised an unclassified `Cannot create a string longer than 0x1fffffe8 characters`.
+  const oversized = Buffer.alloc(MAX_INSPECTABLE_BYTES + 1, 0x5c);
+  assert.throws(
+    () =>
+      findSecretRepresentation(
+        oversized,
+        collectSecretByteRepresentations({ STABLY_API_KEY: "ceiling-secret-sentinel" }),
+        "artifact[0]#0123456789ab",
+      ),
+    (error) => {
+      assert.equal(
+        error.message,
+        `uninspectable-size member in artifact[0]#0123456789ab: ` +
+          `bytes=${MAX_INSPECTABLE_BYTES + 1} limit=${MAX_INSPECTABLE_BYTES}`,
+      );
+      return true;
+    },
+  );
+  assert.equal(MAX_INSPECTABLE_BYTES, bufferConstants.MAX_STRING_LENGTH);
 });
 
 test("seals, scans once, hashes, and records file digests plus the payload tar", () => {
