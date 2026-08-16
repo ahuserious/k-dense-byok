@@ -4,13 +4,10 @@
       "scripts/vendored-dist-*.mjs",
       "package.json",
       ".github/workflows/tests.yml",
-      "docs/preview-env.md"
-    ],
-    "C3": [
-      "scripts/hosted-evidence-*.mjs"
-    ],
-    "D3": [
-      ".github/workflows/stably-cloud.yml"
+      "docs/preview-env.md",
+      "scripts/ownership-check.mjs",
+      "scripts/ownership-check.test.mjs",
+      "server/test/pipelines-disabled.test.ts"
     ],
     "S1": [
       "web/src/app/page.tsx",
@@ -177,17 +174,260 @@
       "e2e/**",
       "playwright.config.*",
       ".stably/**",
+      ".github/workflows/stably-cloud.yml",
       "docs/e2e/**",
       "scripts/preview-*.mjs",
       "deploy/preview/**"
+    ],
+    "C3": [
+      "playwright.cloud.config.ts",
+      "playwright.live-alt.config.ts",
+      "scripts/hosted-evidence-manifest*.mjs"
+    ],
+    "C5": [
+      "config/token-ban.json",
+      "server/src/api/credentials.ts",
+      "server/src/env.ts",
+      "server/src/environment-files.ts",
+      "server/src/legacy-engine-data.ts",
+      "server/src/path-containment.ts",
+      "server/src/projects.ts",
+      "server/src/sandbox-fs.ts",
+      "server/test/credential-env-isolation.test.ts",
+      "server/test/env-isolation.test.ts"
     ]
   },
   "handoffs": [
     {
-      "from": "D3",
+      "from": "R1",
+      "to": "C1",
+      "date": "2026-08-16",
+      "path": "docs/OWNERSHIP.md",
+      "scope": "C1 ownership row and branch-prefix authorization documentation"
+    },
+    {
+      "from": "R1",
+      "to": "C1",
+      "date": "2026-08-16",
+      "path": "docs/inventory/ownership.json",
+      "scope": "C1 lane and reviewed handoff policy"
+    },
+    {
+      "from": "R1",
+      "to": "C1",
+      "date": "2026-08-16",
+      "path": "scripts/ownership-check.mjs",
+      "scope": "trusted-base changed-path authorization and rename endpoint enforcement"
+    },
+    {
+      "from": "S11",
+      "to": "C1",
+      "date": "2026-08-15",
+      "path": "scripts/preview-environment.mjs",
+      "scope": "vendored-dist environment and preview launcher isolation"
+    },
+    {
+      "from": "S11",
+      "to": "C1",
+      "date": "2026-08-15",
+      "path": "scripts/preview-environment.test.mjs",
+      "scope": "vendored-dist environment and lock regression coverage"
+    },
+    {
+      "from": "S11",
+      "to": "C1",
+      "date": "2026-08-15",
+      "path": "scripts/preview-up.mjs",
+      "scope": "prepareVendoredDist and prebuild-isolation ordering"
+    },
+    {
+      "from": "S11",
+      "to": "C1",
+      "date": "2026-08-16",
+      "path": "scripts/preview-launcher-observer.mjs",
+      "scope": "workflow-engine readiness and fatal-exit observer anchors"
+    },
+    {
+      "from": "S2",
+      "to": "C1",
+      "date": "2026-08-15",
+      "path": "start.mjs",
+      "scope": "vendored-dist build, engine-port ownership, readiness, and disabled-state sections"
+    },
+    {
+      "from": "S2",
+      "to": "C1",
+      "date": "2026-08-16",
+      "path": "server/src/agent/pipeline-engine/client.ts",
+      "scope": "launcher-disabled fail-before-fetch guard"
+    },
+    {
+      "from": "S5",
+      "to": "C1",
+      "date": "2026-08-16",
+      "path": "server/src/config.ts",
+      "scope": "explicit pipeline-engine disabled configuration sentinel"
+    },
+    {
+      "from": "S4",
+      "to": "C1",
+      "date": "2026-08-16",
+      "path": "server/src/api/pipelines.ts",
+      "scope": "disabled admission lookup and reconciliation no-fetch guard only"
+    },
+    {
+      "from": "R1",
       "to": "C3",
+      "date": "2026-08-16",
+      "path": "docs/OWNERSHIP.md",
+      "scope": "C3 ownership row"
+    },
+    {
+      "from": "R1",
+      "to": "C3",
+      "date": "2026-08-16",
+      "path": "docs/inventory/ownership.json",
+      "scope": "C3 lane and reviewed handoff policy"
+    },
+    {
+      "from": "C1",
+      "to": "C3",
+      "date": "2026-08-16",
+      "path": ".github/workflows/tests.yml",
+      "scope": "hosted evidence CI integration"
+    },
+    {
+      "from": "C1",
+      "to": "C3",
+      "date": "2026-08-16",
+      "path": "package.json",
+      "scope": "hosted evidence scripts"
+    },
+    {
+      "from": "S11",
+      "to": "C3",
+      "date": "2026-08-16",
+      "path": "docs/e2e/README.md",
+      "scope": "hosted and live E2E instructions"
+    },
+    {
+      "from": "S11",
+      "to": "C3",
+      "date": "2026-08-16",
+      "path": "e2e/config-contracts.node.mjs",
+      "scope": "hosted and live E2E configuration contract"
+    },
+    {
+      "from": "S11",
+      "to": "C3",
+      "date": "2026-08-16",
+      "path": "e2e/global-setup.cloud.ts",
+      "scope": "cloud E2E setup"
+    },
+    {
+      "from": "S11",
+      "to": "C3",
+      "date": "2026-08-16",
+      "path": "e2e/global-setup.ts",
+      "scope": "local E2E setup"
+    },
+    {
+      "from": "S11",
+      "to": "C3",
+      "date": "2026-08-16",
+      "path": "e2e/item-count-reporter.ts",
+      "scope": "E2E evidence counts"
+    },
+    {
+      "from": "S11",
+      "to": "C3",
+      "date": "2026-08-16",
+      "path": "e2e/live-backend.spec.ts",
+      "scope": "live backend E2E proof"
+    },
+    {
+      "from": "S11",
+      "to": "C3",
+      "date": "2026-08-16",
+      "path": "e2e/live-fixtures.ts",
+      "scope": "live E2E fixtures"
+    },
+    {
+      "from": "S11",
+      "to": "C3",
+      "date": "2026-08-16",
+      "path": "e2e/service-origins.ts",
+      "scope": "E2E service origin resolution"
+    },
+    {
+      "from": "S11",
+      "to": "C3",
+      "date": "2026-08-16",
+      "path": "e2e/template-source.ts",
+      "scope": "E2E template provenance"
+    },
+    {
+      "from": "S11",
+      "to": "C3",
+      "date": "2026-08-16",
+      "path": "playwright.config.ts",
+      "scope": "E2E configuration split"
+    },
+    {
+      "from": "R1",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "docs/OWNERSHIP.md",
+      "scope": "C5 ownership row"
+    },
+    {
+      "from": "R1",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "docs/inventory/ownership.json",
+      "scope": "C5 lane and reviewed handoff policy"
+    },
+    {
+      "from": "C1",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "docs/preview-env.md",
+      "scope": "server environment-root isolation documentation"
+    },
+    {
+      "from": "S11",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-environment.mjs",
+      "scope": "server environment-root preview wiring"
+    },
+    {
+      "from": "S11",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-environment.test.mjs",
+      "scope": "server environment-root preview regression tests"
+    },
+    {
+      "from": "S11",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-up.mjs",
+      "scope": "server environment-root preview wiring"
+    },
+    {
+      "from": "S4",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "server/src/workflows/supervisor/credentials.ts",
+      "scope": "credential persistence environment-root isolation"
+    },
+    {
+      "from": "S11",
+      "to": "C3",
+      "date": "2026-08-16",
       "path": ".github/workflows/stably-cloud.yml",
-      "scope": "Orchestrator-authorized hosted evidence manifest, scrubbed-log, final-scan, and gated-upload steps from Rounds 6-9."
+      "scope": "hosted evidence manifest step and artifact upload"
     }
   ]
 }
