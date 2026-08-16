@@ -42,18 +42,26 @@ credential writes land there; the checkout's `.env` is never read or written
 in preview mode. The overlay symlinks the checked-out `server/` tree and runs
 the checkout's exact `start.mjs` and `env-file.mjs` bytes. Its `web/` project
 root is instead the gitignored physical directory
-`web/.preview/launch/web`: each safe checkout entry, including source
-directories and `node_modules`, is linked individually; every automatic env
-filename is omitted; and `.next` is a private real directory inside that
-projection. The temporary launch overlay links its `web/` entry to this
-checkout-local projection. Consequently every projected symlink resolves under
-Turbopack's inferred checkout filesystem root; preview creation rejects any web
-entry whose canonical target escapes that root. Next 16 has no supported switch
-that disables its forced development env-file reload, so the projection also
-keeps env files created or modified in the checkout after readiness outside
-Next's watched project root. Owned preview teardown removes the marked
-projection. Dependencies must already be installed; the preview npm shim
-suppresses the launcher's update lookup and forces npm offline.
+`web/.preview/launch/web`. Preview startup recreates it and copies every web-root
+entry except `.next`, `.preview`, `node_modules`, package-manager lockfiles, and
+the automatic env filenames. This includes the physical `src/app` route tree,
+`public`, package metadata, and Next, TypeScript, PostCSS, Tailwind, and other
+root configuration files; the copy uses `fs.cpSync` without dereferencing
+source symlinks. Lockfiles stay at the checkout ancestor so Turbopack does not
+infer the projection itself as its filesystem root. The projection also copies
+`server/package.json` into its sibling `server/` directory because the copied
+Next config reads that version source through `../server/package.json`. Startup
+prints the measured copy time. `node_modules` alone remains linked within the
+checkout, and `.next` is a private real directory inside the projection. The
+temporary launch overlay links its `web/` entry to this checkout-local project.
+Consequently Turbopack discovers physical App Router files while every retained
+symlink resolves under its inferred checkout filesystem root; preview creation
+rejects any root entry whose canonical target escapes that root. Next 16 has no
+supported switch that disables its forced development env-file reload, so the
+projection also keeps env files created or modified in the checkout after
+readiness outside Next's watched project root. Owned preview teardown removes
+the marked projection. Dependencies must already be installed; the preview npm
+shim suppresses the launcher's update lookup and forces npm offline.
 
 Backend env selection fails closed. With `KADY_PREVIEW=1`, `KADY_ENV_FILE`
 must be present, non-blank, absolute, and resolve to a regular file under the

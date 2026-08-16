@@ -21,6 +21,13 @@ const AUTOMATIC_ENV_FILE_NAMES = [
   ".env.test",
   ".env.test.local",
 ];
+const PACKAGE_MANAGER_LOCK_FILE_NAMES = [
+  "bun.lock",
+  "bun.lockb",
+  "package-lock.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+];
 const PREVIEW_WEB_PROJECTION_MARKER = "kady-preview-web-projection-v1\n";
 const LAUNCHER_HELPER_ANCHOR =
   "const sleep = (ms) => new Promise((r) => setTimeout(r, ms));";
@@ -182,10 +189,13 @@ export function preparePreviewWebRoot(repositoryRoot, launchRoot) {
   );
 
   try {
+    const copyStartedAt = process.hrtime.bigint();
     for (const entry of fs.readdirSync(checkoutWebRoot, { withFileTypes: true })) {
       if (
         entry.name === ".next" ||
         entry.name === ".preview" ||
+        entry.name === "node_modules" ||
+        PACKAGE_MANAGER_LOCK_FILE_NAMES.includes(entry.name) ||
         AUTOMATIC_ENV_FILE_NAMES.includes(entry.name)
       ) {
         continue;
@@ -200,31 +210,46 @@ export function preparePreviewWebRoot(repositoryRoot, launchRoot) {
           `Preview web projection refuses symlink target outside the checkout: ${checkoutEntry}.`,
         );
       }
-      fs.symlinkSync(
+      fs.cpSync(
         checkoutEntry,
         path.join(projectedWebRoot, entry.name),
-        fs.statSync(checkoutEntry).isDirectory() ? "dir" : "file",
+        { recursive: true, dereference: false },
       );
     }
+    const projectedServerRoot = path.join(projectionLaunchRoot, "server");
+    fs.mkdirSync(projectedServerRoot, { mode: 0o700 });
+    fs.cpSync(
+      path.join(canonicalRepositoryRoot, "server", "package.json"),
+      path.join(projectedServerRoot, "package.json"),
+      { dereference: false },
+    );
+    const copyElapsedMilliseconds =
+      Number(process.hrtime.bigint() - copyStartedAt) / 1_000_000;
 
-    const projectedNodeModules = path.join(projectedWebRoot, "node_modules");
-    let nodeModulesStat;
+    const checkoutNodeModules = path.join(checkoutWebRoot, "node_modules");
+    let canonicalNodeModules;
     try {
-      nodeModulesStat = fs.lstatSync(projectedNodeModules);
+      canonicalNodeModules = fs.realpathSync(checkoutNodeModules);
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
+      throw new Error(`Preview web projection requires ${checkoutNodeModules}.`);
+    }
+    if (
+      canonicalNodeModules !== canonicalRepositoryRoot &&
+      !canonicalNodeModules.startsWith(`${canonicalRepositoryRoot}${path.sep}`)
+    ) {
       throw new Error(
-        `Preview web projection requires ${path.join(checkoutWebRoot, "node_modules")}.`,
+        `Preview web projection refuses node_modules outside the checkout: ${checkoutNodeModules}.`,
       );
     }
-    if (!nodeModulesStat.isSymbolicLink()) {
-      throw new Error(`Preview web node_modules must be linked: ${projectedNodeModules}`);
-    }
+    const projectedNodeModules = path.join(projectedWebRoot, "node_modules");
+    fs.symlinkSync(checkoutNodeModules, projectedNodeModules, "dir");
 
     fs.mkdirSync(path.join(projectedWebRoot, ".next"), { mode: 0o700 });
     fs.symlinkSync(projectedWebRoot, path.join(launchRoot, "web"), "dir");
     console.log(
-      `Preview web projection: ${projectedWebRoot} (node_modules linked within checkout).`,
+      `Preview web projection copied in ${copyElapsedMilliseconds.toFixed(1)} ms: ` +
+        `${projectedWebRoot} (node_modules linked within checkout).`,
     );
     return projectedWebRoot;
   } catch (error) {

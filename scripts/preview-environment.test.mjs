@@ -340,15 +340,28 @@ test("projects the web root without automatic env files or checkout build output
   try {
     const repositoryRoot = path.join(temporaryRoot, "checkout");
     const checkoutWebRoot = path.join(repositoryRoot, "web");
+    const checkoutServerRoot = path.join(repositoryRoot, "server");
     const launchRoot = path.join(temporaryRoot, "state", "launch");
-    const checkoutSourceRoot = path.join(checkoutWebRoot, "src");
+    const checkoutAppRoot = path.join(checkoutWebRoot, "src", "app");
     const checkoutNodeModules = path.join(checkoutWebRoot, "node_modules");
-    fs.mkdirSync(checkoutSourceRoot, { recursive: true });
+    const checkoutPublicRoot = path.join(checkoutWebRoot, "public");
+    fs.mkdirSync(checkoutAppRoot, { recursive: true });
     fs.mkdirSync(checkoutNodeModules, { recursive: true });
+    fs.mkdirSync(checkoutPublicRoot, { recursive: true });
+    fs.mkdirSync(checkoutServerRoot, { recursive: true });
     fs.mkdirSync(path.join(checkoutWebRoot, ".next"), { recursive: true });
     fs.mkdirSync(launchRoot, { recursive: true });
-    fs.writeFileSync(path.join(checkoutSourceRoot, "page.tsx"), "export default 1;\n");
+    fs.writeFileSync(path.join(checkoutAppRoot, "page.tsx"), "export default 1;\n");
+    fs.writeFileSync(path.join(checkoutPublicRoot, "marker.txt"), "public marker\n");
     fs.writeFileSync(path.join(checkoutWebRoot, "package.json"), "{}\n");
+    fs.writeFileSync(path.join(checkoutWebRoot, "package-lock.json"), "{}\n");
+    fs.writeFileSync(
+      path.join(checkoutServerRoot, "package.json"),
+      '{"version":"1.2.3"}\n',
+    );
+    fs.writeFileSync(path.join(checkoutWebRoot, "next.config.ts"), "export default {};\n");
+    fs.writeFileSync(path.join(checkoutWebRoot, "tsconfig.json"), "{}\n");
+    fs.writeFileSync(path.join(checkoutWebRoot, "postcss.config.mjs"), "export default {};\n");
     fs.writeFileSync(path.join(checkoutWebRoot, ".next", "checkout.txt"), "stale\n");
     for (const fileName of [
       ".env",
@@ -376,13 +389,26 @@ test("projects the web root without automatic env files or checkout build output
     );
     assert.equal(fs.lstatSync(projectedWebRoot).isDirectory(), true);
     assert.equal(fs.lstatSync(projectedWebRoot).isSymbolicLink(), false);
-    assert.equal(fs.lstatSync(path.join(projectedWebRoot, "src")).isSymbolicLink(), true);
+    for (const copiedEntry of [
+      "src",
+      "public",
+      "package.json",
+      "next.config.ts",
+      "tsconfig.json",
+      "postcss.config.mjs",
+    ]) {
+      assert.equal(
+        fs.lstatSync(path.join(projectedWebRoot, copiedEntry)).isSymbolicLink(),
+        false,
+        `${copiedEntry} must be copied`,
+      );
+    }
     assert.equal(
-      fs.lstatSync(path.join(projectedWebRoot, "node_modules")).isSymbolicLink(),
+      fs.lstatSync(path.join(projectedWebRoot, "src", "app", "page.tsx")).isFile(),
       true,
     );
     assert.equal(
-      fs.lstatSync(path.join(projectedWebRoot, "package.json")).isSymbolicLink(),
+      fs.lstatSync(path.join(projectedWebRoot, "node_modules")).isSymbolicLink(),
       true,
     );
     assert.equal(fs.lstatSync(path.join(projectedWebRoot, ".next")).isDirectory(), true);
@@ -393,6 +419,14 @@ test("projects the web root without automatic env files or checkout build output
       fs.realpathSync(checkoutNodeModules),
     );
     assert.equal(fs.existsSync(path.join(projectedWebRoot, ".preview")), false);
+    assert.equal(fs.existsSync(path.join(projectedWebRoot, "package-lock.json")), false);
+    assert.equal(
+      fs.readFileSync(
+        path.join(path.dirname(projectedWebRoot), "server", "package.json"),
+        "utf8",
+      ),
+      '{"version":"1.2.3"}\n',
+    );
     for (const fileName of [
       ".env",
       ".env.local",
@@ -406,10 +440,10 @@ test("projects the web root without automatic env files or checkout build output
       assert.equal(fs.existsSync(path.join(projectedWebRoot, fileName)), false);
     }
 
-    fs.writeFileSync(path.join(checkoutSourceRoot, "page.tsx"), "export default 2;\n");
+    fs.writeFileSync(path.join(checkoutAppRoot, "page.tsx"), "export default 2;\n");
     assert.equal(
-      fs.readFileSync(path.join(projectedWebRoot, "src", "page.tsx"), "utf8"),
-      "export default 2;\n",
+      fs.readFileSync(path.join(projectedWebRoot, "src", "app", "page.tsx"), "utf8"),
+      "export default 1;\n",
     );
 
     for (const fileName of [
