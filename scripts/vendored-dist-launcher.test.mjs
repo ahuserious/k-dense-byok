@@ -8,9 +8,11 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { applyEnvFile } from "../env-file.mjs";
 import { createLaunchOverlay, previewEnvironment } from "./preview-environment.mjs";
+import { writeVendoredDistManifest, writeVendoredInstallStamp } from "./vendored-dist-check.mjs";
 import {
   classifyWorkflowEngineBuildOutcome,
   classifyWorkflowEngineListener,
+  previewVendoredDistFingerprintEnvironment,
   resolveWorkflowEnginePort,
   terminateOwnedProcessTree,
   waitForOwnedWorkflowEngine,
@@ -58,6 +60,44 @@ async function reapProcessGroups(pids) {
     if (livePid === undefined) return;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
+  assert.fail(`owned process groups survived cleanup: ${[...new Set(pids)].join(", ")}`);
+}
+
+function writeFixtureFile(root, relativePath, content = "") {
+  const filePath = path.join(root, relativePath);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, content);
+  return filePath;
+}
+
+function prepareHermeticLauncherCheckout(stateRoot, environment, ports) {
+  const checkoutRoot = path.join(stateRoot, "checkout");
+  const vendoredRoot = path.join("server", "vendor", "pipeline-engine");
+  const webRoot = path.join(vendoredRoot, "packages", "web");
+  writeFixtureFile(checkoutRoot, path.join(vendoredRoot, "package.json"), "{}\n");
+  writeFixtureFile(checkoutRoot, path.join(vendoredRoot, "bun.lock"), "lockfileVersion = 1\n");
+  writeFixtureFile(checkoutRoot, path.join(vendoredRoot, "bunfig.toml"), "[test]\nroot = './packages'\n");
+  writeFixtureFile(checkoutRoot, path.join(vendoredRoot, "tsconfig.json"), "{}\n");
+  for (const packageName of ["core", "workflows"]) {
+    writeFixtureFile(checkoutRoot, path.join(vendoredRoot, "packages", packageName, "package.json"), "{}\n");
+    writeFixtureFile(checkoutRoot, path.join(vendoredRoot, "packages", packageName, "tsconfig.json"), "{}\n");
+    writeFixtureFile(checkoutRoot, path.join(vendoredRoot, "packages", packageName, "src", "index.ts"), "export {};\n");
+  }
+  writeFixtureFile(checkoutRoot, path.join(webRoot, "package.json"), "{}\n");
+  writeFixtureFile(checkoutRoot, path.join(webRoot, "tsconfig.json"), "{}\n");
+  writeFixtureFile(checkoutRoot, path.join(webRoot, "vite.config.ts"), "export default {};\n");
+  writeFixtureFile(checkoutRoot, path.join(webRoot, "src", "main.tsx"), "export {};\n");
+  writeFixtureFile(checkoutRoot, path.join(webRoot, "public", "logo.svg"), "<svg/>\n");
+  writeFixtureFile(checkoutRoot, path.join(webRoot, "index.html"), "<div id='root'></div>\n");
+  writeFixtureFile(checkoutRoot, path.join(webRoot, "dist", "index.html"), "<script src='/assets/app.js'></script>\n");
+  writeFixtureFile(checkoutRoot, path.join(webRoot, "dist", "assets", "app.js"), "console.log('fixture');\n");
+  fs.mkdirSync(path.join(checkoutRoot, vendoredRoot, "node_modules"), { recursive: true });
+  writeFixtureFile(checkoutRoot, path.join("server", "node_modules", "tsx", "dist", "cli.mjs"), "process.exit(0);\n");
+  writeFixtureFile(checkoutRoot, path.join("web", "node_modules", "next", "dist", "bin", "next"), "process.exit(0);\n");
+  const buildEnvironment = previewVendoredDistFingerprintEnvironment(environment, ports.engine);
+  writeVendoredInstallStamp(checkoutRoot, buildEnvironment);
+  writeVendoredDistManifest(checkoutRoot, buildEnvironment);
+  return checkoutRoot;
 }
 
 async function waitForChildExit(child, timeoutMs = 2_000) {
@@ -508,41 +548,34 @@ test(
     let launcher;
     let serviceStatePath;
     let enginePid;
+    const observedPids = new Set();
     try {
       ports = {
         backend: await reserveLocalPort(),
         frontend: await reserveLocalPort(),
         engine: await reserveLocalPort(),
       };
-      // Integration-only setup: readiness needs a real manifest whose build
-      // environment names this reserved engine port. The entire test is gated
-      // by KADY_SOCKET_TESTS=1, and the real staged build is inside cleanup.
-      const build = spawnSync("npm", ["run", "build:vendored-dist"], {
-        cwd: repositoryRoot,
-        env: { ...process.env, NODE_ENV: "production", PORT: String(ports.engine) },
-        encoding: "utf-8",
-      });
-      assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
-
       const fakeNpm = path.join(stateRoot, "fake-npm");
+      const fakeGit = path.join(stateRoot, "fake-git");
       fs.writeFileSync(fakeNpm, `#!${process.execPath}\nprocess.exit(0);\n`, { mode: 0o700 });
-      const gitPath = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf-8" }).stdout.trim();
+      fs.writeFileSync(fakeGit, `#!${process.execPath}
+const args = process.argv.slice(2).join(" ");
+if (args === "--version") console.log("git version 2.0.0");
+else if (args === "rev-parse HEAD") console.log("${"a".repeat(40)}");
+else process.exit(2);
+`, { mode: 0o700 });
       const { launchRoot, shimDirectory } = createLaunchOverlay(
         repositoryRoot,
         stateRoot,
         fakeNpm,
-        gitPath,
+        fakeGit,
       );
-      // This exercises normal launcher dependency flow with a no-op npm, while
-      // retaining the overlay's byte-derived launcher instrumentation.
-      fs.copyFileSync(fakeNpm, path.join(shimDirectory, "npm"));
-      const bunVersion = spawnSync("bun", ["--version"], { encoding: "utf-8" }).stdout.trim();
       const fakeBun = path.join(shimDirectory, "bun");
       fs.writeFileSync(
         fakeBun,
         `#!${process.execPath}
 import http from "node:http";
-if (process.argv.includes("--version")) { console.log(${JSON.stringify(bunVersion)}); process.exit(0); }
+if (process.argv.includes("--version")) { console.log("1.3.8"); process.exit(0); }
 const server = http.createServer((_request, response) => { response.statusCode = 503; response.end("not ready"); });
 const stop = () => server.close(() => process.exit(0));
 process.on("SIGINT", stop); process.on("SIGTERM", stop); process.on("SIGHUP", stop);
@@ -550,11 +583,15 @@ server.listen(Number(process.env.PORT), "127.0.0.1");
 `,
         { mode: 0o700 },
       );
+      fs.writeFileSync(path.join(shimDirectory, "uv"), `#!${process.execPath}\nconsole.log("uv 0.8.0");\n`, { mode: 0o700 });
       serviceStatePath = path.join(stateRoot, "services.json");
       fs.writeFileSync(serviceStatePath, '{"version":1,"services":{}}\n');
       const environment = previewEnvironment(stateRoot, launchRoot, shimDirectory, ports);
-      delete environment.KADY_PREVIEW;
-      environment.NODE_ENV = "production";
+      const fixtureRoot = prepareHermeticLauncherCheckout(stateRoot, environment, ports);
+      fs.rmSync(path.join(launchRoot, "server"), { force: true });
+      fs.rmSync(path.join(launchRoot, "web"), { force: true });
+      fs.symlinkSync(path.join(fixtureRoot, "server"), path.join(launchRoot, "server"), "dir");
+      fs.symlinkSync(path.join(fixtureRoot, "web"), path.join(launchRoot, "web"), "dir");
       launcher = spawn(
         process.execPath,
         [path.join(launchRoot, "start.mjs"), "--no-browser"],
@@ -572,6 +609,9 @@ server.listen(Number(process.env.PORT), "127.0.0.1");
       let state;
       while (Date.now() < deadline) {
         state = JSON.parse(fs.readFileSync(serviceStatePath, "utf-8"));
+        for (const service of Object.values(state.services ?? {})) {
+          if (Number.isSafeInteger(service?.pid)) observedPids.add(service.pid);
+        }
         if (state.services?.["pipeline-engine"]?.state === "spawned") break;
         if (launcher.exitCode !== null) assert.fail(`launcher exited before engine readiness\n${output}`);
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -597,10 +637,9 @@ server.listen(Number(process.env.PORT), "127.0.0.1");
         try { process.kill(-launcher.pid, "SIGKILL"); } catch { /* already gone */ }
       }
       await waitForChildExit(launcher);
-      await reapProcessGroups([
-        ...recordedServicePids(serviceStatePath),
-        ...(Number.isSafeInteger(enginePid) ? [enginePid] : []),
-      ]);
+      for (const pid of recordedServicePids(serviceStatePath)) observedPids.add(pid);
+      if (Number.isSafeInteger(enginePid)) observedPids.add(enginePid);
+      await reapProcessGroups([...observedPids]);
       await assertLocalPortClosed(ports?.engine, "workflow engine port leaked during test cleanup");
       fs.rmSync(stateRoot, { recursive: true, force: true });
     }
@@ -608,7 +647,7 @@ server.listen(Number(process.env.PORT), "127.0.0.1");
 );
 
 test(
-  "second launcher signal force-reaps an IPC-stuck backend process group",
+  "second launcher signal force-reaps an IPC-stuck backend and detached workflow supervisor",
   {
     skip: process.env.KADY_SOCKET_TESTS === "1" && process.platform !== "win32"
       ? false
@@ -618,6 +657,8 @@ test(
     const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-launcher-force-"));
     const serviceStatePath = path.join(stateRoot, "services.json");
     const shutdownReceiptPath = path.join(stateRoot, "backend-received-shutdown");
+    const supervisorPidPath = path.join(stateRoot, "supervisor.pid");
+    const observedPids = new Set();
     let launcher;
     let ports;
     try {
@@ -629,7 +670,12 @@ test(
       const fakeNpm = path.join(stateRoot, "fake-npm");
       const fakeGit = path.join(stateRoot, "fake-git");
       fs.writeFileSync(fakeNpm, `#!${process.execPath}\nprocess.exit(0);\n`, { mode: 0o700 });
-      fs.writeFileSync(fakeGit, `#!${process.execPath}\nconsole.log("git version 2.0.0");\n`, { mode: 0o700 });
+      fs.writeFileSync(fakeGit, `#!${process.execPath}
+const args = process.argv.slice(2).join(" ");
+if (args === "--version") console.log("git version 2.0.0");
+else if (args === "rev-parse HEAD") console.log("${"b".repeat(40)}");
+else process.exit(2);
+`, { mode: 0o700 });
       const { launchRoot, shimDirectory } = createLaunchOverlay(
         repositoryRoot,
         stateRoot,
@@ -638,20 +684,40 @@ test(
       );
       fs.writeFileSync(
         path.join(shimDirectory, "bun"),
-        `#!${process.execPath}\nif (process.argv.includes("--version")) console.log("1.2.0");\n`,
+        `#!${process.execPath}
+import http from "node:http";
+if (process.argv.includes("--version")) { console.log("1.3.8"); process.exit(0); }
+const server = http.createServer((_request, response) => response.end("healthy"));
+process.on("SIGTERM", () => {}); process.on("SIGINT", () => {});
+server.listen(Number(process.env.PORT), "127.0.0.1");
+`,
         { mode: 0o700 },
       );
+      fs.writeFileSync(path.join(shimDirectory, "uv"), `#!${process.execPath}\nconsole.log("uv 0.8.0");\n`, { mode: 0o700 });
 
-      const fakeServerRoot = path.join(stateRoot, "fake-server");
-      const fakeWebRoot = path.join(stateRoot, "fake-web");
+      const environment = previewEnvironment(stateRoot, launchRoot, shimDirectory, ports, {
+        PATH: process.env.PATH,
+        OLLAMA_BASE_URL: "http://127.0.0.1:9",
+      });
+      const checkoutRoot = prepareHermeticLauncherCheckout(stateRoot, environment, ports);
+      const fakeServerRoot = path.join(checkoutRoot, "server");
+      const fakeWebRoot = path.join(checkoutRoot, "web");
       const fakeBackend = path.join(fakeServerRoot, "node_modules", "tsx", "dist", "cli.mjs");
       const fakeFrontend = path.join(fakeWebRoot, "node_modules", "next", "dist", "bin", "next");
       fs.mkdirSync(path.dirname(fakeBackend), { recursive: true });
       fs.mkdirSync(path.dirname(fakeFrontend), { recursive: true });
       fs.writeFileSync(
         fakeBackend,
-        `import fs from "node:fs";
+        `import { spawn } from "node:child_process";
+import fs from "node:fs";
 import http from "node:http";
+const supervisor = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});process.on('SIGINT',()=>{});setInterval(()=>{},1000)"], {
+  detached: true,
+  stdio: "ignore",
+});
+supervisor.unref();
+fs.writeFileSync(${JSON.stringify(supervisorPidPath)}, String(supervisor.pid));
+process.send?.({ type: "kady-supervisor", pid: supervisor.pid });
 const server = http.createServer((_request, response) => response.end("backend"));
 process.on("message", (message) => {
   if (message?.type === "kady-shutdown") {
@@ -678,10 +744,6 @@ server.listen(Number(process.argv[portIndex + 1]), "127.0.0.1");
       fs.symlinkSync(fakeWebRoot, path.join(launchRoot, "web"), "dir");
       fs.writeFileSync(serviceStatePath, '{"version":1,"services":{}}\n');
 
-      const environment = previewEnvironment(stateRoot, launchRoot, shimDirectory, ports, {
-        PATH: process.env.PATH,
-        OLLAMA_BASE_URL: "http://127.0.0.1:9",
-      });
       launcher = spawn(
         process.execPath,
         [path.join(launchRoot, "start.mjs"), "--no-browser"],
@@ -700,14 +762,25 @@ server.listen(Number(process.argv[portIndex + 1]), "127.0.0.1");
       let state;
       while (Date.now() < startupDeadline) {
         state = JSON.parse(fs.readFileSync(serviceStatePath, "utf-8"));
-        if (state.services?.backend?.state === "spawned" && state.services?.frontend?.state === "spawned") break;
+        for (const service of Object.values(state.services ?? {})) {
+          if (Number.isSafeInteger(service?.pid)) observedPids.add(service.pid);
+        }
+        if (state.services?.backend?.state === "spawned" &&
+            state.services?.frontend?.state === "spawned" &&
+            state.services?.["pipeline-engine"]?.state === "spawned" &&
+            state.services?.["workflow-supervisor"]?.state === "spawned") break;
         if (launcher.exitCode !== null) assert.fail(`launcher exited before fake services started\n${output}`);
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
       const backendPid = state?.services?.backend?.pid;
       const frontendPid = state?.services?.frontend?.pid;
+      const enginePid = state?.services?.["pipeline-engine"]?.pid;
+      const supervisorPid = state?.services?.["workflow-supervisor"]?.pid;
       assert.ok(Number.isSafeInteger(backendPid), output);
       assert.ok(Number.isSafeInteger(frontendPid), output);
+      assert.ok(Number.isSafeInteger(enginePid), output);
+      assert.ok(Number.isSafeInteger(supervisorPid), output);
+      assert.equal(supervisorPid, Number(fs.readFileSync(supervisorPidPath, "utf-8")), output);
       await waitForLocalPortOpen(ports.backend, "fake backend");
       await waitForLocalPortOpen(ports.frontend, "fake frontend");
 
@@ -731,6 +804,8 @@ server.listen(Number(process.argv[portIndex + 1]), "127.0.0.1");
       assert.match(output, /Forcing shutdown: \d+ owned process trees killed/);
       assert.throws(() => process.kill(-backendPid, 0), (error) => error?.code === "ESRCH");
       assert.throws(() => process.kill(-frontendPid, 0), (error) => error?.code === "ESRCH");
+      assert.throws(() => process.kill(-enginePid, 0), (error) => error?.code === "ESRCH");
+      assert.throws(() => process.kill(supervisorPid, 0), (error) => error?.code === "ESRCH");
       await assertLocalPortClosed(ports.backend, "backend listener survived forced shutdown");
       await assertLocalPortClosed(ports.frontend, "frontend listener survived forced shutdown");
     } finally {
@@ -738,7 +813,9 @@ server.listen(Number(process.argv[portIndex + 1]), "127.0.0.1");
         try { process.kill(-launcher.pid, "SIGKILL"); } catch { /* already gone */ }
       }
       await waitForChildExit(launcher);
-      await reapProcessGroups(recordedServicePids(serviceStatePath));
+      for (const pid of recordedServicePids(serviceStatePath)) observedPids.add(pid);
+      if (fs.existsSync(supervisorPidPath)) observedPids.add(Number(fs.readFileSync(supervisorPidPath, "utf-8")));
+      await reapProcessGroups([...observedPids].filter(Number.isSafeInteger));
       await assertLocalPortClosed(ports?.backend, "backend listener leaked during test cleanup");
       await assertLocalPortClosed(ports?.frontend, "frontend listener leaked during test cleanup");
       fs.rmSync(stateRoot, { recursive: true, force: true });

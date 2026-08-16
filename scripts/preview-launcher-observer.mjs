@@ -1,19 +1,22 @@
 const OBSERVER_HELPER_ANCHOR = "const sleep = (ms) => new Promise((r) => setTimeout(r, ms));";
-const SERVICE_EXIT_ANCHOR = `  registerChild(child, role);
-  // Fires for both exit-code and signal deaths, during boot and after.
+const SERVICE_SPAWN_ANCHOR = `  registerChild(child, role);
+  if (role === "backend") {`;
+const SERVICE_EXIT_ANCHOR = `  // Fires for both exit-code and signal deaths, during boot and after.
   child.on("exit", () => {`;
 const ENGINE_SPAWN_ANCHOR = `  registerChild(child, "pipeline-engine");
   let childExited = false;
   const trackEarlyExit = () => {
     childExited = true;
   };`;
+const SUPERVISOR_OWNERSHIP_ANCHOR =
+  "      forcedSupervisorOwners.set(message.pid, { pid: message.pid, identity });";
 
 const OBSERVER_HELPER = `
 
 // The hermetic preview overlay sets this path. The repository launcher stays
 // unchanged; only its disposable copy records direct service process events.
 const previewServiceStateFile = process.env.KADY_PREVIEW_SERVICE_STATE_FILE;
-function recordPreviewServiceState(role, pid, state, exitCode = null, signal = null) {
+function recordPreviewServiceState(role, pid, state, exitCode = null, signal = null, details = {}) {
   if (!previewServiceStateFile) return;
   let current = { version: 1, services: {} };
   try {
@@ -30,6 +33,7 @@ function recordPreviewServiceState(role, pid, state, exitCode = null, signal = n
     state,
     exitCode,
     signal,
+    ...details,
     updatedAt: new Date().toISOString(),
   };
   const temporaryPath = \`\${previewServiceStateFile}.\${process.pid}.tmp\`;
@@ -57,13 +61,19 @@ export function instrumentPreviewLauncher(source) {
   );
   instrumented = replaceExactlyOnce(
     instrumented,
-    SERVICE_EXIT_ANCHOR,
+    SERVICE_SPAWN_ANCHOR,
     `  registerChild(child, role);
   recordPreviewServiceState(child.kadyRole, child.pid, "spawned");
-  // Fires for both exit-code and signal deaths, during boot and after.
+  if (role === "backend") {`,
+    "backend/frontend service spawn hook",
+  );
+  instrumented = replaceExactlyOnce(
+    instrumented,
+    SERVICE_EXIT_ANCHOR,
+    `  // Fires for both exit-code and signal deaths, during boot and after.
   child.on("exit", (exitCode, signal) => {
     recordPreviewServiceState(child.kadyRole, child.pid, "exited", exitCode, signal);`,
-    "backend/frontend service hook",
+    "backend/frontend service exit hook",
   );
   instrumented = replaceExactlyOnce(
     instrumented,
@@ -76,6 +86,20 @@ export function instrumentPreviewLauncher(source) {
     childExited = true;
   };`,
     "workflow-engine spawn hook",
+  );
+  instrumented = replaceExactlyOnce(
+    instrumented,
+    SUPERVISOR_OWNERSHIP_ANCHOR,
+    `${SUPERVISOR_OWNERSHIP_ANCHOR}
+      recordPreviewServiceState(
+        "workflow-supervisor",
+        message.pid,
+        "spawned",
+        null,
+        null,
+        { identity },
+      );`,
+    "workflow-supervisor ownership hook",
   );
   return instrumented;
 }

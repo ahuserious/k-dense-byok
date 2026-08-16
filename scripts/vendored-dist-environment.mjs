@@ -1,7 +1,8 @@
 import path from "node:path";
 import fs from "node:fs";
+import os from "node:os";
 import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 const sensitiveEnvironmentNamePattern =
   /(?:^|_)(?:API_KEY|AUTH[^_]*|CREDENTIALS?|DATABASE_URL|KEY|MYSQL_PWD|PASSWORD|PAT|PGPASSWORD|SECRET|TOKEN)(?:_|$)/i;
@@ -219,31 +220,128 @@ export function missingPreviewLauncherDependencies(repositoryRoot) {
   return requirements.filter((relativePath) => !fs.existsSync(path.join(repositoryRoot, relativePath)));
 }
 
-function processStartIdentity(pid) {
-  if (!Number.isSafeInteger(pid) || pid < 1) return null;
-  if (process.platform === "win32") {
-    const result = spawnSync(
+function linuxProcStartValue(pid, readFileSync) {
+  const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+  const closeParenthesis = stat.lastIndexOf(")");
+  if (closeParenthesis < 0) return null;
+  const fieldsAfterCommand = stat.slice(closeParenthesis + 1).trim().split(/\s+/);
+  const value = fieldsAfterCommand[19]; // field 22; this slice starts at field 3.
+  return /^\d+$/.test(value ?? "") ? value : null;
+}
+
+function hostBootIdentity(platform, readFileSync, spawnProcess) {
+  if (platform === "linux") {
+    try {
+      const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf-8").trim();
+      return bootId || null;
+    } catch {
+      return null;
+    }
+  }
+  if (platform === "darwin") {
+    const result = spawnProcess("sysctl", ["-n", "kern.boottime"], {
+      encoding: "utf-8",
+      env: { ...process.env, LC_ALL: "C", TZ: "UTC0" },
+    });
+    const seconds = /\bsec\s*=\s*(\d+)/.exec(result.stdout ?? "")?.[1];
+    if (result.status === 0 && seconds) return `darwin-boot-seconds:${seconds}`;
+    return null;
+  }
+  if (platform === "win32") {
+    const result = spawnProcess(
       "powershell.exe",
-      ["-NoProfile", "-Command", `(Get-CimInstance Win32_Process -Filter \"ProcessId=${pid}\").CreationDate`],
+      ["-NoProfile", "-Command", "(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('o')"],
       { encoding: "utf-8", windowsHide: true },
     );
-    return result.status === 0 && result.stdout.trim() ? result.stdout.trim() : null;
-  }
-  const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf-8" });
-  if (result.status === 0 && result.stdout.trim()) return result.stdout.trim();
-  if (pid === process.pid) {
-    return `node-start-seconds:${Math.floor((Date.now() - process.uptime() * 1000) / 1000)}`;
+    const value = result.stdout?.trim();
+    return result.status === 0 && value ? `windows-boot:${value}` : null;
   }
   return null;
 }
 
-function processAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code === "EPERM";
+export function captureProcessIdentity(
+  pid,
+  {
+    platform = process.platform,
+    readFileSync = fs.readFileSync,
+    spawnProcess = spawnSync,
+    hostname = os.hostname,
+  } = {},
+) {
+  if (!Number.isSafeInteger(pid) || pid < 1) return null;
+  const host = hostname();
+  const boot = hostBootIdentity(platform, readFileSync, spawnProcess);
+  if (!host || !boot) return null;
+  if (platform === "linux") {
+    try {
+      const value = linuxProcStartValue(pid, readFileSync);
+      return value ? { method: "proc-stat", value, host, boot } : null;
+    } catch {
+      return null;
+    }
   }
+  if (platform === "darwin") {
+    const result = spawnProcess("ps", ["-p", String(pid), "-o", "lstart="], {
+      encoding: "utf-8",
+      env: { ...process.env, LC_ALL: "C", TZ: "UTC0" },
+    });
+    const value = result.stdout?.trim();
+    return result.status === 0 && value ? { method: "ps-lstart-utc", value, host, boot } : null;
+  }
+  if (platform === "win32") {
+    const result = spawnProcess(
+      "powershell.exe",
+      ["-NoProfile", "-Command", `(Get-CimInstance Win32_Process -Filter \"ProcessId=${pid}\").CreationDate.ToUniversalTime().ToString('o')`],
+      { encoding: "utf-8", windowsHide: true },
+    );
+    const value = result.stdout?.trim();
+    return result.status === 0 && value
+      ? { method: "windows-creation-utc", value, host, boot }
+      : null;
+  }
+  return null;
+}
+
+export function processLiveness(pid, killProcess = process.kill.bind(process)) {
+  if (!Number.isSafeInteger(pid) || pid < 1) return "unknown";
+  try {
+    killProcess(pid, 0);
+    return "alive";
+  } catch (error) {
+    return error?.code === "ESRCH" ? "dead" : "unknown";
+  }
+}
+
+function validProcessIdentity(identity) {
+  return identity && typeof identity === "object" &&
+    typeof identity.method === "string" && identity.method &&
+    typeof identity.value === "string" && identity.value &&
+    typeof identity.host === "string" && identity.host &&
+    typeof identity.boot === "string" && identity.boot;
+}
+
+export function recordedProcessState(
+  pid,
+  identity,
+  {
+    getLiveness = processLiveness,
+    captureIdentity = captureProcessIdentity,
+  } = {},
+) {
+  const liveness = getLiveness(pid);
+  if (liveness === "dead") return "gone";
+  if (liveness !== "alive" || !validProcessIdentity(identity)) return "unverifiable";
+  const current = captureIdentity(pid);
+  if (!validProcessIdentity(current)) return "unverifiable";
+  if (current.host !== identity.host || current.boot !== identity.boot) return "unverifiable";
+  if (current.method !== identity.method) return "unverifiable";
+  return current.value === identity.value ? "same" : "gone";
+}
+
+export function latchOwnedProcessGroupRetirement(record, childExitObserved, groupLiveness) {
+  if (record.retired) return true;
+  if (childExitObserved && groupLiveness === "dead") record.retired = true;
+  return record.retired;
 }
 
 export function vendoredDistBuildLockPath(repositoryRoot) {
@@ -262,47 +360,143 @@ export function vendoredDistBuildLockPath(repositoryRoot) {
   );
 }
 
-function readBuildLock(lockPath) {
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function readLockSnapshot(lockPath) {
   try {
-    const lock = JSON.parse(fs.readFileSync(lockPath, "utf-8"));
-    return lock && typeof lock.token === "string" ? lock : null;
+    const stat = fs.statSync(lockPath);
+    const content = fs.readFileSync(lockPath);
+    const record = JSON.parse(content.toString("utf-8"));
+    if (!record || typeof record.token !== "string") return null;
+    return { record, dev: stat.dev, ino: stat.ino, digest: sha256(content) };
   } catch {
     return null;
   }
 }
 
-function recordedPidStartIdentity(lock) {
-  if (typeof lock?.pidStartIdentity === "string" && lock.pidStartIdentity) {
-    return lock.pidStartIdentity;
-  }
-  // Locks written before schema 1 named this field processStart. Treat a live
-  // legacy holder conservatively instead of reclaiming it during an upgrade.
-  return typeof lock?.processStart === "string" && lock.processStart
-    ? lock.processStart
-    : null;
+function readBuildLock(lockPath) {
+  return readLockSnapshot(lockPath)?.record ?? null;
 }
 
 function buildLockOwnerStatus(
   lock,
   {
-    processStartIdentityForPid = processStartIdentity,
-    isProcessAlive = processAlive,
+    getLiveness = processLiveness,
+    captureIdentity = captureProcessIdentity,
   } = {},
 ) {
-  const pidStartIdentity = recordedPidStartIdentity(lock);
-  if (!Number.isSafeInteger(lock?.pid) || lock.pid < 1 || !pidStartIdentity) {
+  if (!Number.isSafeInteger(lock?.pid) || lock.pid < 1 || !validProcessIdentity(lock.identity)) {
     return { active: true, recoverable: false, reason: "unverifiable-owner" };
   }
-  if (!isProcessAlive(lock.pid)) {
-    return { active: false, recoverable: true, reason: "dead-owner" };
+  const processes = [{ pid: lock.pid, identity: lock.identity, role: "wrapper" }];
+  if (!Array.isArray(lock.workers)) {
+    return { active: true, recoverable: false, reason: "unverifiable-workers" };
   }
-  const currentStartIdentity = processStartIdentityForPid(lock.pid);
-  if (currentStartIdentity !== null && currentStartIdentity !== pidStartIdentity) {
-    return { active: false, recoverable: true, reason: "pid-reused" };
+  for (const worker of lock.workers) {
+    if (!Number.isSafeInteger(worker?.pid) || worker.pid < 1 ||
+        !validProcessIdentity(worker.identity) ||
+        !["install", "build"].includes(worker.phase) || typeof worker.startedAt !== "string") {
+      return { active: true, recoverable: false, reason: "unverifiable-worker" };
+    }
+    processes.push(worker);
   }
-  // A live PID whose identity cannot be queried remains authoritative. A stale
-  // heartbeat alone is never evidence that it is safe to create a second writer.
-  return { active: true, recoverable: false, reason: "live-owner" };
+  const states = processes.map((entry) => ({
+    ...entry,
+    state: recordedProcessState(entry.pid, entry.identity, { getLiveness, captureIdentity }),
+  }));
+  const blocking = states.find((entry) => entry.state !== "gone");
+  return blocking
+    ? { active: true, recoverable: false, reason: blocking.state, blocking }
+    : { active: false, recoverable: true, reason: "all-recorded-processes-gone" };
+}
+
+function snapshotMatches(lockPath, expected) {
+  const current = readLockSnapshot(lockPath);
+  return current !== null && current.dev === expected.dev && current.ino === expected.ino &&
+    current.digest === expected.digest && current.record.token === expected.record.token;
+}
+
+function writeExclusiveRecord(lockPath, record, lockFileSystem = fs) {
+  const descriptor = lockFileSystem.openSync(lockPath, "wx", 0o600);
+  try {
+    lockFileSystem.writeFileSync(descriptor, `${JSON.stringify(record)}\n`);
+    if (typeof lockFileSystem.fsyncSync === "function") lockFileSystem.fsyncSync(descriptor);
+    lockFileSystem.closeSync(descriptor);
+  } catch (error) {
+    try { lockFileSystem.closeSync(descriptor); } catch { /* original error wins */ }
+    lockFileSystem.rmSync(lockPath, { force: true });
+    throw error;
+  }
+}
+
+function writeOwnedRecord(lockPath, record, token) {
+  if (readBuildLock(lockPath)?.token !== token) {
+    throw new Error(`vendored dist build lock ownership was lost: ${lockPath}`);
+  }
+  const temporaryPath = `${lockPath}.${token}.update`;
+  const descriptor = fs.openSync(temporaryPath, "w", 0o600);
+  try {
+    fs.writeFileSync(descriptor, `${JSON.stringify(record)}\n`);
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  if (readBuildLock(lockPath)?.token !== token) {
+    fs.rmSync(temporaryPath, { force: true });
+    throw new Error(`vendored dist build lock ownership was lost: ${lockPath}`);
+  }
+  fs.renameSync(temporaryPath, lockPath);
+}
+
+function ownerRecord(token, identity) {
+  const now = new Date().toISOString();
+  return { schema: 2, token, pid: process.pid, identity, heartbeat: now, workers: [] };
+}
+
+async function acquireRecoveryGuard(lockPath, dependencies) {
+  const guardPath = `${lockPath}.recovery`;
+  const token = randomUUID();
+  const identity = dependencies.captureIdentity(process.pid);
+  if (!validProcessIdentity(identity)) throw new Error("could not capture recovery-guard process identity");
+  const record = ownerRecord(token, identity);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      writeExclusiveRecord(guardPath, record);
+      return {
+        path: guardPath,
+        release() {
+          if (readBuildLock(guardPath)?.token === token) fs.rmSync(guardPath, { force: true });
+        },
+      };
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
+    const snapshot = readLockSnapshot(guardPath);
+    if (!snapshot) return null;
+    const status = buildLockOwnerStatus(snapshot.record, dependencies);
+    if (!status.recoverable) return null;
+    // A hard-link claim pins the validated inode. Removing the public name can
+    // then race only with a successor's O_EXCL create; this contender never
+    // removes that successor and simply retries its own O_EXCL acquisition.
+    const claimPath = `${guardPath}.${token}.claim`;
+    try {
+      fs.linkSync(guardPath, claimPath);
+      const claim = readLockSnapshot(claimPath);
+      if (!claim || claim.dev !== snapshot.dev || claim.ino !== snapshot.ino ||
+          claim.digest !== snapshot.digest || !snapshotMatches(guardPath, snapshot)) {
+        return null;
+      }
+      fs.rmSync(guardPath);
+    } catch (error) {
+      if (!["EEXIST", "ENOENT"].includes(error?.code)) throw error;
+      return null;
+    } finally {
+      fs.rmSync(claimPath, { force: true });
+    }
+  }
+  return null;
 }
 
 export function vendoredDistBuildLockStatus(repositoryRoot) {
@@ -321,80 +515,71 @@ export async function acquireVendoredDistBuildLock(
     waitMs = 120_000,
     pollMs = 200,
     lockFileSystem = fs,
-    processStartIdentityForPid = processStartIdentity,
-    isProcessAlive = processAlive,
+    captureIdentity = captureProcessIdentity,
+    getLiveness = processLiveness,
     logRecovery = console.warn,
+    afterStaleLockValidated = async () => {},
   } = {},
 ) {
   const lockPath = vendoredDistBuildLockPath(repositoryRoot);
   fs.mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
   const token = randomUUID();
-  const pidStartIdentity = processStartIdentityForPid(process.pid);
-  if (!pidStartIdentity) throw new Error(`could not determine start time for build-lock PID ${process.pid}`);
+  const identity = captureIdentity(process.pid);
+  if (!validProcessIdentity(identity)) throw new Error(`could not determine identity for build-lock PID ${process.pid}`);
+  const dependencies = { captureIdentity, getLiveness };
   const deadline = Date.now() + waitMs;
+  let recoveryGuard = null;
   const timeoutError = () => {
     const owner = readBuildLock(lockPath);
     const ownerPid = owner?.pid ?? "unknown";
-    const ownerStartIdentity = recordedPidStartIdentity(owner) ?? "unknown";
+    const ownerIdentity = validProcessIdentity(owner?.identity) ? owner.identity : "unknown";
     const ownerMetadata = owner
       ? JSON.stringify({
           pid: ownerPid,
-          pidStartIdentity: ownerStartIdentity,
+          identity: ownerIdentity,
           token: owner.token,
           heartbeat: owner.heartbeat ?? owner.heartbeatAt ?? null,
+          workers: owner.workers ?? "unverifiable",
         })
       : "unreadable-or-malformed";
-    const recoveryCommand =
-      `node -e "require('node:fs').rmSync(process.argv[1], { force: true })" -- ${JSON.stringify(lockPath)}`;
     return new Error(
       `timed out waiting for vendored dist build lock held by pid ${ownerPid}, ` +
-        `start identity ${JSON.stringify(ownerStartIdentity)}: ${lockPath}; owner=${ownerMetadata}; ` +
-        `after verifying that holder is no longer the recorded process, run: ${recoveryCommand}`,
+        `identity ${JSON.stringify(ownerIdentity)}: ${lockPath}; owner=${ownerMetadata}; ` +
+        "safe recovery command: node scripts/vendored-dist-build.mjs --recover-lock",
     );
   };
-  while (true) {
+  try {
+    while (true) {
     if (Date.now() >= deadline) {
       throw timeoutError();
     }
-    const lock = {
-      schema: 1,
-      token,
-      pid: process.pid,
-      pidStartIdentity,
-      createdAt: new Date().toISOString(),
-      heartbeat: new Date().toISOString(),
-    };
+    const lock = ownerRecord(token, identity);
     try {
-      const descriptor = lockFileSystem.openSync(lockPath, "wx", 0o600);
-      try {
-        lockFileSystem.writeFileSync(descriptor, `${JSON.stringify(lock)}\n`);
-        lockFileSystem.closeSync(descriptor);
-      } catch (error) {
-        try {
-          lockFileSystem.closeSync(descriptor);
-        } catch {
-          // The original write/close failure is the useful error.
-        }
-        lockFileSystem.rmSync(lockPath, { force: true });
-        throw error;
-      }
+      writeExclusiveRecord(lockPath, lock, lockFileSystem);
+      recoveryGuard?.release();
+      recoveryGuard = null;
       const heartbeat = setInterval(() => {
         const current = readBuildLock(lockPath);
         if (current?.token !== token) return;
         lock.heartbeat = new Date().toISOString();
-        const temporaryPath = `${lockPath}.${token}.heartbeat`;
-        try {
-          fs.writeFileSync(temporaryPath, `${JSON.stringify(lock)}\n`, { mode: 0o600 });
-          if (readBuildLock(lockPath)?.token === token) fs.renameSync(temporaryPath, lockPath);
-          else fs.rmSync(temporaryPath, { force: true });
-        } catch {
-          fs.rmSync(temporaryPath, { force: true });
-        }
+        try { writeOwnedRecord(lockPath, lock, token); } catch { /* ownership checks remain authoritative */ }
       }, 1000);
       heartbeat.unref();
       return {
         lockPath,
         token,
+        publishWorker(worker) {
+          if (!Number.isSafeInteger(worker?.pid) || !validProcessIdentity(worker.identity) ||
+              !["install", "build"].includes(worker.phase)) {
+            throw new Error("cannot publish an unverifiable vendored-dist worker");
+          }
+          lock.workers = [...lock.workers.filter((entry) => entry.pid !== worker.pid), worker];
+          writeOwnedRecord(lockPath, lock, token);
+        },
+        clearWorker(pid) {
+          lock.workers = lock.workers.filter((entry) => entry.pid !== pid);
+          writeOwnedRecord(lockPath, lock, token);
+        },
         assertOwned(operation) {
           if (readBuildLock(lockPath)?.token !== token) {
             throw new Error(`vendored dist build lock ownership was lost before ${operation}: ${lockPath}`);
@@ -408,26 +593,62 @@ export async function acquireVendoredDistBuildLock(
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
     }
-    const existingLock = readBuildLock(lockPath);
-    if (existingLock) {
-      const ownerStatus = buildLockOwnerStatus(existingLock, {
-        processStartIdentityForPid,
-        isProcessAlive,
-      });
-      if (ownerStatus.recoverable && readBuildLock(lockPath)?.token === existingLock.token) {
+    recoveryGuard = await acquireRecoveryGuard(lockPath, dependencies);
+    if (recoveryGuard) {
+      const snapshot = readLockSnapshot(lockPath);
+      if (!snapshot) continue;
+      const ownerStatus = buildLockOwnerStatus(snapshot.record, dependencies);
+      if (ownerStatus.recoverable) {
+        await afterStaleLockValidated({ lockPath, record: snapshot.record });
+        if (!snapshotMatches(lockPath, snapshot)) {
+          recoveryGuard.release();
+          recoveryGuard = null;
+          continue;
+        }
         fs.rmSync(lockPath, { force: true });
         logRecovery(
-          `recovered stale vendored-dist build lock (pid ${existingLock.pid}, ` +
-            `started ${recordedPidStartIdentity(existingLock)})`,
+          `recovered stale vendored-dist build lock (pid ${snapshot.record.pid}, ` +
+            `identity ${JSON.stringify(snapshot.record.identity)})`,
         );
         continue;
       }
+      recoveryGuard.release();
+      recoveryGuard = null;
     }
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) {
       throw timeoutError();
     }
     await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, remainingMs)));
+  }
+  } finally {
+    recoveryGuard?.release();
+  }
+}
+
+export async function recoverVendoredDistBuildLock(
+  repositoryRoot,
+  { captureIdentity = captureProcessIdentity, getLiveness = processLiveness } = {},
+) {
+  const lockPath = vendoredDistBuildLockPath(repositoryRoot);
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
+  const dependencies = { captureIdentity, getLiveness };
+  const guard = await acquireRecoveryGuard(lockPath, dependencies);
+  if (!guard) throw new Error(`vendored-dist recovery guard is held at ${lockPath}.recovery`);
+  try {
+    const snapshot = readLockSnapshot(lockPath);
+    if (!snapshot) return { recovered: false, lockPath, record: null };
+    const status = buildLockOwnerStatus(snapshot.record, dependencies);
+    if (!status.recoverable) {
+      throw new Error(`refusing lock recovery (${status.reason}): ${JSON.stringify(snapshot.record)}`);
+    }
+    if (!snapshotMatches(lockPath, snapshot)) {
+      throw new Error("refusing lock recovery because the lock changed during revalidation");
+    }
+    fs.rmSync(lockPath, { force: true });
+    return { recovered: true, lockPath, record: snapshot.record };
+  } finally {
+    guard.release();
   }
 }
 

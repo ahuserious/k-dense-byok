@@ -76,20 +76,28 @@ node scripts/vendored-dist-build.mjs --if-stale
 
 All normal launches and previews rendezvous on the checkout-local lock at
 `server/vendor/pipeline-engine/node_modules/.vendored-dist-lock/build.lock`.
-Its record contains the owner PID, that PID's process-start identity, a random
-owner token, and a heartbeat. A missed or old heartbeat is never enough to
-reclaim a lock while the same PID and start identity are still alive. A later
-builder automatically recovers the lock only when the PID is dead or the PID
-now has a different start identity, and logs the recovered owner.
+Its record contains the owner PID, a host- and boot-scoped process-start
+identity, a random owner token, a heartbeat, and every active Bun install/build
+worker. Linux identities use `/proc/<pid>/stat` field 22 plus the kernel boot
+ID; macOS identities use `ps` start time under fixed `LC_ALL=C` and `TZ=UTC0`.
+Identity methods are never compared across representations. A missed or old
+heartbeat is never enough to reclaim a lock while any recorded owner or worker
+is alive or unverifiable.
+
+Recovery is serialized by a separate O_EXCL guard next to the main lock. The
+guard covers stale-record inode/content revalidation through acquisition of the
+replacement lock, so concurrent recoverers cannot unlink a successor. A later
+builder automatically recovers only after the wrapper and every recorded Bun
+worker are proven gone, and logs the recovered owner. This protocol is for one
+host on a local filesystem; shared and network filesystems are unsupported.
 
 If the bounded wait expires, the error prints the holder PID, start identity,
-absolute lock path, and recovery command. First verify that the PID is absent
-or its start identity differs (`ps -o pid=,lstart= -p <pid>` on macOS/Linux;
-inspect `CreationDate` with `Get-CimInstance Win32_Process` on Windows). Only
-then, from the repository root, remove the abandoned record with:
+absolute lock path, owner/worker metadata, and the supported recovery command.
+The command acquires the same recovery guard and refuses removal if the record
+changed or any recorded process remains alive or unverifiable:
 
 ```bash
-node -e "require('node:fs').rmSync(process.argv[1], { force: true })" -- "server/vendor/pipeline-engine/node_modules/.vendored-dist-lock/build.lock"
+node scripts/vendored-dist-build.mjs --recover-lock
 ```
 
 The primary `start.mjs` launcher delegates dependency synchronization and the

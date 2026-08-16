@@ -20,11 +20,15 @@ import { checkVendoredDist } from "./scripts/vendored-dist-check.mjs";
 import {
   classifyWorkflowEngineBuildOutcome,
   classifyWorkflowEngineListener,
+  captureProcessIdentity,
+  latchOwnedProcessGroupRetirement,
   missingPreviewLauncherDependencies,
   prepareLauncherDependencies,
   previewVendoredDistFingerprintEnvironment,
   resolveWorkflowEnginePort,
   scrubSensitiveEnvironment,
+  processLiveness,
+  recordedProcessState,
   terminateOwnedProcessTree,
   vendoredDistBuildLockStatus,
   waitForOwnedWorkflowEngine,
@@ -439,6 +443,7 @@ async function freePort(port, label) {
 // ---- Step 5/6: services + lifecycle -----------------------------------------
 
 const children = [];
+const forcedSupervisorOwners = new Map();
 let shuttingDown = false;
 let shutdownPromise = null;
 let forceShutdownPromise = null;
@@ -451,14 +456,25 @@ const shutdownController = new AbortController();
  *  signal-killed child keeps exitCode === null and sets signalCode). */
 const gone = (child) => child.exitCode !== null || child.signalCode !== null;
 
-function ownedTreeGone(child) {
-  if (isWin) return gone(child);
+function processGroupLiveness(pid) {
+  if (isWin) return "unknown";
   try {
-    process.kill(-child.pid, 0);
-    return false;
+    process.kill(-pid, 0);
+    return "alive";
   } catch (error) {
-    return error?.code === "ESRCH";
+    return error?.code === "ESRCH" ? "dead" : "unknown";
   }
+}
+
+function ownedTreeGone(child) {
+  const groupLiveness = isWin
+    ? (child.kadyExitObserved ? "dead" : "alive")
+    : processGroupLiveness(child.pid);
+  return latchOwnedProcessGroupRetirement(
+    child.kadyOwnedGroup,
+    child.kadyExitObserved,
+    groupLiveness,
+  );
 }
 
 async function waitForOwnedTree(child) {
@@ -482,6 +498,15 @@ function registerChild(child, role) {
   // Node cannot dispatch a signal handler between spawn() returning and this
   // synchronous registration, so shutdown always sees every created child.
   child.kadyRole = role;
+  child.kadyExitObserved = gone(child);
+  child.kadyOwnedGroup = { pid: child.pid, retired: false };
+  child.once("exit", () => {
+    child.kadyExitObserved = true;
+    const latchRetirement = async () => {
+      while (!ownedTreeGone(child)) await sleep(25);
+    };
+    void latchRetirement();
+  });
   children.push(child);
   return child;
 }
@@ -523,6 +548,17 @@ function startService(label, dir, npmArgs, options = {}) {
       ? "frontend"
       : "service";
   registerChild(child, role);
+  if (role === "backend") {
+    child.on("message", (message) => {
+      if (message?.type !== "kady-supervisor" || !Number.isSafeInteger(message.pid) || message.pid < 1) return;
+      const identity = captureProcessIdentity(message.pid);
+      if (!identity) {
+        console.error(`  ${sym.err} Could not capture workflow supervisor PID ${message.pid} identity.`);
+        return;
+      }
+      forcedSupervisorOwners.set(message.pid, { pid: message.pid, identity });
+    });
+  }
   // Fires for both exit-code and signal deaths, during boot and after.
   child.on("exit", () => {
     if (!shuttingDown) {
@@ -944,8 +980,21 @@ async function performForcedShutdown(signal) {
       }
     }
   }
-  log(`Forcing shutdown: ${liveChildren.length} owned process trees killed`);
+  const killedSupervisors = [];
+  for (const owner of forcedSupervisorOwners.values()) {
+    const state = recordedProcessState(owner.pid, owner.identity);
+    if (state === "gone") continue;
+    if (state !== "same") {
+      throw new Error(`workflow supervisor PID ${owner.pid} identity became unverifiable during forced shutdown`);
+    }
+    process.kill(owner.pid, "SIGKILL");
+    killedSupervisors.push(owner);
+  }
+  log(`Forcing shutdown: ${liveChildren.length + killedSupervisors.length} owned process trees killed`);
   await Promise.all(children.map(waitForOwnedTree));
+  for (const owner of killedSupervisors) {
+    while (processLiveness(owner.pid) !== "dead") await sleep(50);
+  }
   process.exit(shutdownExitCode);
 }
 

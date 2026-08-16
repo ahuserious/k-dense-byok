@@ -412,6 +412,9 @@ if (isMain) {
   process.on("message", onLauncherMessage);
 
   let initializingSupervisor: WorkflowSupervisorClient | undefined;
+  const reportWorkflowSupervisor = (snapshot: WorkflowSupervisorSnapshot) => {
+    process.send?.({ type: "kady-supervisor", pid: snapshot.pid });
+  };
   const initialized = await (async () => {
     try {
       // Before anything makes an outbound request: Node's fetch ignores
@@ -420,11 +423,13 @@ if (isMain) {
       const proxy = configureHttpProxy();
       initializingSupervisor = await ensureWorkflowSupervisor();
       let lastSupervisorSnapshot = await initializingSupervisor.snapshot();
+      reportWorkflowSupervisor(lastSupervisorSnapshot);
       syncHelperVenv(); // best-effort; previews degrade gracefully if it fails
       const app = await buildApp({
         workflowSupervisor: initializingSupervisor,
         onWorkflowSupervisorSnapshot: (snapshot) => {
           lastSupervisorSnapshot = snapshot;
+          reportWorkflowSupervisor(snapshot);
         },
       });
       return {
@@ -503,6 +508,7 @@ if (isMain) {
         const addr = await app.listen({ port: PORT, host: HOST });
         if (shutdown.state() === "idle") {
           app.log.info(`kady-server listening on ${addr}`);
+          reportWorkflowSupervisor(supervisorDiagnostics().workflowSupervisor);
           process.send?.({ type: "kady-ready", address: addr });
           startAutomaticSkillSync(app.log);
         }

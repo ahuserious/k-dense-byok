@@ -81,6 +81,19 @@ process.stdout.write(process.env.FAKE_GIT_HEAD ?? "unknown");
 process.exit(2);
 `,
   );
+  // Restricted macOS test sandboxes deny the host ps/sysctl calls used for
+  // stable process identities. Deterministic shims exercise the production
+  // ps-lstart identity path without weakening the builder's fail-closed rule.
+  installCommand(
+    fakeBin,
+    "ps",
+    `process.stdout.write("Sun Aug 16 10:00:00 2026\\n");\n`,
+  );
+  installCommand(
+    fakeBin,
+    "sysctl",
+    `process.stdout.write("{ sec = 12345, usec = 0 }\\n");\n`,
+  );
 
   writeFile(root, sourceRelative, "export const app = 'fixture';\n");
   writeFile(root, publicRelative, "<svg/>\n");
@@ -468,6 +481,14 @@ if (args === "--version") {
 }
 const buildPrefix = "run build -- --outDir ";
 if (!args.startsWith(buildPrefix)) process.exit(2);
+const lock = JSON.parse(fs.readFileSync(path.join(
+  process.env.FAKE_BUN_ROOT,
+  "server/vendor/pipeline-engine/node_modules/.vendored-dist-lock/build.lock",
+), "utf-8"));
+if (!lock.workers.some((worker) => worker.pid === process.pid && worker.phase === "build")) {
+  console.error("build worker was not durably published before mutation");
+  process.exit(3);
+}
 fs.writeFileSync(process.env.FAKE_BUN_ENV_DUMP, JSON.stringify(process.env));
 const dist = args.slice(buildPrefix.length);
 fs.rmSync(dist, { recursive: true, force: true });
@@ -511,7 +532,14 @@ if (args === "--version") {
   process.exit(0);
 }
 fs.appendFileSync(process.env.FAKE_BUN_COMMAND_LOG, JSON.stringify(args) + "\\n");
-if (args === "install --frozen-lockfile") process.exit(0);
+if (args === "install --frozen-lockfile") {
+  const lock = JSON.parse(fs.readFileSync(path.join(
+    process.env.FAKE_BUN_ROOT,
+    "server/vendor/pipeline-engine/node_modules/.vendored-dist-lock/build.lock",
+  ), "utf-8"));
+  if (!lock.workers.some((worker) => worker.pid === process.pid && worker.phase === "install")) process.exit(3);
+  process.exit(0);
+}
 const buildPrefix = "run build -- --outDir ";
 if (!args.startsWith(buildPrefix)) process.exit(2);
 const dist = args.slice(buildPrefix.length);
@@ -665,6 +693,41 @@ fs.writeFileSync(path.join(dist, "assets", "app.js"), "console.log('built');\\n"
   } finally {
     fs.rmSync(fixture.root, { recursive: true, force: true });
   }
+});
+
+test("--recover-lock removes only an identity-verified dead owner", () => {
+  withFixture((fixture) => {
+    const lockPath = path.join(
+      fixture.root,
+      vendoredRelative,
+      "node_modules",
+      ".vendored-dist-lock",
+      "build.lock",
+    );
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+    fs.writeFileSync(lockPath, `${JSON.stringify({
+      schema: 2,
+      token: "dead-cli-owner",
+      pid: 999999,
+      identity: {
+        method: "ps-lstart-utc",
+        value: "Sun Aug 16 09:00:00 2026",
+        host: "fixture-host",
+        boot: "darwin-boot-seconds:12345",
+      },
+      heartbeat: new Date().toISOString(),
+      workers: [],
+    })}\n`);
+    const result = spawnSync(
+      process.execPath,
+      [builderPath, "--recover-lock", "--root", fixture.root],
+      { encoding: "utf-8", env: fixture.environment },
+    );
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /recovered lock owned by pid 999999/);
+    assert.match(result.stdout, /vendored-dist-build: PASS/);
+    assert.equal(fs.existsSync(lockPath), false);
+  });
 });
 
 test("--json emits the stable failure shape", () => {

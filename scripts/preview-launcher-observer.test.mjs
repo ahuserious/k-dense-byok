@@ -29,6 +29,10 @@ test("instruments every direct preview service spawn and exit", () => {
     instrumented,
     /state === "spawned" && previous\?\.pid === pid && previous\.state === "exited"/,
   );
+  assert.match(
+    instrumented,
+    /recordPreviewServiceState\(\s*"workflow-supervisor",\s*message\.pid,\s*"spawned",[\s\S]*\{ identity \}/,
+  );
   assert.match(instrumented, /KADY_PREVIEW_SERVICE_STATE_FILE/);
 });
 
@@ -37,4 +41,12 @@ test("fails closed when launcher anchors drift", () => {
     () => instrumentPreviewLauncher("const sleep = () => {};"),
     /expected one stable anchor/,
   );
+});
+
+test("backend reports the workflow supervisor before launcher readiness", () => {
+  const source = fs.readFileSync(path.join(repositoryRoot, "server", "src", "index.ts"), "utf-8");
+  assert.match(source, /process\.send\?\.\(\{ type: "kady-supervisor", pid: snapshot\.pid \}\)/);
+  const readyIndex = source.indexOf('process.send?.({ type: "kady-ready"');
+  const finalSupervisorReportIndex = source.lastIndexOf("reportWorkflowSupervisor(", readyIndex);
+  assert.ok(finalSupervisorReportIndex >= 0 && finalSupervisorReportIndex < readyIndex);
 });

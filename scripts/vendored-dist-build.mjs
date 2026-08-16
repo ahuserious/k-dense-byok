@@ -16,6 +16,8 @@ import {
 } from "./vendored-dist-check.mjs";
 import {
   acquireVendoredDistBuildLock,
+  captureProcessIdentity,
+  recoverVendoredDistBuildLock,
   scrubSensitiveEnvironment,
 } from "./vendored-dist-environment.mjs";
 
@@ -28,11 +30,14 @@ function parseArguments(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--if-stale") {
-      if (mode === "force-explicit") throw new Error("--if-stale and --force are mutually exclusive.");
+      if (mode !== "force") throw new Error("--if-stale, --force, and --recover-lock are mutually exclusive.");
       mode = "if-stale";
     } else if (argument === "--force") {
-      if (mode === "if-stale") throw new Error("--if-stale and --force are mutually exclusive.");
+      if (mode !== "force") throw new Error("--if-stale, --force, and --recover-lock are mutually exclusive.");
       mode = "force-explicit";
+    } else if (argument === "--recover-lock") {
+      if (mode !== "force") throw new Error("--if-stale, --force, and --recover-lock are mutually exclusive.");
+      mode = "recover-lock";
     } else if (argument === "--root") {
       const value = argv[index + 1];
       if (!value || value.startsWith("--")) throw new Error("--root requires a path.");
@@ -42,7 +47,7 @@ function parseArguments(argv) {
       throw new Error(`Unknown option: ${argument}`);
     }
   }
-  return { ifStale: mode === "if-stale", root };
+  return { ifStale: mode === "if-stale", recoverLock: mode === "recover-lock", root };
 }
 
 function fail(message, exitCode = 1) {
@@ -51,15 +56,71 @@ function fail(message, exitCode = 1) {
   throw new Error("vendored-dist-build-failed");
 }
 
-function runCommand(command, arguments_, options) {
+function runMutatingCommand(command, arguments_, options, buildLock, phase) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, arguments_, {
+    const gatePath = path.join(path.dirname(buildLock.lockPath), `${buildLock.token}-${phase}.go`);
+    fs.rmSync(gatePath, { force: true });
+    const gateArguments = process.platform === "win32"
+      ? [
+          "--input-type=module",
+          "-e",
+          `import fs from "node:fs"; import { spawn } from "node:child_process";
+const timer = setInterval(() => {
+  if (!fs.existsSync(process.argv[1])) return;
+  clearInterval(timer);
+  const child = spawn(process.argv[2], JSON.parse(process.argv[3]), { stdio: "inherit", shell: true });
+  child.once("exit", (code) => process.exit(code ?? 1));
+}, 10);`,
+          gatePath,
+          command,
+          JSON.stringify(arguments_),
+        ]
+      : [
+          "-c",
+          'while [ ! -f "$1" ]; do sleep 0.01; done; shift; exec "$@"',
+          "kady-vendored-dist-gate",
+          gatePath,
+          command,
+          ...arguments_,
+        ];
+    const child = spawn(process.platform === "win32" ? process.execPath : "sh", gateArguments, {
       ...options,
       stdio: "inherit",
-      shell: process.platform === "win32",
+      shell: false,
     });
-    child.once("error", reject);
-    child.once("exit", (code, signal) => resolve({ code: code ?? 1, signal }));
+    const cleanup = () => fs.rmSync(gatePath, { force: true });
+    child.once("error", (error) => { cleanup(); reject(error); });
+    child.once("spawn", () => {
+      const identity = captureProcessIdentity(child.pid);
+      if (!identity) {
+        try { child.kill("SIGKILL"); } catch { /* already gone */ }
+        cleanup();
+        reject(new Error(`could not capture ${phase} worker identity`));
+        return;
+      }
+      try {
+        buildLock.publishWorker({
+          pid: child.pid,
+          identity,
+          phase,
+          startedAt: new Date().toISOString(),
+        });
+        fs.writeFileSync(gatePath, "go\n", { mode: 0o600, flag: "wx" });
+      } catch (error) {
+        try { child.kill("SIGKILL"); } catch { /* already gone */ }
+        cleanup();
+        reject(error);
+      }
+    });
+    child.once("exit", (code, signal) => {
+      cleanup();
+      try {
+        buildLock.clearWorker(child.pid);
+        resolve({ code: code ?? 1, signal });
+      } catch (error) {
+        reject(error);
+      }
+    });
   });
 }
 
@@ -103,6 +164,21 @@ try {
 }
 
 const buildEnvironment = scrubSensitiveEnvironment(process.env);
+if (options.recoverLock) {
+  try {
+    const result = await recoverVendoredDistBuildLock(options.root);
+    if (result.recovered) {
+      console.log(`vendored-dist-build: recovered lock owned by pid ${result.record.pid}`);
+    } else {
+      console.log("vendored-dist-build: no build lock exists");
+    }
+    console.log("vendored-dist-build: PASS");
+    process.exit(0);
+  } catch (error) {
+    console.error(`vendored-dist-build: FAIL (${error instanceof Error ? error.message : String(error)})`);
+    process.exit(1);
+  }
+}
 const vendoredRoot = path.join(options.root, "server", "vendor", "pipeline-engine");
 const webRoot = path.join(vendoredRoot, "packages", "web");
 const distDirectory = path.join(webRoot, "dist");
@@ -123,10 +199,10 @@ try {
     const installInputsBefore = expectedVendoredInstallStamp(options.root, buildEnvironment);
     console.log(`vendored-dist-build: dependency stamp stale; running \`bun install --frozen-lockfile\` in ${vendoredRoot}`);
     buildLock.assertOwned("dependency installation");
-    const install = await runCommand("bun", ["install", "--frozen-lockfile"], {
+    const install = await runMutatingCommand("bun", ["install", "--frozen-lockfile"], {
       cwd: vendoredRoot,
       env: buildEnvironment,
-    });
+    }, buildLock, "install");
     if (install.code !== 0) fail(`bun install exited ${install.code}${install.signal ? ` (${install.signal})` : ""}`, install.code);
     buildLock.assertOwned("dependency installation completion");
     const installInputsAfter = expectedVendoredInstallStamp(options.root, buildEnvironment);
@@ -150,10 +226,12 @@ try {
     stagingDirectory = path.join(vendoredRoot, "node_modules", `.vendored-dist-stage-${buildLock.token}`);
     fs.rmSync(stagingDirectory, { recursive: true, force: true });
     console.log(`vendored-dist-build: running \`bun run build -- --outDir ${stagingDirectory}\` in ${webRoot}`);
-    const build = await runCommand(
+    const build = await runMutatingCommand(
       "bun",
       ["run", "build", "--", "--outDir", stagingDirectory],
       { cwd: webRoot, env: buildEnvironment },
+      buildLock,
+      "build",
     );
     if (build.code !== 0) fail(`build exited ${build.code}${build.signal ? ` (${build.signal})` : ""}`, build.code);
 

@@ -8,10 +8,15 @@ import { fileURLToPath } from "node:url";
 import { createLaunchOverlay, previewEnvironment } from "./preview-environment.mjs";
 import {
   acquireVendoredDistBuildLock,
+  captureProcessIdentity,
+  latchOwnedProcessGroupRetirement,
   missingPreviewLauncherDependencies,
   prepareLauncherDependencies,
   previewVendoredDistFingerprintEnvironment,
   previewVendoredDistEnvironment,
+  processLiveness,
+  recoverVendoredDistBuildLock,
+  recordedProcessState,
   scrubSensitiveEnvironment,
   vendoredDistBuildLockPath,
   vendoredDistBuildLockStatus,
@@ -19,6 +24,29 @@ import {
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(scriptDirectory, "..");
+const identityShimRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-identity-shims-"));
+const originalTestPath = process.env.PATH ?? "";
+for (const [name, output] of [
+  ["ps", "Sun Aug 16 10:00:00 2026\\n"],
+  ["sysctl", "{ sec = 12345, usec = 0 }\\n"],
+]) {
+  fs.writeFileSync(
+    path.join(identityShimRoot, name),
+    `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(output)});\n`,
+    { mode: 0o700 },
+  );
+}
+process.env.PATH = `${identityShimRoot}${path.delimiter}${originalTestPath}`;
+test.after(() => {
+  process.env.PATH = originalTestPath;
+  fs.rmSync(identityShimRoot, { recursive: true, force: true });
+});
+const testIdentity = (value, method = "test-identity") => ({
+  method,
+  value,
+  host: "test-host",
+  boot: "test-boot",
+});
 
 function preparedBuildLockPath(root) {
   const lockPath = vendoredDistBuildLockPath(root);
@@ -318,6 +346,59 @@ test("preview npm shim allows only the launcher prep command", () => {
   }
 });
 
+test("macOS process identity is invariant to ambient locale and timezone", () => {
+  const calls = [];
+  const spawnProcess = (command, _arguments, options) => {
+    calls.push({ command, environment: options.env });
+    return command === "sysctl"
+      ? { status: 0, stdout: "{ sec = 12345, usec = 0 }\n" }
+      : { status: 0, stdout: "Sun Aug 16 10:00:00 2026\n" };
+  };
+  const first = captureProcessIdentity(42, {
+    platform: "darwin",
+    spawnProcess,
+    hostname: () => "fixture-host",
+  });
+  const second = captureProcessIdentity(42, {
+    platform: "darwin",
+    spawnProcess,
+    hostname: () => "fixture-host",
+  });
+  assert.deepEqual(first, second);
+  assert.deepEqual(first, {
+    method: "ps-lstart-utc",
+    value: "Sun Aug 16 10:00:00 2026",
+    host: "fixture-host",
+    boot: "darwin-boot-seconds:12345",
+  });
+  for (const call of calls) {
+    assert.equal(call.environment.LC_ALL, "C");
+    assert.equal(call.environment.TZ, "UTC0");
+  }
+});
+
+test("identity method, host, and liveness uncertainty fail closed", () => {
+  const recorded = testIdentity("start", "proc-stat");
+  assert.equal(recordedProcessState(44, recorded, {
+    getLiveness: () => "alive",
+    captureIdentity: () => testIdentity("start", "ps-lstart-utc"),
+  }), "unverifiable");
+  assert.equal(recordedProcessState(44, recorded, {
+    getLiveness: () => "alive",
+    captureIdentity: () => ({ ...recorded, host: "other-host" }),
+  }), "unverifiable");
+  for (const code of ["EPERM", "EACCES", "EINVAL"]) {
+    assert.equal(processLiveness(44, () => { throw Object.assign(new Error(code), { code }); }), "unknown");
+  }
+  assert.equal(processLiveness(44, () => { throw Object.assign(new Error("gone"), { code: "ESRCH" }); }), "dead");
+});
+
+test("retired process groups never reacquire ownership from a reused numeric PGID", () => {
+  const ownership = { pid: 5151, retired: false };
+  assert.equal(latchOwnedProcessGroupRetirement(ownership, true, "dead"), true);
+  assert.equal(latchOwnedProcessGroupRetirement(ownership, true, "alive"), true);
+});
+
 test("failed build-lock record writes remove the partial lock", async () => {
   const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-write-failure-"));
   const lockPath = preparedBuildLockPath(repositoryRoot);
@@ -350,7 +431,7 @@ test("malformed build locks are never reclaimed and time out with metadata", asy
     fs.writeFileSync(lockPath, "{partial");
     await assert.rejects(
       acquireVendoredDistBuildLock(repositoryRoot, { waitMs: 30, pollMs: 5 }),
-      /timed out waiting for vendored dist build lock held by pid unknown, start identity "unknown".*owner=unreadable-or-malformed.*node -e/,
+      /timed out waiting for vendored dist build lock held by pid unknown, identity "unknown".*owner=unreadable-or-malformed.*node scripts\/vendored-dist-build\.mjs --recover-lock/,
     );
     assert.equal(fs.readFileSync(lockPath, "utf-8"), "{partial");
   } finally {
@@ -368,16 +449,17 @@ test("dead vendored-dist build-lock owner is recovered", async () => {
       schema: 1,
       token: "dead-owner-token",
       pid: 424242,
-      pidStartIdentity: "dead-owner-start",
+      identity: testIdentity("dead-owner-start"),
       heartbeat: "2026-08-16T00:00:00.000Z",
+      workers: [],
     })}\n`);
     const lock = await acquireVendoredDistBuildLock(repositoryRoot, {
-      processStartIdentityForPid: (pid) => pid === process.pid ? "contender-start" : null,
-      isProcessAlive: (pid) => pid === process.pid,
+      captureIdentity: (pid) => testIdentity(pid === process.pid ? "contender-start" : "dead-owner-start"),
+      getLiveness: (pid) => pid === process.pid ? "alive" : "dead",
       logRecovery: (message) => recoveryMessages.push(message),
     });
     assert.deepEqual(recoveryMessages, [
-      "recovered stale vendored-dist build lock (pid 424242, started dead-owner-start)",
+      `recovered stale vendored-dist build lock (pid 424242, identity ${JSON.stringify(testIdentity("dead-owner-start"))})`,
     ]);
     assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf-8")).token, lock.token);
     lock.release();
@@ -396,22 +478,128 @@ test("reused PID with a different start identity is recovered", async () => {
       schema: 1,
       token: "reused-pid-token",
       pid: 434343,
-      pidStartIdentity: "previous-process-start",
+      identity: testIdentity("previous-process-start"),
       heartbeat: new Date().toISOString(),
+      workers: [],
     })}\n`);
     const lock = await acquireVendoredDistBuildLock(repositoryRoot, {
-      processStartIdentityForPid: (pid) => pid === process.pid
+      captureIdentity: (pid) => testIdentity(pid === process.pid
         ? "contender-start"
-        : "replacement-process-start",
-      isProcessAlive: () => true,
+        : "replacement-process-start"),
+      getLiveness: () => "alive",
       logRecovery: (message) => recoveryMessages.push(message),
     });
     assert.deepEqual(recoveryMessages, [
-      "recovered stale vendored-dist build lock (pid 434343, started previous-process-start)",
+      `recovered stale vendored-dist build lock (pid 434343, identity ${JSON.stringify(testIdentity("previous-process-start"))})`,
     ]);
     lock.release();
   } finally {
     fs.rmSync(lockPath, { force: true });
+    fs.rmSync(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("a surviving recorded Bun worker prevents dead-wrapper recovery", async () => {
+  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-live-worker-"));
+  const lockPath = preparedBuildLockPath(repositoryRoot);
+  const workerIdentity = testIdentity("worker-start");
+  try {
+    fs.writeFileSync(lockPath, `${JSON.stringify({
+      schema: 2,
+      token: "dead-wrapper-live-worker",
+      pid: 454545,
+      identity: testIdentity("dead-wrapper-start"),
+      heartbeat: new Date().toISOString(),
+      workers: [{
+        pid: 464646,
+        identity: workerIdentity,
+        phase: "build",
+        startedAt: new Date().toISOString(),
+      }],
+    })}\n`);
+    const dependencies = {
+      captureIdentity: (pid) => pid === process.pid ? testIdentity("contender") : workerIdentity,
+      getLiveness: (pid) => pid === 454545 ? "dead" : "alive",
+    };
+    await assert.rejects(
+      recoverVendoredDistBuildLock(repositoryRoot, dependencies),
+      /refusing lock recovery \(same\).*464646/,
+    );
+    await assert.rejects(
+      acquireVendoredDistBuildLock(repositoryRoot, {
+        ...dependencies,
+        waitMs: 30,
+        pollMs: 5,
+      }),
+      /timed out waiting for vendored dist build lock.*464646/,
+    );
+    assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf-8")).token, "dead-wrapper-live-worker");
+  } finally {
+    fs.rmSync(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("recovery guard serializes two stale-owner recoverers through reacquisition", async () => {
+  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-recovery-race-"));
+  const lockPath = preparedBuildLockPath(repositoryRoot);
+  const validatedPath = path.join(repositoryRoot, "first-validated");
+  const releaseValidationPath = path.join(repositoryRoot, "release-validation");
+  const firstAcquiredPath = path.join(repositoryRoot, "first-acquired");
+  const releaseFirstPath = path.join(repositoryRoot, "release-first");
+  const secondAcquiredPath = path.join(repositoryRoot, "second-acquired");
+  const children = [];
+  const waitForFile = async (filePath, timeoutMs = 5_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (!fs.existsSync(filePath) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(fs.existsSync(filePath), true, `timed out waiting for ${filePath}`);
+  };
+  try {
+    fs.writeFileSync(lockPath, `${JSON.stringify({
+      schema: 2,
+      token: "stale-token",
+      pid: 999999,
+      identity: testIdentity("dead"),
+      heartbeat: new Date().toISOString(),
+      workers: [],
+    })}\n`);
+    const moduleUrl = new URL("./vendored-dist-environment.mjs", import.meta.url).href;
+    const childSource = `
+import fs from "node:fs";
+import { acquireVendoredDistBuildLock } from ${JSON.stringify(moduleUrl)};
+const [root, role, validated, releaseValidation, acquired, release] = process.argv.slice(1);
+const options = { waitMs: 5000, pollMs: 10 };
+if (role === "first") options.afterStaleLockValidated = async () => {
+  fs.writeFileSync(validated, "validated");
+  while (!fs.existsSync(releaseValidation)) await new Promise((resolve) => setTimeout(resolve, 10));
+};
+const lock = await acquireVendoredDistBuildLock(root, options);
+fs.writeFileSync(acquired, String(process.pid));
+while (!fs.existsSync(release)) await new Promise((resolve) => setTimeout(resolve, 10));
+lock.release();
+`;
+    const first = spawn(process.execPath, ["--input-type=module", "-e", childSource,
+      repositoryRoot, "first", validatedPath, releaseValidationPath, firstAcquiredPath, releaseFirstPath]);
+    children.push(first);
+    await waitForFile(validatedPath);
+    const second = spawn(process.execPath, ["--input-type=module", "-e", childSource,
+      repositoryRoot, "second", validatedPath, releaseValidationPath, secondAcquiredPath, releaseFirstPath]);
+    children.push(second);
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    assert.equal(fs.existsSync(secondAcquiredPath), false, "guard loser acquired during stale-record revalidation");
+    fs.writeFileSync(releaseValidationPath, "go");
+    await waitForFile(firstAcquiredPath);
+    assert.equal(fs.existsSync(secondAcquiredPath), false, "guard loser unlinked the successor lock");
+    fs.writeFileSync(releaseFirstPath, "go");
+    await waitForFile(secondAcquiredPath);
+    await Promise.all(children.map((child) => child.exitCode !== null
+      ? Promise.resolve()
+      : new Promise((resolve) => child.once("exit", resolve))));
+  } finally {
+    for (const child of children) {
+      if (child.exitCode === null) child.kill("SIGKILL");
+    }
     fs.rmSync(repositoryRoot, { recursive: true, force: true });
   }
 });
@@ -455,9 +643,9 @@ test("an old-heartbeat build lock remains active while its exact owner is live",
       acquireVendoredDistBuildLock(repositoryRoot, { waitMs: 30, pollMs: 5 }),
       (error) => {
         assert.match(error.message, new RegExp(`held by pid ${process.pid}`));
-        assert.match(error.message, /start identity/);
+        assert.match(error.message, /identity/);
         assert.match(error.message, new RegExp(lockPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-        assert.match(error.message, /after verifying.*node -e/);
+        assert.match(error.message, /safe recovery command: node scripts\/vendored-dist-build\.mjs --recover-lock/);
         return true;
       },
     );
