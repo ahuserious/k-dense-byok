@@ -15,6 +15,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyEnvFile } from "./env-file.mjs";
+import { checkVendoredDist } from "./scripts/vendored-dist-check.mjs";
+import {
+  classifyVendoredDistAfterBuildFailure,
+  scrubSensitiveEnvironment,
+} from "./scripts/vendored-dist-environment.mjs";
 
 const repoRoot = path.dirname(fileURLToPath(import.meta.url));
 const isWin = process.platform === "win32";
@@ -514,8 +519,9 @@ async function startWorkflowEngine() {
     }
   }
 
-  // One-time install/build, keyed on the artifacts themselves (node_modules
-  // and the built web dist are git-ignored inside the vendor dir).
+  // Package installation is keyed on node_modules. The ignored web dist uses
+  // its content manifest, Git identity, safe build environment, and output
+  // hashes as the freshness boundary on every launch.
   if (!fs.existsSync(path.join(PIPELINE_ENGINE_DIR, "node_modules"))) {
     log("  Installing workflow engine packages (first run)...");
     if (run(bun, ["install"], { cwd: PIPELINE_ENGINE_DIR }) !== 0) {
@@ -523,10 +529,31 @@ async function startWorkflowEngine() {
       return false;
     }
   }
-  if (!fs.existsSync(path.join(PIPELINE_ENGINE_DIR, "packages", "web", "dist", "index.html"))) {
-    log("  Building the workflow engine UI (first run)...");
-    if (run(bun, ["run", "build:web"], { cwd: PIPELINE_ENGINE_DIR }) !== 0) {
-      log(`  ${sym.warn} Workflow engine UI build failed — skipping it (everything else keeps running).`);
+  const bunDirectory = path.dirname(bun);
+  const builderEnvironment = scrubSensitiveEnvironment({
+    ...process.env,
+    PATH:
+      bunDirectory === "."
+        ? process.env.PATH ?? ""
+        : `${bunDirectory}${path.delimiter}${process.env.PATH ?? ""}`,
+    PORT: String(PIPELINE_ENGINE_PORT),
+  });
+  const builderScript = path.join(repoRoot, "scripts", "vendored-dist-build.mjs");
+  if (
+    run(process.execPath, [builderScript, "--if-stale"], {
+      cwd: repoRoot,
+      env: builderEnvironment,
+    }) !== 0
+  ) {
+    const distStatus = checkVendoredDist(repoRoot, builderEnvironment);
+    if (classifyVendoredDistAfterBuildFailure(distStatus) === "serve-stale") {
+      log(`  ${sym.warn} WARNING: THE SERVED WORKFLOW BUILDER BUNDLE IS STALE.`);
+      log(`    Offending freshness input: ${distStatus.path} (${distStatus.reason}).`);
+      log("    Its rebuild failed; run 'npm run build:vendored-dist' to repair it.");
+      log("    Continuing with the stale-but-valid bundle so the rest of the product stays available.");
+    } else {
+      log(`  ${sym.warn} Workflow engine's served builder bundle is missing or invalid because its freshness-aware build failed.`);
+      log("    Skipping the optional workflow engine; run 'npm run build:vendored-dist' to repair it.");
       return false;
     }
   }

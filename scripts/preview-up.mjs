@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { previewEnvironment } from "./preview-environment.mjs";
+import { scrubSensitiveEnvironment } from "./vendored-dist-environment.mjs";
 import { instrumentPreviewLauncher } from "./preview-launcher-observer.mjs";
 import {
   collectPreviewListenerGroups,
@@ -51,7 +52,7 @@ function writeExecutable(targetPath, content) {
   fs.writeFileSync(targetPath, content, { mode: 0o700 });
 }
 
-function prepareVendoredDist({ skipBuild }) {
+function prepareVendoredDist({ skipBuild, enginePort }) {
   const scriptName = skipBuild ? "vendored-dist-check.mjs" : "vendored-dist-build.mjs";
   const arguments_ = [path.join(scriptDirectory, scriptName)];
   if (!skipBuild) arguments_.push("--if-stale");
@@ -61,9 +62,13 @@ function prepareVendoredDist({ skipBuild }) {
   } else {
     console.log("Preparing the vendored Pipeline Engine web bundle.");
   }
+  const buildEnvironment = scrubSensitiveEnvironment({
+    ...process.env,
+    PORT: String(enginePort),
+  });
   const result = spawnSync(process.execPath, arguments_, {
     cwd: repositoryRoot,
-    env: process.env,
+    env: buildEnvironment,
     stdio: "inherit",
   });
   if (result.error) fail(`Could not run ${scriptName}: ${result.error.message}`);
@@ -195,8 +200,6 @@ if (fs.existsSync(stateFile)) {
   fail(`Preview state already exists at ${stateFile}; run scripts/preview-down.mjs first.`);
 }
 
-prepareVendoredDist({ skipBuild: process.argv.includes("--no-build-dist") });
-
 const ports = {
   backend: portOption("--backend-port", Number(process.env.KADY_PORT || 18000)),
   frontend: portOption("--frontend-port", Number(process.env.KADY_FRONTEND_PORT || 13000)),
@@ -215,6 +218,11 @@ if (!process.env.KADY_PIPELINE_ENGINE_PORT && process.env.KADY_ARCHON_PORT) {
   );
 }
 if (new Set(Object.values(ports)).size !== 3) fail("Preview ports must be distinct.");
+
+prepareVendoredDist({
+  skipBuild: process.argv.includes("--no-build-dist"),
+  enginePort: ports.engine,
+});
 
 const initiallyOccupied = await waitForPreviewPortsFree(ports, 15_000);
 if (initiallyOccupied.length > 0) {

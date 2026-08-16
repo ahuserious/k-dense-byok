@@ -1,4 +1,5 @@
 import path from "node:path";
+import { scrubSensitiveEnvironment } from "./vendored-dist-environment.mjs";
 
 const LEGACY_ENGINE_ENVIRONMENT_NAMES = [
   "ARCHON_BASE_URL",
@@ -42,10 +43,7 @@ export function previewEnvironment(
   ports,
   ambientEnvironment = process.env,
 ) {
-  const environment = { ...ambientEnvironment };
-  for (const name of Object.keys(environment)) {
-    if (/(?:API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)/i.test(name)) delete environment[name];
-  }
+  const environment = scrubSensitiveEnvironment(ambientEnvironment);
   for (const name of LEGACY_ENGINE_ENVIRONMENT_NAMES) delete environment[name];
 
   const piAgentDirectory = path.join(stateRoot, "pi-agent");

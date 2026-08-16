@@ -17,20 +17,47 @@ Before opening any sockets, `preview-up` runs
 `node scripts/vendored-dist-build.mjs --if-stale`. The build script invokes
 `bun run build:web` from `server/vendor/pipeline-engine/`, which is the
 vendored Bun workspace owning `bun.lock` and filters the build to the web
-package. It then re-runs the fail-closed freshness check. This produces the
-ignored `packages/web/dist/` required by the workflow-engine server in a fresh
-clone without committing generated assets.
+package. The build receives the selected engine port as `PORT`; ambient
+variables with API-key, token, secret, password, or credential markers in
+their names are removed before the child starts. The build does not load the
+outer repository's `.env`.
+
+After Vite succeeds, the wrapper writes the ignored
+`packages/web/dist/.vendored-dist-manifest.json`. Its schema-1 record contains:
+
+- a SHA-256 fingerprint and per-file hashes for the complete enumerated input
+  set, including web source/public/config/env files, the core and workflows
+  package trees, and the workspace package/lock/TypeScript/env files;
+- the outer repository's full Git HEAD, or the literal `unknown` when Git
+  identity is unavailable;
+- the names and values of the non-credential Vite build environment inputs
+  `NODE_ENV` and `PORT`;
+- the relative path, SHA-256, and byte count for every regular output file.
+
+The post-build check recomputes that context, validates every recorded output,
+and verifies every local `src`/`href` asset referenced by `dist/index.html`.
+Missing roots, symlinks, a missing manifest, Git/environment drift, changed
+inputs, partial outputs, and broken asset references all fail closed. This
+produces the bundle required by the workflow-engine server in a fresh clone
+without committing generated assets or trusting filesystem timestamp
+resolution.
 
 Use `--no-build-dist` only when a caller has already built the bundle. The
 option skips compilation, not validation: `preview-up` still exits before boot
-when `dist/index.html` is missing or older than a build input. The standalone
-commands are:
+when the manifest, build context, or any recorded/referenced output fails
+validation. The standalone commands are:
 
 ```bash
 npm run check:vendored-dist
 npm run build:vendored-dist
 node scripts/vendored-dist-build.mjs --if-stale
 ```
+
+The primary `start.mjs` launcher uses the same scrubbed, freshness-aware
+`--if-stale` path after the optional vendored workspace dependencies are
+available. The workflow engine remains optional: missing Bun still skips it,
+and a build/validation failure warns with the repair command above and lets the
+rest of Kady continue.
 
 `preview-up` creates a unique `/tmp/kady-preview-*` directory, including fresh
 project, Pi-agent, skills-cache, workflow-supervisor, and log paths. It creates

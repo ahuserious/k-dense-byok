@@ -1,4 +1,20 @@
 {
+  "handoffs": [
+    {
+      "from": "S2",
+      "to": "C1",
+      "date": "2026-08-15",
+      "path": "start.mjs",
+      "scope": "vendored-dist build section"
+    },
+    {
+      "from": "S11",
+      "to": "C1",
+      "date": "2026-08-15",
+      "path": "scripts/preview-up.mjs",
+      "scope": "prepareVendoredDist block"
+    }
+  ],
   "lanes": {
     "C1": [
       "scripts/vendored-dist-*.mjs",
