@@ -12,7 +12,10 @@ import {
   writeVendoredInstallStamp,
   writeVendoredDistManifest,
 } from "./vendored-dist-check.mjs";
-import { classifyVendoredDistAfterBuildFailure } from "./vendored-dist-environment.mjs";
+import {
+  classifyVendoredDistAfterBuildFailure,
+  previewVendoredDistFingerprintEnvironment,
+} from "./vendored-dist-environment.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const checkerPath = path.join(scriptDirectory, "vendored-dist-check.mjs");
@@ -164,6 +167,30 @@ test("a preview-style launcher check leaves the prebuilt manifest byte-exact and
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.deepEqual(fs.readFileSync(manifestPath), beforeBytes);
     assert.equal(fs.statSync(manifestPath).mtimeMs, beforeMtime);
+  });
+});
+
+test("check-only launcher validates a production manifest without exporting NODE_ENV", () => {
+  withFixture((fixture) => {
+    writeManifest(fixture);
+    installCommand(
+      fixture.fakeBin,
+      "git",
+      `if (process.argv.slice(2).join(" ") !== "rev-parse HEAD") process.exit(2);
+process.stdout.write(${JSON.stringify(gitHeadA)});
+`,
+    );
+    const launcherEnvironment = { ...fixture.environment };
+    delete launcherEnvironment.NODE_ENV;
+    delete launcherEnvironment.FAKE_GIT_HEAD;
+    const fingerprintEnvironment = previewVendoredDistFingerprintEnvironment(
+      launcherEnvironment,
+      3090,
+    );
+    assert.equal("NODE_ENV" in launcherEnvironment, false);
+    assert.equal(fingerprintEnvironment.NODE_ENV, "production");
+    const result = checkVendoredDist(fixture.root, fingerprintEnvironment);
+    assert.equal(result.status, "fresh", result.message);
   });
 });
 

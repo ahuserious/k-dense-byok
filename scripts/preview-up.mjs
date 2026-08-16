@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createLaunchOverlay, previewEnvironment } from "./preview-environment.mjs";
-import { strictPreviewVendoredDistEnvironment } from "./vendored-dist-environment.mjs";
+import { previewVendoredDistEnvironment } from "./vendored-dist-environment.mjs";
 import {
   collectPreviewListenerGroups,
   stopProcessGroups,
@@ -198,7 +198,11 @@ const { launchRoot, shimDirectory } = createLaunchOverlay(
   realGit,
 );
 const environment = previewEnvironment(stateRoot, launchRoot, shimDirectory, ports);
-const vendoredDistEnvironment = strictPreviewVendoredDistEnvironment(environment);
+const vendoredDistEnvironment = previewVendoredDistEnvironment(
+  stateRoot,
+  shimDirectory,
+  ports.engine,
+);
 const logPath = path.join(stateRoot, "preview.log");
 const serviceStatePath = environment.KADY_PREVIEW_SERVICE_STATE_FILE;
 fs.writeFileSync(serviceStatePath, `${JSON.stringify({ version: 1, services: {} }, null, 2)}\n`, {

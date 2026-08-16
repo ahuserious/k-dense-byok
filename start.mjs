@@ -20,8 +20,9 @@ import { checkVendoredDist } from "./scripts/vendored-dist-check.mjs";
 import {
   classifyWorkflowEngineBuildOutcome,
   classifyWorkflowEngineListener,
+  prepareLauncherDependencies,
+  previewVendoredDistFingerprintEnvironment,
   scrubSensitiveEnvironment,
-  strictPreviewVendoredDistEnvironment,
   vendoredDistBuildLockStatus,
 } from "./scripts/vendored-dist-environment.mjs";
 
@@ -271,6 +272,9 @@ async function checkModelAccess() {
 // ---- Step 3: npm install ----------------------------------------------------
 
 function installPackages(dir, label, packages = []) {
+  if (process.env.KADY_PREVIEW === "1") {
+    fail(`  ${sym.err} Preview launches must reuse installed dependencies; refusing npm install for ${label}.`);
+  }
   log(`Installing ${label} packages...`);
   const code = run("npm", ["install", "--no-audit", "--no-fund", "--loglevel=error", ...packages], {
     cwd: path.join(repoRoot, dir),
@@ -293,6 +297,9 @@ const PI_PACKAGES = [
 ];
 
 function installBackendPackages() {
+  if (process.env.KADY_PREVIEW === "1") {
+    fail(`  ${sym.err} Preview launches must reuse installed dependencies; refusing backend npm update.`);
+  }
   const latest = capture("npm", ["view", "@earendil-works/pi-coding-agent@latest", "version"]);
   if (!latest || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(latest)) {
     log(`  ${sym.warn} Could not check npm for the latest Pi release; using the version in package-lock.json.`);
@@ -552,7 +559,10 @@ async function startWorkflowEngine() {
     PORT: String(PIPELINE_ENGINE_PORT),
   };
   const builderEnvironment = process.env.KADY_PREVIEW === "1"
-    ? strictPreviewVendoredDistEnvironment(candidateBuilderEnvironment)
+    ? previewVendoredDistFingerprintEnvironment(
+        candidateBuilderEnvironment,
+        PIPELINE_ENGINE_PORT,
+      )
     : scrubSensitiveEnvironment(candidateBuilderEnvironment);
 
   const activeBuildLock = vendoredDistBuildLockStatus(vendoredDistRepositoryRoot);
@@ -816,8 +826,26 @@ if (flags.check) {
   process.exit(0);
 }
 
-installBackendPackages();
-installPackages("web", "frontend");
+try {
+  const dependencyAction = prepareLauncherDependencies({
+    environment: process.env,
+    serverDependenciesReady: fs.existsSync(
+      path.join(repoRoot, "server", "node_modules", "tsx", "dist", "cli.mjs"),
+    ),
+    webDependenciesReady: fs.existsSync(
+      path.join(repoRoot, "web", "node_modules", "next", "dist", "bin", "next"),
+    ),
+    install() {
+      installBackendPackages();
+      installPackages("web", "frontend");
+    },
+  });
+  if (dependencyAction === "reuse-preview") {
+    log("  Preview dependencies already installed; skipping npm install.");
+  }
+} catch (error) {
+  fail(`  ${sym.err} ${error instanceof Error ? error.message : String(error)}`);
+}
 log("");
 
 const BACKEND_PORT = Number(process.env.KADY_PORT || 8000);

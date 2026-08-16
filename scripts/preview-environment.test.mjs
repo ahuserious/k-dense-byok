@@ -7,9 +7,10 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { createLaunchOverlay, previewEnvironment } from "./preview-environment.mjs";
 import {
+  prepareLauncherDependencies,
+  previewVendoredDistFingerprintEnvironment,
   previewVendoredDistEnvironment,
   scrubSensitiveEnvironment,
-  strictPreviewVendoredDistEnvironment,
 } from "./vendored-dist-environment.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -72,7 +73,7 @@ test("preview vendored dist prebuild uses only the strict allowlist", () => {
   });
 });
 
-test("prebuild and launcher derive one strict environment and fake Bun receives nothing else", () => {
+test("build-only NODE_ENV reaches fake Bun but not the preview launcher", () => {
   const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-build-env-"));
   try {
     const fakeBin = path.join(stateRoot, "bin");
@@ -97,9 +98,15 @@ test("prebuild and launcher derive one strict environment and fake Bun receives 
         NORMAL_SENTINEL: "drop",
       },
     );
-    const prebuildEnvironment = strictPreviewVendoredDistEnvironment(preview);
-    const launcherEnvironment = strictPreviewVendoredDistEnvironment(preview);
-    assert.deepEqual(launcherEnvironment, prebuildEnvironment);
+    const prebuildDirect = previewVendoredDistEnvironment(
+      stateRoot,
+      fakeBin,
+      13191,
+      { PATH: process.env.PATH },
+    );
+    const prebuildEnvironment = previewVendoredDistFingerprintEnvironment(preview, 13191);
+    assert.deepEqual(prebuildEnvironment, prebuildDirect);
+    assert.equal("NODE_ENV" in preview, false);
     assert.equal(prebuildEnvironment.NODE_ENV, "production");
     assert.equal(prebuildEnvironment.PORT, "13191");
     assert.equal(prebuildEnvironment.TMPDIR, path.join(stateRoot, "tmp"));
@@ -110,6 +117,78 @@ test("prebuild and launcher derive one strict environment and fake Bun receives 
     for (const name of ["PGPASSWORD", "MYSQL_PWD", "DATABASE_URL", "NORMAL_SENTINEL", "GITHUB_PAT", "SSH_AUTH_SOCK"]) {
       assert.equal(name in dumped, false, name);
     }
+  } finally {
+    fs.rmSync(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("preview launcher preserves an explicitly ambient NODE_ENV only", () => {
+  const absent = previewEnvironment(
+    "/tmp/kady-preview-test",
+    "/tmp/kady-preview-test/launch",
+    "/tmp/kady-preview-test/bin",
+    { backend: 18100, frontend: 13100, engine: 13191 },
+    { PATH: "/usr/bin" },
+  );
+  const explicit = previewEnvironment(
+    "/tmp/kady-preview-test",
+    "/tmp/kady-preview-test/launch",
+    "/tmp/kady-preview-test/bin",
+    { backend: 18100, frontend: 13100, engine: 13191 },
+    { PATH: "/usr/bin", NODE_ENV: "test" },
+  );
+  assert.equal("NODE_ENV" in absent, false);
+  assert.equal(explicit.NODE_ENV, "test");
+});
+
+test("preview dependency preparation never invokes fake npm under production NODE_ENV", () => {
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-fake-npm-"));
+  try {
+    const invocationLog = path.join(stateRoot, "npm-invoked");
+    const fakeNpmPath = path.join(stateRoot, "npm");
+    fs.writeFileSync(
+      fakeNpmPath,
+      `#!${process.execPath}\nimport fs from "node:fs";
+if (process.env.NODE_ENV === "production") process.exit(91);
+fs.writeFileSync(${JSON.stringify(invocationLog)}, "invoked\\n");
+`,
+      { mode: 0o700 },
+    );
+    const previewEnvironmentWithProduction = { KADY_PREVIEW: "1", NODE_ENV: "production" };
+    const invokeFakeNpm = (environment) => {
+      const result = spawnSync(fakeNpmPath, ["install"], { env: environment });
+      assert.equal(result.status, 0, `fake npm exited ${result.status}`);
+    };
+    const action = prepareLauncherDependencies({
+      environment: previewEnvironmentWithProduction,
+      serverDependenciesReady: true,
+      webDependenciesReady: true,
+      install: () => invokeFakeNpm(previewEnvironmentWithProduction),
+    });
+    assert.equal(action, "reuse-preview");
+    assert.equal(fs.existsSync(invocationLog), false);
+    assert.throws(
+      () => prepareLauncherDependencies({
+        environment: previewEnvironmentWithProduction,
+        serverDependenciesReady: false,
+        webDependenciesReady: true,
+        install: () => invokeFakeNpm(previewEnvironmentWithProduction),
+      }),
+      /Preview requires dependencies installed before launch/,
+    );
+    assert.equal(fs.existsSync(invocationLog), false);
+
+    const normalEnvironment = { PATH: process.env.PATH ?? "" };
+    assert.equal(
+      prepareLauncherDependencies({
+        environment: normalEnvironment,
+        serverDependenciesReady: false,
+        webDependenciesReady: false,
+        install: () => invokeFakeNpm(normalEnvironment),
+      }),
+      "installed",
+    );
+    assert.equal(fs.readFileSync(invocationLog, "utf-8"), "invoked\n");
   } finally {
     fs.rmSync(stateRoot, { recursive: true, force: true });
   }
@@ -189,6 +268,7 @@ test("pins both engine clients to the preview port by default and scrubs legacy 
   assert.equal(environment.NEXT_PUBLIC_ADK_API_URL, "http://127.0.0.1:18000");
   assert.equal(environment.NEXT_PUBLIC_SCIENTIFIC_DAG_STUDIO, "1");
   assert.equal(environment.KADY_PIPELINE_ENGINE_PORT, "13091");
+  assert.equal("NODE_ENV" in environment, false);
   assert.equal(environment.HOME, "/tmp/kady-preview-test/home");
   assert.equal(environment.PATH, "/tmp/kady-preview-test/launch/bin:/usr/bin");
   assert.equal(environment.npm_config_cache, "/tmp/kady-preview-test/npm-cache");

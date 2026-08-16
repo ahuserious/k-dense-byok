@@ -72,8 +72,11 @@ node scripts/vendored-dist-build.mjs --if-stale
 The primary `start.mjs` launcher delegates dependency synchronization and the
 freshness-aware `--if-stale` build to that locked wrapper. Preview mode is
 check-only: the isolated prebuild is the sole builder, and the launcher fails
-with `preview prebuild should have produced a fresh manifest` if its identical
-`NODE_ENV`, `PORT`, or `TMPDIR` context does not validate. It reuses a listener
+with `preview prebuild should have produced a fresh manifest` if a computed
+fingerprint using the prebuild's `NODE_ENV`, `PORT`, or `TMPDIR` values does not
+validate. Build-only defaults such as `NODE_ENV=production` are passed only to
+Bun/Vite and the manifest checker; they are never exported to the launcher,
+npm, backend, or frontend. It reuses a listener
 only when the PID belongs to this checkout, the health endpoint responds, and
 the manifest is fresh. Engine-port ownership is checked before backend/frontend
 spawn; a foreign listener aborts startup rather than becoming the backend's
@@ -108,8 +111,11 @@ The effective environment includes:
   `PI_CODING_AGENT_DIR`, `KADY_SKILLS_CACHE_DIR`, and workflow-supervisor paths;
 - `KADY_SKILLS_REPO=kady-preview-nonexistent/none` and a blank
   `TELEGRAM_BOT_TOKEN`;
-- the shared strict vendored-build values (`HOME`, `PATH`, `NODE_ENV`, `PORT`,
-  `TMPDIR`, and optional `LANG`/`CI`) used by both prebuild and launcher checks;
+- isolated launcher `HOME`, `PATH`, and `TMPDIR`; `NODE_ENV` is absent unless
+  the caller explicitly supplied it;
+- a separately computed strict vendored-build environment (`HOME`, `PATH`,
+  build-only `NODE_ENV`, `PORT`, `TMPDIR`, and optional `LANG`/`CI`) used only
+  by the prebuild and freshness checker;
 - scrubbed ambient variables for non-build preview services; the scrubber also
   removes auth/PAT/key/token/secret/password/credential names and common
   database secrets such as `PGPASSWORD`, `MYSQL_PWD`, and `DATABASE_URL`.
@@ -119,6 +125,11 @@ replaces the state paths with its unique temporary root. Startup succeeds only
 after the backend `/health`, web root, and workflow engine `/api/health` all
 answer successfully. It then prints those URLs, the spawned root PID, and the
 log location.
+
+Preview startup never runs `npm install`. It requires the already-installed
+backend `tsx` and frontend `next` entrypoints and fails clearly if either is
+missing. Normal `start.mjs` launches retain their existing install/update
+behaviour.
 
 ## Push block
 

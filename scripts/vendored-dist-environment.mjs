@@ -51,6 +51,39 @@ export function strictPreviewVendoredDistEnvironment(environment) {
   );
 }
 
+export function previewVendoredDistFingerprintEnvironment(
+  launcherEnvironment,
+  enginePort,
+) {
+  return strictPreviewVendoredDistEnvironment({
+    ...launcherEnvironment,
+    NODE_ENV: launcherEnvironment.NODE_ENV ?? "production",
+    PORT: String(enginePort),
+  });
+}
+
+export function prepareLauncherDependencies({
+  environment,
+  serverDependenciesReady,
+  webDependenciesReady,
+  install,
+}) {
+  if (environment.KADY_PREVIEW === "1") {
+    if (!serverDependenciesReady || !webDependenciesReady) {
+      const missing = [
+        !serverDependenciesReady ? "server/node_modules/tsx" : null,
+        !webDependenciesReady ? "web/node_modules/next" : null,
+      ].filter(Boolean);
+      throw new Error(
+        `Preview requires dependencies installed before launch; missing ${missing.join(" and ")}.`,
+      );
+    }
+    return "reuse-preview";
+  }
+  install();
+  return "installed";
+}
+
 function processStartIdentity(pid) {
   if (!Number.isSafeInteger(pid) || pid < 1) return null;
   if (process.platform === "win32") {
