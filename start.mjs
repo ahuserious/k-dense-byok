@@ -1176,6 +1176,10 @@ if (!process.env.KADY_PIPELINE_ENGINE_PORT && process.env.KADY_ARCHON_PORT) {
 try {
   PIPELINE_ENGINE_PORT = resolveWorkflowEnginePort(process.env, flags.enginePort);
 } catch (error) {
+  // The handoff sentinel is fail() unwinding towards the shutdown coordinator,
+  // not a failure of this step; re-wrapping it would print "launcher exit
+  // deferred…" as if the step itself had failed.
+  if (isForcedShutdownHandoff(error)) throw error;
   fail(`  ${sym.err} ${error instanceof Error ? error.message : String(error)}`);
 }
 try {
@@ -1184,6 +1188,7 @@ try {
     workflowEngineConsumerEnvironment(process.env, PIPELINE_ENGINE_PORT),
   );
 } catch (error) {
+  if (isForcedShutdownHandoff(error)) throw error;
   fail(`  ${sym.err} ${error instanceof Error ? error.message : String(error)}`);
 }
 await checkModelAccess();
@@ -1208,6 +1213,9 @@ try {
     log("  Preview dependencies already installed; skipping npm install.");
   }
 } catch (error) {
+  // installBackendPackages() calls fail() directly, so this is the catch block
+  // the sentinel actually reaches during a forced-shutdown retry hold.
+  if (isForcedShutdownHandoff(error)) throw error;
   fail(`  ${sym.err} ${error instanceof Error ? error.message : String(error)}`);
 }
 log("");

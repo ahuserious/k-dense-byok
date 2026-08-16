@@ -483,12 +483,24 @@ export function vendoredDistBuildLockOwnerPath(lockDirectory) {
 }
 
 function vendoredPipelineEngineRoot(repositoryRoot) {
-  return path.join(
+  // Resolving only the repository root is not enough: a preview overlay reaches
+  // the checkout through a symlinked `<launchRoot>/server`, so joining onto the
+  // resolved launch root still yields a path *through* that symlink. Both cwd
+  // proofs report fully resolved paths, so an unresolved needle could never
+  // match and the proof would report zero occupants for a live builder.
+  const vendoredRoot = path.join(
     fs.realpathSync(path.resolve(repositoryRoot)),
     "server",
     "vendor",
     "pipeline-engine",
   );
+  try {
+    return fs.realpathSync(vendoredRoot);
+  } catch {
+    // Nothing vendored yet: the unresolved path is still the best needle, and
+    // an absent root means there is no builder to find.
+    return vendoredRoot;
+  }
 }
 
 function validWorkerRecord(worker) {
@@ -664,7 +676,38 @@ function processCommandName(pid, { platform = process.platform, readFileSync = f
   return result.status === 0 && value ? path.basename(value) : null;
 }
 
-function processWorkingDirectory(pid, { platform = process.platform, readLinkSync = fs.readlinkSync, spawnProcess = spawnSync } = {}) {
+/**
+ * Every occupant proof runs an external tool that reports its failures through
+ * `error`, `signal`, or an exit status rather than by throwing. Reading any of
+ * those as "no occupants" would turn the proof fail-open, so every call goes
+ * through one runner with an explicit set of statuses that mean "the tool
+ * answered".
+ */
+function createOccupantProofRunner(vendoredRoot, spawnProcess) {
+  return (command, commandArguments, timeoutMs, answeredStatuses) => {
+    let result;
+    try {
+      result = spawnProcess(command, commandArguments, { encoding: "utf-8", timeout: timeoutMs });
+    } catch (error) {
+      throw new Error(`could not verify occupants of ${vendoredRoot}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    // spawnSync reports a missing binary, a timeout, or a signal death through
+    // `error`/`signal` instead of throwing.
+    if (result?.error) {
+      throw new Error(`could not verify occupants of ${vendoredRoot}: ${command} failed: ${result.error.message}`);
+    }
+    if (result?.signal) {
+      throw new Error(`could not verify occupants of ${vendoredRoot}: ${command} was killed by ${result.signal}`);
+    }
+    const status = result?.status ?? 0;
+    if (!answeredStatuses.includes(status)) {
+      throw new Error(`could not verify occupants of ${vendoredRoot}: ${command} exited with status ${status}`);
+    }
+    return result;
+  };
+}
+
+function processWorkingDirectory(pid, { platform = process.platform, readLinkSync = fs.readlinkSync, runProof } = {}) {
   if (platform === "linux") {
     try {
       return readLinkSync(`/proc/${pid}/cwd`);
@@ -673,7 +716,11 @@ function processWorkingDirectory(pid, { platform = process.platform, readLinkSyn
     }
   }
   if (platform === "darwin") {
-    const result = spawnProcess("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], { encoding: "utf-8" });
+    // lsof exits 1 when the PID it was asked to list is already gone, which is
+    // a clean negative answer. A hung lookup, a signal death, or a usage error
+    // must throw instead of reporting "no working directory", or a single
+    // unreadable PID would silently drop out of the proof.
+    const result = runProof("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], 2_000, [0, 1]);
     const line = (result.stdout ?? "").split("\n").find((entry) => entry.startsWith("n"));
     return line ? line.slice(1) : null;
   }
@@ -707,7 +754,9 @@ export function escapeExtendedRegularExpression(value) {
  *    merely name the path (editors, greps) from blocking recovery forever.
  *
  * SCOPE LIMIT: a mutator that changed its working directory away from the root
- * and does not name it in argv is invisible to both proofs. See docs/preview-env.md.
+ * and does not name it in argv is invisible to both proofs, and an unprivileged
+ * caller cannot read the working directory of another user's (or root's)
+ * processes at all. See docs/preview-env.md.
  */
 export function findVendoredRootOccupants(
   vendoredRoot,
@@ -721,12 +770,13 @@ export function findVendoredRootOccupants(
   } = {},
 ) {
   const occupants = new Set();
+  const runProof = createOccupantProofRunner(vendoredRoot, spawnProcess);
   const insideVendoredRoot = (directory) =>
     Boolean(directory) && (directory === vendoredRoot || directory.startsWith(`${vendoredRoot}${path.sep}`));
   const consider = (pid, knownWorkingDirectory) => {
     if (!Number.isSafeInteger(pid) || pid < 1 || pid === selfPid) return;
     const workingDirectory = knownWorkingDirectory === undefined
-      ? processWorkingDirectory(pid, { platform, readLinkSync, spawnProcess })
+      ? processWorkingDirectory(pid, { platform, readLinkSync, runProof })
       : knownWorkingDirectory;
     if (insideVendoredRoot(workingDirectory)) {
       occupants.add(pid);
@@ -735,29 +785,13 @@ export function findVendoredRootOccupants(
     const command = processCommandName(pid, { platform, readFileSync, spawnProcess });
     if (isNodeOrBunCommand(command)) occupants.add(pid);
   };
-  const runProof = (command, commandArguments, timeoutMs) => {
-    let result;
-    try {
-      result = spawnProcess(command, commandArguments, { encoding: "utf-8", timeout: timeoutMs });
-    } catch (error) {
-      throw new Error(`could not verify occupants of ${vendoredRoot}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    // spawnSync reports a missing binary, a timeout, or a signal death through
-    // `error`/`signal` instead of throwing; treating those as "no occupants"
-    // would turn this proof fail-open.
-    if (result?.error) {
-      throw new Error(`could not verify occupants of ${vendoredRoot}: ${command} failed: ${result.error.message}`);
-    }
-    if (result?.signal) {
-      throw new Error(`could not verify occupants of ${vendoredRoot}: ${command} was killed by ${result.signal}`);
-    }
-    return result;
-  };
-  // pgrep exits 1 when nothing matched, which is a valid negative answer.
+  // pgrep exits 1 when nothing matched, which is a valid negative answer;
+  // anything above that is a usage or system error, not an empty result.
   const argumentMatches = runProof(
     "pgrep",
     ["-f", "--", escapeExtendedRegularExpression(vendoredRoot)],
     2_000,
+    [0, 1],
   );
   for (const token of (argumentMatches.stdout ?? "").trim().split(/\s+/).filter(Boolean)) {
     consider(Number(token));
@@ -773,13 +807,25 @@ export function findVendoredRootOccupants(
       if (!/^\d+$/.test(entry)) continue;
       const pid = Number(entry);
       if (pid === selfPid) continue;
-      const workingDirectory = processWorkingDirectory(pid, { platform, readLinkSync, spawnProcess });
+      let workingDirectory = null;
+      try {
+        workingDirectory = readLinkSync(`/proc/${pid}/cwd`);
+      } catch (error) {
+        // A process that belongs to another user answers EACCES/EPERM here, so
+        // its working directory is unprovable rather than known-outside. Fall
+        // through to the comm/argv check instead of dropping it silently; only
+        // a process that has gone away (ESRCH/ENOENT) is skipped.
+        if (error?.code === "EACCES" || error?.code === "EPERM") consider(pid, null);
+        continue;
+      }
       if (insideVendoredRoot(workingDirectory)) consider(pid, workingDirectory);
     }
   } else if (platform === "darwin") {
     // No `-c node -c bun` filter: any command with its cwd under the root
-    // counts. A full cwd listing is slower, so it gets a wider timeout.
-    const result = runProof("lsof", ["-a", "-d", "cwd", "-w", "-Fn"], 10_000);
+    // counts. A full cwd listing is slower, so it gets a wider timeout. Only a
+    // clean exit answers: lsof exits 1 after an error it could not complete,
+    // and partial output could omit the very occupant this proof exists to find.
+    const result = runProof("lsof", ["-a", "-d", "cwd", "-w", "-Fn"], 10_000, [0]);
     let currentPid = null;
     for (const line of (result.stdout ?? "").split("\n")) {
       if (line.startsWith("p")) {
@@ -904,6 +950,23 @@ export async function recoverVendoredDistBuildLock(
         "verify no build worker remains, then manually remove the build.lock.d directory",
     );
   }
+  // Both --force exits below delete a directory this command does not own, so
+  // they share one gate: no forced removal happens while anything can still be
+  // mutating the vendored root.
+  const assertVendoredRootIsUnoccupied = () => {
+    const vendoredRoot = vendoredPipelineEngineRoot(repositoryRoot);
+    const occupants = occupantsFor(vendoredRoot, {
+      platform,
+      spawnProcess,
+      readFileSync,
+      readLinkSync,
+    });
+    if (occupants.length > 0) {
+      throw new Error(
+        `refusing forced lock recovery because node/bun still reference ${vendoredRoot}: ${occupants.join(", ")}`,
+      );
+    }
+  };
   const inspection = inspectLockDirectory(lockPath);
   if (inspection.kind === "absent") return { recovered: false, lockPath, record: null };
   if (inspection.kind === "valid") {
@@ -927,6 +990,12 @@ export async function recoverVendoredDistBuildLock(
               "inspect them, then re-run with --force to remove the directory",
           );
         }
+        // The recorded processes are dead, but the leftovers under the lock
+        // directory belong to some writer whose identity was never recorded.
+        // The occupant proof is the only evidence that no such writer is still
+        // running, so it gates this recursive removal exactly as it gates the
+        // unreadable-record one below.
+        assertVendoredRootIsUnoccupied();
         fs.rmSync(lockPath, { recursive: true, force: true });
       }
     }
@@ -935,18 +1004,7 @@ export async function recoverVendoredDistBuildLock(
   if (!force) {
     throw new Error(`refusing lock recovery because the owner record is unreadable: ${lockPath}`);
   }
-  const vendoredRoot = vendoredPipelineEngineRoot(repositoryRoot);
-  const occupants = occupantsFor(vendoredRoot, {
-    platform,
-    spawnProcess,
-    readFileSync,
-    readLinkSync,
-  });
-  if (occupants.length > 0) {
-    throw new Error(
-      `refusing forced lock recovery because node/bun still reference ${vendoredRoot}: ${occupants.join(", ")}`,
-    );
-  }
+  assertVendoredRootIsUnoccupied();
   fs.rmSync(lockPath, { recursive: true, force: true });
   return { recovered: true, lockPath, record: null, forced: true };
 }

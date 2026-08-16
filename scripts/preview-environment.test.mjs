@@ -1254,6 +1254,129 @@ test("occupant proof fails closed when a proof command cannot run", () => {
   );
 });
 
+test("occupant proof fails closed on an exit status that is not an answer", () => {
+  const vendoredRoot = "/tmp/kady-occupant-status/server/vendor/pipeline-engine";
+  // pgrep answers with 0 (matched) or 1 (nothing matched); 2 is a usage error
+  // and 3 an operational one, neither of which means "no occupants".
+  assert.throws(
+    () => findVendoredRootOccupants(vendoredRoot, {
+      platform: "darwin",
+      selfPid: 1,
+      spawnProcess: (command) => (command === "pgrep"
+        ? { status: 2, stdout: "" }
+        : { status: 0, stdout: "" }),
+    }),
+    /could not verify occupants of .*pgrep exited with status 2/,
+  );
+  // The full cwd listing must complete: partial output could omit an occupant.
+  assert.throws(
+    () => findVendoredRootOccupants(vendoredRoot, {
+      platform: "darwin",
+      selfPid: 1,
+      spawnProcess: (command) => (command === "pgrep"
+        ? { status: 1, stdout: "" }
+        : { status: 1, stdout: "" }),
+    }),
+    /could not verify occupants of .*lsof exited with status 1/,
+  );
+  // The per-PID cwd lookup runs through the same runner: a failed lookup must
+  // throw rather than read as "this PID has no working directory".
+  assert.throws(
+    () => findVendoredRootOccupants(vendoredRoot, {
+      platform: "darwin",
+      selfPid: 1,
+      spawnProcess: (command, commandArguments) => {
+        if (command === "pgrep") return { status: 0, stdout: "6301\n" };
+        if (command === "lsof" && commandArguments.includes("-p")) return { status: 2, stdout: "" };
+        return { status: 0, stdout: "" };
+      },
+    }),
+    /could not verify occupants of .*lsof exited with status 2/,
+  );
+});
+
+test("occupant proof cannot clear a linux PID whose working directory is unreadable", () => {
+  const vendoredRoot = "/tmp/kady-occupant-eacces/server/vendor/pipeline-engine";
+  const commandNames = new Map([[7101, "node"], [7102, "node"], [7103, "sshd"]]);
+  const workingDirectoryErrors = new Map([
+    // Another user's (or root's) process: unprovable, not known-outside.
+    [7101, Object.assign(new Error("EACCES"), { code: "EACCES" })],
+    // Already gone between the readdir and the readlink.
+    [7102, Object.assign(new Error("ENOENT"), { code: "ENOENT" })],
+    [7103, Object.assign(new Error("EPERM"), { code: "EPERM" })],
+  ]);
+  const occupants = findVendoredRootOccupants(vendoredRoot, {
+    platform: "linux",
+    selfPid: 1,
+    spawnProcess: (command) => (command === "pgrep"
+      ? { status: 1, stdout: "" }
+      : { status: 0, stdout: "" }),
+    readDirSync: () => ["7101", "7102", "7103", "self", "meminfo"],
+    readLinkSync: (linkPath) => {
+      throw workingDirectoryErrors.get(Number(linkPath.split("/")[2]));
+    },
+    readFileSync: (commPath) => {
+      const command = commandNames.get(Number(commPath.split("/")[2]));
+      if (!command) throw new Error("ENOENT");
+      return `${command}\n`;
+    },
+  });
+  // 7101 is an unreadable node process, so it blocks recovery; 7102 is gone;
+  // 7103 is unreadable but is not a node/bun mutator.
+  assert.deepEqual(occupants, [7101]);
+});
+
+test("occupant proof resolves a symlinked repository root before comparing working directories", async () => {
+  // A preview overlay is a real launch root whose `server` entry is a symlink
+  // into the checkout, so the joined vendored path runs *through* the symlink
+  // while every cwd proof reports the resolved path.
+  const checkoutRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-overlay-checkout-"));
+  const launchRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-overlay-launch-"));
+  try {
+    fs.mkdirSync(path.join(checkoutRoot, "server", "vendor", "pipeline-engine"), { recursive: true });
+    fs.symlinkSync(path.join(checkoutRoot, "server"), path.join(launchRoot, "server"));
+    const lockPath = preparedBuildLockPath(launchRoot);
+    fs.mkdirSync(lockPath, { recursive: true });
+    fs.writeFileSync(vendoredDistBuildLockOwnerPath(lockPath), "{ truncated");
+
+    const resolvedVendoredRoot = path.join(
+      fs.realpathSync(checkoutRoot),
+      "server",
+      "vendor",
+      "pipeline-engine",
+    );
+    const overlayVendoredRoot = path.join(
+      fs.realpathSync(launchRoot),
+      "server",
+      "vendor",
+      "pipeline-engine",
+    );
+    // Without this the test would pass for the wrong reason.
+    assert.notEqual(overlayVendoredRoot, resolvedVendoredRoot);
+
+    const processes = [
+      {
+        pid: 5150,
+        comm: "sh",
+        cwd: `${resolvedVendoredRoot}/packages/web`,
+        argv: "sh -c while [ ! -f gate ]; do sleep 0.01; done",
+      },
+    ];
+    await assert.rejects(
+      recoverVendoredDistBuildLock(launchRoot, {
+        force: true,
+        platform: "darwin",
+        spawnProcess: fakeProcessTable(processes),
+      }),
+      /refusing forced lock recovery because node\/bun still reference .*pipeline-engine: 5150/,
+    );
+    assert.equal(fs.existsSync(lockPath), true);
+  } finally {
+    fs.rmSync(launchRoot, { recursive: true, force: true });
+    fs.rmSync(checkoutRoot, { recursive: true, force: true });
+  }
+});
+
 test("CLI recovery refuses a lock directory that is not empty unless --force", async () => {
   const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-dirty-directory-"));
   const lockPath = preparedBuildLockPath(repositoryRoot);
@@ -1284,7 +1407,78 @@ test("CLI recovery refuses a lock directory that is not empty unless --force", a
     assert.equal(status.recoverable, false);
     assert.equal(status.reason, "unreadable-owner");
 
+    // The forced removal deletes entries this command does not own, so it is
+    // gated by the occupant proof exactly like the unreadable-record path.
+    await assert.rejects(
+      recoverVendoredDistBuildLock(repositoryRoot, {
+        force: true,
+        occupantsFor: () => [55055],
+      }),
+      /refusing forced lock recovery because node\/bun still reference .*: 55055/,
+    );
+    assert.equal(fs.existsSync(path.join(lockPath, ".owner.878787.leftover.tmp")), true);
+
     const recovered = await recoverVendoredDistBuildLock(repositoryRoot, {
+      force: true,
+      occupantsFor: () => [],
+    });
+    assert.equal(recovered.recovered, true);
+    assert.equal(fs.existsSync(lockPath), false);
+  } finally {
+    fs.rmSync(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("a single-shot forced recovery of a dead owner record runs the occupant proof first", async () => {
+  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-forced-proof-"));
+  const lockPath = preparedBuildLockPath(repositoryRoot);
+  const leftoverPath = path.join(lockPath, ".owner.919191.leftover.tmp");
+  const deadIdentity = testIdentity("dead-forced-owner");
+  const deadOwnerDependencies = {
+    captureIdentity: (pid) => pid === process.pid ? testIdentity("operator") : deadIdentity,
+    getLiveness: (pid) => pid === process.pid ? "alive" : "dead",
+  };
+  try {
+    writePlantedOwner(lockPath, {
+      version: 1,
+      pid: 919191,
+      identity: deadIdentity,
+      phase: "holding",
+      workers: [],
+      createdAt: new Date().toISOString(),
+      heartbeatAt: new Date().toISOString(),
+    });
+    fs.writeFileSync(leftoverPath, "{partial");
+
+    // First invocation is already --force: the owner record parses and its
+    // recorded processes are dead, but the dirty directory means the recursive
+    // removal still has to clear the proof.
+    const provedRoots = [];
+    await assert.rejects(
+      recoverVendoredDistBuildLock(repositoryRoot, {
+        ...deadOwnerDependencies,
+        force: true,
+        occupantsFor: (vendoredRoot) => {
+          provedRoots.push(vendoredRoot);
+          return [4242];
+        },
+      }),
+      /refusing forced lock recovery because node\/bun still reference .*: 4242/,
+    );
+    assert.equal(provedRoots.length, 1);
+    assert.equal(
+      provedRoots[0],
+      path.join(fs.realpathSync(repositoryRoot), "server", "vendor", "pipeline-engine"),
+    );
+    assert.equal(fs.existsSync(leftoverPath), true);
+    // The owner record is gone, so the lock stays busy as an unreadable record
+    // rather than becoming adoptable while a live builder is still around.
+    const status = vendoredDistBuildLockStatus(repositoryRoot);
+    assert.equal(status.active, true);
+    assert.equal(status.reason, "unreadable-owner");
+
+    const recovered = await recoverVendoredDistBuildLock(repositoryRoot, {
+      ...deadOwnerDependencies,
       force: true,
       occupantsFor: () => [],
     });
