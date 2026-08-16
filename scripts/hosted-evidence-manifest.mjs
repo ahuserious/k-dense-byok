@@ -9,6 +9,10 @@ import {
   scrubAndVerifyText,
   scrubText,
 } from "./hosted-evidence-secrets.mjs";
+import {
+  assertHostedEvidenceLogWithinLimit,
+  MAX_HOSTED_EVIDENCE_LOG_BYTES,
+} from "./hosted-evidence-log-cap.mjs";
 
 const RAW_LOG_FILE_NAME = "stably-test.log";
 const LOG_FILE_NAME = "stably-test.scrubbed.log";
@@ -16,14 +20,15 @@ const RAW_PREVIEW_LOG_FILE_NAME = "preview-up.log";
 const PREVIEW_LOG_FILE_NAME = "preview-up.scrubbed.log";
 const RUNNER_FINGERPRINT_FILE_NAME = "runner-fingerprint.json";
 const MANIFEST_FILE_NAME = "hosted-evidence-manifest.json";
+const EPILOGUE_DIAGNOSTIC_FILE_NAME = "stably-test-epilogue.scrubbed.log";
 const STABLY_LAST_RUN_FILE_NAMES = [
   ".stably/last-run.json",
   "e2e/.stably/last-run.json",
 ];
 const STABLY_CLI_VERSION = "4.12.28";
 const STABLY_REPORTER_VERSION = "2.1.16";
-const MAX_RAW_LOG_BYTES = 32 * 1024 * 1024;
 const RAW_EPILOGUE_SUFFIX_BYTES = 64 * 1024;
+const EPILOGUE_DIAGNOSTIC_BYTES = 4 * 1024;
 const SCRUB_STREAM_CHUNK_BYTES = 64 * 1024;
 const STABLY_DASHBOARD_CONTRACT = Object.freeze({
   origin: "https://app.stably.ai",
@@ -127,13 +132,7 @@ function parseSummary(log, environment) {
 }
 
 function assertRawLogWithinLimit(sourcePath) {
-  const stat = fs.statSync(sourcePath);
-  if (stat.size > MAX_RAW_LOG_BYTES) {
-    throw new Error(
-      `raw evidence log exceeds ${MAX_RAW_LOG_BYTES}-byte validation limit`,
-    );
-  }
-  return stat.size;
+  return assertHostedEvidenceLogWithinLimit(sourcePath);
 }
 
 function readBoundedLogSuffix(filePath) {
@@ -182,7 +181,7 @@ function writeScrubbedLog(workingDirectory, sourceName, destinationName, environ
       const bytesRead = fs.readSync(inputDescriptor, buffer, 0, buffer.length);
       if (bytesRead === 0) break;
       totalBytesRead += bytesRead;
-      if (totalBytesRead > MAX_RAW_LOG_BYTES) {
+      if (totalBytesRead > MAX_HOSTED_EVIDENCE_LOG_BYTES) {
         throw new Error("raw evidence log grew beyond its validation limit");
       }
       const text = carry + decoder.write(buffer.subarray(0, bytesRead));
@@ -199,7 +198,7 @@ function writeScrubbedLog(workingDirectory, sourceName, destinationName, environ
     carry += decoder.end();
     fs.writeSync(outputDescriptor, scrubText(carry, replacements));
     fs.closeSync(outputDescriptor);
-    if (fs.statSync(temporaryPath).size > MAX_RAW_LOG_BYTES) {
+    if (fs.statSync(temporaryPath).size > MAX_HOSTED_EVIDENCE_LOG_BYTES) {
       throw new Error("scrubbed evidence log exceeds its validation limit");
     }
     const verified = scrubAndVerifyText(
@@ -241,7 +240,7 @@ function escapeRegularExpression(value) {
 }
 
 function stablyResultUrl(log, suiteName, runId, projectId) {
-  const lines = stripAnsi(log).split(/\r?\n/);
+  const lines = log.split(/\r?\n/);
   const suitePattern = new RegExp(
     `^\\s*✨ Suite "${escapeRegularExpression(suiteName)}" run complete!\\s*$`,
   );
@@ -252,6 +251,7 @@ function stablyResultUrl(log, suiteName, runId, projectId) {
     );
     if (!resultMatch) return null;
     const rawUrl = resultMatch[1];
+    if (/[\x00-\x1f\x7f]/.test(rawUrl)) return null;
     const expectedUrl =
       STABLY_DASHBOARD_CONTRACT.origin +
       STABLY_DASHBOARD_CONTRACT.projectPrefix +
@@ -335,7 +335,9 @@ function readStablyRun(workingDirectory, environment, log) {
   const { relativePath: lastRunFile, runId } = validLastRuns[0];
   const plainLog = stripAnsi(log);
   if (!plainLog.includes(`Suite \"${suiteName}\" run complete!`)) {
-    throw new Error("Attached Stably run does not match the expected suite name.");
+    throw new Error(
+      `reporter epilogue absent from the final ${RAW_EPILOGUE_SUFFIX_BYTES.toLocaleString("en-US")} bytes`,
+    );
   }
   const url = stablyResultUrl(
     log,
@@ -379,6 +381,16 @@ function removeRawLogs(workingDirectory) {
   });
 }
 
+function writeBoundedEpilogueDiagnostic(workingDirectory, rawSuffix, environment) {
+  const diagnostic = rawSuffix.slice(-EPILOGUE_DIAGNOSTIC_BYTES);
+  const scrubbed = scrubAndVerifyText(diagnostic, environment);
+  fs.writeFileSync(
+    path.join(workingDirectory, EPILOGUE_DIAGNOSTIC_FILE_NAME),
+    scrubbed,
+    { mode: 0o600 },
+  );
+}
+
 function suiteCommand(environment) {
   const workers = environment.E2E_WORKERS ?? "";
   const grep = environment.INPUT_GREP ?? "";
@@ -409,6 +421,8 @@ export function buildHostedEvidenceManifest({
     environment: {
       CI: "1",
       KADY_E2E_BASE_URL: "http://127.0.0.1:13000",
+      FORCE_COLOR: "0",
+      NO_COLOR: "1",
       workers: environment.E2E_WORKERS ?? "",
       KADY_E2E_WORKERS: environment.KADY_E2E_WORKERS || null,
       E2E_SUITE_NAME:
@@ -438,8 +452,9 @@ export function buildHostedEvidenceManifest({
 export function writeHostedEvidenceManifest(options = {}) {
   const workingDirectory = options.workingDirectory ?? process.cwd();
   const environment = options.environment ?? process.env;
+  let rawLog = "";
   try {
-    const rawLog = readBoundedLogSuffix(
+    rawLog = readBoundedLogSuffix(
       path.join(workingDirectory, RAW_LOG_FILE_NAME),
     );
     const stablyEvidence = readStablyRun(
@@ -461,6 +476,15 @@ export function writeHostedEvidenceManifest(options = {}) {
     fs.writeFileSync(path.join(workingDirectory, MANIFEST_FILE_NAME), serialized);
     process.stdout.write(serialized);
     return JSON.parse(serialized);
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message ===
+        `reporter epilogue absent from the final ${RAW_EPILOGUE_SUFFIX_BYTES.toLocaleString("en-US")} bytes`
+    ) {
+      writeBoundedEpilogueDiagnostic(workingDirectory, rawLog, environment);
+    }
+    throw error;
   } finally {
     removeRawLogs(workingDirectory);
   }

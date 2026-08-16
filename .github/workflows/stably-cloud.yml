@@ -169,6 +169,8 @@ jobs:
         env:
           CI: "1"
           KADY_E2E_BASE_URL: http://127.0.0.1:13000
+          FORCE_COLOR: "0"
+          NO_COLOR: "1"
           STABLY_API_KEY: ${{ secrets.STABLY_API_KEY }}
           STABLY_PROJECT_ID: ${{ secrets.STABLY_PROJECT_ID }}
         run: npx playwright test --workers="$E2E_WORKERS" --trace on > stably-test.log 2>&1
@@ -179,17 +181,24 @@ jobs:
         env:
           CI: "1"
           KADY_E2E_BASE_URL: http://127.0.0.1:13000
+          FORCE_COLOR: "0"
+          NO_COLOR: "1"
           STABLY_API_KEY: ${{ secrets.STABLY_API_KEY }}
           STABLY_PROJECT_ID: ${{ secrets.STABLY_PROJECT_ID }}
           INPUT_GREP: ${{ inputs.grep }}
         run: npx playwright test --workers="$E2E_WORKERS" --grep "$INPUT_GREP" --trace on > stably-test.log 2>&1
+
+      - name: Enforce hosted evidence log size limit
+        id: evidence-log-cap
+        if: always()
+        run: node scripts/hosted-evidence-log-cap.mjs stably-test.log
 
       - name: Stop hermetic preview
         if: always()
         run: node scripts/preview-down.mjs
 
       - name: Extract suite counts
-        if: always()
+        if: always() && steps.evidence-log-cap.outcome == 'success'
         run: |
           passed="$(grep -Eo '[0-9]+ passed' stably-test.log 2>/dev/null | tail -1 | cut -d' ' -f1 || true)"
           failed="$(grep -Eo '[0-9]+ failed' stably-test.log 2>/dev/null | tail -1 | cut -d' ' -f1 || true)"

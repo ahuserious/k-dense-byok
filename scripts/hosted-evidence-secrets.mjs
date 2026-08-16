@@ -4,9 +4,10 @@ const EXPLICIT_SECRET_ENVIRONMENT_NAMES = new Set([
   "STABLY_API_KEY",
   "STABLY_PROJECT_ID",
 ]);
-const MAX_CANONICALIZATION_PASSES = 8;
-const MAX_CANONICAL_VARIANTS = 64;
-const MAX_CANONICALIZATION_WORK_BYTES = 512 * 1024 * 1024;
+const MAX_CANONICALIZATION_DEPTH = 8;
+const MAX_CANONICALIZATION_CHAIN_WORK_BYTES = 256 * 1024 * 1024;
+const MAX_CANONICALIZATION_GLOBAL_WORK_BYTES = 2 * 1024 * 1024 * 1024;
+const MIN_BASE64_SPAN_LENGTH = 16;
 
 function strictRfc3986(value) {
   return encodeURIComponent(value).replace(/[!'()*]/g, (character) =>
@@ -154,39 +155,64 @@ function utf16BigEndianToString(buffer) {
   return swapped.toString("utf16le");
 }
 
-function plausibleUtf16Views(buffer) {
-  if (buffer.length < 4 || buffer.length % 2 !== 0) return [];
-  if (buffer[0] === 0xff && buffer[1] === 0xfe) {
-    return [buffer.subarray(2).toString("utf16le")];
+function utf16TextViews(buffer) {
+  const values = [];
+  let uninspectable = false;
+  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
+    const body = buffer.subarray(2);
+    const alignedLength = body.length - (body.length % 2);
+    if (alignedLength !== body.length) uninspectable = true;
+    if (alignedLength > 0) {
+      values.push(body.subarray(0, alignedLength).toString("utf16le"));
+    }
+  } else if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
+    const body = buffer.subarray(2);
+    const alignedLength = body.length - (body.length % 2);
+    if (alignedLength !== body.length) uninspectable = true;
+    if (alignedLength > 0) {
+      values.push(utf16BigEndianToString(body.subarray(0, alignedLength)));
+    }
   }
-  if (buffer[0] === 0xfe && buffer[1] === 0xff) {
-    return [utf16BigEndianToString(buffer.subarray(2))];
+
+  // Inspect both byte orders at both possible two-byte alignments. This is
+  // intentionally not gated on ASCII-printability: CJK text can legitimately
+  // surround an encoded credential, and skipping that view would fail open.
+  for (const offset of [0, 1]) {
+    const available = buffer.length - offset;
+    const alignedLength = available - (available % 2);
+    if (alignedLength < 2) continue;
+    const aligned = buffer.subarray(offset, offset + alignedLength);
+    values.push(aligned.toString("utf16le"));
+    values.push(utf16BigEndianToString(aligned));
   }
-  const pairCount = buffer.length / 2;
-  let evenZeroes = 0;
-  let oddZeroes = 0;
-  for (let index = 0; index < buffer.length; index += 2) {
-    if (buffer[index] === 0) evenZeroes += 1;
-    if (buffer[index + 1] === 0) oddZeroes += 1;
+  return { values: [...new Set(values)], uninspectable };
+}
+
+function canReconstructLatin1(value) {
+  if (value.includes("\uFFFD")) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    if (value.charCodeAt(index) > 0xff) return false;
   }
-  const views = [];
-  if (oddZeroes / pairCount >= 0.3 && oddZeroes > evenZeroes * 2) {
-    views.push(buffer.toString("utf16le"));
-  }
-  if (evenZeroes / pairCount >= 0.3 && evenZeroes > oddZeroes * 2) {
-    views.push(utf16BigEndianToString(buffer));
-  }
-  return views;
+  return true;
 }
 
 function byteTextViews(buffer) {
   const lossyUtf8 = buffer.toString("utf8");
-  return [...new Set([
-    lossyUtf8,
-    lossyUtf8.replaceAll("\uFFFD", ""),
-    buffer.toString("latin1"),
-    ...plausibleUtf16Views(buffer),
-  ])];
+  const utf16 = utf16TextViews(buffer);
+  const reconstructedLatin1 =
+    canReconstructLatin1(lossyUtf8)
+      ? utf16TextViews(Buffer.from(lossyUtf8, "latin1"))
+      : { values: [], uninspectable: false };
+  return {
+    values: [...new Set([
+      lossyUtf8,
+      lossyUtf8.replaceAll("\uFFFD", ""),
+      buffer.toString("latin1"),
+      ...utf16.values,
+      ...reconstructedLatin1.values,
+    ])],
+    uninspectable: utf16.uninspectable || reconstructedLatin1.uninspectable,
+  };
 }
 
 function invalidPercentFragmentEnd(value, percentIndex) {
@@ -202,19 +228,50 @@ function invalidPercentFragmentEnd(value, percentIndex) {
   return end;
 }
 
-function hasMalformedPercentAdjacency(value) {
-  const validRuns = [...value.matchAll(COMPLETE_PERCENT_RUN_PATTERN)].map(
-    (match) => ({ start: match.index, end: match.index + match[0].length }),
+function isHexDigit(character) {
+  if (character === undefined) return false;
+  const code = character.charCodeAt(0);
+  return (
+    (code >= 0x30 && code <= 0x39) ||
+    (code >= 0x41 && code <= 0x46) ||
+    (code >= 0x61 && code <= 0x66)
   );
-  if (validRuns.length === 0) return false;
-  for (let index = value.indexOf("%"); index !== -1; index = value.indexOf("%", index + 1)) {
-    if (validRuns.some((run) => index >= run.start && index < run.end)) continue;
-    const fragmentEnd = invalidPercentFragmentEnd(value, index);
-    if (
-      validRuns.some((run) => run.end === index || run.start === fragmentEnd)
-    ) {
-      return true;
+}
+
+export function hasMalformedPercentAdjacency(value) {
+  let index = 0;
+  let previousCompleteEnd = -1;
+  let pendingMalformedEnd = -1;
+  while (index < value.length) {
+    if (value[index] !== "%") {
+      pendingMalformedEnd = -1;
+      index += 1;
+      continue;
     }
+    if (
+      index + 2 < value.length &&
+      isHexDigit(value[index + 1]) &&
+      isHexDigit(value[index + 2])
+    ) {
+      const completeStart = index;
+      do {
+        index += 3;
+      } while (
+        index + 2 < value.length &&
+        value[index] === "%" &&
+        isHexDigit(value[index + 1]) &&
+        isHexDigit(value[index + 2])
+      );
+      if (pendingMalformedEnd === completeStart) return true;
+      previousCompleteEnd = index;
+      pendingMalformedEnd = -1;
+      continue;
+    }
+    const malformedStart = index;
+    const malformedEnd = invalidPercentFragmentEnd(value, index);
+    if (previousCompleteEnd === malformedStart) return true;
+    pendingMalformedEnd = malformedEnd;
+    index = malformedEnd;
   }
   return false;
 }
@@ -251,12 +308,43 @@ function decodePercentRuns(value, plusAsSpace) {
   const trimmed = source.replace(/^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g, "");
   if (/^(?:%[0-9A-Fa-f]{2})+$/.test(trimmed)) {
     const bytes = Buffer.from(trimmed.replaceAll("%", ""), "hex");
-    outputViews.push(...byteTextViews(bytes));
+    const byteViews = byteTextViews(bytes);
+    outputViews.push(...byteViews.values);
+    if (byteViews.uninspectable) malformedBytes = true;
   }
   return {
     values: [...new Set(outputViews)],
     malformed: malformedSyntax || malformedBytes,
+    uninspectable: false,
   };
+}
+
+function decodePercentCandidates(value, plusAsSpace) {
+  const candidates = new Set();
+  let start = -1;
+  for (let index = 0; index <= value.length; index += 1) {
+    const code = index < value.length ? value.charCodeAt(index) : 0;
+    const isUriTokenCharacter = code >= 0x21 && code <= 0x7e;
+    if (isUriTokenCharacter && start === -1) start = index;
+    if (isUriTokenCharacter) continue;
+    if (start !== -1) {
+      const candidate = value.slice(start, index);
+      if (candidate.includes("%") || (plusAsSpace && candidate.includes("+"))) {
+        candidates.add(candidate);
+      }
+      start = -1;
+    }
+  }
+  const values = [];
+  let malformed = false;
+  let uninspectable = false;
+  for (const candidate of candidates) {
+    const decoded = decodePercentRuns(candidate, plusAsSpace);
+    values.push(...decoded.values);
+    malformed ||= decoded.malformed;
+    uninspectable ||= decoded.uninspectable === true;
+  }
+  return { values: [...new Set(values)], malformed, uninspectable };
 }
 
 function decodeJsonEscapes(value) {
@@ -279,10 +367,29 @@ function decodeJsonEscapes(value) {
   );
 }
 
+function decodeJsonEscapeCandidates(value) {
+  const values = [];
+  let start = -1;
+  for (let index = 0; index <= value.length; index += 1) {
+    const code = index < value.length ? value.charCodeAt(index) : 0;
+    const isAsciiText = code >= 0x20 && code <= 0x7e;
+    if (isAsciiText && start === -1) start = index;
+    if (isAsciiText) continue;
+    if (start !== -1) {
+      const candidate = value.slice(start, index);
+      if (/\\(?:u[0-9A-Fa-f]{4}|["\\/bfnrt])/.test(candidate)) {
+        values.push(decodeJsonEscapes(candidate));
+      }
+      start = -1;
+    }
+  }
+  return { values: [...new Set(values)], malformed: false, uninspectable: false };
+}
+
 function decodeBase64Token(token) {
   const normalized = token.replace(ASCII_WHITESPACE_PATTERN, "");
   if (
-    normalized.length < 8 ||
+    normalized.length < MIN_BASE64_SPAN_LENGTH ||
     !/^[A-Za-z0-9+/_-]+={0,2}$/.test(normalized) ||
     normalized.length % 4 === 1
   ) {
@@ -296,134 +403,193 @@ function decodeBase64Token(token) {
     .replace(/_/g, "/")
     .replace(/=+$/, "");
   if (roundTrip !== comparable) return [];
-  return [
-    normalized,
-    ...byteTextViews(decoded).filter(isMostlyInspectableText),
-  ];
+  const views = byteTextViews(decoded);
+  return { values: views.values, uninspectable: views.uninspectable };
+}
+
+function isBase64Alphabet(character) {
+  if (character === undefined) return false;
+  const code = character.charCodeAt(0);
+  return (
+    (code >= 0x41 && code <= 0x5a) ||
+    (code >= 0x61 && code <= 0x7a) ||
+    (code >= 0x30 && code <= 0x39) ||
+    character === "+" ||
+    character === "/" ||
+    character === "_" ||
+    character === "-"
+  );
+}
+
+function extractBase64Spans(value, candidates) {
+  let index = 0;
+  while (index < value.length) {
+    if (!isBase64Alphabet(value[index])) {
+      index += 1;
+      continue;
+    }
+    const start = index;
+    while (isBase64Alphabet(value[index])) index += 1;
+    let padding = 0;
+    while (value[index] === "=" && padding < 2) {
+      padding += 1;
+      index += 1;
+    }
+    if (value[index] === "=") {
+      while (value[index] === "=") index += 1;
+      continue;
+    }
+    const candidate = value.slice(start, index);
+    if (candidate.length >= MIN_BASE64_SPAN_LENGTH) candidates.add(candidate);
+  }
 }
 
 function decodeBase64Candidates(value) {
   const candidates = new Set();
-  const trimmed = value.replace(/^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g, "");
-  if (/^[A-Za-z0-9+/_=\-\t\n\v\f\r ]+$/.test(trimmed)) {
-    candidates.add(trimmed);
+  let mimeBlock = [];
+  for (const line of value.split(/\r?\n/)) {
+    extractBase64Spans(line, candidates);
+    const withoutWhitespace = line.replace(ASCII_WHITESPACE_PATTERN, "");
+    if (withoutWhitespace !== line) {
+      extractBase64Spans(withoutWhitespace, candidates);
+    }
+    if (/^[A-Za-z0-9+/_-]+={0,2}$/.test(withoutWhitespace)) {
+      mimeBlock.push(withoutWhitespace);
+    } else {
+      if (mimeBlock.length > 1) extractBase64Spans(mimeBlock.join(""), candidates);
+      mimeBlock = [];
+    }
   }
-  const whitespaceBase64Patterns = [
-    /[A-Za-z0-9+/_-]{4}[\t\n\v\f\r ]+[A-Za-z0-9+/_-]{2,4}={0,2}/g,
-    /(?:[A-Za-z0-9+/_-]{4}[\t\n\v\f\r ]+){2,}[A-Za-z0-9+/_-]{2,4}={0,2}/g,
-    /[A-Za-z0-9+/_-]{8,}={0,2}[\t\n\v\f\r ]+[A-Za-z0-9+/_-]{4,}={0,2}/g,
-  ];
-  for (const pattern of whitespaceBase64Patterns) {
-    for (const match of value.matchAll(pattern)) candidates.add(match[0]);
+  if (mimeBlock.length > 1) extractBase64Spans(mimeBlock.join(""), candidates);
+  const values = [];
+  let uninspectable = false;
+  for (const candidate of candidates) {
+    const decoded = decodeBase64Token(candidate);
+    if (Array.isArray(decoded)) continue;
+    values.push(...decoded.values);
+    uninspectable ||= decoded.uninspectable;
   }
   return {
     malformed: false,
-    values: [...candidates].flatMap(decodeBase64Token),
+    values: [...new Set(values)],
+    uninspectable,
   };
 }
 
-function isMostlyInspectableText(value) {
+function isStructuredText(value) {
   if (value.length === 0) return true;
-  const sampleLimit = 64 * 1024;
-  const samples = value.length <= sampleLimit * 2
-    ? [value]
-    : [value.slice(0, sampleLimit), value.slice(-sampleLimit)];
-  let inspected = 0;
-  let printable = 0;
-  for (const sample of samples) {
-    for (let index = 0; index < sample.length; index += 1) {
-      const codeUnit = sample.charCodeAt(index);
-      inspected += 1;
-      if (
-        codeUnit === 0x09 ||
-        codeUnit === 0x0a ||
-        codeUnit === 0x0d ||
-        (codeUnit >= 0x20 && codeUnit <= 0x7e) ||
-        (codeUnit >= 0xa0 && codeUnit !== 0xfffd)
-      ) {
-        printable += 1;
-      }
+  const sampleSize = Math.min(value.length, 64 * 1024);
+  let structured = 0;
+  for (let index = 0; index < sampleSize; index += 1) {
+    const code = value.charCodeAt(index);
+    const character = value[index];
+    if (
+      code === 0x09 ||
+      code === 0x0a ||
+      code === 0x0d ||
+      (code >= 0x20 && code <= 0x7e) ||
+      (code >= 0xa0 && /[\p{L}\p{N}\p{P}\p{S}\p{Zs}]/u.test(character))
+    ) {
+      structured += 1;
     }
   }
-  return printable / inspected >= 0.9;
+  return structured / sampleSize >= 0.9;
 }
 
 function canonicalTextVariants(buffer) {
   const initial = byteTextViews(buffer);
-  const seen = new Set(initial);
-  let frontier = initial;
-  let workBytes = 0;
-  const variants = [...initial];
+  const rawUtf8 = buffer.toString("utf8");
+  const hasUtf16Bom =
+    buffer.length >= 2 &&
+    ((buffer[0] === 0xff && buffer[1] === 0xfe) ||
+      (buffer[0] === 0xfe && buffer[1] === 0xff));
+  const syntaxTrusted =
+    hasUtf16Bom ||
+    (!rawUtf8.includes("\uFFFD") && isStructuredText(rawUtf8));
+  const queue = initial.values.map((value) => ({
+    value,
+    depth: 0,
+    chainWorkBytes: 0,
+    ancestors: new Set([value]),
+    syntaxTrusted,
+  }));
+  const variants = [];
+  let globalWorkBytes = 0;
+  let maximumDepth = 0;
+  let maximumChainWorkBytes = 0;
   let malformedPercentEncoding = false;
-  for (let pass = 0; pass < MAX_CANONICALIZATION_PASSES; pass += 1) {
-    const next = [];
-    for (const value of frontier) {
-      const decoders = [];
-      const inspectableText = isMostlyInspectableText(value);
-      if (inspectableText && value.includes("%")) {
-        decoders.push((input) => decodePercentRuns(input, false));
-      }
-      if (inspectableText && value.includes("+")) {
-        decoders.push((input) => decodePercentRuns(input, true));
-      }
-      if (inspectableText && /\\(?:u[0-9A-Fa-f]{4}|["\\/bfnrt])/.test(value)) {
-        decoders.push((input) => ({
-          values: [decodeJsonEscapes(input)],
-          malformed: false,
-        }));
-      }
-      if (inspectableText) decoders.push(decodeBase64Candidates);
-      for (const decode of decoders) {
-        workBytes += Buffer.byteLength(value, "utf8");
-        if (workBytes > MAX_CANONICALIZATION_WORK_BYTES) {
-          return {
-            exhausted: true,
-            malformedPercentEncoding,
-            observedPasses: pass + 1,
-            observedVariants: seen.size,
-            variants,
-            workBytes,
-          };
-        }
-        const decoded = decode(value);
-        malformedPercentEncoding ||= decoded.malformed;
-        for (const candidate of decoded.values) {
-          if (candidate === value || seen.has(candidate)) continue;
-          if (seen.size >= MAX_CANONICAL_VARIANTS) {
-            return {
-              exhausted: true,
-              malformedPercentEncoding,
-              observedPasses: pass + 1,
-              observedVariants: seen.size,
-              variants,
-              workBytes,
-            };
-          }
-          seen.add(candidate);
-          variants.push(candidate);
-          next.push(candidate);
-        }
-      }
+  let uninspectable = initial.uninspectable;
+  let exhausted = false;
+
+  for (let queueIndex = 0; queueIndex < queue.length; queueIndex += 1) {
+    const current = queue[queueIndex];
+    variants.push(current.value);
+    const decoders = [];
+    if (current.value.includes("%")) {
+      decoders.push((input) => decodePercentCandidates(input, false));
     }
-    if (next.length === 0) {
-      return {
-        exhausted: false,
-        malformedPercentEncoding,
-        observedPasses: pass + 1,
-        observedVariants: seen.size,
-        variants,
-        workBytes,
-      };
+    if (current.value.includes("+")) {
+      decoders.push((input) => decodePercentCandidates(input, true));
     }
-    frontier = next;
+    if (/\\(?:u[0-9A-Fa-f]{4}|["\\/bfnrt])/.test(current.value)) {
+      decoders.push(decodeJsonEscapeCandidates);
+    }
+    decoders.push(decodeBase64Candidates);
+
+    for (const decode of decoders) {
+      const inputBytes = Buffer.byteLength(current.value, "utf8");
+      globalWorkBytes += inputBytes;
+      const nextChainWorkBytes = current.chainWorkBytes + inputBytes;
+      maximumChainWorkBytes = Math.max(
+        maximumChainWorkBytes,
+        nextChainWorkBytes,
+      );
+      if (
+        globalWorkBytes > MAX_CANONICALIZATION_GLOBAL_WORK_BYTES ||
+        nextChainWorkBytes > MAX_CANONICALIZATION_CHAIN_WORK_BYTES
+      ) {
+        exhausted = true;
+        break;
+      }
+      const decoded = decode(current.value);
+      // Binary views are still decoded and searched, but coincidental percent
+      // bytes in otherwise binary data do not turn a valid trace into a
+      // malformed-text failure. Actual encoded secrets remain detectable in
+      // every view; this gate affects only syntax diagnostics.
+      malformedPercentEncoding ||=
+        decoded.malformed && current.syntaxTrusted;
+      uninspectable ||= decoded.uninspectable === true;
+      for (const candidate of decoded.values) {
+        if (candidate === current.value || current.ancestors.has(candidate)) continue;
+        const nextDepth = current.depth + 1;
+        maximumDepth = Math.max(maximumDepth, nextDepth);
+        if (nextDepth > MAX_CANONICALIZATION_DEPTH) {
+          exhausted = true;
+          break;
+        }
+        const ancestors = new Set(current.ancestors);
+        ancestors.add(candidate);
+        queue.push({
+          value: candidate,
+          depth: nextDepth,
+          chainWorkBytes: nextChainWorkBytes,
+          ancestors,
+          syntaxTrusted: current.syntaxTrusted,
+        });
+      }
+      if (exhausted) break;
+    }
+    if (exhausted) break;
   }
   return {
-    exhausted: true,
+    exhausted,
     malformedPercentEncoding,
-    observedPasses: MAX_CANONICALIZATION_PASSES,
-    observedVariants: seen.size,
+    uninspectable,
+    observedDepth: maximumDepth,
+    observedChains: queue.length,
+    maximumChainWorkBytes,
     variants,
-    workBytes,
+    globalWorkBytes,
   };
 }
 
@@ -454,15 +620,21 @@ export function findSecretRepresentation(
   if (canonicalized.exhausted) {
     throw new Error(
       `canonicalization budget exhausted for ${artifactReference}: ` +
-        `bounds=passes:${MAX_CANONICALIZATION_PASSES},variants:${MAX_CANONICAL_VARIANTS},` +
-        `bytes:${MAX_CANONICALIZATION_WORK_BYTES} ` +
-        `observed=passes:${canonicalized.observedPasses},` +
-        `variants:${canonicalized.observedVariants},bytes:${canonicalized.workBytes} ` +
+        `bounds=depth:${MAX_CANONICALIZATION_DEPTH},` +
+        `chainBytes:${MAX_CANONICALIZATION_CHAIN_WORK_BYTES},` +
+        `globalBytes:${MAX_CANONICALIZATION_GLOBAL_WORK_BYTES} ` +
+        `observed=depth:${canonicalized.observedDepth},` +
+        `chains:${canonicalized.observedChains},` +
+        `chainBytes:${canonicalized.maximumChainWorkBytes},` +
+        `globalBytes:${canonicalized.globalWorkBytes} ` +
         `size=${buffer.length}`,
     );
   }
   if (canonicalized.malformedPercentEncoding) {
     throw new Error(`malformed percent encoding in ${artifactReference}`);
+  }
+  if (canonicalized.uninspectable) {
+    throw new Error(`uninspectable encoded content in ${artifactReference}`);
   }
   return false;
 }

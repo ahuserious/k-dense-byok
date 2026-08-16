@@ -4,6 +4,7 @@ import { randomFillSync } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import test from "node:test";
 import {
   HOSTED_EVIDENCE_ARTIFACT_PATHS,
@@ -11,7 +12,10 @@ import {
   scanHostedEvidenceArtifacts,
   sealHostedEvidenceBundle,
 } from "./hosted-evidence-scan.mjs";
-import { scrubAndVerifyText } from "./hosted-evidence-secrets.mjs";
+import {
+  hasMalformedPercentAdjacency,
+  scrubAndVerifyText,
+} from "./hosted-evidence-secrets.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 
@@ -167,6 +171,92 @@ test("composed base64 whitespace, percent, and UTF-16 fail scrub and seal", () =
   }
 });
 
+test("embedded and arbitrarily spaced base64 of percent-encoded credentials fail closed", () => {
+  const secret = "EmbeddedBase64CredentialAlpha123";
+  const nestedBase64 = Buffer.from(
+    fullyPercentEncode(secret, "mixed"),
+    "utf8",
+  ).toString("base64");
+  const spaced = [...nestedBase64]
+    .map((character, index) =>
+      index === 0 ? character : `${index % 3 === 0 ? "\t" : " "}${character}`,
+    )
+    .join("");
+  const fixtures = [
+    `prefix:${nestedBase64}:suffix`,
+    `prefix:${spaced}:suffix`,
+  ];
+  for (const fixture of fixtures) {
+    assert.throws(
+      () => scrubAndVerifyText(fixture, { STABLY_API_KEY: secret }),
+      /secret representation remained after scrubbing/,
+    );
+    withTemporaryDirectory((directory) => {
+      fs.writeFileSync(path.join(directory, "embedded.log"), fixture);
+      assert.throws(
+        () =>
+          scanHostedEvidenceArtifacts({
+            workingDirectory: directory,
+            environment: { STABLY_API_KEY: secret },
+            artifactPaths: ["embedded.log"],
+          }),
+        /secret representation detected in artifact\[0\]#[a-f0-9]{12}/,
+      );
+    });
+    withTemporaryDirectory((directory) => {
+      writeRequiredPayloadArtifacts(directory);
+      fs.writeFileSync(path.join(directory, "stably-test.scrubbed.log"), fixture);
+      assert.throws(
+        () =>
+          sealHostedEvidenceBundle({
+            workingDirectory: directory,
+            environment: { STABLY_API_KEY: secret },
+          }),
+        /secret representation detected in artifact\[4\]#[a-f0-9]{12}/,
+      );
+    });
+  }
+});
+
+test("UTF-16 BOM tails and CJK padding cannot conceal composed credentials", () => {
+  const secret = "Utf16ComposedCredentialAlpha123";
+  const percentEncoded = fullyPercentEncode(secret, "mixed");
+  const fixtures = [
+    Buffer.concat([
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from(percentEncoded, "utf16le"),
+      Buffer.from([0xff]),
+    ]),
+    Buffer.from(`前${percentEncoded}後`, "utf16le"),
+  ];
+  for (const fixture of fixtures) {
+    withTemporaryDirectory((directory) => {
+      fs.writeFileSync(path.join(directory, "utf16.data"), fixture);
+      assert.throws(
+        () =>
+          scanHostedEvidenceArtifacts({
+            workingDirectory: directory,
+            environment: { STABLY_API_KEY: secret },
+            artifactPaths: ["utf16.data"],
+          }),
+        /(?:secret representation detected|uninspectable encoded content) in artifact\[0\]#[a-f0-9]{12}/,
+      );
+    });
+    withTemporaryDirectory((directory) => {
+      writeRequiredPayloadArtifacts(directory);
+      fs.writeFileSync(path.join(directory, "stably-test.scrubbed.log"), fixture);
+      assert.throws(
+        () =>
+          sealHostedEvidenceBundle({
+            workingDirectory: directory,
+            environment: { STABLY_API_KEY: secret },
+          }),
+        /(?:secret representation detected|uninspectable encoded content) in artifact\[4\]#[a-f0-9]{12}/,
+      );
+    });
+  }
+});
+
 test("malformed percent syntax is rejected only when adjacent to a complete run", () => {
   const environment = { STABLY_API_KEY: "unrelated-secret-value" };
   for (const benign of ["progress 100% complete", "%", "%A", "%GG"]) {
@@ -179,6 +269,14 @@ test("malformed percent syntax is rejected only when adjacent to a complete run"
       malformed,
     );
   }
+});
+
+test("percent adjacency validation is linear over four MiB", () => {
+  const input = "%41x".repeat((4 * 1024 * 1024) / 4);
+  const startedAt = performance.now();
+  assert.equal(hasMalformedPercentAdjacency(input), false);
+  const elapsedMs = performance.now() - startedAt;
+  assert.ok(elapsedMs < 2_000, `percent validation took ${elapsedMs.toFixed(1)}ms`);
 });
 
 test("real invalid bytes cannot conceal percent-encoded credentials", () => {
@@ -488,7 +586,7 @@ test("seal path fails closed when canonicalization cannot reach a fixed point", 
           workingDirectory: directory,
           environment: { STABLY_API_KEY: "alpha/beta gamma" },
         }),
-      /^Error: canonicalization budget exhausted for artifact\[4\]#[a-f0-9]{12}: bounds=passes:8,variants:64,bytes:536870912 observed=passes:\d+,variants:\d+,bytes:\d+ size=\d+$/,
+      /^Error: canonicalization budget exhausted for artifact\[4\]#[a-f0-9]{12}: bounds=depth:8,chainBytes:268435456,globalBytes:2147483648 observed=depth:\d+,chains:\d+,chainBytes:\d+,globalBytes:\d+ size=\d+$/,
     );
     assert.equal(
       fs.existsSync(path.join(directory, HOSTED_EVIDENCE_BUNDLE_NAME)),
@@ -518,7 +616,7 @@ test("archive entry exhaustion reports bounds and an opaque nested reference", (
           environment: { STABLY_API_KEY: "alpha/beta gamma" },
           artifactPaths: ["budget.data"],
         }),
-      /^Error: canonicalization budget exhausted for artifact\[0\]#[a-f0-9]{12}\/entry\[0\]#[a-f0-9]{12}: bounds=passes:8,variants:64,bytes:536870912 observed=passes:\d+,variants:\d+,bytes:\d+ size=\d+$/,
+      /^Error: canonicalization budget exhausted for artifact\[0\]#[a-f0-9]{12}\/entry\[0\]#[a-f0-9]{12}: bounds=depth:8,chainBytes:268435456,globalBytes:2147483648 observed=depth:\d+,chains:\d+,chainBytes:\d+,globalBytes:\d+ size=\d+$/,
     );
   });
 });

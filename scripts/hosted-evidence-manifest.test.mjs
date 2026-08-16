@@ -175,6 +175,8 @@ test("grep mode parses a genuine multiline Playwright epilogue", () => {
     assert.deepEqual(manifest.environment, {
       CI: "1",
       KADY_E2E_BASE_URL: "http://127.0.0.1:13000",
+      FORCE_COLOR: "0",
+      NO_COLOR: "1",
       workers: "3",
       KADY_E2E_WORKERS: "4",
       E2E_SUITE_NAME: suiteName,
@@ -481,7 +483,10 @@ test("attached reporter rejects stale records and mismatched suite evidence", as
         E2E_SUITE_NAME: "expected-suite",
       });
       assert.notEqual(result.status, 0);
-      assert.match(result.stderr, /does not match the expected suite name/);
+      assert.match(
+        result.stderr,
+        /reporter epilogue absent from the final 65,536 bytes/,
+      );
     });
   });
 });
@@ -545,6 +550,10 @@ test("attached reporter requires an exact terminal run URL segment", async (cont
     [
       "empty fragment delimiter",
       `https://app.stably.ai/project/${projectId}/playwright/history/run-1#`,
+    ],
+    [
+      "ANSI control inside URL",
+      `https://app.stably.ai/proj\u001b[31mect/${projectId}/playwright/history/run-1`,
     ],
   ];
   for (const [caseName, resultUrl] of cases) {
@@ -620,6 +629,45 @@ test("oversized raw log fails before reading and is always removed", () => {
     );
     assert.equal(fs.existsSync(rawLogPath), false);
     assert.equal(fs.existsSync(path.join(directory, manifestFileName)), false);
+  });
+});
+
+test("noisy tail reports the bounded epilogue window and retains only a scrubbed diagnostic", () => {
+  withTemporaryDirectory((directory) => {
+    const apiKey = "tail-diagnostic-api-key";
+    const projectId = "tail-diagnostic-project";
+    const runId = "tail-diagnostic-run";
+    const suiteName = "sds-outer-loop-ci-noisy-tail";
+    const rawLogPath = path.join(directory, "stably-test.log");
+    fs.writeFileSync(
+      rawLogPath,
+      [
+        ...stablyEpilogue(suiteName, runId, projectId),
+        `${"noisy reporter tail\n".repeat(4_000)}${apiKey}`,
+      ].join("\n"),
+    );
+    writeLastRun(directory, runId, Date.now());
+    const result = runManifest(directory, {
+      STABLY_API_KEY: apiKey,
+      STABLY_PROJECT_ID: projectId,
+      E2E_RUN_STARTED_AT: String(Date.now() - 1_000),
+      E2E_SUITE_NAME: suiteName,
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(
+      result.stderr,
+      /reporter epilogue absent from the final 65,536 bytes/,
+    );
+    assert.equal(fs.existsSync(rawLogPath), false);
+    const diagnosticPath = path.join(
+      directory,
+      "stably-test-epilogue.scrubbed.log",
+    );
+    assert.equal(fs.existsSync(diagnosticPath), true);
+    const diagnostic = fs.readFileSync(diagnosticPath, "utf8");
+    assert.ok(Buffer.byteLength(diagnostic) <= 4 * 1024);
+    assert.equal(diagnostic.includes(apiKey), false);
+    assert.match(diagnostic, /<REDACTED#\d+>/);
   });
 });
 

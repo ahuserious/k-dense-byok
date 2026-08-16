@@ -37,6 +37,8 @@ one additional request to the main page before starting the suite.
 The test command is `npx playwright test --trace on`, with `CI=1`, two workers by default, the
 localhost frontend as `KADY_E2E_BASE_URL`, and a run-specific `E2E_SUITE_NAME`. It deliberately does
 not use `--browser cloud`: the Playwright process and Chromium execute on the GitHub-hosted runner.
+The suite step sets `FORCE_COLOR=0` and `NO_COLOR=1`, so the reporter epilogue retained as evidence is
+byte-exact text rather than an ANSI-normalized approximation.
 Stably credentials enable the reporter from the repository's base config, so results and traces can
 also appear in the Stably dashboard. Reporter `2.1.16` resolves credentials from the environment and
 receives only the non-secret suite name as an option.
@@ -66,9 +68,11 @@ views. Percent, JSON-escape, and whitespace-normalized base64 decoding feed thei
 same fixed-point queue, so composed encodings are covered. A percent fragment is malformed when an
 incomplete `%`, `%H`, or `%GG` fragment directly touches a complete `%HH` run; ordinary standalone text
 such as `100%`, `%A`, or `%GG` remains valid. Invalid percent bytes and uninspectable inputs fail closed.
-Canonicalization work is bounded per value to eight passes, 64 variants, and 512 MiB of decoder input.
-Reaching any bound before a fixed point fails closed with an opaque artifact or nested-entry reference
-plus configured and observed bounds; compressed archive bytes do not consume that text budget.
+Canonicalization is bounded per transformation chain to eight decoding levels and 256 MiB of decoder
+input. Unrelated tokens do not share a variant-count limit; a generous 2 GiB byte-work ceiling is the
+only file-global bound. Reaching a depth, chain-work, or global-work bound before a fixed point fails
+closed with an opaque artifact or nested-entry reference plus configured and observed bounds.
+Compressed archive bytes do not consume that text budget; each extracted entry is charged separately.
 
 Reporter `2.1.16` prints the server-returned `createdSuiteRun.url` directly (the pinned CJS dist at
 `index-CdLJi9uc.cjs:9593-9594`). This evidence tool documents its checked-in Stably dashboard contract
@@ -79,12 +83,29 @@ trailing slashes, queries, and fragments fail closed. The retained manifest repl
 segment with `<REDACTED-PROJECT>`; changing the dashboard contract requires a reviewed source change,
 not an environment override.
 
-The raw suite log is capped at 32 MiB before any read, and only its final 64 KiB is retained in memory
-for reporter-epilogue validation. Scrubbing uses 64 KiB chunks with overlap, then verifies the capped
-scrubbed result. A `finally` cleanup removes raw suite and preview logs after every success or failure.
+The raw suite log is capped at 32 MiB in the first post-suite step, before teardown or any count grep,
+and only its final 64 KiB is retained in memory for reporter-epilogue validation. If that suffix does
+not contain the reporter epilogue, the failure says so explicitly and retains only a scrubbed final
+4 KiB diagnostic. Scrubbing uses 64 KiB chunks with overlap, then verifies the capped scrubbed result.
+A `finally` cleanup removes raw suite and preview logs after every success or failure.
 Reporter isolation tests audit WebSocket, `fetch`, HTTP, HTTPS, `net`, TLS, and DNS transports. The guard
 is installed through inherited `NODE_OPTIONS`, and the pinned reporter is exercised through `onBegin`
 so its `create-suite.mjs` child transport is covered too.
+
+### Threat model
+
+This evidence tooling protects against accidental inclusion of this workflow's own credential values
+in artifacts it produces. The scanner covers literal values, percent and JSON escapes, Base64 and
+Base64URL spans (including embedded and arbitrarily whitespace-spaced forms), UTF-16LE/BE text, composed
+forms reached by the bounded fixed-point decoders, and entries in recursively inspected TAR and ZIP
+archives. Every non-archive input is inspected as raw bytes plus lossy UTF-8, latin1, and both UTF-16
+byte orders at both alignments. A BOM with an unmatched trailing byte, an unsupported compressed format,
+or any other genuinely uninspectable content fails closed.
+
+Deliberate adversarial obfuscation beyond that fixed-point closure, encrypted content, and content
+compressed with an unavailable key are out of scope. They are not silently accepted: an unsupported or
+uninspectable artifact is rejected, and exhausting a decoder chain or byte-work bound rejects the
+artifact rather than treating it as clean.
 
 ### What Job A proves
 
