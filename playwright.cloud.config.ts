@@ -1,10 +1,10 @@
-// Cloud-run configuration for the S11 outer loop.
+// Public-origin configuration for the S11 outer loop.
 //
-// Stably's cloud browser launches Chromium on THEIR runner (see
-// @stablyai/playwright-test's cloud-runner-launch-options), so the app under test must be reachable
-// from the public internet -- 127.0.0.1 is not. The owner authorised an ngrok tunnel for this, and a
-// local proxy multiplexes the web app and the vendored engine onto that single hostname because
-// ngrok's free tier reserves one domain and two tunnels sharing it round-robin.
+// This overlay does not select a remote browser. `stably test --browser cloud` still runs the
+// Playwright test process on the host that invoked the CLI; that flag is consumed by Stably's agent
+// commands. The file remains useful when a test process running elsewhere is intentionally pointed at
+// a public URL. For the prior tunnel experiment, a local proxy multiplexed the web app and vendored
+// engine onto one ngrok hostname because the free tier allowed only one reserved domain.
 //
 // Two things this file adds on top of the committed config:
 //   1. baseURL comes from KADY_E2E_BASE_URL (the tunnel origin).
@@ -26,8 +26,8 @@ if (!tunnelOrigin) {
 
 export default {
   ...baseConfig,
-  // Cloud latency is the reason these differ from the local config, and ONLY these differ.
-  // Every asset crosses the internet twice (Stably runner -> ngrok edge -> this machine), so the
+  // Public-path latency is the reason these differ from the local config, and ONLY these differ.
+  // Every asset crosses the internet twice (test runner -> ngrok edge -> this machine), so the
   // local budgets (45s test / 10s expect) expire during fixture setup. Raising a transport timeout
   // does not weaken any assertion -- no expectation is relaxed, the suite merely gets time to load.
   // Observed locally-direct ~2s/test, through the tunnel ~37s/test.

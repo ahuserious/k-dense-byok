@@ -171,6 +171,7 @@
       "e2e/**",
       "playwright.config.*",
       ".stably/**",
+      ".github/workflows/stably-cloud.yml",
       "docs/e2e/**",
       "scripts/preview-*.mjs",
       "deploy/preview/**"
