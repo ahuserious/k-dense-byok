@@ -64,9 +64,11 @@ The teardown command does not return successfully until `deploy/preview/.state.j
 
 Playwright then performs its default worker barrier in `e2e/global-setup.ts`. Both its request context and Chromium context inherit the resolved project's `baseURL` and `extraHTTPHeaders`. It waits for the web root, renders the project workspace, opens Builder, and waits for the Builder name field inside the iframe. Backend and engine health probes run only for an included live topology whose resolved service origin is loopback or shares the app hostname; `KADY_E2E_WARMUP_SERVICES=1` explicitly forces both probes. The warm-up records `console.error` and `pageerror` before navigation and fails setup if either occurs, so cold-only hydration, chunk, and iframe failures cannot be hidden by the compile barrier.
 
-The public-URL overlay replaces that barrier with `e2e/global-setup.cloud.ts`. It passes the resolved headers to a request context and verifies only that the web root returns `200` with the expected Kady HTML title. App-page, project, and Builder warm-up is impossible in that topology: the backend is deliberately not exposed, and the API mocks are installed later by worker fixtures. The suite defaults to 4 workers; set `KADY_E2E_WORKERS` to a positive integer only for an intentional measured override. Raising timeouts or worker counts is not a substitute for investigating contention.
+The public-URL overlay replaces that barrier with `e2e/global-setup.cloud.ts`. It accepts HTTPS by default, passes the resolved headers to a request context with redirects disabled, and verifies only that the response remains on the configured origin and returns `200` with the expected Kady HTML title. App-page, project, and Builder warm-up is impossible in that topology: the backend is deliberately not exposed, and the API mocks are installed later by worker fixtures. The suite defaults to 4 workers; set `KADY_E2E_WORKERS` to a positive integer only for an intentional measured override. Raising timeouts or worker counts is not a substitute for investigating contention.
 
-The orchestrator's 2026-08-15 cold run printed the `rendered=workspace+builder` warm-up barrier and started all 249 items with 4 workers. Every mocked-tier item completed without failure, so the prior 72-failure cold-start phenomenon did not recur. The two failures were confined to first-run assumptions in the new `@live` items and were corrected in the following static pass; a zero-failure full-suite rerun remains required.
+At commit `640b39a`, the orchestrator ran the default-port cold, warm, and `@live` legs plus the alternate-port `@live-alt` leg. Those results established the pre-final runtime state; every leg must be rerun at the final reviewed SHA so the evidence binds to the delivered code.
+
+Orchestrator evidence at <sha>: …
 
 To prove consecutive cleanup, run the complete up/curl/down sequence three times. A later `preview-up.mjs` must not encounter occupied ports or reuse state from an earlier cycle.
 
@@ -118,7 +120,7 @@ The conditional reporter in `playwright.config.ts` uploads results only when bot
 
 ## Hosted-runner (CI) evidence
 
-The real remote path is the `github-runner` job in `.github/workflows/stably-cloud.yml`. It runs the default `playwright.config.ts` on a GitHub-hosted runner; it does not use the public-URL overlay above. One retained evidence artifact must contain:
+The real remote path is the `github-runner` job in [`.github/workflows/stably-cloud.yml`](../../.github/workflows/stably-cloud.yml). It runs the default `playwright.config.ts` on a GitHub-hosted runner; it does not use the public-URL overlay above. One retained evidence artifact must contain:
 
 - the exact test command and relevant environment, with secrets redacted;
 - the tested commit SHA;
