@@ -42,14 +42,29 @@ export async function probePreviewService(service, fetchImplementation = fetch) 
 }
 
 export function readPreviewServiceStates(serviceStatePath, expectedGeneration) {
+  return readPreviewServiceStateSnapshot(serviceStatePath, expectedGeneration).services;
+}
+
+export function readPreviewServiceStateSnapshot(serviceStatePath, expectedGeneration) {
   try {
-    const parsed = JSON.parse(fs.readFileSync(serviceStatePath, "utf-8"));
-    if (expectedGeneration && parsed?.generation !== expectedGeneration) return {};
-    return parsed && typeof parsed === "object" && parsed.services && typeof parsed.services === "object"
-      ? parsed.services
-      : {};
-  } catch {
-    return {};
+    const raw = fs.readFileSync(serviceStatePath, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (expectedGeneration && parsed?.generation !== expectedGeneration) {
+      return { status: "generation-mismatch", signature: raw, services: {} };
+    }
+    return {
+      status: "valid",
+      signature: raw,
+      services: parsed && typeof parsed === "object" && parsed.services && typeof parsed.services === "object"
+        ? parsed.services
+        : {},
+    };
+  } catch (error) {
+    return {
+      status: error?.code === "ENOENT" ? "missing" : "malformed",
+      signature: error?.code === "ENOENT" ? "<missing>" : "<malformed>",
+      services: {},
+    };
   }
 }
 

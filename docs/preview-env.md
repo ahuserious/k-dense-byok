@@ -49,13 +49,18 @@ symlinks are dereferenced only when their canonical target remains inside one
 of those copied roots. Links to Git metadata, environment files, dependencies,
 build output, preview state/destinations, vendored dist staging, any other
 checkout path, a dangling target, or a directory cycle stop startup and name
-the rejected class. A post-copy walk requires the projected source set to
+the rejected class. The checkout's `web/` and `server/` roots must themselves
+be real directories under the canonical checkout; every source entry is
+canonicalized and checked even when its final component is not a symlink. A
+post-copy walk requires the projected source set to
 contain no symlinks. Lockfiles stay at the checkout ancestor so Turbopack does not
 infer the projection itself as its filesystem root. The projection also copies
 `server/package.json` into its sibling `server/` directory because the copied
 Next config reads that version source through `../server/package.json`. Startup
-prints the measured copy time. `node_modules` alone remains linked to its
-canonical path within the checkout and is not traversed by the snapshot walk;
+prints the measured copy time. The checkout's top-level `web/node_modules`
+must be a real directory; the projection links its canonical path and does not
+traverse the dependency tree, whose internal layout remains the package
+manager's responsibility. A symlinked dependency root is refused;
 `.next` is a private real directory inside the projection. The
 temporary launch overlay links its `web/` entry to this checkout-local project.
 Consequently Turbopack discovers physical App Router files while every retained
@@ -74,6 +79,9 @@ metadata, or configuration require `preview-down.mjs` followed by
 source set and adds a preview-only `/api/preview-health` route. Readiness probes
 that route and requires its JSON generation to match; backend and engine
 readiness additionally require their recorded PID identities to remain live.
+All three readiness ports must also be owned by the identity-validated service
+PID or its recorded process group; a foreign listener prevents readiness and
+is named without being signalled.
 Later health probes return HTTP 503 and name the first drifted checkout file
 rather than silently serving stale evidence.
 
@@ -90,26 +98,35 @@ PID instead of crossing generations.
 
 Lifecycle state is fsynced to a same-directory temporary file and published by
 atomic rename. A lock is fully written and fsynced under a temporary name, then
-hard-linked into place with no replacement. Stale takeover atomically renames
-the observed inode to a unique tombstone and verifies its inode and digest
-before publishing the new owner. An unreadable lock is recoverable only after
-it is at least 500 ms old and the same inode/digest remains unchanged across a
-second read 250 ms later.
+hard-linked into place with no replacement. Every publisher first owns the
+single `.lifecycle.lock.recovery` guard, then rechecks the canonical lock's
+inode and digest before replacing a proven-dead current owner. Guard waits and
+acquisition retries are bounded to 30 seconds; a dead guard owner is recovered
+using the same PID birth-identity rules.
 
 Each lock records its PID, generation, creation time, and a structured process
 birth identity. Linux uses the boot ID plus `/proc/<pid>/stat` start ticks;
 macOS uses `LC_ALL=C TZ=UTC0 ps ... lstart`. A failed lookup or method mismatch
 is treated as live. A dead PID, or a different value from the same method, is
 recoverable only when readable state/projection generations agree.
+Legacy, malformed, zero-byte, and unknown-identity lock records are always
+busy. They are removed only by `node scripts/preview-down.mjs --recover-lock`,
+which refuses unless `lsof` reports no holder of the lock file, no recorded
+generation-bound launcher or service remains alive, and no recorded preview
+port has a listener.
 
 `preview-down` tolerates missing or malformed state when the owned projection
 marker contains a non-null generation-bound launcher record. The disposable
-launcher waits on a gate while `preview-up` atomically records its PID, PGID,
-birth identity, and generation in the marker and state. Its observer records
-the same tuple for backend, frontend, and engine children. Teardown signals
-only records whose live identity and PGID still match; cwd is a secondary
-check. A listener whose PGID is absent from those records is foreign and is
-never signalled, even when its cwd is under this checkout.
+launcher waits while `preview-up` atomically records its PID, PGID, birth
+identity, and generation in the marker and state, then publishes a fully
+written gate containing that exact generation. Its observer ignores absent,
+empty, and wrong-generation gates and records the same tuple for backend,
+frontend, and engine children. A recording failure kills the still-stopped
+child group before the launcher fails. Teardown quiesces the launcher,
+fresh-reads and merges service records until two consecutive reads match,
+stops every matching group, and proves both recorded process and listener
+counts are zero before deleting state. Failure retains state and the temporary
+tree; cwd remains only a secondary ownership check.
 
 Backend env selection fails closed. With `KADY_PREVIEW=1`, `KADY_ENV_FILE`
 must be present, non-blank, absolute, and resolve to a regular file under the

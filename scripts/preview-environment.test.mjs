@@ -629,6 +629,71 @@ test("refuses a symlinked checkout parent for the generated health route", () =>
   }
 });
 
+test("refuses symlinked web and server source-root directories", async (testContext) => {
+  for (const sourceRootName of ["web", "server"]) {
+    await testContext.test(sourceRootName, () => {
+      const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-source-root-link-"));
+      try {
+        const fixture = createMinimalProjectionCheckout(temporaryRoot);
+        const sourceRoot = path.join(fixture.repositoryRoot, sourceRootName);
+        const realRoot = path.join(fixture.repositoryRoot, `${sourceRootName}-real`);
+        fs.renameSync(sourceRoot, realRoot);
+        fs.symlinkSync(realRoot, sourceRoot, "dir");
+        assert.throws(
+          () => preparePreviewWebRoot(
+            fixture.repositoryRoot,
+            fixture.launchRoot,
+            `${sourceRootName}-root-link-generation`,
+          ),
+          (error) => error instanceof Error &&
+            error.message.includes(`${sourceRootName}/ to be a real directory`) &&
+            error.message.includes(sourceRoot),
+        );
+      } finally {
+        fs.rmSync(temporaryRoot, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test("refuses a symlinked top-level node_modules regardless of its target", async (testContext) => {
+  const cases = [
+    {
+      name: "ordinary in-checkout dependency directory",
+      target: ({ repositoryRoot }) => path.join(repositoryRoot, "dependency-store"),
+    },
+    {
+      name: "git metadata redirect",
+      target: ({ repositoryRoot }) => path.join(repositoryRoot, ".git"),
+    },
+  ];
+  for (const testCase of cases) {
+    await testContext.test(testCase.name, () => {
+      const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-node-modules-link-"));
+      try {
+        const fixture = createMinimalProjectionCheckout(temporaryRoot);
+        const nodeModules = path.join(fixture.checkoutWebRoot, "node_modules");
+        const target = testCase.target(fixture);
+        fs.rmSync(nodeModules, { recursive: true, force: true });
+        fs.mkdirSync(target, { recursive: true });
+        fs.symlinkSync(target, nodeModules, "dir");
+        assert.throws(
+          () => preparePreviewWebRoot(
+            fixture.repositoryRoot,
+            fixture.launchRoot,
+            `node-modules-${testCase.name.replaceAll(" ", "-")}`,
+          ),
+          (error) => error instanceof Error &&
+            error.message.includes("node_modules to be a real directory") &&
+            error.message.includes(nodeModules),
+        );
+      } finally {
+        fs.rmSync(temporaryRoot, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 test("refuses an in-checkout symlink directory cycle", () => {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-web-cycle-"));
   try {

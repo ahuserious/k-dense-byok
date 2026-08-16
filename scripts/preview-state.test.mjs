@@ -14,9 +14,12 @@ import {
 } from "./preview-environment.mjs";
 import {
   acquirePreviewLifecycleLock,
+  PREVIEW_LIFECYCLE_LOCK_VERSION,
   previewPidStartIdentity,
   previewTeardownRecord,
+  publishPreviewStartGate,
   publishPreviewStateFile,
+  recoverUnrecognizedPreviewLifecycleLock,
   removePreviewStateFile,
 } from "./preview-state.mjs";
 
@@ -221,39 +224,73 @@ test("recovers a reused PID only when lifecycle generations agree", () => {
   }
 });
 
-test("recovers a stable zero-byte lock left by an early SIGKILL", async () => {
-  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-empty-"));
+test("legacy, unknown-identity, and zero-byte locks remain busy until explicit recovery", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-legacy-"));
   try {
-    const lockFile = path.join(temporaryRoot, ".lifecycle.lock");
-    const holderScript = path.join(temporaryRoot, "hold-empty-lock.mjs");
-    fs.writeFileSync(
-      holderScript,
-      `import fs from "node:fs";\nfs.openSync(${JSON.stringify(lockFile)}, "wx", 0o600);\nconsole.log("EMPTY");\nsetInterval(() => {}, 1000);\n`,
-    );
-    const child = spawn(process.execPath, [holderScript], {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    await waitForOutput(child, "EMPTY");
-    const childExit = waitForExit(child);
-    child.kill("SIGKILL");
-    await childExit;
-    const messages = [];
-    const recovered = acquirePreviewLifecycleLock(lockFile, {
-      operation: "preview-up",
-      generation: "new-generation",
-      pid: 602,
-      identity: { method: "test", value: "new-start" },
-      resolvePidStartIdentity: () => null,
-      log: (message) => messages.push(message),
-    });
-    assert.match(messages.join("\n"), /Recovered unreadable lifecycle lock older than 500ms/);
-    recovered.release();
+    const cases = [
+      {
+        name: "live-v2",
+        value: JSON.stringify({
+          version: 2,
+          operation: "preview-up",
+          generation: "legacy-generation",
+          pid: process.pid,
+          identity: { method: "test", value: "legacy-live" },
+        }),
+      },
+      {
+        name: "unknown-method",
+        value: JSON.stringify({
+          version: PREVIEW_LIFECYCLE_LOCK_VERSION,
+          operation: "preview-up",
+          generation: "unknown-generation",
+          pid: process.pid,
+          identity: { method: "future-method", value: "opaque" },
+        }),
+      },
+      { name: "zero-byte", value: "" },
+    ];
+    for (const testCase of cases) {
+      const lockFile = path.join(temporaryRoot, `.lifecycle.${testCase.name}.lock`);
+      fs.writeFileSync(lockFile, testCase.value);
+      assert.throws(
+        () => acquirePreviewLifecycleLock(lockFile, {
+          operation: "preview-down",
+          generation: "contender-generation",
+          identity: { method: "test", value: "contender" },
+        }),
+        /legacy, malformed, or uses an unknown identity method and is busy.*--recover-lock/s,
+      );
+    }
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
 });
 
-test("two coordinated stale-lock recoverers admit exactly one live owner", async () => {
+test("explicit recovery removes an unrecognized lock only after its proof succeeds", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-explicit-"));
+  const lockFile = path.join(temporaryRoot, ".lifecycle.lock");
+  try {
+    fs.writeFileSync(lockFile, "");
+    assert.throws(
+      () => recoverUnrecognizedPreviewLifecycleLock(lockFile, {
+        identity: { method: "test", value: "recovery-owner" },
+        verifySafeRecovery: () => { throw new Error("listener still alive"); },
+      }),
+      /listener still alive/,
+    );
+    assert.equal(fs.existsSync(lockFile), true);
+    assert.equal(recoverUnrecognizedPreviewLifecycleLock(lockFile, {
+      identity: { method: "test", value: "recovery-owner" },
+      verifySafeRecovery: () => {},
+    }), true);
+    assert.equal(fs.existsSync(lockFile), false);
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("three barrier-coordinated stale-lock contenders admit exactly one live owner", async () => {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-race-"));
   const lockFile = path.join(temporaryRoot, ".lifecycle.lock");
   const gateFile = path.join(temporaryRoot, "go");
@@ -262,7 +299,7 @@ test("two coordinated stale-lock recoverers admit exactly one live owner", async
     fs.writeFileSync(
       lockFile,
       `${JSON.stringify({
-        version: 3,
+        version: PREVIEW_LIFECYCLE_LOCK_VERSION,
         operation: "preview-up",
         generation: "stale-generation",
         pid: 999_999,
@@ -270,7 +307,7 @@ test("two coordinated stale-lock recoverers admit exactly one live owner", async
         createdAt: new Date(0).toISOString(),
       })}\n`,
     );
-    const children = ["one", "two"].map((name) => {
+    const children = ["one", "two", "three"].map((name) => {
       const childScript = path.join(temporaryRoot, `${name}.mjs`);
       fs.writeFileSync(
         childScript,
@@ -286,10 +323,26 @@ test("two coordinated stale-lock recoverers admit exactly one live owner", async
     fs.writeFileSync(gateFile, "go\n");
     const outputs = await Promise.all(children.map(waitForLockOutcome));
     assert.equal(outputs.filter((output) => output.includes("ACQUIRED")).length, 1);
-    assert.equal(outputs.filter((output) => output.includes("REFUSED:")).length, 1);
+    assert.equal(outputs.filter((output) => output.includes("REFUSED:")).length, 2);
     for (const child of children) {
       if (child.exitCode === null) child.kill("SIGKILL");
     }
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("publishes a complete generation gate without a visible temporary file", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-gate-"));
+  try {
+    const gateFile = path.join(temporaryRoot, "start.gate");
+    publishPreviewStartGate(gateFile, "gate-generation");
+    assert.equal(fs.readFileSync(gateFile, "utf8"), "gate-generation\n");
+    assert.deepEqual(fs.readdirSync(temporaryRoot), ["start.gate"]);
+    assert.throws(
+      () => publishPreviewStartGate(gateFile, "other-generation"),
+      (error) => error?.code === "EEXIST",
+    );
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }

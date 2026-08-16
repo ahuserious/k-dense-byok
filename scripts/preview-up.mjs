@@ -21,19 +21,20 @@ import {
 } from "./preview-environment.mjs";
 import { instrumentPreviewLauncher } from "./preview-launcher-observer.mjs";
 import {
-  assertNoForeignPreviewListeners,
   collectRecordedPreviewProcessGroups,
   processGroupId,
-  stopProcessGroups,
+  assertPreviewServiceListenersOwned,
+  quiescePreviewGeneration,
   waitForPreviewPortsFree,
 } from "./preview-processes.mjs";
 import {
-  readPreviewServiceStates,
+  readPreviewServiceStateSnapshot,
   waitForPreviewReadiness,
 } from "./preview-readiness.mjs";
 import {
   acquirePreviewLifecycleLock,
   previewPidStartIdentity,
+  publishPreviewStartGate,
   publishPreviewStateFile,
   readPreviewStateCandidate,
 } from "./preview-state.mjs";
@@ -185,28 +186,16 @@ async function stopFailedLaunch(state) {
   ) {
     throw new Error("Preview failure cleanup refuses malformed or different lifecycle state.");
   }
-  const serviceStates = readPreviewServiceStates(state.serviceStatePath, state.generation);
-  let groups = collectRecordedPreviewProcessGroups(
+  await quiescePreviewGeneration(
     repositoryRoot,
     state,
-    serviceStates,
+    {
+      readServiceSnapshot: () => readPreviewServiceStateSnapshot(
+        state.serviceStatePath,
+        state.generation,
+      ),
+    },
   );
-  const rootGroup = groups.find(({ record }) => record.pid === state.rootProcess.pid);
-  if (rootGroup) await stopProcessGroups([rootGroup], 30_000);
-  groups = collectRecordedPreviewProcessGroups(repositoryRoot, state, serviceStates);
-  const survivors = await stopProcessGroups(groups);
-  if (survivors.length > 0) {
-    throw new Error(
-      `Preview listener process groups survived failed-launch cleanup: ${survivors.map(({ groupId }) => groupId).join(", ")}`,
-    );
-  }
-  assertNoForeignPreviewListeners(state.ports, groups);
-  const occupied = await waitForPreviewPortsFree(state.ports, 15_000);
-  if (occupied.length > 0) {
-    throw new Error(
-      `Preview ports did not become free after failed-launch cleanup: ${formatOccupiedPorts(occupied)}`,
-    );
-  }
 }
 
 function formatOccupiedPorts(occupied) {
@@ -231,6 +220,7 @@ try {
 }
 let projectionPrepared = false;
 let statePublished = false;
+let preserveFailedLaunchArtifacts = false;
 function releaseLifecycleLock() {
   if (!lifecycleLock) return;
   const heldLock = lifecycleLock;
@@ -238,7 +228,7 @@ function releaseLifecycleLock() {
   heldLock.release();
 }
 process.once("exit", () => {
-  if (projectionPrepared && !statePublished) {
+  if (projectionPrepared && !statePublished && !preserveFailedLaunchArtifacts) {
     try {
       removePreviewWebRoot(repositoryRoot, previewGeneration);
     } catch (error) {
@@ -395,10 +385,7 @@ try {
   publishPreviewStateFile(stateFile, lifecycleState);
   statePublished = true;
   const gateFile = environment.KADY_PREVIEW_START_GATE_FILE;
-  const gateDescriptor = fs.openSync(gateFile, "wx", 0o600);
-  fs.writeFileSync(gateDescriptor, `${previewGeneration}\n`);
-  fs.fsyncSync(gateDescriptor);
-  fs.closeSync(gateDescriptor);
+  publishPreviewStartGate(gateFile, previewGeneration);
 
   await waitForPreviewReadiness({
     launcherProcess: rootProcess,
@@ -445,6 +432,11 @@ try {
           );
         }
       }
+      assertPreviewServiceListenersOwned(
+        ports,
+        serviceStates,
+        previewGeneration,
+      );
     },
   });
 
@@ -465,7 +457,14 @@ try {
     } catch (caught) {
       cleanupError = caught;
     }
+  } else if (rootProcess?.pid) {
+    try {
+      process.kill(-rootProcess.pid, "SIGKILL");
+    } catch (caught) {
+      cleanupError = caught;
+    }
   }
+  preserveFailedLaunchArtifacts = cleanupError !== null;
   console.error(`Preview failed: ${error instanceof Error ? error.message : String(error)}`);
   if (cleanupError) {
     console.error(

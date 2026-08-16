@@ -5,17 +5,19 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  assertNoForeignPreviewListeners,
-  collectRecordedPreviewProcessGroups,
+  assertExplicitPreviewLockRecoverySafe,
   listenersOnPort,
-  stopProcessGroups,
-  waitForPreviewPortsFree,
+  processesHoldingFile,
+  quiescePreviewGeneration,
 } from "./preview-processes.mjs";
-import { readPreviewServiceStates } from "./preview-readiness.mjs";
+import {
+  readPreviewServiceStateSnapshot,
+} from "./preview-readiness.mjs";
 import {
   acquirePreviewLifecycleLock,
   previewTeardownRecord,
   readPreviewStateCandidate,
+  recoverUnrecognizedPreviewLifecycleLock,
   removePreviewStateFile,
 } from "./preview-state.mjs";
 import {
@@ -29,6 +31,7 @@ const repositoryRoot = fs.realpathSync(path.resolve(scriptDirectory, ".."));
 const stateFile = path.join(repositoryRoot, "deploy", "preview", ".state.json");
 const lifecycleLockFile = path.join(repositoryRoot, "deploy", "preview", ".lifecycle.lock");
 const keepState = process.argv.includes("--keep-state");
+const recoverLock = process.argv.includes("--recover-lock");
 
 function fail(message) {
   console.error(message);
@@ -137,8 +140,94 @@ function printListenerProof(state) {
   return total;
 }
 
+function explicitLockRecoveryEvidence() {
+  const candidate = readPreviewStateCandidate(stateFile);
+  let marker = null;
+  try {
+    marker = readPreviewWebProjectionMarker(repositoryRoot);
+  } catch (error) {
+    throw new Error(
+      `Explicit preview lock recovery cannot read the projection marker: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (candidate.status === "malformed" && !marker) {
+    throw new Error(
+      `Explicit preview lock recovery cannot prove recorded ports or processes because ${stateFile} is malformed and no projection marker exists.`,
+    );
+  }
+  if (
+    candidate.status === "valid" &&
+    marker &&
+    candidate.state?.generation !== marker.generation
+  ) {
+    throw new Error(
+      `Explicit preview lock recovery refuses conflicting state generation ${candidate.state?.generation ?? "<missing>"} and marker generation ${marker.generation}.`,
+    );
+  }
+  const source = candidate.status === "valid" ? candidate.state : marker;
+  const generation = typeof source?.generation === "string" ? source.generation : null;
+  if (source && !generation) {
+    throw new Error("Explicit preview lock recovery cannot prove a generation from lifecycle artifacts.");
+  }
+  const ports = source?.ports && typeof source.ports === "object" ? source.ports : {};
+  if (source && Object.keys(ports).length === 0) {
+    throw new Error("Explicit preview lock recovery cannot prove preview ports from lifecycle artifacts.");
+  }
+  const records = [];
+  const lifecycleSources = [source];
+  if (candidate.status === "valid" && marker) lifecycleSources.push(marker);
+  for (const lifecycleSource of lifecycleSources) {
+    if (lifecycleSource?.rootProcess) records.push(lifecycleSource.rootProcess);
+    const serviceStatePath = lifecycleSource?.serviceStatePath;
+    if (lifecycleSource && typeof serviceStatePath !== "string") {
+      throw new Error(
+        "Explicit preview lock recovery cannot prove service processes without a recorded service-state path.",
+      );
+    }
+    if (generation && typeof serviceStatePath === "string") {
+      const serviceSnapshot = readPreviewServiceStateSnapshot(serviceStatePath, generation);
+      if (serviceSnapshot.status !== "valid") {
+        throw new Error(
+          `Explicit preview lock recovery cannot prove service processes because ${serviceStatePath} is ${serviceSnapshot.status}.`,
+        );
+      }
+      records.push(...Object.values(serviceSnapshot.services));
+    }
+  }
+  return {
+    candidate,
+    marker,
+    generation,
+    ports,
+    records,
+  };
+}
+
 if (process.platform === "win32") {
   fail("The preview lifecycle currently requires POSIX process-group semantics.");
+}
+
+if (recoverLock) {
+  let evidence;
+  try {
+    evidence = explicitLockRecoveryEvidence();
+    const recovered = recoverUnrecognizedPreviewLifecycleLock(lifecycleLockFile, {
+      verifySafeRecovery: () => assertExplicitPreviewLockRecoverySafe({
+        lockFile: lifecycleLockFile,
+        lockHolderPids: processesHoldingFile(lifecycleLockFile),
+        records: evidence.records,
+        generation: evidence.generation,
+        ports: evidence.ports,
+      }),
+    });
+    if (!recovered) console.log(`No preview lifecycle lock exists at ${lifecycleLockFile}.`);
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
+  if (evidence.candidate.status === "missing" && !evidence.marker) {
+    console.log("No preview state or projection remains after explicit lock recovery.");
+    process.exit(0);
+  }
 }
 
 let lifecycleLock;
@@ -168,60 +257,21 @@ process.once("exit", () => {
 });
 
 const { state, recoveredFromMarker } = readStateOrProjectionRecovery();
-const serviceStates = readPreviewServiceStates(
-  state.serviceStatePath,
-  state.generation,
-);
-let recordedGroups;
 try {
-  recordedGroups = collectRecordedPreviewProcessGroups(
+  await quiescePreviewGeneration(
     repositoryRoot,
     state,
-    serviceStates,
+    {
+      readServiceSnapshot: () => readPreviewServiceStateSnapshot(
+        state.serviceStatePath,
+        state.generation,
+      ),
+    },
   );
 } catch (error) {
   fail(
     `${error instanceof Error ? error.message : String(error)} ` +
-      "Stop the unrelated listener or restore a matching lifecycle state, then rerun preview-down.",
-  );
-}
-
-const rootGroup = recordedGroups.find(
-  ({ record }) => record.pid === state.rootProcess.pid,
-);
-if (rootGroup) await stopProcessGroups([rootGroup], 90_000);
-let survivingRecordedGroups;
-try {
-  survivingRecordedGroups = collectRecordedPreviewProcessGroups(
-    repositoryRoot,
-    state,
-    serviceStates,
-  );
-} catch (error) {
-  fail(error instanceof Error ? error.message : String(error));
-}
-const survivingGroups = await stopProcessGroups(survivingRecordedGroups);
-if (survivingGroups.length > 0) {
-  fail(
-    `Preview process groups survived teardown: ${survivingGroups.map(({ groupId }) => groupId).join(", ")}`,
-  );
-}
-
-try {
-  assertNoForeignPreviewListeners(state.ports, recordedGroups);
-} catch (error) {
-  fail(
-    `${error instanceof Error ? error.message : String(error)} ` +
-      "The listener was not signalled; stop it manually or choose different preview ports, then rerun preview-down.",
-  );
-}
-
-const occupiedAfterShutdown = await waitForPreviewPortsFree(state.ports, 15_000);
-if (occupiedAfterShutdown.length > 0) {
-  fail(
-    `Preview ports did not become free after teardown: ${occupiedAfterShutdown
-      .map(({ role, port, listeners }) => `${role} :${port} (${listeners.join(", ")})`)
-      .join("; ")}`,
+      "Preview state and the temporary tree were retained. Stop only the named generation-bound survivor or foreign listener, then rerun preview-down.",
   );
 }
 

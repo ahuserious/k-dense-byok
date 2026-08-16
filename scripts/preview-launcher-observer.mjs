@@ -1,3 +1,5 @@
+import fs from "node:fs";
+
 const OBSERVER_HELPER_ANCHOR = "const sleep = (ms) => new Promise((r) => setTimeout(r, ms));";
 const SERVICE_EXIT_ANCHOR = `  children.push(child);
   // Fires for both exit-code and signal deaths, during boot and after.
@@ -6,6 +8,36 @@ const ENGINE_EXIT_ANCHOR = `  children.push(child);
   // Unlike the backend/frontend, an engine death is a degradation, not a
   // launcher failure: the /pipelines proxy answers 503 while it is down.
   child.on("exit", () => {`;
+
+export function previewStartGateMatches(
+  gateFile,
+  generation,
+  readFile = (file) => fs.readFileSync(file, "utf8"),
+) {
+  try {
+    return readFile(gateFile) === `${generation}\n`;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+export function recordPreviewChildOrKill(
+  child,
+  recordChild,
+  signalProcess = process.kill,
+) {
+  try {
+    recordChild();
+  } catch (error) {
+    try {
+      signalProcess(-child.pid, "SIGKILL");
+    } catch {
+      try { signalProcess(child.pid, "SIGKILL"); } catch {}
+    }
+    throw error;
+  }
+}
 
 const OBSERVER_HELPER = `
 
@@ -17,11 +49,11 @@ const previewStartGateFile = process.env.KADY_PREVIEW_START_GATE_FILE;
 if (previewStartGateFile) {
   if (!previewGeneration) fail("Preview launcher gate requires KADY_PREVIEW_GENERATION.");
   const gateDeadline = Date.now() + 30_000;
-  while (!fs.existsSync(previewStartGateFile) && Date.now() < gateDeadline) {
+  while (!previewStartGateMatches(previewStartGateFile, previewGeneration) && Date.now() < gateDeadline) {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
   }
-  if (!fs.existsSync(previewStartGateFile)) {
-    fail(\`Preview launcher gate timed out for generation \${previewGeneration}.\`);
+  if (!previewStartGateMatches(previewStartGateFile, previewGeneration)) {
+    fail(\`Preview launcher gate timed out waiting for exact generation \${previewGeneration}.\`);
   }
 }
 
@@ -83,6 +115,13 @@ function recordPreviewServiceState(role, pid, state, exitCode = null, signal = n
   const directoryDescriptor = fs.openSync(path.dirname(previewServiceStateFile), "r");
   fs.fsyncSync(directoryDescriptor);
   fs.closeSync(directoryDescriptor);
+}
+
+function recordSpawnedPreviewServiceOrKill(child) {
+  recordPreviewChildOrKill(
+    child,
+    () => recordPreviewServiceState(child.kadyRole, child.pid, "spawned"),
+  );
 }`;
 
 function replaceExactlyOnce(source, anchor, replacement, label) {
@@ -97,7 +136,7 @@ export function instrumentPreviewLauncher(source) {
   let instrumented = replaceExactlyOnce(
     source,
     OBSERVER_HELPER_ANCHOR,
-    `${OBSERVER_HELPER_ANCHOR}${OBSERVER_HELPER}`,
+    `${OBSERVER_HELPER_ANCHOR}\n${previewStartGateMatches.toString()}\n${recordPreviewChildOrKill.toString()}${OBSERVER_HELPER}`,
     "observer helper",
   );
   instrumented = replaceExactlyOnce(
@@ -105,7 +144,7 @@ export function instrumentPreviewLauncher(source) {
     SERVICE_EXIT_ANCHOR,
     `  children.push(child);
   if (previewServiceStateFile) process.kill(child.pid, "SIGSTOP");
-  recordPreviewServiceState(child.kadyRole, child.pid, "spawned");
+  recordSpawnedPreviewServiceOrKill(child);
   if (previewServiceStateFile) process.kill(child.pid, "SIGCONT");
   // Fires for both exit-code and signal deaths, during boot and after.
   child.on("exit", (exitCode, signal) => {
@@ -117,7 +156,7 @@ export function instrumentPreviewLauncher(source) {
     ENGINE_EXIT_ANCHOR,
     `  children.push(child);
   if (previewServiceStateFile) process.kill(child.pid, "SIGSTOP");
-  recordPreviewServiceState(child.kadyRole, child.pid, "spawned");
+  recordSpawnedPreviewServiceOrKill(child);
   if (previewServiceStateFile) process.kill(child.pid, "SIGCONT");
   // Unlike the backend/frontend, an engine death is a degradation, not a
   // launcher failure: the /pipelines proxy answers 503 while it is down.

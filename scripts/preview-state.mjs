@@ -3,8 +3,10 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-export const UNREADABLE_LOCK_MINIMUM_AGE_MS = 500;
-export const UNREADABLE_LOCK_STABILITY_DELAY_MS = 250;
+export const PREVIEW_LIFECYCLE_LOCK_VERSION = 4;
+export const PREVIEW_LOCK_ACQUIRE_TIMEOUT_MS = 30_000;
+const PREVIEW_LOCK_POLL_INTERVAL_MS = 25;
+const PREVIEW_RECOVERY_GUARD_VERSION = 1;
 
 function sleepSync(milliseconds) {
   if (milliseconds <= 0) return;
@@ -142,12 +144,28 @@ function parseLockOwner(snapshot) {
   try {
     const owner = JSON.parse(snapshot.raw.toString("utf8"));
     if (
-      owner?.version !== 3 ||
+      owner?.version !== PREVIEW_LIFECYCLE_LOCK_VERSION ||
       typeof owner.operation !== "string" ||
       typeof owner.generation !== "string" ||
       !Number.isSafeInteger(owner.pid) ||
       owner.pid < 1 ||
       !validIdentity(owner.identity)
+    ) return null;
+    return owner;
+  } catch {
+    return null;
+  }
+}
+
+function parseRecoveryGuardOwner(snapshot) {
+  try {
+    const owner = JSON.parse(snapshot.raw.toString("utf8"));
+    if (
+      owner?.version !== PREVIEW_RECOVERY_GUARD_VERSION ||
+      !Number.isSafeInteger(owner.pid) ||
+      owner.pid < 1 ||
+      !validIdentity(owner.identity) ||
+      typeof owner.createdAt !== "string"
     ) return null;
     return owner;
   } catch {
@@ -205,20 +223,116 @@ function assertStaleGenerationMatches(owner, generationFiles) {
   }
 }
 
-function stableUnreadableSnapshot(lockFile, firstSnapshot, now, pauseSync) {
-  const remainingAge = Math.max(
-    0,
-    UNREADABLE_LOCK_MINIMUM_AGE_MS - (now() - firstSnapshot.stat.mtimeMs),
+function lockTimeoutError(lockFile, holder) {
+  const holderText = holder
+    ? ` PID ${holder.pid} (${holder.identity.method}:${holder.identity.value})`
+    : " with an unrecognized owner";
+  return new Error(
+    `Timed out after ${PREVIEW_LOCK_ACQUIRE_TIMEOUT_MS}ms waiting for preview lifecycle recovery guard${holderText} at ${lockFile}.`,
   );
-  pauseSync(remainingAge + UNREADABLE_LOCK_STABILITY_DELAY_MS);
-  let secondSnapshot;
-  try {
-    secondSnapshot = readFileSnapshot(lockFile);
-  } catch (error) {
-    if (error?.code === "ENOENT") return null;
-    throw error;
+}
+
+function acquirePreviewRecoveryGuard(
+  lockFile,
+  {
+    pid,
+    identity,
+    resolvePidStartIdentity,
+    now,
+    pauseSync,
+    deadline,
+  },
+) {
+  const guardFile = `${lockFile}.recovery`;
+  const guardOwner = {
+    version: PREVIEW_RECOVERY_GUARD_VERSION,
+    pid,
+    identity,
+    createdAt: new Date(now()).toISOString(),
+  };
+  const serializedGuardOwner = `${JSON.stringify(guardOwner, null, 2)}\n`;
+  let ownedSnapshot;
+
+  while (now() <= deadline) {
+    try {
+      ownedSnapshot = publishCompleteFile(guardFile, serializedGuardOwner);
+      break;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
+
+    let observedSnapshot;
+    try {
+      observedSnapshot = readFileSnapshot(guardFile);
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+    const observedOwner = parseRecoveryGuardOwner(observedSnapshot);
+    if (!observedOwner) {
+      throw new Error(
+        `Preview lifecycle recovery guard is unrecognized and cannot be reclaimed automatically: ${guardFile}.`,
+      );
+    }
+    const currentIdentity = resolvePidStartIdentity(observedOwner.pid);
+    if (identityDisposition(observedOwner.identity, currentIdentity) === "live") {
+      if (now() >= deadline) throw lockTimeoutError(guardFile, observedOwner);
+      pauseSync(PREVIEW_LOCK_POLL_INTERVAL_MS);
+      continue;
+    }
+
+    // A hard-link claim keeps the observed inode alive and lets contenders use
+    // link count as an atomic election. Only the sole claimant may unlink the
+    // canonical stale guard and publish its replacement.
+    const claimFile = `${guardFile}.claim.${pid}.${randomUUID()}`;
+    try {
+      fs.linkSync(guardFile, claimFile);
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+    try {
+      const claimSnapshot = readFileSnapshot(claimFile);
+      if (!sameSnapshot(observedSnapshot, claimSnapshot)) continue;
+      let canonicalSnapshot;
+      try {
+        canonicalSnapshot = readFileSnapshot(guardFile);
+      } catch (error) {
+        if (error?.code === "ENOENT") continue;
+        throw error;
+      }
+      if (!sameSnapshot(observedSnapshot, canonicalSnapshot)) continue;
+      if (fs.statSync(claimFile).nlink !== 2) {
+        pauseSync(PREVIEW_LOCK_POLL_INTERVAL_MS);
+        continue;
+      }
+      fs.unlinkSync(guardFile);
+      fsyncDirectory(path.dirname(guardFile));
+      try {
+        ownedSnapshot = publishCompleteFile(guardFile, serializedGuardOwner);
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+      }
+      if (ownedSnapshot) break;
+    } finally {
+      fs.rmSync(claimFile, { force: true });
+    }
   }
-  return sameSnapshot(firstSnapshot, secondSnapshot) ? secondSnapshot : null;
+  if (!ownedSnapshot) throw lockTimeoutError(guardFile, null);
+
+  let released = false;
+  return {
+    release() {
+      if (released) return;
+      const currentSnapshot = readFileSnapshot(guardFile);
+      if (!sameSnapshot(ownedSnapshot, currentSnapshot)) {
+        throw new Error(`Preview lifecycle recovery guard ownership changed: ${guardFile}.`);
+      }
+      fs.unlinkSync(guardFile);
+      fsyncDirectory(path.dirname(guardFile));
+      released = true;
+    },
+  };
 }
 
 export function acquirePreviewLifecycleLock(
@@ -243,7 +357,7 @@ export function acquirePreviewLifecycleLock(
     throw new Error(`Preview lifecycle cannot acquire a lock without PID identity for ${pid}.`);
   }
   const owner = {
-    version: 3,
+    version: PREVIEW_LIFECYCLE_LOCK_VERSION,
     operation,
     generation,
     pid,
@@ -252,24 +366,35 @@ export function acquirePreviewLifecycleLock(
   };
   const serializedOwner = `${JSON.stringify(owner, null, 2)}\n`;
 
+  const deadline = now() + PREVIEW_LOCK_ACQUIRE_TIMEOUT_MS;
   let ownedSnapshot;
-  for (;;) {
+  while (!ownedSnapshot && now() <= deadline) {
+    const guard = acquirePreviewRecoveryGuard(lockFile, {
+      pid,
+      identity: ownerIdentity,
+      resolvePidStartIdentity,
+      now,
+      pauseSync,
+      deadline,
+    });
     try {
-      ownedSnapshot = publishCompleteFile(lockFile, serializedOwner);
-      break;
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
-    }
-
-    let staleSnapshot;
-    try {
-      staleSnapshot = readFileSnapshot(lockFile);
-    } catch (error) {
-      if (error?.code === "ENOENT") continue;
-      throw error;
-    }
-    const staleOwner = parseLockOwner(staleSnapshot);
-    if (staleOwner) {
+      let observedSnapshot;
+      try {
+        observedSnapshot = readFileSnapshot(lockFile);
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+      if (!observedSnapshot) {
+        ownedSnapshot = publishCompleteFile(lockFile, serializedOwner);
+        continue;
+      }
+      const staleOwner = parseLockOwner(observedSnapshot);
+      if (!staleOwner) {
+        throw new Error(
+          `Preview lifecycle lock is legacy, malformed, or uses an unknown identity method and is busy: ${lockFile}. ` +
+            "Run node scripts/preview-down.mjs --recover-lock for explicit proof-based recovery.",
+        );
+      }
       const currentIdentity = resolvePidStartIdentity(staleOwner.pid);
       if (identityDisposition(staleOwner.identity, currentIdentity) === "live") {
         const suffix = staleOwner.operation === "preview-up" ? " is still starting" : " is running";
@@ -278,69 +403,112 @@ export function acquirePreviewLifecycleLock(
         );
       }
       assertStaleGenerationMatches(staleOwner, generationFiles);
-    } else {
-      staleSnapshot = stableUnreadableSnapshot(lockFile, staleSnapshot, now, pauseSync);
-      if (!staleSnapshot) continue;
-    }
-
-    const takeoverFile = `${lockFile}.stale.${pid}.${randomUUID()}`;
-    try {
-      fs.renameSync(lockFile, takeoverFile);
-    } catch (error) {
-      if (error?.code === "ENOENT") continue;
-      throw error;
-    }
-    const takeoverSnapshot = readFileSnapshot(takeoverFile);
-    if (!sameSnapshot(staleSnapshot, takeoverSnapshot)) {
-      try {
-        fs.linkSync(takeoverFile, lockFile);
-      } catch {}
-      fs.rmSync(takeoverFile, { force: true });
-      continue;
-    }
-    try {
+      const currentSnapshot = readFileSnapshot(lockFile);
+      if (!sameSnapshot(observedSnapshot, currentSnapshot)) continue;
+      fs.unlinkSync(lockFile);
+      fsyncDirectory(path.dirname(lockFile));
       ownedSnapshot = publishCompleteFile(lockFile, serializedOwner);
-    } catch (error) {
-      fs.rmSync(takeoverFile, { force: true });
-      if (error?.code === "EEXIST") continue;
-      throw error;
+      log(
+        `Recovered stale lifecycle lock (pid ${staleOwner.pid}, started ${staleOwner.identity.method}:${staleOwner.identity.value}).`,
+      );
+    } finally {
+      guard.release();
     }
-    fs.rmSync(takeoverFile, { force: true });
-    fsyncDirectory(path.dirname(lockFile));
-    log(
-      staleOwner
-        ? `Recovered stale lifecycle lock (pid ${staleOwner.pid}, started ${staleOwner.identity.method}:${staleOwner.identity.value}).`
-        : `Recovered unreadable lifecycle lock older than ${UNREADABLE_LOCK_MINIMUM_AGE_MS}ms.`,
-    );
-    break;
   }
+  if (!ownedSnapshot) throw lockTimeoutError(lockFile, null);
 
   let released = false;
   return {
     owner,
     release() {
       if (released) return;
-      const releaseFile = `${lockFile}.release.${pid}.${randomUUID()}`;
+      const deadline = now() + PREVIEW_LOCK_ACQUIRE_TIMEOUT_MS;
+      const guard = acquirePreviewRecoveryGuard(lockFile, {
+        pid,
+        identity: ownerIdentity,
+        resolvePidStartIdentity,
+        now,
+        pauseSync,
+        deadline,
+      });
       try {
-        fs.renameSync(lockFile, releaseFile);
-      } catch (error) {
-        if (error?.code === "ENOENT") {
-          throw new Error(`Preview lifecycle lock disappeared before release: ${lockFile}.`);
+        const currentSnapshot = readFileSnapshot(lockFile);
+        if (!sameSnapshot(ownedSnapshot, currentSnapshot)) {
+          throw new Error(`Preview lifecycle lock ownership changed before release: ${lockFile}.`);
         }
-        throw error;
+        fs.unlinkSync(lockFile);
+        fsyncDirectory(path.dirname(lockFile));
+        released = true;
+      } finally {
+        guard.release();
       }
-      const releasedSnapshot = readFileSnapshot(releaseFile);
-      if (!sameSnapshot(ownedSnapshot, releasedSnapshot)) {
-        try {
-          fs.linkSync(releaseFile, lockFile);
-        } catch {}
-        throw new Error(`Preview lifecycle lock ownership changed before release: ${lockFile}.`);
-      }
-      fs.rmSync(releaseFile, { force: true });
-      fsyncDirectory(path.dirname(lockFile));
-      released = true;
     },
   };
+}
+
+export function recoverUnrecognizedPreviewLifecycleLock(
+  lockFile,
+  {
+    verifySafeRecovery,
+    pid = process.pid,
+    identity,
+    resolvePidStartIdentity = previewPidStartIdentity,
+    log = console.log,
+    now = Date.now,
+    pauseSync = sleepSync,
+  } = {},
+) {
+  if (typeof verifySafeRecovery !== "function") {
+    throw new Error("Explicit preview lock recovery requires a safety proof callback.");
+  }
+  const ownerIdentity = identity ?? resolvePidStartIdentity(pid);
+  if (!validIdentity(ownerIdentity)) {
+    throw new Error(`Preview lock recovery cannot verify PID identity for ${pid}.`);
+  }
+  const guard = acquirePreviewRecoveryGuard(lockFile, {
+    pid,
+    identity: ownerIdentity,
+    resolvePidStartIdentity,
+    now,
+    pauseSync,
+    deadline: now() + PREVIEW_LOCK_ACQUIRE_TIMEOUT_MS,
+  });
+  try {
+    let observedSnapshot;
+    try {
+      observedSnapshot = readFileSnapshot(lockFile);
+    } catch (error) {
+      if (error?.code === "ENOENT") return false;
+      throw error;
+    }
+    if (parseLockOwner(observedSnapshot)) {
+      throw new Error(
+        `Preview lifecycle lock is a current-version record; use normal preview-down recovery: ${lockFile}.`,
+      );
+    }
+    verifySafeRecovery({
+      lockFile,
+      identity: observedSnapshot.identity,
+      digest: observedSnapshot.digest,
+    });
+    const currentSnapshot = readFileSnapshot(lockFile);
+    if (!sameSnapshot(observedSnapshot, currentSnapshot)) {
+      throw new Error(`Preview lifecycle lock changed during explicit recovery: ${lockFile}.`);
+    }
+    fs.unlinkSync(lockFile);
+    fsyncDirectory(path.dirname(lockFile));
+    log(`Recovered legacy or malformed preview lifecycle lock: ${lockFile}.`);
+    return true;
+  } finally {
+    guard.release();
+  }
+}
+
+export function publishPreviewStartGate(gateFile, generation) {
+  if (typeof generation !== "string" || !generation) {
+    throw new Error("Preview start gate requires a generation.");
+  }
+  publishCompleteFile(gateFile, `${generation}\n`);
 }
 
 export function publishPreviewStateFile(stateFile, state) {

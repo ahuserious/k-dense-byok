@@ -54,6 +54,18 @@ export function listenersOnPort(port) {
   );
 }
 
+export function processesHoldingFile(file) {
+  const result = spawnSync("lsof", ["-t", file], { encoding: "utf-8" });
+  if (result.status !== 0 && !(result.status === 1 && !result.stderr.trim())) {
+    throw new Error(
+      `lsof could not inspect preview lifecycle lock ${file}: ` +
+        `${(result.stderr || result.stdout).trim() || `exit ${result.status}`}`,
+    );
+  }
+  return [...new Set(result.stdout.trim().split(/\s+/).filter(Boolean).map(Number))]
+    .filter((pid) => Number.isSafeInteger(pid) && pid > 1);
+}
+
 export function occupiedPreviewPorts(ports, inspectPort = listenersOnPort) {
   return Object.entries(ports).flatMap(([role, port]) => {
     const listeners = inspectPort(port);
@@ -163,7 +175,7 @@ export function collectRecordedPreviewProcessGroups(
   if (rootGroup) groups.set(rootGroup.groupId, rootGroup);
 
   for (const [role, record] of Object.entries(serviceStates)) {
-    const expectedDirectory = expectedWorkingDirectory(repositoryRoot, role);
+    const expectedDirectory = expectedWorkingDirectory(repositoryRoot, record.role ?? role);
     const group = recordedPreviewProcessGroup(
       record,
       lifecycleState.generation,
@@ -173,6 +185,198 @@ export function collectRecordedPreviewProcessGroups(
     if (group) groups.set(group.groupId, group);
   }
   return [...groups.values()];
+}
+
+const PORT_SERVICE_ROLES = {
+  backend: "backend",
+  frontend: "frontend",
+  engine: "pipeline-engine",
+};
+
+export function assertPreviewServiceListenersOwned(
+  ports,
+  serviceStates,
+  generation,
+  {
+    inspectPort = listenersOnPort,
+    resolveProcessGroup = processGroupId,
+  } = {},
+) {
+  for (const [portRole, port] of Object.entries(ports)) {
+    const serviceRole = PORT_SERVICE_ROLES[portRole];
+    const record = serviceStates[serviceRole];
+    if (!validRecordedProcess(record, generation)) {
+      throw new Error(
+        `Preview readiness lacks a valid ${serviceRole ?? portRole} process record for generation ${generation}.`,
+      );
+    }
+    const listenerPids = inspectPort(port);
+    if (listenerPids.length === 0) {
+      throw new Error(`Preview port ${port} has no listener for generation ${generation}.`);
+    }
+    for (const listenerPid of listenerPids) {
+      if (listenerPid === record.pid) continue;
+      const listenerGroup = resolveProcessGroup(listenerPid);
+      if (listenerGroup !== record.pgid) {
+        throw new Error(
+          `Preview port ${port} held by pid ${listenerPid} not owned by generation ${generation}.`,
+        );
+      }
+    }
+  }
+}
+
+function matchingLiveRecord(record, generation, { isAlive, resolveIdentity }) {
+  if (!validRecordedProcess(record, generation) || !isAlive(record.pid)) return false;
+  const identity = resolveIdentity(record.pid);
+  if (!identity) return false;
+  return identity.method === record.identity.method && identity.value === record.identity.value;
+}
+
+export function assertPreviewGenerationQuiesced(
+  records,
+  generation,
+  ports,
+  {
+    isAlive = processAlive,
+    resolveIdentity = previewPidStartIdentity,
+    inspectPort = listenersOnPort,
+  } = {},
+) {
+  const survivingPids = records
+    .filter((record) => matchingLiveRecord(record, generation, { isAlive, resolveIdentity }))
+    .map((record) => record.pid);
+  if (survivingPids.length > 0) {
+    throw new Error(
+      `Preview generation ${generation} process records survived teardown: ${[...new Set(survivingPids)].join(", ")}.`,
+    );
+  }
+  const occupied = occupiedPreviewPorts(ports, inspectPort);
+  if (occupied.length > 0) {
+    throw new Error(
+      `Preview generation ${generation} ports still have listeners: ${occupied
+        .map(({ role, port, listeners }) => `${role} :${port} (${listeners.join(", ")})`)
+        .join("; ")}.`,
+    );
+  }
+}
+
+export function assertExplicitPreviewLockRecoverySafe(
+  {
+    lockFile,
+    lockHolderPids,
+    records,
+    generation,
+    ports,
+  },
+  options = {},
+) {
+  if (lockHolderPids.length > 0) {
+    throw new Error(
+      `Explicit preview lock recovery refuses ${lockFile}; lsof reports holder PID(s) ${lockHolderPids.join(", ")}.`,
+    );
+  }
+  if (generation) {
+    const invalidRecord = records.find((record) => !validRecordedProcess(record, generation));
+    if (invalidRecord) {
+      throw new Error(
+        `Explicit preview lock recovery cannot validate recorded PID ${invalidRecord?.pid ?? "<missing>"} for generation ${generation}.`,
+      );
+    }
+    assertPreviewGenerationQuiesced(records, generation, ports, options);
+  } else if (Object.keys(ports).length > 0) {
+    const occupied = occupiedPreviewPorts(ports, options.inspectPort ?? listenersOnPort);
+    if (occupied.length > 0) {
+      throw new Error(
+        `Explicit preview lock recovery refuses listeners without a provable generation: ${occupied
+          .map(({ role, port, listeners }) => `${role} :${port} (${listeners.join(", ")})`)
+          .join("; ")}.`,
+      );
+    }
+  }
+}
+
+function mergeGenerationRecords(recordMap, serviceStates, generation) {
+  for (const [role, record] of Object.entries(serviceStates)) {
+    if (!validRecordedProcess(record, generation)) continue;
+    const identityKey = `${record.identity.method}:${record.identity.value}`;
+    recordMap.set(`${record.role ?? role}:${record.pid}:${identityKey}`, {
+      ...record,
+      role: record.role ?? role,
+    });
+  }
+}
+
+export async function quiescePreviewGeneration(
+  repositoryRoot,
+  lifecycleState,
+  {
+    readServiceSnapshot,
+    stopGroups = stopProcessGroups,
+    inspectPort = listenersOnPort,
+    now = Date.now,
+    pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    timeoutMs = 30_000,
+    pollIntervalMs = 50,
+    processOptions = {},
+  },
+) {
+  const recordMap = new Map();
+  const rootRecord = lifecycleState.rootProcess;
+  const rootGroup = recordedPreviewProcessGroup(
+    rootRecord,
+    lifecycleState.generation,
+    lifecycleState.launchRoot,
+    processOptions,
+  );
+  if (rootGroup) await stopGroups([rootGroup], timeoutMs);
+  recordMap.set(`launcher:${rootRecord.pid}`, rootRecord);
+
+  const deadline = now() + timeoutMs;
+  let previousSignature = null;
+  let identicalReads = 0;
+  while (now() <= deadline) {
+    const snapshot = readServiceSnapshot();
+    if (snapshot.status && snapshot.status !== "valid") {
+      throw new Error(
+        `Preview generation ${lifecycleState.generation} service state is ${snapshot.status}; refusing teardown without a complete process record.`,
+      );
+    }
+    mergeGenerationRecords(recordMap, snapshot.services, lifecycleState.generation);
+    if (snapshot.signature === previousSignature) identicalReads += 1;
+    else identicalReads = 1;
+    previousSignature = snapshot.signature;
+
+    const mergedServices = Object.fromEntries(
+      [...recordMap.entries()].filter(([key]) => !key.startsWith("launcher:")),
+    );
+    const liveGroups = collectRecordedPreviewProcessGroups(
+      repositoryRoot,
+      lifecycleState,
+      mergedServices,
+      processOptions,
+    );
+    await stopGroups(liveGroups);
+
+    if (identicalReads >= 2) {
+      const records = [...recordMap.values()];
+      assertPreviewGenerationQuiesced(
+        records,
+        lifecycleState.generation,
+        lifecycleState.ports,
+        {
+          isAlive: processOptions.isAlive ?? processAlive,
+          resolveIdentity: processOptions.resolveIdentity ?? previewPidStartIdentity,
+          inspectPort,
+        },
+      );
+      return records;
+    }
+    await pause(pollIntervalMs);
+  }
+  throw new Error(
+    `Preview generation ${lifecycleState.generation} service records did not settle before teardown timeout.`,
+  );
 }
 
 export function assertNoForeignPreviewListeners(

@@ -133,12 +133,30 @@ function pathIsInside(candidate, root) {
   return candidate === root || candidate.startsWith(`${root}${path.sep}`);
 }
 
+function canonicalPreviewSourceDirectory(canonicalRepositoryRoot, name) {
+  const sourceDirectory = path.join(canonicalRepositoryRoot, name);
+  const sourceStat = fs.lstatSync(sourceDirectory);
+  if (sourceStat.isSymbolicLink() || !sourceStat.isDirectory()) {
+    throw new Error(
+      `Preview web projection requires checkout ${name}/ to be a real directory: ${sourceDirectory}.`,
+    );
+  }
+  const canonicalDirectory = fs.realpathSync(sourceDirectory);
+  if (!pathIsInside(canonicalDirectory, canonicalRepositoryRoot)) {
+    throw new Error(
+      `Preview web projection refuses checkout ${name}/ outside the canonical checkout: ${canonicalDirectory}.`,
+    );
+  }
+  return canonicalDirectory;
+}
+
 function previewWebAllowedSourceRoots(canonicalRepositoryRoot) {
-  const webRoot = path.join(canonicalRepositoryRoot, "web");
+  const webRoot = canonicalPreviewSourceDirectory(canonicalRepositoryRoot, "web");
+  const serverRoot = canonicalPreviewSourceDirectory(canonicalRepositoryRoot, "server");
   return [
     ...PREVIEW_WEB_SOURCE_DIRECTORY_NAMES.map((name) => path.join(webRoot, name)),
     ...PREVIEW_WEB_SOURCE_FILE_NAMES.map((name) => path.join(webRoot, name)),
-    path.join(canonicalRepositoryRoot, "server", "package.json"),
+    path.join(serverRoot, "package.json"),
   ];
 }
 
@@ -164,20 +182,18 @@ function previewSensitiveTargetClass(canonicalRepositoryRoot, canonicalTarget) {
 
 function resolvePreviewSourceContent(sourcePath, canonicalRepositoryRoot) {
   const sourceStat = fs.lstatSync(sourcePath);
-  if (!sourceStat.isSymbolicLink()) return { contentPath: sourcePath, stat: sourceStat };
-
   let canonicalTarget;
   try {
     canonicalTarget = fs.realpathSync(sourcePath);
   } catch (error) {
     throw new Error(
-      `Preview web projection refuses dangling symlink ${sourcePath}.`,
+      `Preview web projection refuses ${sourceStat.isSymbolicLink() ? "dangling symlink" : "unresolvable source entry"} ${sourcePath}.`,
       { cause: error },
     );
   }
   if (!pathIsInside(canonicalTarget, canonicalRepositoryRoot)) {
     throw new Error(
-      `Preview web projection refuses symlink ${sourcePath}: target ${canonicalTarget} is outside the checkout.`,
+      `Preview web projection refuses source entry ${sourcePath}: canonical target ${canonicalTarget} is outside the checkout.`,
     );
   }
   const sensitiveClass = previewSensitiveTargetClass(
@@ -186,21 +202,25 @@ function resolvePreviewSourceContent(sourcePath, canonicalRepositoryRoot) {
   );
   if (sensitiveClass) {
     throw new Error(
-      `Preview web projection refuses symlink ${sourcePath}: target ${canonicalTarget} is ${sensitiveClass}.`,
+      `Preview web projection refuses source entry ${sourcePath}: canonical target ${canonicalTarget} is ${sensitiveClass}.`,
     );
   }
   const allowedRoots = previewWebAllowedSourceRoots(canonicalRepositoryRoot);
   if (!allowedRoots.some((allowedRoot) => pathIsInside(canonicalTarget, allowedRoot))) {
     throw new Error(
-      `Preview web projection refuses symlink ${sourcePath}: target ${canonicalTarget} is outside the copied source set.`,
+      `Preview web projection refuses source entry ${sourcePath}: canonical target ${canonicalTarget} is outside the copied source set.`,
     );
   }
-  return { contentPath: canonicalTarget, stat: fs.statSync(canonicalTarget) };
+  return {
+    contentPath: canonicalTarget,
+    stat: sourceStat.isSymbolicLink() ? fs.statSync(canonicalTarget) : sourceStat,
+  };
 }
 
 export function previewWebSourceManifest(repositoryRoot) {
   const canonicalRepositoryRoot = fs.realpathSync(repositoryRoot);
-  const checkoutWebRoot = fs.realpathSync(path.join(canonicalRepositoryRoot, "web"));
+  const checkoutWebRoot = canonicalPreviewSourceDirectory(canonicalRepositoryRoot, "web");
+  const checkoutServerRoot = canonicalPreviewSourceDirectory(canonicalRepositoryRoot, "server");
   const entries = [];
 
   function visit(absolutePath, manifestPath, ancestorDirectories = new Set()) {
@@ -240,7 +260,7 @@ export function previewWebSourceManifest(repositoryRoot) {
     if (fs.existsSync(sourcePath)) visit(sourcePath, `web/${name}`);
   }
   visit(
-    path.join(canonicalRepositoryRoot, "server", "package.json"),
+    path.join(checkoutServerRoot, "package.json"),
     "server/package.json",
   );
   return {
@@ -376,7 +396,8 @@ function copyPreviewSource(
 }
 
 export function previewWebRoot(repositoryRoot) {
-  const checkoutWebRoot = fs.realpathSync(path.join(repositoryRoot, "web"));
+  const canonicalRepositoryRoot = fs.realpathSync(repositoryRoot);
+  const checkoutWebRoot = canonicalPreviewSourceDirectory(canonicalRepositoryRoot, "web");
   return path.join(checkoutWebRoot, ".preview", "launch", "web");
 }
 
@@ -459,6 +480,7 @@ const generation = ${JSON.stringify(generation)};
 
 ${isPreviewWebRootExcluded.toString()}
 ${pathIsInside.toString()}
+${canonicalPreviewSourceDirectory.toString()}
 ${previewWebAllowedSourceRoots.toString()}
 ${previewSensitiveTargetClass.toString()}
 ${resolvePreviewSourceContent.toString()}
@@ -566,7 +588,8 @@ export function preparePreviewWebRoot(
 ) {
   if (!generation) throw new Error("Preview web projection requires a generation.");
   const canonicalRepositoryRoot = fs.realpathSync(repositoryRoot);
-  const checkoutWebRoot = fs.realpathSync(path.join(canonicalRepositoryRoot, "web"));
+  const checkoutWebRoot = canonicalPreviewSourceDirectory(canonicalRepositoryRoot, "web");
+  const checkoutServerRoot = canonicalPreviewSourceDirectory(canonicalRepositoryRoot, "server");
   const projectedWebRoot = previewWebRoot(canonicalRepositoryRoot);
   const projectionLaunchRoot = path.dirname(projectedWebRoot);
   const previewDirectory = path.dirname(projectionLaunchRoot);
@@ -622,7 +645,7 @@ export function preparePreviewWebRoot(
     const projectedServerRoot = path.join(projectionLaunchRoot, "server");
     fs.mkdirSync(projectedServerRoot, { mode: 0o700 });
     copyPreviewSource(
-      path.join(canonicalRepositoryRoot, "server", "package.json"),
+      path.join(checkoutServerRoot, "package.json"),
       path.join(projectedServerRoot, "package.json"),
       canonicalRepositoryRoot,
     );
@@ -630,6 +653,19 @@ export function preparePreviewWebRoot(
       Number(process.hrtime.bigint() - copyStartedAt) / 1_000_000;
 
     const checkoutNodeModules = path.join(checkoutWebRoot, "node_modules");
+    let nodeModulesStat;
+    try {
+      nodeModulesStat = fs.lstatSync(checkoutNodeModules);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      throw new Error(`Preview web projection requires ${checkoutNodeModules}.`);
+    }
+    if (nodeModulesStat.isSymbolicLink() || !nodeModulesStat.isDirectory()) {
+      throw new Error(
+        `Preview web projection requires node_modules to be a real directory; ` +
+          `refusing linked dependency tree ${checkoutNodeModules}.`,
+      );
+    }
     let canonicalNodeModules;
     try {
       canonicalNodeModules = fs.realpathSync(checkoutNodeModules);

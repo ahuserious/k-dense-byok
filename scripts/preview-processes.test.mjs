@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
+  assertExplicitPreviewLockRecoverySafe,
   assertNoForeignPreviewListeners,
+  assertPreviewServiceListenersOwned,
   occupiedPreviewPorts,
+  quiescePreviewGeneration,
   recordedPreviewProcessGroup,
   waitForPreviewPortsFree,
 } from "./preview-processes.mjs";
@@ -50,6 +56,155 @@ test("classifies an unrelated same-checkout listener as foreign without signalli
     /listener PID 77 belongs to foreign process group 200; refusing to signal/,
   );
   assert.equal(signals, 0);
+});
+
+test("refuses readiness when a foreign listener races onto a recorded service port", () => {
+  const serviceStates = {
+    backend: {
+      role: "backend",
+      pid: 41,
+      pgid: 41,
+      generation: "generation-one",
+      identity: { method: "test", value: "birth-one" },
+    },
+  };
+  assert.throws(
+    () => assertPreviewServiceListenersOwned(
+      { backend: 18100 },
+      serviceStates,
+      "generation-one",
+      {
+        inspectPort: () => [77],
+        resolveProcessGroup: () => 77,
+      },
+    ),
+    /port 18100 held by pid 77 not owned by generation generation-one/i,
+  );
+});
+
+test("explicit lock recovery requires no holder, live generation record, or listener", () => {
+  const proof = {
+    lockFile: "/checkout/deploy/preview/.lifecycle.lock",
+    lockHolderPids: [],
+    generation: "generation-one",
+    ports: { backend: 18100 },
+    records: [{
+      role: "backend",
+      pid: 41,
+      pgid: 41,
+      generation: "generation-one",
+      identity: { method: "test", value: "birth-one" },
+    }],
+  };
+  assert.throws(
+    () => assertExplicitPreviewLockRecoverySafe(
+      { ...proof, lockHolderPids: [99] },
+      { isAlive: () => false, inspectPort: () => [] },
+    ),
+    /lsof reports holder PID\(s\) 99/,
+  );
+  assert.throws(
+    () => assertExplicitPreviewLockRecoverySafe(proof, {
+      isAlive: () => true,
+      resolveIdentity: () => ({ method: "test", value: "birth-one" }),
+      inspectPort: () => [],
+    }),
+    /process records survived teardown: 41/,
+  );
+  assert.throws(
+    () => assertExplicitPreviewLockRecoverySafe(proof, {
+      isAlive: () => false,
+      inspectPort: () => [77],
+    }),
+    /ports still have listeners.*18100.*77/s,
+  );
+  assert.doesNotThrow(() => assertExplicitPreviewLockRecoverySafe(proof, {
+    isAlive: () => false,
+    inspectPort: () => [],
+  }));
+});
+
+test("teardown fresh-reads and stops a service record published after its first read", async () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-late-record-"));
+  try {
+    const repositoryRoot = path.join(temporaryRoot, "checkout");
+    let launchRoot = path.join(temporaryRoot, "launch");
+    fs.mkdirSync(path.join(repositoryRoot, "server", "vendor", "pipeline-engine"), { recursive: true });
+    fs.mkdirSync(path.join(repositoryRoot, "web"), { recursive: true });
+    fs.mkdirSync(launchRoot, { recursive: true });
+    launchRoot = fs.realpathSync(launchRoot);
+    const generation = "late-record-generation";
+    const records = {
+      backend: {
+        role: "backend",
+        pid: 20,
+        pgid: 20,
+        generation,
+        identity: { method: "test", value: "backend" },
+      },
+      frontend: {
+        role: "frontend",
+        pid: 21,
+        pgid: 21,
+        generation,
+        identity: { method: "test", value: "frontend" },
+      },
+    };
+    const snapshots = [
+      { signature: "one", services: { backend: records.backend } },
+      { signature: "two", services: records },
+      { signature: "two", services: records },
+    ];
+    let readIndex = 0;
+    const livePids = new Set([10, 20, 21]);
+    const stoppedGroups = [];
+    const identities = new Map([
+      [10, { method: "test", value: "launcher" }],
+      [20, records.backend.identity],
+      [21, records.frontend.identity],
+    ]);
+    await quiescePreviewGeneration(
+      repositoryRoot,
+      {
+        generation,
+        launchRoot,
+        rootProcess: {
+          pid: 10,
+          pgid: 10,
+          generation,
+          identity: identities.get(10),
+        },
+        ports: { backend: 18100, frontend: 13100, engine: 13191 },
+      },
+      {
+        readServiceSnapshot: () => snapshots[Math.min(readIndex++, snapshots.length - 1)],
+        stopGroups: async (groups) => {
+          for (const { groupId } of groups) {
+            stoppedGroups.push(groupId);
+            livePids.delete(groupId);
+          }
+          return [];
+        },
+        inspectPort: () => [],
+        pause: async () => {},
+        now: () => 0,
+        processOptions: {
+          isAlive: (pid) => livePids.has(pid),
+          resolveIdentity: (pid) => identities.get(pid) ?? null,
+          resolveProcessGroup: (pid) => pid,
+          workingDirectory: (pid) => pid === 10
+            ? fs.realpathSync(launchRoot)
+            : pid === 20
+              ? fs.realpathSync(path.join(repositoryRoot, "server"))
+              : fs.realpathSync(path.join(repositoryRoot, "web")),
+        },
+      },
+    );
+    assert.ok(readIndex >= 3);
+    assert.deepEqual(new Set(stoppedGroups), new Set([10, 20, 21]));
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
 });
 
 test("reports only listener-occupied preview ports", () => {
