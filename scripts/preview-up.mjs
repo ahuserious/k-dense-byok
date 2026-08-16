@@ -5,8 +5,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  assertPreviewEngineCwdIsolated,
+  allowlistedPreviewEnvironment,
+  assertPreviewEngineEnvironmentFilesAbsent,
+  instrumentPreviewEnvironment,
   preparePreviewEngineHome,
+  previewEngineHome,
   previewEnvironment,
 } from "./preview-environment.mjs";
 import { instrumentPreviewLauncher } from "./preview-launcher-observer.mjs";
@@ -25,6 +28,11 @@ const stateFile = path.join(previewDirectory, ".state.json");
 function fail(message) {
   console.error(message);
   process.exit(1);
+}
+
+function replaceProcessEnvironment(environment) {
+  for (const name of Object.keys(process.env)) delete process.env[name];
+  Object.assign(process.env, environment);
 }
 
 function optionValue(name, fallback) {
@@ -90,7 +98,7 @@ function createLaunchOverlay(stateRoot, realNpm, realGit) {
   const launcherSource = fs.readFileSync(path.join(repositoryRoot, "start.mjs"), "utf-8");
   fs.writeFileSync(
     path.join(launchRoot, "start.mjs"),
-    instrumentPreviewLauncher(launcherSource),
+    instrumentPreviewEnvironment(instrumentPreviewLauncher(launcherSource)),
     { mode: 0o700 },
   );
   fs.copyFileSync(path.join(repositoryRoot, "env-file.mjs"), path.join(launchRoot, "env-file.mjs"));
@@ -199,35 +207,7 @@ if (fs.existsSync(stateFile)) {
   fail(`Preview state already exists at ${stateFile}; run scripts/preview-down.mjs first.`);
 }
 
-assertPreviewEngineCwdIsolated(repositoryRoot);
-prepareVendoredDist({ skipBuild: process.argv.includes("--no-build-dist") });
-
-const ports = {
-  backend: portOption("--backend-port", Number(process.env.KADY_PORT || 18000)),
-  frontend: portOption("--frontend-port", Number(process.env.KADY_FRONTEND_PORT || 13000)),
-  engine: portOption(
-    "--engine-port",
-    Number(
-      process.env.KADY_PIPELINE_ENGINE_PORT ||
-        process.env.KADY_ARCHON_PORT ||
-        13091,
-    ),
-  ),
-};
-if (!process.env.KADY_PIPELINE_ENGINE_PORT && process.env.KADY_ARCHON_PORT) {
-  console.warn(
-    "[deprecated] KADY_ARCHON_PORT is deprecated; use KADY_PIPELINE_ENGINE_PORT instead.",
-  );
-}
-if (new Set(Object.values(ports)).size !== 3) fail("Preview ports must be distinct.");
-
-const initiallyOccupied = await waitForPreviewPortsFree(ports, 15_000);
-if (initiallyOccupied.length > 0) {
-  fail(
-    `Preview ports are still occupied after the startup free-port barrier: ${formatOccupiedPorts(initiallyOccupied)}`,
-  );
-}
-
+const ambientEnvironment = { ...process.env };
 const requestedStateRoot = optionValue("--state-root", "");
 let stateRoot = requestedStateRoot
   ? path.resolve(requestedStateRoot)
@@ -246,12 +226,59 @@ if (requestedStateRoot) {
   fs.mkdirSync(stateRoot, { recursive: false, mode: 0o700 });
 }
 stateRoot = fs.realpathSync(stateRoot);
+fs.mkdirSync(path.join(stateRoot, "home"), { recursive: true, mode: 0o700 });
 preparePreviewEngineHome(stateRoot);
+
+replaceProcessEnvironment(
+  allowlistedPreviewEnvironment(ambientEnvironment, {
+    HOME: path.join(stateRoot, "home"),
+    ARCHON_HOME: previewEngineHome(stateRoot),
+    KADY_PREVIEW: "1",
+  }),
+);
+assertPreviewEngineEnvironmentFilesAbsent(repositoryRoot);
+prepareVendoredDist({ skipBuild: process.argv.includes("--no-build-dist") });
+
+const ports = {
+  backend: portOption("--backend-port", Number(ambientEnvironment.KADY_PORT || 18000)),
+  frontend: portOption(
+    "--frontend-port",
+    Number(ambientEnvironment.KADY_FRONTEND_PORT || 13000),
+  ),
+  engine: portOption(
+    "--engine-port",
+    Number(
+      ambientEnvironment.KADY_PIPELINE_ENGINE_PORT ||
+        ambientEnvironment.KADY_ARCHON_PORT ||
+        13091,
+    ),
+  ),
+};
+if (!ambientEnvironment.KADY_PIPELINE_ENGINE_PORT && ambientEnvironment.KADY_ARCHON_PORT) {
+  console.warn(
+    "[deprecated] KADY_ARCHON_PORT is deprecated; use KADY_PIPELINE_ENGINE_PORT instead.",
+  );
+}
+if (new Set(Object.values(ports)).size !== 3) fail("Preview ports must be distinct.");
+
+const initiallyOccupied = await waitForPreviewPortsFree(ports, 15_000);
+if (initiallyOccupied.length > 0) {
+  fail(
+    `Preview ports are still occupied after the startup free-port barrier: ${formatOccupiedPorts(initiallyOccupied)}`,
+  );
+}
 
 const realNpm = commandPath("npm");
 const realGit = commandPath("git");
 const { launchRoot, shimDirectory } = createLaunchOverlay(stateRoot, realNpm, realGit);
-const environment = previewEnvironment(stateRoot, launchRoot, shimDirectory, ports);
+const environment = previewEnvironment(
+  stateRoot,
+  launchRoot,
+  shimDirectory,
+  ports,
+  ambientEnvironment,
+);
+replaceProcessEnvironment(environment);
 const logPath = path.join(stateRoot, "preview.log");
 const serviceStatePath = environment.KADY_PREVIEW_SERVICE_STATE_FILE;
 fs.writeFileSync(serviceStatePath, `${JSON.stringify({ version: 1, services: {} }, null, 2)}\n`, {

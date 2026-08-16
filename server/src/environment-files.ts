@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { isWithin } from "./path-containment.ts";
 
 function canonicalExistingPath(
   configuredPath: string,
@@ -50,12 +51,9 @@ export function explicitEnvironmentFile(
   if (!fs.statSync(canonicalEnvFile).isFile()) {
     throw new Error("KADY_ENV_FILE must resolve to a regular file.");
   }
-  const relativePath = path.relative(canonicalLaunchRoot, canonicalEnvFile);
   if (
-    relativePath === "" ||
-    relativePath === ".." ||
-    relativePath.startsWith(`..${path.sep}`) ||
-    path.isAbsolute(relativePath)
+    canonicalEnvFile === canonicalLaunchRoot ||
+    !isWithin(canonicalLaunchRoot, canonicalEnvFile)
   ) {
     throw new Error(
       "KADY_ENV_FILE must resolve within KADY_PREVIEW_LAUNCH_ROOT.",

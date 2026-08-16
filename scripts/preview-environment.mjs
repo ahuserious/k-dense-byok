@@ -1,11 +1,25 @@
 import fs from "node:fs";
 import path from "node:path";
+import { LEGACY_ENGINE_DATA_DIRECTORY } from "../server/src/legacy-engine-data.ts";
 
-const LEGACY_ENGINE_ENVIRONMENT_NAMES = [
-  "ARCHON_BASE_URL",
-  "NEXT_PUBLIC_ARCHON_URL",
-  "KADY_ARCHON_PORT",
+const ALLOWED_AMBIENT_VARIABLES = [
+  "PATH",
+  "TMPDIR",
+  "LANG",
+  "TERM",
+  "CI",
+  "NEXT_PUBLIC_ADK_API_URL",
+  "NEXT_PUBLIC_PIPELINE_ENGINE_URL",
 ];
+const BUN_AUTO_ENV_FILE_NAMES = [
+  ".env",
+  ".env.local",
+  ".env.development",
+  ".env.production",
+  ".env.test",
+];
+const ENGINE_ARGUMENTS_ANCHOR =
+  '  const engineArgs = ["--filter", "@archon/server", "start"];';
 
 function browserOrigin(environment, environmentName, fallbackUrl) {
   const configuredUrl = environment[environmentName];
@@ -40,6 +54,22 @@ export function previewEngineHome(stateRoot) {
   return path.join(stateRoot, "pipeline-engine-home");
 }
 
+export function allowlistedPreviewEnvironment(
+  ambientEnvironment = process.env,
+  explicitPreviewVariables = {},
+) {
+  const environment = {};
+  for (const name of ALLOWED_AMBIENT_VARIABLES) {
+    if (ambientEnvironment[name] !== undefined) {
+      environment[name] = ambientEnvironment[name];
+    }
+  }
+  if (ambientEnvironment.NODE_ENV !== undefined) {
+    environment.NODE_ENV = ambientEnvironment.NODE_ENV;
+  }
+  return { ...environment, ...explicitPreviewVariables };
+}
+
 export function preparePreviewEngineHome(stateRoot) {
   const engineHome = previewEngineHome(stateRoot);
   fs.mkdirSync(engineHome, { recursive: true, mode: 0o700 });
@@ -53,32 +83,73 @@ export function preparePreviewEngineHome(stateRoot) {
   return engineHome;
 }
 
-export function assertPreviewEngineCwdIsolated(repositoryRoot) {
-  const engineCwd = path.join(
+export function previewEngineEnvironmentFiles(repositoryRoot) {
+  const vendoredRoot = path.join(
     repositoryRoot,
     "server",
     "vendor",
     "pipeline-engine",
   );
-  const forbiddenFiles = [
-    {
-      label: "vendored-root .env",
-      file: path.join(engineCwd, ".env"),
-    },
-    {
-      label: "<cwd>/.archon/.env",
-      file: path.join(engineCwd, ".archon", ".env"),
-    },
+  // `bun --filter @archon/server start` runs the package script from here,
+  // so this is the cwd used by the engine's repository env loader.
+  const enginePackageDirectory = path.join(vendoredRoot, "packages", "server");
+  return [
+    ...BUN_AUTO_ENV_FILE_NAMES.flatMap((fileName) => [
+      path.join(vendoredRoot, fileName),
+      path.join(enginePackageDirectory, fileName),
+    ]),
+    path.join(enginePackageDirectory, LEGACY_ENGINE_DATA_DIRECTORY, ".env"),
   ];
-  for (const { label, file } of forbiddenFiles) {
+}
+
+export function assertPreviewEngineEnvironmentFilesAbsent(repositoryRoot) {
+  for (const file of previewEngineEnvironmentFiles(repositoryRoot)) {
     try {
       fs.lstatSync(file);
-      throw new Error(`Preview engine isolation refuses ${label} at ${file}.`);
+      throw new Error(`Preview engine isolation refuses environment file ${file}.`);
     } catch (error) {
       if (error?.code === "ENOENT") continue;
       throw error;
     }
   }
+}
+
+export function instrumentPreviewEnvironment(launcherSource) {
+  const firstAnchor = launcherSource.indexOf(ENGINE_ARGUMENTS_ANCHOR);
+  if (
+    firstAnchor === -1 ||
+    launcherSource.indexOf(ENGINE_ARGUMENTS_ANCHOR, firstAnchor + 1) !== -1
+  ) {
+    throw new Error(
+      "Preview engine isolation instrumentation expected one engine spawn anchor in start.mjs.",
+    );
+  }
+
+  const autoEnvFileNames = JSON.stringify(BUN_AUTO_ENV_FILE_NAMES);
+  const legacyDataDirectory = JSON.stringify(LEGACY_ENGINE_DATA_DIRECTORY);
+  const guard = `  if (process.env.KADY_PREVIEW === "1") {
+    const previewEnginePackageDirectory = path.join(PIPELINE_ENGINE_DIR, "packages", "server");
+    const previewEngineEnvironmentFiles = [
+      ...${autoEnvFileNames}.flatMap((fileName) => [
+        path.join(PIPELINE_ENGINE_DIR, fileName),
+        path.join(previewEnginePackageDirectory, fileName),
+      ]),
+      path.join(previewEnginePackageDirectory, ${legacyDataDirectory}, ".env"),
+    ];
+    for (const previewEngineEnvironmentFile of previewEngineEnvironmentFiles) {
+      try {
+        fs.lstatSync(previewEngineEnvironmentFile);
+      } catch (error) {
+        if (error?.code === "ENOENT") continue;
+        throw error;
+      }
+      throw new Error(
+        \`Preview engine isolation refuses environment file \${previewEngineEnvironmentFile}.\`,
+      );
+    }
+  }
+`;
+  return launcherSource.replace(ENGINE_ARGUMENTS_ANCHOR, guard + ENGINE_ARGUMENTS_ANCHOR);
 }
 
 export function previewEnvironment(
@@ -88,30 +159,24 @@ export function previewEnvironment(
   ports,
   ambientEnvironment = process.env,
 ) {
-  const environment = { ...ambientEnvironment };
-  for (const name of Object.keys(environment)) {
-    if (/(?:API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)/i.test(name)) delete environment[name];
-  }
-  for (const name of LEGACY_ENGINE_ENVIRONMENT_NAMES) delete environment[name];
-
   const piAgentDirectory = path.join(stateRoot, "pi-agent");
   const backendUrl = `http://127.0.0.1:${ports.backend}`;
   const pipelineEngineUrl = `http://127.0.0.1:${ports.engine}`;
   const backendBrowserUrl = browserOrigin(
-    environment,
+    ambientEnvironment,
     "NEXT_PUBLIC_ADK_API_URL",
     backendUrl,
   );
   const pipelineEngineBrowserUrl = browserOrigin(
-    environment,
+    ambientEnvironment,
     "NEXT_PUBLIC_PIPELINE_ENGINE_URL",
     pipelineEngineUrl,
   );
-  return {
-    ...environment,
+  const allowedAmbientEnvironment = allowlistedPreviewEnvironment(ambientEnvironment);
+  return allowlistedPreviewEnvironment(ambientEnvironment, {
     HOME: path.join(stateRoot, "home"),
     ARCHON_HOME: previewEngineHome(stateRoot),
-    PATH: `${shimDirectory}${path.delimiter}${environment.PATH ?? ""}`,
+    PATH: [shimDirectory, allowedAmbientEnvironment.PATH].filter(Boolean).join(path.delimiter),
     KADY_PREVIEW: "1",
     KADY_ENV_FILE: path.join(launchRoot, ".env"),
     KADY_PORT: String(ports.backend),
@@ -139,5 +204,5 @@ export function previewEnvironment(
     npm_config_cache: path.join(stateRoot, "npm-cache"),
     KADY_PREVIEW_LAUNCH_ROOT: launchRoot,
     KADY_PREVIEW_SERVICE_STATE_FILE: path.join(stateRoot, "services.json"),
-  };
+  });
 }

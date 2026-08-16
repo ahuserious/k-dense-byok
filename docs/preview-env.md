@@ -51,11 +51,24 @@ which file owns persisted credentials.
 
 The workflow engine receives `ARCHON_HOME=<stateRoot>/pipeline-engine-home`, a
 new empty directory created by `preview-up`; an ambient `ARCHON_HOME` is never
-preserved. Before the vendored build or service boot, preview-up also refuses
-to continue if either `server/vendor/pipeline-engine/.env` or
-`server/vendor/pipeline-engine/.archon/.env` exists. Those checks cover the
-vendored server's automatic root, user-scope, and cwd-scope env loaders without
-patching vendored code.
+preserved. The filtered Bun package runs with
+`server/vendor/pipeline-engine/packages/server` as its actual cwd. Preview boot
+therefore refuses every Bun automatic env candidate (`.env`, `.env.local`,
+`.env.development`, `.env.production`, and `.env.test`) at both the vendored
+workspace root and that package directory, plus the package cwd's legacy
+data-directory env file. The check runs once before vendored preparation and is
+injected again immediately before the engine spawn, closing the
+validation-to-start window without patching vendored code.
+
+Before its first child process, `preview-up` replaces its own environment with
+an explicit allowlist. It may retain ambient `PATH`, `TMPDIR`, `LANG`, `TERM`,
+`CI`, `NODE_ENV` (only when already set), and the two validated browser-facing
+origin overrides. It then adds only the preview's isolated `HOME`, engine home,
+ports, state paths, loopback service URLs, and safety controls. All other
+ambient values are dropped, including Docker/workspace selectors, database and
+cloud-tracing configuration, proxy variables, the host SSH agent socket, and
+the host Pi-agent directory. The sanitized environment is used by vendored
+preparation, the supervisor, and every service descendant.
 
 The effective environment includes:
 
@@ -68,8 +81,7 @@ The effective environment includes:
   `PI_CODING_AGENT_DIR`, `KADY_SKILLS_CACHE_DIR`, and workflow-supervisor paths;
 - `KADY_SKILLS_REPO=kady-preview-nonexistent/none` and a blank
   `TELEGRAM_BOT_TOKEN`;
-- scrubbed ambient variables whose names contain API-key, token, secret,
-  password, or credential markers.
+- only the ambient interoperability variables named by the allowlist above.
 
 The example values are in `deploy/preview/preview.env.example`; `preview-up`
 replaces the state paths with its unique temporary root. Startup succeeds only

@@ -8,6 +8,10 @@
     "C5": [
       "server/src/env.ts",
       "server/src/environment-files.ts",
+      "server/src/path-containment.ts",
+      "server/src/legacy-engine-data.ts",
+      "server/src/sandbox-fs.ts",
+      "server/src/projects.ts",
       "server/src/api/credentials.ts",
       "server/src/workflows/supervisor/credentials.ts",
       "server/test/env-isolation.test.ts",

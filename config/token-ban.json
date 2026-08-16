@@ -164,32 +164,11 @@
       "comment": "deprecated-compat: upgrade coverage for fingerprinted removed committed skill"
     },
     {
-      "path": "server/src/projects.ts",
+      "path": "server/src/legacy-engine-data.ts",
       "identifiers": [
         ".archon"
       ],
-      "comment": "deprecated-compat: the vendored pipeline-engine hardcodes .archon as its per-worktree data dir; the run-snapshot must include it by that exact name. Remove when the engine's data-dir name is parameterized."
-    },
-    {
-      "path": "scripts/preview-environment.mjs",
-      "identifiers": [
-        ".archon"
-      ],
-      "comment": "deprecated-compat: preview boot must reject the vendored engine's fixed cwd env path"
-    },
-    {
-      "path": "scripts/preview-environment.test.mjs",
-      "identifiers": [
-        ".archon"
-      ],
-      "comment": "deprecated-compat: listener-free coverage must name the vendored engine's fixed cwd env path"
-    },
-    {
-      "path": "docs/preview-env.md",
-      "identifiers": [
-        ".archon"
-      ],
-      "comment": "deprecated-compat: preview isolation documentation must name the vendored engine's fixed cwd env path"
+      "comment": "deprecated-compat: the vendored pipeline-engine hardcodes .archon as its per-worktree data dir; product and preview guards share this exact name until the engine parameterizes it."
     }
   ]
 }
