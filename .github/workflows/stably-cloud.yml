@@ -227,6 +227,12 @@ jobs:
             echo "E2E_RUN_ID=${run_id:-not detected}"
           } >> "$GITHUB_ENV"
 
+      - name: Write hosted evidence manifest
+        if: always()
+        env:
+          INPUT_GREP: ${{ inputs.grep }}
+        run: node scripts/hosted-evidence-manifest.mjs
+
       - name: Write GitHub-runner result summary
         if: always()
         run: |
@@ -268,6 +274,7 @@ jobs:
             preview-up.log
             stably-test.log
             runner-fingerprint.json
+            hosted-evidence-manifest.json
 
   stably-cloud:
     name: Stably Cloud action spike

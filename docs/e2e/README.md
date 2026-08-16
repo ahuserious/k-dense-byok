@@ -114,19 +114,29 @@ KADY_E2E_BASE_URL=https://public-preview.example \
 npx playwright test --config playwright.cloud.config.ts
 ```
 
-`playwright.cloud.config.ts` excludes `@live`: that topology deliberately exposes the frontend and vendored engine but not the real Kady backend. Its cloud-safe global setup fetches only the web root, so collection contains the 246 mocked items without pretending that a project page was warmed. Run server-truth evidence through the default or alternate local preview legs above.
+`playwright.cloud.config.ts` excludes `@live`: that topology deliberately exposes the frontend and vendored engine but not the real Kady backend. Its cloud-safe global setup fetches only the web root, so collection contains the 246 mocked items without pretending that a project page was warmed. The mocked-only tier can also be selected explicitly:
+
+```bash
+KADY_E2E_BASE_URL=https://public-preview.example \
+npx playwright test --config playwright.cloud.config.ts --grep-invert @live
+```
+
+Run server-truth evidence through the complete default or alternate local preview legs above.
 
 The conditional reporter in `playwright.config.ts` uploads results only when both credentials exist. Cloud run evidence lands in the Stably project/suite dashboard; local trace, screenshot, video, and result material remains under `.stably/test-results/`.
 
 ## Hosted-runner (CI) evidence
 
-The real remote path is the `github-runner` job in [`.github/workflows/stably-cloud.yml`](../../.github/workflows/stably-cloud.yml). It runs the default `playwright.config.ts` on a GitHub-hosted runner; it does not use the public-URL overlay above. One retained evidence artifact must contain:
+The real remote path is the `github-runner` job in [`.github/workflows/stably-cloud.yml`](../../.github/workflows/stably-cloud.yml). It runs the complete default `playwright.config.ts` suite, including the three `@live` items, on a GitHub-hosted runner; it does not use the public-URL overlay above. The retained `hosted-evidence-manifest.json` must contain:
 
-- the exact test command and relevant environment, with secrets redacted;
-- the tested commit SHA;
-- the `246`-item collection line;
-- a runner fingerprint, including the runner OS/image and runner identity available to the job; and
-- the provider run identity when the conditional Stably reporter was attached.
+- the exact test command and relevant environment (`CI`, `KADY_E2E_BASE_URL`, workers, and `KADY_E2E_WORKERS` when set), with `STABLY_API_KEY` and `STABLY_PROJECT_ID` recorded only as variable names;
+- the tested commit SHA and GitHub run ID;
+- `E2E inventory verified: 249 total = 213 executing-substantive + 36 thin; 4 fixme + 0 skip.`;
+- the final Playwright summary line and suite outcome;
+- the embedded runner fingerprint, including runner image/identity fields available to the job; and
+- the Stably run ID and URL when the conditional reporter attached.
+
+A dispatch with the optional grep input is diagnostic and does not satisfy this complete-suite evidence contract.
 
 ## Evidence gate
 

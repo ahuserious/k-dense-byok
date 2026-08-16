@@ -8,6 +8,8 @@ inventory path is owned exactly once.
 | Lane | Scope | Owned globs |
 | --- | --- | --- |
 | C1 | Vendored builder dist freshness and hosted build | `scripts/vendored-dist-*.mjs`; `package.json`; `.github/workflows/tests.yml`; `docs/preview-env.md` |
+| C3 | Hosted evidence manifest | `scripts/hosted-evidence-manifest*.mjs` |
+| D3 | Hosted-runner E2E workflow | `.github/workflows/stably-cloud.yml` |
 | S1 | Consolidation and typed-surface removal | `web/src/app/page.tsx`; `web/src/components/{workspace-navigation,persistent-workspace-surfaces,dag-builder-surface,dag-builder,dag-builder-canvas,dag-builder-inspector,dag-workflow-console}.{ts,tsx}`; `web/src/lib/{workspace-persistence,dag-workflow-builder,dag-workflows}.ts` |
 | S1b | Scientific Pipelines cross-engine registry | `web/src/components/dag-workflows-panel.tsx`; `web/src/components/dag-workflows-panel.test.tsx`; `web/src/lib/scientific-pipeline-registry.ts`; `web/src/lib/scientific-pipeline-registry.test.ts`; `server/test/pipeline-engine-client.test.ts`; `docs/lanes/S1b-INTEGRATION.md` |
 | S2 | Vendor integration and naming sweep | `start.mjs`; `server/src/agent/pipeline-engine/**`; `server/src/agent/skills.ts`; `web/src/components/{pipelines-panel,pipeline-builder-panel,engine-iframe-panel}.tsx`; `web/src/lib/{engine-config,embed-config,pipelines}.ts`; vendor attribution files (`LICENSE`, `NOTICE*`, `VENDORED-FROM.md`) |
@@ -19,7 +21,13 @@ inventory path is owned exactly once.
 | S8 | Chat live graph and chat-turn adapter | `server/src/api/sessions.ts`; `server/src/agent/{runs-index,goal-loop,run-broker}.ts`; `web/src/components/{chat-tab,chat-rail}.tsx`; `web/src/components/console/kady-console.tsx`; `web/src/lib/{use-agent,console,console-types}.ts`; planned `server/src/agent/chat-turn-runs-adapter*.ts` and `web/src/components/chat-live-graph*.tsx` |
 | S9 | Design tokens and Studio popup | `web/src/app/globals.css`; `web/src/components/theme-provider.tsx`; planned `web/src/components/scientific-dag-studio*.tsx` and `web/src/lib/studio-design-tokens*.ts` |
 | S10 | Workflow library | `web/src/components/workflows-panel.tsx`; `web/src/data/workflows.json`; `web/src/data/dag-workflow-templates/**`; `web/src/lib/dag-workflow-templates.ts`; `server/test/dag-workflow-templates.test.ts`; planned `web/src/components/workflow-library*.tsx` and `web/src/lib/workflow-library*.ts` |
-| S11 | Stably cloud outer loop | `e2e/**`, `playwright.config.*`, `.stably/**`, `.github/workflows/stably-cloud.yml`, `docs/e2e/**`, `scripts/preview-*.mjs`, and `deploy/preview/**` |
+| S11 | Stably cloud outer loop | `e2e/**`, `playwright.config.*`, `.stably/**`, `docs/e2e/**`, `scripts/preview-*.mjs`, and `deploy/preview/**` |
+
+## Authorized cross-lane handoffs
+
+| From | To | Path | Authorized scope |
+| --- | --- | --- | --- |
+| D3 | C3 | `.github/workflows/stably-cloud.yml` | Orchestrator-authorized Round 6 addition of the redacted hosted evidence manifest step and its artifact path. |
 
 Tests follow the lane owning their production basename. Repository rail scripts,
 guard tests, and `docs/lanes/R1.log` belong to R1 and are outside S1-S11 product

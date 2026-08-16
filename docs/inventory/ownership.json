@@ -6,6 +6,12 @@
       ".github/workflows/tests.yml",
       "docs/preview-env.md"
     ],
+    "C3": [
+      "scripts/hosted-evidence-manifest*.mjs"
+    ],
+    "D3": [
+      ".github/workflows/stably-cloud.yml"
+    ],
     "S1": [
       "web/src/app/page.tsx",
       "web/src/components/workspace-navigation.tsx",
@@ -171,10 +177,17 @@
       "e2e/**",
       "playwright.config.*",
       ".stably/**",
-      ".github/workflows/stably-cloud.yml",
       "docs/e2e/**",
       "scripts/preview-*.mjs",
       "deploy/preview/**"
     ]
-  }
+  },
+  "handoffs": [
+    {
+      "from": "D3",
+      "to": "C3",
+      "path": ".github/workflows/stably-cloud.yml",
+      "scope": "Orchestrator-authorized Round 6 addition of the redacted hosted evidence manifest step and its artifact path."
+    }
+  ]
 }
