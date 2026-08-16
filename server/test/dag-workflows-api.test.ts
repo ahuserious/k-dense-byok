@@ -9,6 +9,7 @@ import {
   workflowBudgetStore,
 } from "../src/workflows/budget.ts";
 import {
+  WorkflowDefinitionConflictError,
   WorkflowRunController,
   workflowStore,
   type WorkflowGraphDocument,
@@ -104,6 +105,29 @@ function headers(projectId = "default", extra: Record<string, string> = {}) {
   return { "x-project-id": projectId, ...extra };
 }
 
+/** The strict create precondition every definition PUT that creates must send. */
+function createHeaders(projectId = "default") {
+  return headers(projectId, { "if-none-match": "*" });
+}
+
+/** The strict update precondition; `revision` may be any non-negative integer. */
+function updateHeaders(revision: number, projectId = "default") {
+  return headers(projectId, { "if-match": `"${revision}"` });
+}
+
+function putDefinition(
+  requestHeaders: Record<string, string | string[]>,
+  payload: WorkflowGraphDocument,
+  target = app,
+) {
+  return target.inject({
+    method: "PUT",
+    url: "/dag-workflows/api-workflow",
+    headers: requestHeaders,
+    payload,
+  });
+}
+
 beforeEach(() => {
   fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
   fs.mkdirSync(PROJECTS_ROOT, { recursive: true });
@@ -186,12 +210,15 @@ describe("DAG workflow API", () => {
     const saved = await app.inject({
       method: "PUT",
       url: "/dag-workflows/api-workflow",
-      headers: headers(),
+      headers: createHeaders(),
       payload: graph(),
     });
     expect(saved.statusCode).toBe(201);
     expect(saved.headers.etag).toBe('"1"');
-    expect(saved.json()).toMatchObject({ id: "api-workflow", revision: 1 });
+    expect(saved.json()).toMatchObject({
+      outcome: "created",
+      definition: { id: "api-workflow", revision: 1 },
+    });
 
     const list = await app.inject({
       method: "GET",
@@ -222,45 +249,196 @@ describe("DAG workflow API", () => {
     expect(read.json().graph.name).toBe("API workflow");
   });
 
-  it("requires compare-and-swap for changed updates", async () => {
-    await app.inject({
-      method: "PUT",
+  it("returns 201 created only for a create against an absent definition", async () => {
+    const created = await putDefinition(createHeaders(), graph());
+    expect(created.statusCode).toBe(201);
+    expect(created.headers.etag).toBe('"1"');
+    expect(created.headers.location).toBe("/dag-workflows/api-workflow");
+    expect(created.json()).toMatchObject({
+      outcome: "created",
+      definition: { id: "api-workflow", revision: 1 },
+    });
+  });
+
+  it("returns 200 unchanged for an identical update at the current revision", async () => {
+    expect((await putDefinition(createHeaders(), graph())).statusCode).toBe(201);
+
+    const unchanged = await putDefinition(updateHeaders(1), graph());
+    expect(unchanged.statusCode).toBe(200);
+    expect(unchanged.headers.etag).toBe('"1"');
+    expect(unchanged.json()).toMatchObject({
+      outcome: "unchanged",
+      definition: { id: "api-workflow", revision: 1 },
+    });
+  });
+
+  it("returns 200 updated and the next ETag for a changed update at the current revision", async () => {
+    expect((await putDefinition(createHeaders(), graph())).statusCode).toBe(201);
+
+    const updated = await putDefinition(updateHeaders(1), graph("Changed"));
+    expect(updated.statusCode).toBe(200);
+    expect(updated.headers.etag).toBe('"2"');
+    expect(updated.json()).toMatchObject({
+      outcome: "updated",
+      definition: { id: "api-workflow", revision: 2 },
+    });
+  });
+
+  it("conflicts on a stale update precondition for identical and changed bodies alike", async () => {
+    expect((await putDefinition(createHeaders(), graph())).statusCode).toBe(201);
+
+    // Revision 0 is a legal precondition that no persisted definition can
+    // satisfy. An identical body must not bypass it.
+    const staleIdentical = await putDefinition(updateHeaders(0), graph());
+    expect(staleIdentical.statusCode).toBe(409);
+    expect(staleIdentical.json().code).toBe("CONFLICT");
+    expect(staleIdentical.headers.etag).toBe('"1"');
+
+    const staleChanged = await putDefinition(updateHeaders(0), graph("Changed"));
+    expect(staleChanged.statusCode).toBe(409);
+    expect(staleChanged.json().code).toBe("CONFLICT");
+    expect(staleChanged.headers.etag).toBe('"1"');
+
+    // Neither attempt wrote.
+    const read = await app.inject({
+      method: "GET",
       url: "/dag-workflows/api-workflow",
       headers: headers(),
-      payload: graph(),
     });
-    const stale = await app.inject({
-      method: "PUT",
+    expect(read.json().revision).toBe(1);
+  });
+
+  it("conflicts without an ETag when an update targets a missing definition", async () => {
+    const missing = await putDefinition(updateHeaders(0), graph());
+    expect(missing.statusCode).toBe(409);
+    expect(missing.json().code).toBe("CONFLICT");
+    expect(missing.headers.etag).toBeUndefined();
+  });
+
+  it("conflicts on a create against an existing definition for identical and changed bodies alike", async () => {
+    expect((await putDefinition(createHeaders(), graph())).statusCode).toBe(201);
+
+    // An identical body would pass a hash-equality shortcut placed before the
+    // intent check; the create precondition must still fail.
+    const identical = await putDefinition(createHeaders(), graph());
+    expect(identical.statusCode).toBe(409);
+    expect(identical.json().code).toBe("CONFLICT");
+    expect(identical.headers.etag).toBe('"1"');
+
+    const changed = await putDefinition(createHeaders(), graph("Changed"));
+    expect(changed.statusCode).toBe(409);
+    expect(changed.json().code).toBe("CONFLICT");
+    expect(changed.headers.etag).toBe('"1"');
+
+    const read = await app.inject({
+      method: "GET",
       url: "/dag-workflows/api-workflow",
       headers: headers(),
-      payload: graph("Changed"),
     });
-    expect(stale.statusCode).toBe(409);
-    expect(stale.json().code).toBe("CONFLICT");
+    expect(read.json().revision).toBe(1);
+    expect(read.json().graph.name).toBe("API workflow");
+  });
 
-    const saved = await app.inject({
-      method: "PUT",
-      url: "/dag-workflows/api-workflow",
-      headers: headers("default", { "if-match": '"1"' }),
-      payload: graph("Changed"),
-    });
-    expect(saved.statusCode).toBe(200);
-    expect(saved.headers.etag).toBe('"2"');
+  it("requires exactly one conditional header on every definition write", async () => {
+    const missingBoth = await putDefinition(headers(), graph());
+    expect(missingBoth.statusCode).toBe(428);
+    expect(missingBoth.json().code).toBe("CONDITIONAL_HEADER_REQUIRED");
+    expect(missingBoth.headers.etag).toBeUndefined();
 
-    const malformed = await app.inject({
-      method: "PUT",
-      url: "/dag-workflows/api-workflow",
-      headers: headers("default", { "if-match": "revision-one" }),
-      payload: graph("Changed again"),
+    const both = await putDefinition(
+      headers("default", { "if-none-match": "*", "if-match": '"1"' }),
+      graph(),
+    );
+    expect(both.statusCode).toBe(400);
+    expect(both.json().code).toBe("INVALID_CONDITIONAL_HEADER");
+    expect(both.headers.etag).toBeUndefined();
+
+    // Nothing was written by either rejected request.
+    const list = await app.inject({
+      method: "GET",
+      url: "/dag-workflows",
+      headers: headers(),
     });
-    expect(malformed.statusCode).toBe(409);
+    expect(list.json().workflows).toEqual([]);
+  });
+
+  it.each([
+    ["bare", { "if-match": "1" }],
+    ["weak", { "if-match": 'W/"1"' }],
+    ["list", { "if-match": '"1", "2"' }],
+    ["array", { "if-match": ['"1"', '"2"'] }],
+    ["wildcard", { "if-match": "*" }],
+    ["negative", { "if-match": '"-1"' }],
+  ] as const)(
+    "rejects a %s If-Match with 400 and no ETag",
+    async (_label, extra) => {
+      const response = await putDefinition(
+        { "x-project-id": "default", ...extra },
+        graph(),
+      );
+      expect(response.statusCode).toBe(400);
+      expect(response.json().code).toBe("INVALID_CONDITIONAL_HEADER");
+      expect(response.headers.etag).toBeUndefined();
+    },
+  );
+
+  it.each([
+    ["non-wildcard", { "if-none-match": '"1"' }],
+    ["list", { "if-none-match": '*, "1"' }],
+    ["array", { "if-none-match": ["*", '"1"'] }],
+  ] as const)(
+    "rejects a %s If-None-Match with 400 and no ETag",
+    async (_label, extra) => {
+      const response = await putDefinition(
+        { "x-project-id": "default", ...extra },
+        graph(),
+      );
+      expect(response.statusCode).toBe(400);
+      expect(response.json().code).toBe("INVALID_CONDITIONAL_HEADER");
+      expect(response.headers.etag).toBeUndefined();
+    },
+  );
+
+  it("derives every 409 ETag from the store's locked revision without rereading", async () => {
+    const readSpy = vi.spyOn(workflowStore, "readDefinition");
+    const saveSpy = vi
+      .spyOn(workflowStore, "saveDefinitionWithIntent")
+      .mockImplementation(() => {
+        throw new WorkflowDefinitionConflictError(
+          "Workflow api-workflow is revision 7; expected 1.",
+          7,
+        );
+      });
+    try {
+      const conflict = await putDefinition(updateHeaders(1), graph("Changed"));
+      expect(conflict.statusCode).toBe(409);
+      expect(conflict.headers.etag).toBe('"7"');
+      // The revision 7 the route published came only from the structured error.
+      // Any reread after the throw would race a later writer.
+      expect(readSpy).not.toHaveBeenCalled();
+      expect(saveSpy).toHaveBeenCalledTimes(1);
+
+      saveSpy.mockImplementation(() => {
+        throw new WorkflowDefinitionConflictError(
+          "Workflow api-workflow does not exist at revision 1.",
+          null,
+        );
+      });
+      const nullConflict = await putDefinition(updateHeaders(1), graph("Changed"));
+      expect(nullConflict.statusCode).toBe(409);
+      expect(nullConflict.headers.etag).toBeUndefined();
+      expect(readSpy).not.toHaveBeenCalled();
+    } finally {
+      saveSpy.mockRestore();
+      readSpy.mockRestore();
+    }
   });
 
   it("creates an idempotent immutable queued run and exposes bounded events", async () => {
     await app.inject({
       method: "PUT",
       url: "/dag-workflows/api-workflow",
-      headers: headers(),
+      headers: createHeaders(),
       payload: graph(),
     });
     const create = () => app.inject({
@@ -329,7 +507,7 @@ describe("DAG workflow API", () => {
     await app.inject({
       method: "PUT",
       url: "/dag-workflows/api-workflow",
-      headers: headers(),
+      headers: createHeaders(),
       payload: budgetGraph,
     });
     const created = await app.inject({
@@ -425,13 +603,13 @@ describe("DAG workflow API", () => {
     await app.inject({
       method: "PUT",
       url: "/dag-workflows/api-workflow",
-      headers: headers("default"),
+      headers: createHeaders("default"),
       payload: graph("Default graph"),
     });
     await app.inject({
       method: "PUT",
       url: "/dag-workflows/api-workflow",
-      headers: headers("private-lab"),
+      headers: createHeaders("private-lab"),
       payload: graph("Private graph"),
     });
     const privateRead = await app.inject({
@@ -454,7 +632,7 @@ describe("DAG workflow API", () => {
     const response = await app.inject({
       method: "PUT",
       url: "/dag-workflows/api-workflow",
-      headers: headers(),
+      headers: createHeaders(),
       payload: invalid,
     });
     expect(response.statusCode).toBe(400);
@@ -471,7 +649,7 @@ describe("DAG workflow API", () => {
     await controlledApp.inject({
       method: "PUT",
       url: "/dag-workflows/api-workflow",
-      headers: headers(),
+      headers: createHeaders(),
       payload: graph(),
     });
 
@@ -606,7 +784,7 @@ describe("DAG workflow API", () => {
     await productionApp.inject({
       method: "PUT",
       url: "/dag-workflows/api-workflow",
-      headers: headers(),
+      headers: createHeaders(),
       payload: unsupported,
     });
     const created = await productionApp.inject({

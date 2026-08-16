@@ -92,6 +92,23 @@ export class WorkflowStoreError extends Error {
   }
 }
 
+/**
+ * Every definition intent/revision conflict. `currentRevision` is the revision
+ * observed by the same read that decided the conflict, inside the definition
+ * mutation lock, or `null` when no record existed at that instant. Callers must
+ * use it instead of rereading: a reread can race a later writer and would emit
+ * an ETag that never described the compared state.
+ */
+export class WorkflowDefinitionConflictError extends WorkflowStoreError {
+  readonly currentRevision: number | null;
+
+  constructor(message: string, currentRevision: number | null) {
+    super("CONFLICT", message);
+    this.name = "WorkflowDefinitionConflictError";
+    this.currentRevision = currentRevision;
+  }
+}
+
 export class WorkflowPreconditionError extends WorkflowStoreError {
   readonly issues: ScientificWorkflowPreconditionIssue[];
 
@@ -115,9 +132,45 @@ export interface StoredWorkflowDefinitionV1 {
   graph: WorkflowGraphDocument;
 }
 
+/**
+ * A definition precondition supplied by a caller: `Number.isSafeInteger(value)
+ * && value >= 0`. Persisted definition revisions are separately positive
+ * integers, so `0` is a legal update precondition that can only reach the
+ * missing-record conflict path; it never means "create".
+ */
+export type WorkflowExpectedRevision = number;
+
+export type SaveWorkflowDefinitionIntent =
+  | { kind: "create" }
+  | { kind: "update"; expectedRevision: WorkflowExpectedRevision }
+  | { kind: "upsert"; expectedRevision?: WorkflowExpectedRevision };
+
+export type SaveWorkflowDefinitionOutcome = "created" | "unchanged" | "updated";
+
+export interface SaveWorkflowDefinitionResult {
+  outcome: SaveWorkflowDefinitionOutcome;
+  definition: StoredWorkflowDefinitionV1;
+}
+
+/**
+ * Temporary trusted compatibility facade options. An omitted `intent` maps to
+ * `upsert`, never `create`, so repeated in-process setup helpers keep working.
+ * The HTTP route may not use this facade; it calls the outcome core with an
+ * explicit `create` or `update` intent.
+ */
 export interface SaveWorkflowDefinitionOptions {
-  /** Required for a changed update. Omit (or use 0) only for first creation. */
-  expectedRevision?: number;
+  intent?: "upsert";
+  /** Compared against `current?.revision ?? 0` before any hash equality check. */
+  expectedRevision?: WorkflowExpectedRevision;
+}
+
+function assertExpectedRevision(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new WorkflowStoreError(
+      "INVALID_DEFINITION",
+      `expectedRevision must be a non-negative safe integer; received ${String(value)}.`,
+    );
+  }
 }
 
 export interface CreateWorkflowRunInput {
@@ -2161,12 +2214,29 @@ export class WorkflowStore {
     }
   }
 
+  /**
+   * Temporary trusted compatibility facade over {@link saveDefinitionWithIntent}.
+   * An omitted intent means `upsert`, never `create`. Returns the definition so
+   * existing in-process callers keep their `StoredWorkflowDefinitionV1` shape.
+   */
   saveDefinition(
     projectId: string,
     workflowId: string,
     value: unknown,
     options: SaveWorkflowDefinitionOptions = {},
   ): StoredWorkflowDefinitionV1 {
+    const intent: SaveWorkflowDefinitionIntent = options.expectedRevision === undefined
+      ? { kind: "upsert" }
+      : { kind: "upsert", expectedRevision: options.expectedRevision };
+    return this.saveDefinitionWithIntent(projectId, workflowId, value, intent).definition;
+  }
+
+  saveDefinitionWithIntent(
+    projectId: string,
+    workflowId: string,
+    value: unknown,
+    intent: SaveWorkflowDefinitionIntent,
+  ): SaveWorkflowDefinitionResult {
     assertWorkflowId(workflowId);
     const validation = validateWorkflowGraphDocument(value);
     if (!validation.ok || validation.document.id !== workflowId) {
@@ -2175,30 +2245,61 @@ export class WorkflowStore {
         : validation.issues.map((issue) => `${issue.path}: ${issue.message}`).join("; ");
       throw new WorkflowStoreError("INVALID_DEFINITION", detail);
     }
+    if (intent.kind !== "create" && intent.expectedRevision !== undefined) {
+      assertExpectedRevision(intent.expectedRevision);
+    }
     const graph = validation.document;
     const graphSha256 = sha256(graph);
     const paths = projectPaths(projectId);
     ensureManagedDirectory(paths, paths.workflowDefinitionsDir);
     return withDefinitionMutationLock(paths, workflowId, () => {
-      // The read, expected-revision comparison, and replacement are one
-      // cross-process CAS critical section. Validation and hashing above are
-      // pure and deliberately stay outside the lock.
+      // The read, intent evaluation, and replacement are one cross-process CAS
+      // critical section. Validation and hashing above are pure and deliberately
+      // stay outside the lock.
       const current = readDefinitionFile(projectId, workflowId);
-      if (current?.graphSha256 === graphSha256) return current;
+      const currentRevision = current?.revision ?? null;
 
-      const expectedRevision = options.expectedRevision;
-      if (current) {
-        if (expectedRevision !== current.revision) {
-          throw new WorkflowStoreError(
-            "CONFLICT",
-            `Workflow ${workflowId} is revision ${current.revision}; expected ${String(expectedRevision)}.`,
+      // The discriminated intent is evaluated against this locked read BEFORE
+      // any hash equality check. An identical body must never smuggle a caller
+      // past a failed precondition.
+      if (intent.kind === "create") {
+        if (current) {
+          throw new WorkflowDefinitionConflictError(
+            `Workflow ${workflowId} already exists at revision ${current.revision}; create requires absence.`,
+            current.revision,
           );
         }
-      } else if (expectedRevision !== undefined && expectedRevision !== 0) {
-        throw new WorkflowStoreError(
-          "CONFLICT",
-          `Workflow ${workflowId} does not exist at revision ${expectedRevision}.`,
+      } else if (intent.kind === "update") {
+        if (!current) {
+          throw new WorkflowDefinitionConflictError(
+            `Workflow ${workflowId} does not exist at revision ${intent.expectedRevision}.`,
+            null,
+          );
+        }
+        if (current.revision !== intent.expectedRevision) {
+          throw new WorkflowDefinitionConflictError(
+            `Workflow ${workflowId} is revision ${current.revision}; expected ${intent.expectedRevision}.`,
+            current.revision,
+          );
+        }
+      } else if (intent.expectedRevision !== undefined) {
+        if (intent.expectedRevision !== (current?.revision ?? 0)) {
+          throw new WorkflowDefinitionConflictError(
+            `Workflow ${workflowId} is revision ${String(currentRevision)}; expected ${intent.expectedRevision}.`,
+            currentRevision,
+          );
+        }
+      } else if (current && current.graphSha256 !== graphSha256) {
+        // Trusted upsert without a precondition may repeat an identical setup
+        // save, but it may not overwrite a changed record.
+        throw new WorkflowDefinitionConflictError(
+          `Workflow ${workflowId} is revision ${current.revision}; a changed upsert requires an expected revision.`,
+          current.revision,
         );
+      }
+
+      if (current && current.graphSha256 === graphSha256) {
+        return { outcome: "unchanged" as const, definition: current };
       }
 
       if (!current && definitionIds(projectId).length >= MAX_WORKFLOW_DEFINITIONS_PER_PROJECT) {
@@ -2223,7 +2324,7 @@ export class WorkflowStore {
         stored,
         MAX_STORED_WORKFLOW_DEFINITION_BYTES,
       );
-      return stored;
+      return { outcome: current ? ("updated" as const) : ("created" as const), definition: stored };
     });
   }
 

@@ -34,7 +34,7 @@ describe("DAG workflow client", () => {
     vi.stubGlobal("fetch", fetchMock);
   });
 
-  it("reads ETags and sends revision compare-and-swap on saves", async () => {
+  it("reads ETags and sends an explicit update compare-and-swap on saves", async () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse({
         storageVersion: 1,
@@ -46,25 +46,114 @@ describe("DAG workflow client", () => {
         graph,
       }, { headers: { ETag: '"3"' } }))
       .mockResolvedValueOnce(jsonResponse({
-        storageVersion: 1,
-        id: "graph-a",
-        revision: 4,
-        createdAt: 1,
-        updatedAt: 3,
-        graphSha256: "def",
-        graph,
+        outcome: "updated",
+        definition: {
+          storageVersion: 1,
+          id: "graph-a",
+          revision: 4,
+          createdAt: 1,
+          updatedAt: 3,
+          graphSha256: "def",
+          graph,
+        },
       }, { headers: { ETag: '"4"' } }));
 
     const read = await readDagWorkflowDefinition("project-a", "graph-a");
-    const saved = await saveDagWorkflowDefinition("project-a", "graph-a", graph, 3);
+    const saved = await saveDagWorkflowDefinition("project-a", "graph-a", graph, {
+      kind: "update",
+      expectedRevision: 3,
+    });
 
     expect(read.etag).toBe('"3"');
+    expect(saved.outcome).toBe("updated");
     expect(saved.definition.revision).toBe(4);
+    expect(saved.etag).toBe('"4"');
     const [, saveInit] = fetchMock.mock.calls[1];
     const headers = new Headers(saveInit?.headers);
     expect(headers.get("If-Match")).toBe('"3"');
+    expect(headers.get("If-None-Match")).toBeNull();
     expect(headers.get("X-Project-Id")).toBe("project-a");
     expect(saveInit?.method).toBe("PUT");
+  });
+
+  it("sends If-None-Match: * and unwraps the created envelope on an explicit create", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      outcome: "created",
+      definition: {
+        storageVersion: 1,
+        id: "graph-a",
+        revision: 1,
+        createdAt: 1,
+        updatedAt: 1,
+        graphSha256: "abc",
+        graph,
+      },
+    }, { status: 201, headers: { ETag: '"1"' } }));
+
+    const created = await saveDagWorkflowDefinition("project-a", "graph-a", graph, {
+      kind: "create",
+    });
+
+    expect(created).toEqual({
+      outcome: "created",
+      definition: expect.objectContaining({ id: "graph-a", revision: 1 }),
+      etag: '"1"',
+    });
+    const [, createInit] = fetchMock.mock.calls[0];
+    const headers = new Headers(createInit?.headers);
+    expect(headers.get("If-None-Match")).toBe("*");
+    expect(headers.get("If-Match")).toBeNull();
+  });
+
+  it("unwraps an unchanged 200 without inventing a new revision", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      outcome: "unchanged",
+      definition: {
+        storageVersion: 1,
+        id: "graph-a",
+        revision: 2,
+        createdAt: 1,
+        updatedAt: 2,
+        graphSha256: "abc",
+        graph,
+      },
+    }, { headers: { ETag: '"2"' } }));
+
+    const unchanged = await saveDagWorkflowDefinition("project-a", "graph-a", graph, {
+      kind: "update",
+      expectedRevision: 2,
+    });
+
+    expect(unchanged.outcome).toBe("unchanged");
+    expect(unchanged.definition.revision).toBe(2);
+    expect(unchanged.etag).toBe('"2"');
+  });
+
+  it("accepts every non-negative safe integer update revision, including 0", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(
+      { code: "CONFLICT", detail: "Workflow graph-a does not exist at revision 0." },
+      { status: 409 },
+    ));
+
+    // 0 is a legal precondition that reaches the server's missing-record
+    // conflict; the client must never reinterpret it as a create.
+    await expect(saveDagWorkflowDefinition("project-a", "graph-a", graph, {
+      kind: "update",
+      expectedRevision: 0,
+    })).rejects.toMatchObject({ name: "DagWorkflowApiError", status: 409 });
+    const [, zeroInit] = fetchMock.mock.calls[0];
+    expect(new Headers(zeroInit?.headers).get("If-Match")).toBe('"0"');
+    expect(new Headers(zeroInit?.headers).get("If-None-Match")).toBeNull();
+  });
+
+  it("rejects an invalid update revision before making a request", async () => {
+    for (const expectedRevision of [-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+      await expect(saveDagWorkflowDefinition("project-a", "graph-a", graph, {
+        kind: "update",
+        expectedRevision,
+      })).rejects.toThrow("Expected revision must be a non-negative safe integer.");
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("preserves server error detail, code, and status", async () => {
@@ -73,7 +162,10 @@ describe("DAG workflow client", () => {
       { status: 409 },
     ));
 
-    await expect(saveDagWorkflowDefinition("project-a", "graph-a", graph, 3))
+    await expect(saveDagWorkflowDefinition("project-a", "graph-a", graph, {
+      kind: "update",
+      expectedRevision: 3,
+    }))
       .rejects.toMatchObject({
         name: "DagWorkflowApiError",
         status: 409,

@@ -9,6 +9,7 @@ import { resolvePaths } from "../src/projects.ts";
 import {
   MAX_WORKFLOW_EVENT_LOG_BYTES,
   MAX_WORKFLOW_EVENT_PAGE_SIZE,
+  WorkflowDefinitionConflictError,
   WorkflowStore,
   WorkflowStoreError,
   workflowRunFiles,
@@ -141,6 +142,26 @@ function expectStoreError(action: () => unknown, code: WorkflowStoreError["code"
   }
 }
 
+/**
+ * Asserts a definition conflict and returns the revision the store captured
+ * inside its mutation lock, which is the only revision a 409 ETag may use.
+ */
+function expectDefinitionConflict(
+  action: () => unknown,
+  expectedCurrentRevision: number | null,
+): void {
+  let caught: unknown = null;
+  try {
+    action();
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(WorkflowDefinitionConflictError);
+  const conflict = caught as WorkflowDefinitionConflictError;
+  expect(conflict.code).toBe("CONFLICT");
+  expect(conflict.currentRevision).toBe(expectedCurrentRevision);
+}
+
 async function waitForFiles(files: string[]): Promise<void> {
   const deadline = Date.now() + 10_000;
   while (!files.every((file) => fs.existsSync(file))) {
@@ -222,10 +243,20 @@ describe("WorkflowStore definitions", () => {
     expect(first.revision).toBe(1);
     expect(first.graph.rescue?.enabled).toBe(true);
 
-    // A response-lost autosave retry is idempotent even with its old revision.
-    const retry = store.saveDefinition(PROJECT_ID, document.id, document, {
-      expectedRevision: 0,
-    });
+    // A stale-identical retry no longer bypasses the precondition: revision 0
+    // is evaluated against the revision-1 record before hash equality, so the
+    // "response-lost autosave" shortcut is a conflict carrying the locked
+    // revision.
+    expectDefinitionConflict(
+      () => store.saveDefinition(PROJECT_ID, document.id, document, {
+        expectedRevision: 0,
+      }),
+      1,
+    );
+    expect(store.readDefinition(PROJECT_ID, document.id)).toEqual(first);
+
+    // The trusted facade still repeats an identical setup save as a no-op.
+    const retry = store.saveDefinition(PROJECT_ID, document.id, document);
     expect(retry).toEqual(first);
 
     const changed = structuredClone(document);
@@ -243,6 +274,139 @@ describe("WorkflowStore definitions", () => {
     expect(store.listDefinitions(PROJECT_ID).map((item) => item.id)).toEqual([
       document.id,
     ]);
+  });
+
+  it("evaluates the definition intent before hash equality for every outcome", () => {
+    const store = new WorkflowStore();
+    const document = workflow();
+    const changed = structuredClone(document);
+    changed.name = "Changed workflow";
+
+    // create + absent -> created at revision 1.
+    const created = store.saveDefinitionWithIntent(PROJECT_ID, document.id, document, {
+      kind: "create",
+    });
+    expect(created).toEqual({ outcome: "created", definition: expect.objectContaining({ revision: 1 }) });
+
+    // create + existing, IDENTICAL body -> conflict. An identical hash must not
+    // short-circuit the create precondition.
+    expectDefinitionConflict(
+      () => store.saveDefinitionWithIntent(PROJECT_ID, document.id, document, { kind: "create" }),
+      1,
+    );
+    // create + existing, changed body -> conflict from the same locked read.
+    expectDefinitionConflict(
+      () => store.saveDefinitionWithIntent(PROJECT_ID, document.id, changed, { kind: "create" }),
+      1,
+    );
+
+    // update + matching revision + identical body -> unchanged, revision held.
+    const unchanged = store.saveDefinitionWithIntent(PROJECT_ID, document.id, document, {
+      kind: "update",
+      expectedRevision: 1,
+    });
+    expect(unchanged.outcome).toBe("unchanged");
+    expect(unchanged.definition.revision).toBe(1);
+
+    // update + stale revision 0 + identical body -> conflict carrying revision 1.
+    expectDefinitionConflict(
+      () => store.saveDefinitionWithIntent(PROJECT_ID, document.id, document, {
+        kind: "update",
+        expectedRevision: 0,
+      }),
+      1,
+    );
+    // update + stale revision 0 + changed body -> the same conflict.
+    expectDefinitionConflict(
+      () => store.saveDefinitionWithIntent(PROJECT_ID, document.id, changed, {
+        kind: "update",
+        expectedRevision: 0,
+      }),
+      1,
+    );
+
+    // update + matching revision + changed body -> updated at revision 2.
+    const updated = store.saveDefinitionWithIntent(PROJECT_ID, document.id, changed, {
+      kind: "update",
+      expectedRevision: 1,
+    });
+    expect(updated.outcome).toBe("updated");
+    expect(updated.definition.revision).toBe(2);
+
+    // update against a missing record -> conflict with a null current revision.
+    expectDefinitionConflict(
+      () => store.saveDefinitionWithIntent(PROJECT_ID, "absent-workflow", workflow("absent-workflow"), {
+        kind: "update",
+        expectedRevision: 0,
+      }),
+      null,
+    );
+    expect(store.readDefinition(PROJECT_ID, "absent-workflow")).toBeNull();
+  });
+
+  it("keeps trusted upsert usable for repeated setup without a stale-identical bypass", () => {
+    const store = new WorkflowStore();
+    const document = workflow("upsert-workflow");
+    const changed = structuredClone(document);
+    changed.name = "Changed upsert workflow";
+
+    // absent -> create, even without a supplied revision.
+    expect(store.saveDefinitionWithIntent(PROJECT_ID, document.id, document, { kind: "upsert" }))
+      .toEqual({ outcome: "created", definition: expect.objectContaining({ revision: 1 }) });
+    // existing identical -> unchanged.
+    expect(
+      store.saveDefinitionWithIntent(PROJECT_ID, document.id, document, { kind: "upsert" }).outcome,
+    ).toBe("unchanged");
+    // existing changed without a revision -> conflict.
+    expectDefinitionConflict(
+      () => store.saveDefinitionWithIntent(PROJECT_ID, document.id, changed, { kind: "upsert" }),
+      1,
+    );
+    // a supplied upsert revision is compared to `current?.revision ?? 0`.
+    expectDefinitionConflict(
+      () => store.saveDefinitionWithIntent(PROJECT_ID, document.id, changed, {
+        kind: "upsert",
+        expectedRevision: 0,
+      }),
+      1,
+    );
+    expect(
+      store.saveDefinitionWithIntent(PROJECT_ID, document.id, changed, {
+        kind: "upsert",
+        expectedRevision: 1,
+      }).outcome,
+    ).toBe("updated");
+    // absent + revision 0 upsert creates; that is the only creating precondition.
+    const absent = workflow("upsert-absent");
+    expect(
+      store.saveDefinitionWithIntent(PROJECT_ID, absent.id, absent, {
+        kind: "upsert",
+        expectedRevision: 0,
+      }).outcome,
+    ).toBe("created");
+
+    // The compatibility facade maps an omitted intent to upsert, never create,
+    // and returns the bare StoredWorkflowDefinitionV1 that untouched callers
+    // (the production context watcher, executor setup) still consume.
+    const facade = store.saveDefinition(PROJECT_ID, absent.id, absent);
+    expect(facade.revision).toBe(1);
+    expect(facade.storageVersion).toBe(1);
+    expect(facade.graphSha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("rejects a definition precondition that is not a non-negative safe integer", () => {
+    const store = new WorkflowStore();
+    const document = workflow("bad-precondition-workflow");
+    for (const expectedRevision of [-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+      expectStoreError(
+        () => store.saveDefinitionWithIntent(PROJECT_ID, document.id, document, {
+          kind: "update",
+          expectedRevision,
+        }),
+        "INVALID_DEFINITION",
+      );
+    }
+    expect(store.readDefinition(PROJECT_ID, document.id)).toBeNull();
   });
 
   it("serializes definition CAS across independent processes", async () => {

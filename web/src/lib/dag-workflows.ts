@@ -265,6 +265,22 @@ export interface VersionedDagWorkflowDefinition {
   etag: string | null;
 }
 
+export type DagWorkflowSaveOutcome = "created" | "unchanged" | "updated";
+
+/**
+ * The caller's explicit definition intent. There is no inferred intent: a
+ * create sends `If-None-Match: *`, an update sends `If-Match: "<revision>"`,
+ * and an expected revision of `0` is a legal update precondition that can only
+ * reach the server's missing-record conflict path.
+ */
+export type DagWorkflowSaveIntent =
+  | { kind: "create" }
+  | { kind: "update"; expectedRevision: number };
+
+export interface SavedDagWorkflowDefinition extends VersionedDagWorkflowDefinition {
+  outcome: DagWorkflowSaveOutcome;
+}
+
 export type WorkflowRunStatus =
   | "queued"
   | "running"
@@ -459,6 +475,18 @@ function positiveBoundedInteger(
   return value;
 }
 
+/**
+ * Definition update preconditions accept every non-negative safe integer,
+ * including `0`. `0` never means "create": it is a precondition no persisted
+ * definition can satisfy, so the server answers 409.
+ */
+function nonNegativeSafeInteger(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError(`${label} must be a non-negative safe integer.`);
+  }
+  return value;
+}
+
 export async function listDagWorkflowDefinitions(
   projectId: string,
 ): Promise<DagWorkflowDefinitionSummary[]> {
@@ -484,19 +512,38 @@ export async function saveDagWorkflowDefinition(
   projectId: string,
   workflowId: string,
   graph: WorkflowGraphDocument,
-  expectedRevision?: number,
-): Promise<VersionedDagWorkflowDefinition> {
+  intent: DagWorkflowSaveIntent,
+): Promise<SavedDagWorkflowDefinition> {
   const headers = new Headers({ "Content-Type": "application/json" });
-  if (expectedRevision !== undefined) {
-    headers.set("If-Match", `"${positiveBoundedInteger(expectedRevision, Number.MAX_SAFE_INTEGER, "Expected revision")}"`);
+  if (intent.kind === "create") {
+    headers.set("If-None-Match", "*");
+  } else {
+    headers.set(
+      "If-Match",
+      `"${nonNegativeSafeInteger(intent.expectedRevision, "Expected revision")}"`,
+    );
   }
   const response = await apiFetch(
     `/dag-workflows/${encodeURIComponent(workflowId)}`,
     { method: "PUT", headers, body: JSON.stringify(graph) },
     projectId,
   );
-  const definition = await parseResponse<StoredDagWorkflowDefinition>(response);
-  return { definition, etag: response.headers.get("ETag") };
+  const body = await parseResponse<{
+    outcome: DagWorkflowSaveOutcome;
+    definition: StoredDagWorkflowDefinition;
+  }>(response);
+  if (!isRecord(body) || !isRecord(body.definition) || typeof body.outcome !== "string") {
+    throw new DagWorkflowApiError(
+      response.status,
+      "The workflow definition write returned no {outcome, definition} envelope.",
+      "MALFORMED_SAVE_RESPONSE",
+    );
+  }
+  return {
+    outcome: body.outcome,
+    definition: body.definition,
+    etag: response.headers.get("ETag"),
+  };
 }
 
 export async function createDagWorkflowRun(

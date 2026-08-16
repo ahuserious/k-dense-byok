@@ -532,7 +532,11 @@ describe("persistent run routes", () => {
     const saved = await associationApp.inject({
       method: "PUT",
       url: "/dag-workflows/active-turn-workflow",
-      headers: { "x-project-id": "default", "content-type": "application/json" },
+      headers: {
+        "x-project-id": "default",
+        "content-type": "application/json",
+        "if-none-match": "*",
+      },
       payload: activeTurnWorkflow(),
     });
     expect(saved.statusCode).toBe(201);
@@ -605,6 +609,7 @@ describe("persistent run routes", () => {
         headers: {
           "x-project-id": "default",
           "content-type": "application/json",
+          "if-none-match": "*",
         },
         payload: activeTurnWorkflow(),
       });

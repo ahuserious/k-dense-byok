@@ -852,7 +852,8 @@ describe("DagWorkflowsPanel", () => {
 
   it("creates a minimal bounded Pi (Kady) graph through the real definition PUT", async () => {
     vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
-    const created: dagApi.VersionedDagWorkflowDefinition = {
+    const created: dagApi.SavedDagWorkflowDefinition = {
+      outcome: "created",
       etag: '"1"',
       definition: {
         storageVersion: 1,
@@ -888,6 +889,7 @@ describe("DagWorkflowsPanel", () => {
           }),
           rescue: expect.objectContaining({ enabled: true, maxAttempts: 2 }),
         }),
+        { kind: "create" },
       );
       expect(screen.getByRole("heading", { name: "New research" })).toBeInTheDocument();
     });
@@ -900,7 +902,8 @@ describe("DagWorkflowsPanel", () => {
       "ml-model-selection-review",
       "ML Model Selection Review",
     );
-    const created: dagApi.VersionedDagWorkflowDefinition = {
+    const created: dagApi.SavedDagWorkflowDefinition = {
+      outcome: "created",
       etag: '"1"',
       definition: {
         storageVersion: 1,
@@ -937,8 +940,37 @@ describe("DagWorkflowsPanel", () => {
         "project-a",
         "ml-model-selection-review",
         expectedGraph,
+        { kind: "create" },
       );
       expect(screen.getByRole("heading", { name: "ML Model Selection Review" })).toBeInTheDocument();
     });
+  });
+
+  it("surfaces a create conflict instead of overwriting an existing definition", async () => {
+    vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([]);
+    vi.spyOn(dagApi, "saveDagWorkflowDefinition").mockRejectedValue(
+      new dagApi.DagWorkflowApiError(
+        409,
+        "Workflow new-research already exists at revision 1; create requires absence.",
+        "CONFLICT",
+      ),
+    );
+    renderPanel();
+
+    await screen.findByText("No workflows yet");
+    await userEvent.click(screen.getByRole("button", { name: "New typed workflow" }));
+    await userEvent.type(screen.getByLabelText("New workflow id"), "new-research");
+    await userEvent.type(screen.getByLabelText("New workflow name"), "New research");
+    await userEvent.click(screen.getByRole("button", { name: "Create and open" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "CONFLICT: Workflow new-research already exists at revision 1; create requires absence.",
+    );
+    expect(dagApi.saveDagWorkflowDefinition).toHaveBeenCalledWith(
+      "project-a",
+      "new-research",
+      expect.objectContaining({ id: "new-research" }),
+      { kind: "create" },
+    );
   });
 });

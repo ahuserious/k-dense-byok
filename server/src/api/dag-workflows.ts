@@ -8,11 +8,13 @@ import {
   LegacyPipelineImportError,
   MAX_WORKFLOW_EVENT_PAGE_SIZE,
   MAX_WORKFLOW_RUN_LIST_SIZE,
+  WorkflowDefinitionConflictError,
   WorkflowPreconditionError,
   WorkflowStoreError,
   WorkflowRunControllerError,
   previewLegacyPipelineWorkflow,
   workflowStore,
+  type SaveWorkflowDefinitionIntent,
   type WorkflowRunController,
   type StoredWorkflowDefinitionV1,
   type WorkflowRunRecord,
@@ -67,7 +69,32 @@ function workflowRunSummary(run: WorkflowRunRecord) {
   };
 }
 
+/**
+ * A conditional-header failure that must not be reported as a store conflict.
+ * `WorkflowStoreError` has no code that maps to 400-for-malformed-precondition
+ * or to 428, so the definition PUT raises this instead.
+ */
+class DefinitionConditionalHeaderError extends Error {
+  readonly status: 400 | 428;
+  readonly code: "INVALID_CONDITIONAL_HEADER" | "CONDITIONAL_HEADER_REQUIRED";
+
+  constructor(
+    status: 400 | 428,
+    code: "INVALID_CONDITIONAL_HEADER" | "CONDITIONAL_HEADER_REQUIRED",
+    message: string,
+  ) {
+    super(message);
+    this.name = "DefinitionConditionalHeaderError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
 function errorResponse(reply: FastifyReply, error: unknown) {
+  if (error instanceof DefinitionConditionalHeaderError) {
+    reply.code(error.status);
+    return { detail: error.message, code: error.code };
+  }
   if (error instanceof WorkflowPreconditionError) {
     reply.code(422);
     return {
@@ -121,17 +148,83 @@ function errorResponse(reply: FastifyReply, error: unknown) {
   return { detail: error.message, code: error.code };
 }
 
-function parseRevisionHeader(value: string | string[] | undefined): number | undefined {
-  const raw = Array.isArray(value) ? value[0] : value;
-  if (raw === undefined) return undefined;
-  const match = /^(?:W\/)?"?(\d+)"?$/.exec(raw.trim());
-  if (!match) {
-    throw new WorkflowStoreError(
-      "CONFLICT",
-      "If-Match must contain one workflow revision number.",
+/**
+ * Exactly one header value, or a 400. An array (a repeated header, or a
+ * pre-split list) is never acceptable on a definition precondition: taking the
+ * first member would silently apply a precondition the client did not intend.
+ */
+function singleConditionalHeader(
+  value: string | string[] | undefined,
+  name: string,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (Array.isArray(value)) {
+    throw new DefinitionConditionalHeaderError(
+      400,
+      "INVALID_CONDITIONAL_HEADER",
+      `${name} must be sent exactly once as a single value.`,
     );
   }
-  return Number(match[1]);
+  return value;
+}
+
+/** Strict `If-None-Match: *`. Any other form, including a list, is a 400. */
+function parseCreatePrecondition(value: string | string[] | undefined): boolean {
+  const raw = singleConditionalHeader(value, "If-None-Match");
+  if (raw === undefined) return false;
+  if (raw.trim() !== "*") {
+    throw new DefinitionConditionalHeaderError(
+      400,
+      "INVALID_CONDITIONAL_HEADER",
+      "If-None-Match must be exactly `*` on a workflow definition create.",
+    );
+  }
+  return true;
+}
+
+/**
+ * Strict strong quoted `If-Match: "<non-negative safe integer>"`. Bare, weak
+ * (`W/"1"`), wildcard, and list forms are all 400.
+ */
+function parseUpdatePrecondition(value: string | string[] | undefined): number | undefined {
+  const raw = singleConditionalHeader(value, "If-Match");
+  if (raw === undefined) return undefined;
+  const match = /^"(\d+)"$/.exec(raw.trim());
+  const revision = match ? Number(match[1]) : Number.NaN;
+  if (!match || !Number.isSafeInteger(revision) || revision < 0) {
+    throw new DefinitionConditionalHeaderError(
+      400,
+      "INVALID_CONDITIONAL_HEADER",
+      'If-Match must be exactly one strong quoted non-negative workflow revision, for example If-Match: "1".',
+    );
+  }
+  return revision;
+}
+
+/**
+ * The HTTP route may express only `create` or `update`; the trusted `upsert`
+ * facade is never reachable from a request.
+ */
+function parseDefinitionIntent(
+  ifMatch: string | string[] | undefined,
+  ifNoneMatch: string | string[] | undefined,
+): SaveWorkflowDefinitionIntent {
+  const create = parseCreatePrecondition(ifNoneMatch);
+  const expectedRevision = parseUpdatePrecondition(ifMatch);
+  if (create && expectedRevision !== undefined) {
+    throw new DefinitionConditionalHeaderError(
+      400,
+      "INVALID_CONDITIONAL_HEADER",
+      "If-Match and If-None-Match are mutually exclusive on a workflow definition write.",
+    );
+  }
+  if (create) return { kind: "create" };
+  if (expectedRevision !== undefined) return { kind: "update", expectedRevision };
+  throw new DefinitionConditionalHeaderError(
+    428,
+    "CONDITIONAL_HEADER_REQUIRED",
+    'A workflow definition write requires either If-None-Match: * (create) or If-Match: "<revision>" (update).',
+  );
 }
 
 function parseBoundedInteger(
@@ -302,19 +395,34 @@ export async function registerDagWorkflowRoutes(
     "/dag-workflows/:workflowId",
     async (request, reply) => {
       try {
-        const expectedRevision = parseRevisionHeader(request.headers["if-match"]);
-        const saved = workflowStore.saveDefinition(
+        const intent = parseDefinitionIntent(
+          request.headers["if-match"],
+          request.headers["if-none-match"],
+        );
+        const result = workflowStore.saveDefinitionWithIntent(
           currentProjectId(),
           request.params.workflowId,
           request.body,
-          { expectedRevision },
+          intent,
         );
-        reply.code(saved.revision === 1 ? 201 : 200);
+        reply.code(result.outcome === "created" ? 201 : 200);
         reply.header("Cache-Control", "no-store");
-        reply.header("ETag", `"${saved.revision}"`);
-        reply.header("Location", `/dag-workflows/${encodeURIComponent(saved.id)}`);
-        return saved;
+        reply.header("ETag", `"${result.definition.revision}"`);
+        reply.header(
+          "Location",
+          `/dag-workflows/${encodeURIComponent(result.definition.id)}`,
+        );
+        return { outcome: result.outcome, definition: result.definition };
       } catch (error) {
+        // The 409 ETag comes only from the revision the store captured inside
+        // the mutation lock. Rereading here could race a later writer and
+        // publish an ETag that never described the compared state.
+        if (
+          error instanceof WorkflowDefinitionConflictError &&
+          error.currentRevision !== null
+        ) {
+          reply.header("ETag", `"${error.currentRevision}"`);
+        }
         return errorResponse(reply, error);
       }
     },
