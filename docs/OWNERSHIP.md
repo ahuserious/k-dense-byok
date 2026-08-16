@@ -40,10 +40,11 @@ A handoff lets the recipient lane edit a path another lane owns, for the stated 
 | S11 | C1 | `scripts/preview-environment.mjs` | vendored-dist environment and preview launcher isolation |
 | S11 | C1 | `scripts/preview-environment.test.mjs` | vendored-dist environment and lock regression coverage |
 | S11 | C1 | `scripts/preview-up.mjs` | prepareVendoredDist and prebuild-isolation ordering |
-| S11 | C1 | `scripts/preview-launcher-observer.mjs` | workflow-engine readiness and fatal-exit observer anchors |
-| S11 | C1 | `scripts/preview-launcher-observer.test.mjs` | workflow-engine readiness and fatal-exit observer regression coverage |
+| S11 | C1 | `scripts/preview-launcher-observer.mjs` | workflow-engine readiness and fatal-exit observer anchors; workflow-supervisor role recording (pid + identity reported by the backend) |
+| S11 | C1 | `scripts/preview-launcher-observer.test.mjs` | workflow-engine readiness and fatal-exit observer regression coverage; workflow-supervisor role recording |
 | S7 | C1 | `server/src/index.ts` | kady-supervisor IPC message (supervisor pid reported to the launcher parent) — no other change |
-| S2 | C1 | `start.mjs` | vendored-dist build, engine-port ownership, readiness, and disabled-state sections |
+| S5 | C1 | `server/src/workflows/supervisor/client.ts` | onOwnership callback invoked immediately when a supervisor process is acquired (spawned or inherited) — no other change |
+| S2 | C1 | `start.mjs` | vendored-dist build, engine-port ownership, readiness, and disabled-state sections; forced-shutdown ownership of the backend's detached workflow supervisor (second explicit signal) and process-group retirement |
 | S2 | C1 | `server/src/agent/pipeline-engine/client.ts` | launcher-disabled fail-before-fetch guard |
 | S5 | C1 | `server/src/config.ts` | explicit pipeline-engine disabled configuration sentinel |
 | S4 | C1 | `server/src/api/pipelines.ts` | disabled admission lookup and reconciliation no-fetch guard only |
@@ -71,6 +72,10 @@ A handoff lets the recipient lane edit a path another lane owns, for the stated 
 | S11 | C5 | `scripts/preview-down.mjs` | owned checkout-local preview web projection cleanup |
 | S11 | C5 | `scripts/preview-state.mjs` | exclusive preview lifecycle lock |
 | S11 | C5 | `scripts/preview-state.test.mjs` | preview lifecycle lock recovery regression |
+| C1 | C5 | `scripts/preview-launcher-observer.mjs` | generation-bound service records, launcher start gate and process identity in the preview observer |
+| C1 | C5 | `scripts/preview-launcher-observer.test.mjs` | observer generation/identity regression |
+| S11 | C5 | `scripts/preview-processes.mjs` | identity-verified preview process ownership (no cwd-only signaling) |
+| S11 | C5 | `scripts/preview-processes.test.mjs` | preview process ownership regression |
 | S11 | C5 | `scripts/preview-readiness.mjs` | named preview source-drift health failure detail |
 | S11 | C5 | `scripts/preview-readiness.test.mjs` | named preview source-drift health regression |
 | S4 | C5 | `server/src/workflows/supervisor/credentials.ts` | credential persistence environment-root isolation |
