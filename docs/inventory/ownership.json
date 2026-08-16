@@ -7,7 +7,9 @@
       "docs/preview-env.md",
       "scripts/ownership-check.mjs",
       "scripts/ownership-check.test.mjs",
-      "server/test/pipelines-disabled.test.ts"
+      "server/test/pipelines-disabled.test.ts",
+      ".github/workflows/ownership-authorization.yml",
+      "server/test/pipelines.test.ts"
     ],
     "S1": [
       "web/src/app/page.tsx",
@@ -182,7 +184,7 @@
     "C3": [
       "playwright.cloud.config.ts",
       "playwright.live-alt.config.ts",
-      "scripts/hosted-evidence-manifest*.mjs"
+      "scripts/hosted-evidence-*.mjs"
     ],
     "C5": [
       "config/token-ban.json",
@@ -449,6 +451,41 @@
       "date": "2026-08-16",
       "path": ".github/workflows/stably-cloud.yml",
       "scope": "hosted evidence manifest step and artifact upload"
+    },
+    {
+      "from": "C1",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/vendored-dist-build.mjs",
+      "scope": "single guarded call of the preview env-candidate refusal helper immediately before the Bun spawn"
+    },
+    {
+      "from": "S11",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-state.mjs",
+      "scope": "exclusive preview lifecycle lock"
+    },
+    {
+      "from": "S11",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-readiness.mjs",
+      "scope": "named preview source-drift health failure detail"
+    },
+    {
+      "from": "S11",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-readiness.test.mjs",
+      "scope": "named preview source-drift health regression"
+    },
+    {
+      "from": "S11",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-down.mjs",
+      "scope": "owned checkout-local preview web projection cleanup"
     }
   ]
 }
