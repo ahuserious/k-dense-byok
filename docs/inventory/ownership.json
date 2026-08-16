@@ -7,7 +7,8 @@
       "docs/preview-env.md",
       "scripts/ownership-check.mjs",
       "scripts/ownership-check.test.mjs",
-      "server/test/pipelines-disabled.test.ts"
+      "server/test/pipelines-disabled.test.ts",
+      ".github/workflows/ownership-authorization.yml"
     ],
     "S1": [
       "web/src/app/page.tsx",
@@ -428,6 +429,20 @@
       "date": "2026-08-16",
       "path": ".github/workflows/stably-cloud.yml",
       "scope": "hosted evidence manifest step and artifact upload"
+    },
+    {
+      "from": "S4",
+      "to": "C1",
+      "date": "2026-08-16",
+      "path": "server/test/pipelines.test.ts",
+      "scope": "disabled crash-window recovery tests only"
+    },
+    {
+      "from": "C1",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/vendored-dist-build.mjs",
+      "scope": "single guarded call of the preview env-candidate refusal helper immediately before the Bun spawn"
     }
   ]
 }

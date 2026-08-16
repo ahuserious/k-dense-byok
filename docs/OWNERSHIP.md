@@ -7,7 +7,7 @@ inventory path is owned exactly once.
 
 | Lane | Scope | Owned globs |
 | --- | --- | --- |
-| C1 | Vendored builder dist freshness and launcher safety | `.github/workflows/tests.yml`; `docs/preview-env.md`; `package.json`; `scripts/{ownership-check,ownership-check.test,vendored-dist-*}.mjs`; `server/test/pipelines-disabled.test.ts`; reviewed handoffs from R1, S2, S4, S5, and S11 listed in the policy. |
+| C1 | Vendored builder dist freshness and launcher safety | `.github/workflows/tests.yml`; `docs/preview-env.md`; `package.json`; `.github/workflows/ownership-authorization.yml`; `scripts/{ownership-check,ownership-check.test,vendored-dist-*}.mjs`; `server/test/pipelines-disabled.test.ts`; reviewed handoffs from R1, S2, S4, S5, and S11 listed in the policy. |
 | C3 | Hosted and live E2E evidence | `playwright.{cloud,live-alt}.config.ts`; `scripts/hosted-evidence-*.mjs`; reviewed handoffs from C1, R1, and S11 listed in the policy. |
 | C5 | Preview credential and environment-root isolation | `config/token-ban.json`; `server/src/{env,environment-files,legacy-engine-data,path-containment,projects,sandbox-fs}.ts`; `server/src/api/credentials.ts`; `server/test/{credential-env-isolation,env-isolation}.test.ts`; reviewed handoffs from C1, R1, S4, and S11 listed in the policy. |
 | S1 | Consolidation and typed-surface removal | `web/src/app/page.tsx`; `web/src/components/{workspace-navigation,persistent-workspace-surfaces,dag-builder-surface,dag-builder,dag-builder-canvas,dag-builder-inspector,dag-workflow-console}.{ts,tsx}`; `web/src/lib/{workspace-persistence,dag-workflow-builder,dag-workflows}.ts` |
@@ -66,3 +66,5 @@ A handoff lets the recipient lane edit a path another lane owns, for the stated 
 | S11 | C5 | `scripts/preview-up.mjs` | server environment-root preview wiring |
 | S4 | C5 | `server/src/workflows/supervisor/credentials.ts` | credential persistence environment-root isolation |
 | S11 | C3 | `.github/workflows/stably-cloud.yml` | hosted evidence manifest step and artifact upload |
+| S4 | C1 | `server/test/pipelines.test.ts` | disabled crash-window recovery tests only |
+| C1 | C5 | `scripts/vendored-dist-build.mjs` | single guarded call of the preview env-candidate refusal helper immediately before the Bun spawn |
