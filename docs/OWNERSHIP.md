@@ -53,6 +53,7 @@ A handoff lets the recipient lane edit a path another lane owns, for the stated 
 | S11 | C1 | `scripts/preview-environment.test.mjs` | vendored-dist environment and lock regression coverage |
 | S11 | C1 | `scripts/preview-up.mjs` | prepareVendoredDist and prebuild-isolation ordering |
 | S11 | C1 | `scripts/preview-launcher-observer.mjs` | workflow-engine readiness and fatal-exit observer anchors |
+| S11 | C1 | `scripts/preview-launcher-observer.test.mjs` | workflow-engine readiness and fatal-exit observer regression coverage |
 | S2 | C1 | `start.mjs` | vendored-dist build, engine-port ownership, readiness, and disabled-state sections |
 | S2 | C1 | `server/src/agent/pipeline-engine/client.ts` | launcher-disabled fail-before-fetch guard |
 | S5 | C1 | `server/src/config.ts` | explicit pipeline-engine disabled configuration sentinel |
@@ -73,10 +74,15 @@ A handoff lets the recipient lane edit a path another lane owns, for the stated 
 | S11 | C3 | `playwright.config.ts` | E2E configuration split |
 | R1 | C5 | `docs/OWNERSHIP.md` | C5 ownership row |
 | R1 | C5 | `docs/inventory/ownership.json` | C5 lane and reviewed handoff policy |
+| R1 | C5 | `.gitignore` | checkout-local preview web projection ignore rule |
 | C1 | C5 | `docs/preview-env.md` | server environment-root isolation documentation |
 | S11 | C5 | `scripts/preview-environment.mjs` | server environment-root preview wiring |
 | S11 | C5 | `scripts/preview-environment.test.mjs` | server environment-root preview regression tests |
 | S11 | C5 | `scripts/preview-up.mjs` | server environment-root preview wiring |
+| S11 | C5 | `scripts/preview-down.mjs` | owned checkout-local preview web projection cleanup |
+| S11 | C5 | `scripts/preview-state.mjs` | exclusive preview lifecycle lock |
+| S11 | C5 | `scripts/preview-readiness.mjs` | named preview source-drift health failure detail |
+| S11 | C5 | `scripts/preview-readiness.test.mjs` | named preview source-drift health regression |
 | S4 | C5 | `server/src/workflows/supervisor/credentials.ts` | credential persistence environment-root isolation |
 | S11 | C3 | `.github/workflows/stably-cloud.yml` | hosted evidence manifest step and artifact upload |
 | C1 | C5 | `scripts/vendored-dist-build.mjs` | single guarded call of the preview env-candidate refusal helper immediately before the Bun spawn |
