@@ -139,6 +139,23 @@ async function assertLocalPortClosed(port, message) {
   assert.equal(closed, true, message);
 }
 
+/** The fake supervisor records its descendant after the launcher has already
+ *  been told the supervisor exists, so the file appears slightly later than the
+ *  observed service state. */
+async function readRecordedPid(pidPath, description, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const pid = Number(fs.readFileSync(pidPath, "utf-8").trim());
+      if (Number.isSafeInteger(pid) && pid > 0) return pid;
+    } catch {
+      // Not written yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.fail(`${description} was not recorded at ${pidPath} within ${timeoutMs}ms`);
+}
+
 async function waitForLocalPortOpen(port, description, timeoutMs = 5_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -856,8 +873,10 @@ server.listen(Number(process.argv[portIndex + 1]), "127.0.0.1");
       assert.ok(Number.isSafeInteger(enginePid), startupFailureDetails);
       assert.ok(Number.isSafeInteger(supervisorPid), startupFailureDetails);
       assert.equal(supervisorPid, Number(fs.readFileSync(supervisorPidPath, "utf-8")), output);
-      const supervisorDescendantPid = Number(fs.readFileSync(supervisorDescendantPidPath, "utf-8"));
-      assert.ok(Number.isSafeInteger(supervisorDescendantPid), startupFailureDetails);
+      const supervisorDescendantPid = await readRecordedPid(
+        supervisorDescendantPidPath,
+        "the workflow supervisor descendant PID",
+      );
       observedPids.add(supervisorDescendantPid);
       await waitForLocalPortOpen(ports.backend, "fake backend");
       await waitForLocalPortOpen(ports.frontend, "fake frontend");
@@ -1102,8 +1121,10 @@ server.listen(Number(process.argv[portIndex + 1]), "127.0.0.1");
         `launcher services incomplete after ${Date.now() - startupStartedAt}ms\n${output}`;
       assert.ok(Number.isSafeInteger(backendPid), startupFailureDetails);
       assert.ok(Number.isSafeInteger(supervisorPid), startupFailureDetails);
-      const supervisorDescendantPid = Number(fs.readFileSync(supervisorDescendantPidPath, "utf-8"));
-      assert.ok(Number.isSafeInteger(supervisorDescendantPid), startupFailureDetails);
+      const supervisorDescendantPid = await readRecordedPid(
+        supervisorDescendantPidPath,
+        "the workflow supervisor descendant PID",
+      );
       observedPids.add(supervisorDescendantPid);
       await waitForLocalPortOpen(ports.backend, "fake backend");
 
@@ -1147,6 +1168,220 @@ server.listen(Number(process.argv[portIndex + 1]), "127.0.0.1");
       await reapProcessGroups([...observedPids].filter(Number.isSafeInteger));
       await assertLocalPortClosed(ports?.backend, "backend listener leaked during test cleanup");
       await assertLocalPortClosed(ports?.frontend, "frontend listener leaked during test cleanup");
+      fs.rmSync(stateRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "a forced shutdown latched inside the engine readiness window holds the launcher for its retry signal",
+  {
+    skip: process.env.KADY_SOCKET_TESTS === "1" && process.platform !== "win32"
+      ? false
+      : "requires Unix process groups and local socket binding; orchestrator runs with KADY_SOCKET_TESTS=1",
+  },
+  async () => {
+    const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-launcher-boot-force-retry-"));
+    // While this marker exists the launcher's copy of the environment module
+    // reports every owned process group as still live, which is the one
+    // injected failure: the graceful engine stop cannot verify disappearance
+    // and the first forced shutdown times out waiting for the same group.
+    const liveGroupMarkerPath = path.join(stateRoot, "owned-groups-stay-live");
+    const serviceStatePath = path.join(stateRoot, "services.json");
+    const observedPids = new Set();
+    let ports;
+    let launcher;
+    let enginePid;
+    try {
+      ports = {
+        backend: await reserveLocalPort(),
+        frontend: await reserveLocalPort(),
+        engine: await reserveLocalPort(),
+      };
+      const commandLog = path.join(stateRoot, "commands.jsonl");
+      const fakeNpm = path.join(stateRoot, "fake-npm");
+      const fakeGit = path.join(stateRoot, "fake-git");
+      fs.writeFileSync(fakeNpm, `#!${process.execPath}
+import fs from "node:fs";
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(commandLog)}, JSON.stringify({ command: "npm", args }) + "\\n");
+if (args.join(" ") !== "run prep --silent") process.exit(125);
+`, { mode: 0o700 });
+      fs.writeFileSync(fakeGit, `#!${process.execPath}
+import fs from "node:fs";
+const argv = process.argv.slice(2);
+const args = argv.join(" ");
+fs.appendFileSync(${JSON.stringify(commandLog)}, JSON.stringify({ command: "git", args: argv }) + "\\n");
+if (args === "--version") console.log("git version 2.0.0");
+else if (args === "rev-parse HEAD") console.log("${"c".repeat(40)}");
+else process.exit(2);
+`, { mode: 0o700 });
+      const { launchRoot, shimDirectory } = createLaunchOverlay(
+        repositoryRoot,
+        stateRoot,
+        fakeNpm,
+        fakeGit,
+      );
+      const originalEnvironmentModule = path.join(repositoryRoot, "scripts", "vendored-dist-environment.mjs");
+      fs.writeFileSync(
+        path.join(launchRoot, "scripts", "vendored-dist-environment.mjs"),
+        `import fs from "node:fs";
+import { latchOwnedProcessGroupRetirement as actualLatch } from ${JSON.stringify(originalEnvironmentModule)};
+export {
+  classifyWorkflowEngineBuildOutcome,
+  classifyWorkflowEngineListener,
+  captureProcessIdentity,
+  forceOwnedSupervisorProcessGroup,
+  missingPreviewLauncherDependencies,
+  prepareLauncherDependencies,
+  previewVendoredDistFingerprintEnvironment,
+  resolveWorkflowEnginePort,
+  scrubSensitiveEnvironment,
+  recordSupervisorOwnership,
+  terminateOwnedProcessTree,
+  vendoredDistBuildLockStatus,
+  waitForOwnedWorkflowEngine,
+  workflowEngineConsumerEnvironment,
+  workflowEnginePrerequisiteStatus,
+  workflowEngineRuntimeOwnership,
+} from ${JSON.stringify(originalEnvironmentModule)};
+export function latchOwnedProcessGroupRetirement(record, childExitObserved, groupLiveness) {
+  if (fs.existsSync(${JSON.stringify(liveGroupMarkerPath)})) return false;
+  return actualLatch(record, childExitObserved, groupLiveness);
+}
+`,
+      );
+      fs.writeFileSync(
+        path.join(shimDirectory, "bun"),
+        `#!${process.execPath}
+import fs from "node:fs";
+import http from "node:http";
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(commandLog)}, JSON.stringify({ command: "bun", args }) + "\\n");
+if (args.join(" ") === "--version") { console.log("1.3.8"); process.exit(0); }
+if (args.join(" ") !== "--filter @archon/server start") process.exit(125);
+const server = http.createServer((_request, response) => { response.statusCode = 503; response.end("not ready"); });
+const stop = () => server.close(() => process.exit(0));
+process.on("SIGINT", stop); process.on("SIGTERM", stop); process.on("SIGHUP", stop);
+server.listen(Number(process.env.PORT), "127.0.0.1");
+`,
+        { mode: 0o700 },
+      );
+      fs.writeFileSync(path.join(shimDirectory, "uv"), `#!${process.execPath}
+import fs from "node:fs";
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(commandLog)}, JSON.stringify({ command: "uv", args }) + "\\n");
+if (args.join(" ") !== "--version") process.exit(125);
+console.log("uv 0.8.0");
+`, { mode: 0o700 });
+      fs.writeFileSync(serviceStatePath, '{"version":1,"services":{}}\n');
+      const environment = previewEnvironment(stateRoot, launchRoot, shimDirectory, ports);
+      const fixtureRoot = prepareHermeticLauncherCheckout(stateRoot, environment, ports);
+      fs.rmSync(path.join(launchRoot, "server"), { force: true });
+      fs.rmSync(path.join(launchRoot, "web"), { force: true });
+      fs.symlinkSync(path.join(fixtureRoot, "server"), path.join(launchRoot, "server"), "dir");
+      fs.symlinkSync(path.join(fixtureRoot, "web"), path.join(launchRoot, "web"), "dir");
+      fs.writeFileSync(liveGroupMarkerPath, "owned groups stay live\n");
+
+      launcher = spawn(
+        process.execPath,
+        [path.join(launchRoot, "start.mjs"), "--no-browser"],
+        {
+          cwd: launchRoot,
+          detached: true,
+          env: environment,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      let output = "";
+      launcher.stdout.on("data", (chunk) => { output += chunk; });
+      launcher.stderr.on("data", (chunk) => { output += chunk; });
+
+      const waitForOutput = async (needle, timeoutMs, description) => {
+        const startedAt = Date.now();
+        while (Date.now() - startedAt < timeoutMs) {
+          if (output.includes(needle)) return;
+          if (launcher.exitCode !== null || launcher.signalCode !== null) {
+            assert.fail(
+              `launcher exited (code ${launcher.exitCode}, signal ${launcher.signalCode}) ` +
+                `before ${description} after ${Date.now() - startedAt}ms\n${output}`,
+            );
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        assert.fail(`${description} was not observed after ${Date.now() - startedAt}ms\n${output}`);
+      };
+
+      const startupStartedAt = Date.now();
+      const startupDeadline = startupStartedAt + 45_000;
+      let state;
+      while (Date.now() < startupDeadline) {
+        state = JSON.parse(fs.readFileSync(serviceStatePath, "utf-8"));
+        for (const service of Object.values(state.services ?? {})) {
+          if (Number.isSafeInteger(service?.pid)) observedPids.add(service.pid);
+        }
+        if (state.services?.["pipeline-engine"]?.state === "spawned") break;
+        if (launcher.exitCode !== null) {
+          assert.fail(
+            `launcher exited before engine readiness after ${Date.now() - startupStartedAt}ms\n${output}`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      enginePid = state?.services?.["pipeline-engine"]?.pid;
+      assert.ok(
+        Number.isSafeInteger(enginePid),
+        `engine spawn was not observed after ${Date.now() - startupStartedAt}ms\n${output}`,
+      );
+
+      // Both signals land while waitForOwnedWorkflowEngine is still waiting:
+      // the launcher never reaches the backend or frontend.
+      launcher.kill("SIGTERM");
+      await waitForOutput("Shutting down...", 5_000, "the graceful shutdown of the readiness window");
+      launcher.kill("SIGTERM");
+      await waitForOutput(
+        "forced shutdown incomplete:",
+        15_000,
+        "the first forced shutdown failing on a live owned group",
+      );
+      assert.match(output, /forced shutdown incomplete:.*send another signal to retry/);
+      assert.equal(launcher.exitCode, null, `a failed force must leave the launcher alive for retry\n${output}`);
+
+      // The graceful engine stop now gives up too. Its boot-time caller must
+      // hand the exit back to the forced-shutdown coordinator instead of
+      // exiting the launcher while the retry hold is in place.
+      await waitForOutput(
+        "could not verify disappearance of workflow engine process tree",
+        15_000,
+        "the graceful engine stop reporting failure",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      assert.equal(
+        launcher.exitCode,
+        null,
+        `the boot-time caller must not exit the launcher during the forced-shutdown retry hold\n${output}`,
+      );
+      assert.doesNotMatch(output, /Backend on port|Frontend on port/);
+
+      fs.rmSync(liveGroupMarkerPath, { force: true });
+      const launcherExit = new Promise((resolve) => launcher.once("exit", resolve));
+      launcher.kill("SIGTERM");
+      const exitCode = await Promise.race([
+        launcherExit,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("retried forced launcher shutdown timed out")), 10_000)),
+      ]);
+      assert.equal(exitCode, 143, output);
+      assert.throws(() => process.kill(-enginePid, 0), (error) => error?.code === "ESRCH");
+      await assertLocalPortClosed(ports.engine, "workflow engine port remained open after the retried shutdown");
+    } finally {
+      if (launcher?.exitCode === null) {
+        try { process.kill(-launcher.pid, "SIGKILL"); } catch { /* already gone */ }
+      }
+      await waitForChildExit(launcher);
+      for (const pid of recordedServicePids(serviceStatePath)) observedPids.add(pid);
+      if (Number.isSafeInteger(enginePid)) observedPids.add(enginePid);
+      await reapProcessGroups([...observedPids].filter(Number.isSafeInteger));
+      await assertLocalPortClosed(ports?.engine, "workflow engine port leaked during test cleanup");
       fs.rmSync(stateRoot, { recursive: true, force: true });
     }
   },

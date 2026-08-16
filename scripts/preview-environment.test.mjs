@@ -9,6 +9,8 @@ import { createLaunchOverlay, previewEnvironment } from "./preview-environment.m
 import {
   acquireVendoredDistBuildLock,
   captureProcessIdentity,
+  escapeExtendedRegularExpression,
+  findVendoredRootOccupants,
   forceOwnedSupervisorProcessGroup,
   latchOwnedProcessGroupRetirement,
   missingPreviewLauncherDependencies,
@@ -1137,4 +1139,158 @@ test("scrubs credentials when a browser-facing backend origin is present", () =>
   assert.equal("CLIENT_SECRET" in environment, false);
   assert.equal("DATABASE_PASSWORD" in environment, false);
   assert.equal("SERVICE_CREDENTIAL" in environment, false);
+});
+
+function fakeProcessTable(processes) {
+  return (command, commandArguments) => {
+    if (command === "pgrep") {
+      const pattern = commandArguments[commandArguments.length - 1];
+      const matcher = new RegExp(pattern);
+      const matched = processes.filter((entry) => matcher.test(entry.argv ?? ""));
+      return { status: matched.length > 0 ? 0 : 1, stdout: `${matched.map((entry) => entry.pid).join("\n")}\n` };
+    }
+    if (command === "ps") {
+      const pid = Number(commandArguments[commandArguments.indexOf("-p") + 1]);
+      const entry = processes.find((candidate) => candidate.pid === pid);
+      return entry ? { status: 0, stdout: `${entry.comm}\n` } : { status: 1, stdout: "" };
+    }
+    if (command === "lsof") {
+      const pidIndex = commandArguments.indexOf("-p");
+      const listed = pidIndex === -1
+        ? processes
+        : processes.filter((entry) => entry.pid === Number(commandArguments[pidIndex + 1]));
+      const lines = listed.flatMap((entry) => (entry.cwd ? [`p${entry.pid}`, `n${entry.cwd}`] : []));
+      return { status: 0, stdout: `${lines.join("\n")}\n` };
+    }
+    throw new Error(`unexpected occupant proof command: ${command}`);
+  };
+}
+
+test("occupant proof keeps every command whose cwd is under the vendored root", () => {
+  const vendoredRoot = "/tmp/kady-occupants/server/vendor/pipeline-engine";
+  const processes = [
+    { pid: 4101, comm: "sh", cwd: `${vendoredRoot}/packages/web`, argv: "sh -c while [ ! -f gate ]; do sleep 0.01; done" },
+    { pid: 4102, comm: "vite", cwd: `${vendoredRoot}/packages/web`, argv: "vite build --outDir dist" },
+    { pid: 4103, comm: "grep", cwd: "/tmp", argv: `grep -r ${vendoredRoot}` },
+    { pid: 4104, comm: "node", cwd: "/tmp", argv: `node ${vendoredRoot}/scripts/report.mjs` },
+    { pid: 4105, comm: "sh", cwd: "/tmp", argv: "sh -c sleep 60" },
+  ];
+  const occupants = findVendoredRootOccupants(vendoredRoot, {
+    platform: "darwin",
+    selfPid: 1,
+    spawnProcess: fakeProcessTable(processes),
+  });
+  assert.deepEqual(occupants.sort((left, right) => left - right), [4101, 4102, 4104]);
+
+  const linuxOccupants = findVendoredRootOccupants(vendoredRoot, {
+    platform: "linux",
+    selfPid: 1,
+    spawnProcess: fakeProcessTable(processes),
+    readDirSync: () => processes.map((entry) => String(entry.pid)),
+    readLinkSync: (linkPath) => {
+      const pid = Number(linkPath.split("/")[2]);
+      const entry = processes.find((candidate) => candidate.pid === pid);
+      if (!entry?.cwd) throw new Error("ENOENT");
+      return entry.cwd;
+    },
+    readFileSync: (commPath) => {
+      const pid = Number(commPath.split("/")[2]);
+      const entry = processes.find((candidate) => candidate.pid === pid);
+      if (!entry) throw new Error("ENOENT");
+      return `${entry.comm}\n`;
+    },
+  });
+  assert.deepEqual(linuxOccupants.sort((left, right) => left - right), [4101, 4102, 4104]);
+});
+
+test("occupant proof matches the vendored root as a fixed string, not a regular expression", () => {
+  const vendoredRoot = "/tmp/kady-a.b+c/server/vendor/pipeline-engine";
+  assert.equal(
+    escapeExtendedRegularExpression(vendoredRoot),
+    "/tmp/kady-a\\.b\\+c/server/vendor/pipeline-engine",
+  );
+  const neighbourRoot = "/tmp/kady-axbxc/server/vendor/pipeline-engine";
+  const processes = [
+    { pid: 4201, comm: "node", cwd: "/tmp", argv: `node ${neighbourRoot}/scripts/report.mjs` },
+  ];
+  const spawned = [];
+  const spawnProcess = fakeProcessTable(processes);
+  const occupants = findVendoredRootOccupants(vendoredRoot, {
+    platform: "darwin",
+    selfPid: 1,
+    spawnProcess: (command, commandArguments, options) => {
+      spawned.push({ command, commandArguments });
+      return spawnProcess(command, commandArguments, options);
+    },
+  });
+  const pgrepCall = spawned.find((entry) => entry.command === "pgrep");
+  assert.deepEqual(pgrepCall.commandArguments, [
+    "-f",
+    "--",
+    "/tmp/kady-a\\.b\\+c/server/vendor/pipeline-engine",
+  ]);
+  assert.deepEqual(occupants, []);
+});
+
+test("occupant proof fails closed when a proof command cannot run", () => {
+  const vendoredRoot = "/tmp/kady-occupant-failure/server/vendor/pipeline-engine";
+  assert.throws(
+    () => findVendoredRootOccupants(vendoredRoot, {
+      platform: "darwin",
+      selfPid: 1,
+      spawnProcess: () => ({ error: new Error("spawnSync pgrep ENOENT"), stdout: "" }),
+    }),
+    /could not verify occupants of .*pgrep failed: spawnSync pgrep ENOENT/,
+  );
+  assert.throws(
+    () => findVendoredRootOccupants(vendoredRoot, {
+      platform: "darwin",
+      selfPid: 1,
+      spawnProcess: (command) => (command === "pgrep"
+        ? { status: 1, stdout: "" }
+        : { signal: "SIGTERM", stdout: "" }),
+    }),
+    /could not verify occupants of .*lsof was killed by SIGTERM/,
+  );
+});
+
+test("CLI recovery refuses a lock directory that is not empty unless --force", async () => {
+  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-dirty-directory-"));
+  const lockPath = preparedBuildLockPath(repositoryRoot);
+  const deadIdentity = testIdentity("dead-dirty-owner");
+  try {
+    writePlantedOwner(lockPath, {
+      version: 1,
+      pid: 878787,
+      identity: deadIdentity,
+      phase: "holding",
+      workers: [],
+      createdAt: new Date().toISOString(),
+      heartbeatAt: new Date().toISOString(),
+    });
+    fs.writeFileSync(path.join(lockPath, ".owner.878787.leftover.tmp"), "{partial");
+    await assert.rejects(
+      recoverVendoredDistBuildLock(repositoryRoot, {
+        captureIdentity: (pid) => pid === process.pid ? testIdentity("operator") : deadIdentity,
+        getLiveness: (pid) => pid === process.pid ? "alive" : "dead",
+      }),
+      /refusing lock recovery: the lock directory is not empty.*ENOTEMPTY.*build\.lock\.d.*\.owner\.878787\.leftover\.tmp.*re-run with --force/s,
+    );
+    assert.equal(fs.existsSync(lockPath), true);
+    // The lock stays busy, now as an unreadable owner record, so no launcher
+    // or builder can adopt the directory while the operator inspects it.
+    const status = vendoredDistBuildLockStatus(repositoryRoot);
+    assert.equal(status.active, true);
+    assert.equal(status.recoverable, false);
+    assert.equal(status.reason, "unreadable-owner");
+
+    const recovered = await recoverVendoredDistBuildLock(repositoryRoot, {
+      force: true,
+      occupantsFor: () => [],
+    });
+    assert.equal(recovered.recovered, true);
+    assert.equal(fs.existsSync(lockPath), false);
+  } finally {
+    fs.rmSync(repositoryRoot, { recursive: true, force: true });
+  }
 });

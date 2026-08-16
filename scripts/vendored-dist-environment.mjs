@@ -582,6 +582,14 @@ function writeOwnedOwnerRecord(lockDirectory, record, pid, identity, lockFileSys
   }
 }
 
+function lockDirectoryEntries(lockDirectory) {
+  try {
+    return fs.readdirSync(lockDirectory);
+  } catch {
+    return [];
+  }
+}
+
 function abandonLockDirectory(lockDirectory) {
   try {
     for (const entry of fs.readdirSync(lockDirectory)) {
@@ -679,6 +687,28 @@ function isNodeOrBunCommand(command) {
     base === "node.exe" || base === "bun.exe";
 }
 
+/** `pgrep -f` takes an extended regular expression, so a path used as a literal
+ *  needle must have its metacharacters escaped or it matches unrelated
+ *  processes (and, with `.`, silently over-matches this checkout's neighbours). */
+export function escapeExtendedRegularExpression(value) {
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+}
+
+/**
+ * Every process that could still mutate the vendored root, used to keep
+ * `--recover-lock --force` fail-closed.
+ *
+ * Two independent proofs, both fail-closed:
+ *  - working directory inside the vendored root: an occupant whatever its
+ *    command name, because the POSIX gate waiter is `sh` and Bun's build spawns
+ *    `tsc`/`vite` children;
+ *  - the root's exact path in the command line (`pgrep -f`, fixed string): an
+ *    occupant when the command is node/bun, which keeps unrelated tools that
+ *    merely name the path (editors, greps) from blocking recovery forever.
+ *
+ * SCOPE LIMIT: a mutator that changed its working directory away from the root
+ * and does not name it in argv is invisible to both proofs. See docs/preview-env.md.
+ */
 export function findVendoredRootOccupants(
   vendoredRoot,
   {
@@ -691,20 +721,44 @@ export function findVendoredRootOccupants(
   } = {},
 ) {
   const occupants = new Set();
-  const consider = (pid) => {
+  const insideVendoredRoot = (directory) =>
+    Boolean(directory) && (directory === vendoredRoot || directory.startsWith(`${vendoredRoot}${path.sep}`));
+  const consider = (pid, knownWorkingDirectory) => {
     if (!Number.isSafeInteger(pid) || pid < 1 || pid === selfPid) return;
+    const workingDirectory = knownWorkingDirectory === undefined
+      ? processWorkingDirectory(pid, { platform, readLinkSync, spawnProcess })
+      : knownWorkingDirectory;
+    if (insideVendoredRoot(workingDirectory)) {
+      occupants.add(pid);
+      return;
+    }
     const command = processCommandName(pid, { platform, readFileSync, spawnProcess });
     if (isNodeOrBunCommand(command)) occupants.add(pid);
   };
-  let argumentMatches;
-  try {
-    argumentMatches = spawnProcess("pgrep", ["-f", vendoredRoot], {
-      encoding: "utf-8",
-      timeout: 2_000,
-    });
-  } catch (error) {
-    throw new Error(`could not verify node/bun occupants of ${vendoredRoot}: ${error instanceof Error ? error.message : String(error)}`);
-  }
+  const runProof = (command, commandArguments, timeoutMs) => {
+    let result;
+    try {
+      result = spawnProcess(command, commandArguments, { encoding: "utf-8", timeout: timeoutMs });
+    } catch (error) {
+      throw new Error(`could not verify occupants of ${vendoredRoot}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    // spawnSync reports a missing binary, a timeout, or a signal death through
+    // `error`/`signal` instead of throwing; treating those as "no occupants"
+    // would turn this proof fail-open.
+    if (result?.error) {
+      throw new Error(`could not verify occupants of ${vendoredRoot}: ${command} failed: ${result.error.message}`);
+    }
+    if (result?.signal) {
+      throw new Error(`could not verify occupants of ${vendoredRoot}: ${command} was killed by ${result.signal}`);
+    }
+    return result;
+  };
+  // pgrep exits 1 when nothing matched, which is a valid negative answer.
+  const argumentMatches = runProof(
+    "pgrep",
+    ["-f", "--", escapeExtendedRegularExpression(vendoredRoot)],
+    2_000,
+  );
   for (const token of (argumentMatches.stdout ?? "").trim().split(/\s+/).filter(Boolean)) {
     consider(Number(token));
   }
@@ -719,21 +773,13 @@ export function findVendoredRootOccupants(
       if (!/^\d+$/.test(entry)) continue;
       const pid = Number(entry);
       if (pid === selfPid) continue;
-      const cwd = processWorkingDirectory(pid, { platform, readLinkSync, spawnProcess });
-      if (cwd === vendoredRoot || (cwd && cwd.startsWith(`${vendoredRoot}${path.sep}`))) {
-        consider(pid);
-      }
+      const workingDirectory = processWorkingDirectory(pid, { platform, readLinkSync, spawnProcess });
+      if (insideVendoredRoot(workingDirectory)) consider(pid, workingDirectory);
     }
   } else if (platform === "darwin") {
-    let result;
-    try {
-      result = spawnProcess("lsof", ["-a", "-d", "cwd", "-c", "node", "-c", "bun", "-Fn"], {
-        encoding: "utf-8",
-        timeout: 2_000,
-      });
-    } catch (error) {
-      throw new Error(`could not verify node/bun occupants of ${vendoredRoot}: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    // No `-c node -c bun` filter: any command with its cwd under the root
+    // counts. A full cwd listing is slower, so it gets a wider timeout.
+    const result = runProof("lsof", ["-a", "-d", "cwd", "-w", "-Fn"], 10_000);
     let currentPid = null;
     for (const line of (result.stdout ?? "").split("\n")) {
       if (line.startsWith("p")) {
@@ -741,10 +787,8 @@ export function findVendoredRootOccupants(
         continue;
       }
       if (!line.startsWith("n") || !Number.isSafeInteger(currentPid) || currentPid === selfPid) continue;
-      const cwd = line.slice(1);
-      if (cwd === vendoredRoot || cwd.startsWith(`${vendoredRoot}${path.sep}`)) {
-        consider(currentPid);
-      }
+      const workingDirectory = line.slice(1);
+      if (insideVendoredRoot(workingDirectory)) consider(currentPid, workingDirectory);
     }
   }
   return [...occupants];
@@ -872,6 +916,17 @@ export async function recoverVendoredDistBuildLock(
       fs.rmdirSync(lockPath);
     } catch (error) {
       if (error?.code !== "ENOENT") {
+        // Leftovers under the lock directory are not this command's to delete:
+        // recursive removal here would discard whatever another writer left
+        // behind. Report the dirty path and let the operator confirm with
+        // --force.
+        if (!force) {
+          throw new Error(
+            `refusing lock recovery: the lock directory is not empty after removing its owner record ` +
+              `(${error?.code ?? "unknown"}): ${lockPath}; entries: ${lockDirectoryEntries(lockPath).join(", ") || "unreadable"}; ` +
+              "inspect them, then re-run with --force to remove the directory",
+          );
+        }
         fs.rmSync(lockPath, { recursive: true, force: true });
       }
     }

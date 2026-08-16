@@ -99,18 +99,47 @@ used by one host, one PID namespace, and a local filesystem. Containers or VMs
 that share this checkout, shared/network filesystems, and cross-host builders
 are unsupported and therefore fail closed as busy.
 
+Release unlinks `owner.json` and then `rmdir`s the directory. An `ENOTEMPTY`
+there — a temporary owner file left behind by an interrupted write — is not an
+error: the empty-of-owner directory stays, and every later launcher and builder
+reads it as BUSY with an `unreadable owner record`. Recovering from that state
+is the same one operator command, `--recover-lock` (with `--force`, because the
+owner record is gone; see below).
+
 `--recover-lock` is the only recovery path. A parseable `owner.json` is removed
 only when the recorded wrapper PID and every recorded worker PID are dead by
 the identity rules (same host and boot, then `ESRCH`). A host mismatch or any
-unverifiable identity refuses recovery. A missing or unreadable owner record
-also refuses unless the operator adds `--force` and no `node`/`bun` process
-has the vendored root as its cwd or in its arguments (`pgrep -f` on the exact
-vendored-root string). That `--force` path is an operator-confirmed action:
+unverifiable identity refuses recovery. If the directory is not empty once that
+owner record is removed, recovery stops and prints the dirty path with its
+remaining entries instead of deleting a tree it does not own; the lock stays
+BUSY (now as an unreadable owner record) until the operator inspects those
+entries and re-runs with `--force`. A missing or unreadable owner record also
+refuses unless the operator adds `--force` and the occupant proof below finds
+nothing. That `--force` path is an operator-confirmed action:
 
 ```bash
 node scripts/vendored-dist-build.mjs --recover-lock
 node scripts/vendored-dist-build.mjs --recover-lock --force
 ```
+
+The `--force` occupant proof is fail-closed and has two independent parts:
+
+- any process whose working directory is the vendored root or below it counts,
+  whatever its command name — the POSIX gate waiter is `sh`, and Bun's build
+  spawns `tsc`/`vite` children;
+- any `node`/`bun` process whose command line contains the vendored root
+  counts. The root is matched as a fixed string: `pgrep -f` takes an extended
+  regular expression, so the path's metacharacters are escaped before the
+  search. Non-node/bun commands that merely name the path (an editor, a `grep`)
+  do not block recovery.
+
+A proof command that cannot run — missing `pgrep`/`lsof`, a timeout, a signal
+death — refuses recovery rather than reporting zero occupants.
+
+SCOPE LIMIT: a mutator that changed its working directory away from the
+vendored root and does not name the root in its arguments is invisible to both
+parts of the proof. `--force` therefore remains an operator assertion that the
+build is really dead; it is not a proof of exclusivity.
 
 On Windows the CLI refuses `--recover-lock` (including `--force`): the gate
 helper cannot prove the identity of the eventual Bun mutator. Any existing
@@ -213,6 +242,18 @@ shape, root PID, and launch working directory before signaling anything. It
 sends `SIGTERM` to the recorded launcher's process group. `start.mjs` then uses
 its normal backend IPC drain and detached-child group teardown. A second signal
 is used only if the owned tree does not quiesce within 90 seconds.
+
+The launcher has exactly one exit owner. The first explicit signal starts the
+graceful shutdown; a second latches forced mode and hands the exit to the
+forced-shutdown coordinator. When a force cannot be verified — a supervisor
+group that will not die, or an owned process group still alive after the force
+deadline — the launcher prints `forced shutdown incomplete: …; send another
+signal to retry` and deliberately stays alive so a later signal retries it.
+Every other path that would otherwise end the process defers to that
+coordinator while the retry hold is in place: the graceful shutdown, the
+boot-time caller that is still inside the workflow engine's build/readiness
+window, and `fail()`. A launcher that exits during the hold would abandon the
+owned supervisor trees the hold exists to reap.
 
 Afterward, `preview-down` runs scoped `pgrep -f` checks for
 `kady-workflow-supervisor`, `tsx/dist/preflight.cjs`, and

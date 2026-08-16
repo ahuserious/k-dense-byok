@@ -76,10 +76,41 @@ const sym =
     : { ok: "✓", warn: "⚠", err: "✗", arrow: "→" };
 
 const log = (msg = "") => console.log(msg);
+
+// The launcher has exactly one exit owner. Once a forced shutdown is latched
+// (second explicit signal) that owner is the shutdown coordinator, which may
+// deliberately keep the process alive after a failed force so a later signal
+// can retry it. fail() must therefore neither exit nor return into its caller
+// in that window: it throws this sentinel, which abandons the failing frame
+// and is swallowed at the process boundary below.
+const forcedShutdownHandoff = Symbol("kady-forced-shutdown-handoff");
+const isForcedShutdownHandoff = (error) =>
+  Boolean(error && typeof error === "object" && error[forcedShutdownHandoff]);
+// Declared here, with its first reader, rather than with the rest of the
+// shutdown state further down: fail() runs from the very first dependency
+// check onwards.
+let forcedShutdownLatched = false;
+
 const fail = (msg) => {
   console.error(msg);
+  if (forcedShutdownLatched) {
+    console.error("    A forced shutdown is already in progress; its coordinator owns the launcher exit.");
+    const handoff = new Error("launcher exit deferred to the forced-shutdown coordinator");
+    handoff[forcedShutdownHandoff] = true;
+    throw handoff;
+  }
   process.exit(1);
 };
+
+// Real crashes keep their existing "print it and exit 1" behaviour; only the
+// forced-shutdown handoff above is allowed to unwind without an exit.
+const reportFatalError = (error) => {
+  if (isForcedShutdownHandoff(error)) return;
+  console.error(error instanceof Error ? (error.stack ?? error.message) : String(error));
+  process.exit(1);
+};
+process.on("uncaughtException", reportFatalError);
+process.on("unhandledRejection", reportFatalError);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -447,7 +478,7 @@ const forcedSupervisorOwners = new Map();
 let shuttingDown = false;
 let shutdownPromise = null;
 let forceShutdownPromise = null;
-let forcedShutdownLatched = false;
+// forcedShutdownLatched belongs to this group; it is declared with fail() above.
 let forceRetryBarrier = null;
 let explicitShutdownSignalCount = 0;
 let shutdownExitCode = 0;
@@ -1195,46 +1226,59 @@ log("");
 
 log("Starting services...");
 log("");
-const engineState = await startWorkflowEngine();
-if (shuttingDown) {
-  await shutdownPromise;
-  process.exit(shutdownExitCode);
-}
-if (!engineState.available) {
-  process.env.KADY_PIPELINE_ENGINE_DISABLED = "1";
-  log(`  ${sym.warn} Workflow engine disabled; pipeline routes will return 503.`);
-} else {
-  process.env.KADY_PIPELINE_ENGINE_DISABLED = "0";
-  monitorWorkflowEngineOwnership(engineState);
-}
-if (!shuttingDown) {
-  startService(
-    `Backend on port ${BACKEND_PORT} (Pi agent, TypeScript)`,
-    "server",
-    [],
-    { directBackend: true },
-  );
-}
-if (!shuttingDown) {
-  startService(
-    `Frontend on port ${FRONTEND_PORT} (Next.js UI)`,
-    "web",
-    [],
-    { directFrontend: true, serviceArgs: ["dev", "-p", String(FRONTEND_PORT)] },
-  );
+
+/**
+ * Boot the remaining services. This runs in a function, not at module scope,
+ * so a shutdown that starts inside the workflow engine's build/readiness window
+ * can hand the launcher back to the shutdown coordinator with `return` instead
+ * of becoming a second exit owner: after a failed forced shutdown the
+ * coordinator deliberately holds the process alive for a retry signal.
+ */
+async function startServicesAndWait() {
+  const engineState = await startWorkflowEngine();
+  if (shuttingDown) {
+    await shutdownPromise;
+    if (await joinForcedShutdownIfActive()) return;
+    process.exit(shutdownExitCode);
+  }
+  if (!engineState.available) {
+    process.env.KADY_PIPELINE_ENGINE_DISABLED = "1";
+    log(`  ${sym.warn} Workflow engine disabled; pipeline routes will return 503.`);
+  } else {
+    process.env.KADY_PIPELINE_ENGINE_DISABLED = "0";
+    monitorWorkflowEngineOwnership(engineState);
+  }
+  if (!shuttingDown) {
+    startService(
+      `Backend on port ${BACKEND_PORT} (Pi agent, TypeScript)`,
+      "server",
+      [],
+      { directBackend: true },
+    );
+  }
+  if (!shuttingDown) {
+    startService(
+      `Frontend on port ${FRONTEND_PORT} (Next.js UI)`,
+      "web",
+      [],
+      { directFrontend: true, serviceArgs: ["dev", "-p", String(FRONTEND_PORT)] },
+    );
+  }
+
+  log("");
+  log("Waiting for services to come up (the first run can take a minute)...");
+  await waitFor(`http://localhost:${BACKEND_PORT}/`, "backend", 120);
+  await waitFor(`http://localhost:${FRONTEND_PORT}/`, "app UI", 180);
+  if (!shuttingDown) {
+    log("");
+    log("============================================");
+    log("  All services running!");
+    log(`  UI: http://localhost:${FRONTEND_PORT}`);
+    log("  Press Ctrl+C to stop everything");
+    log("============================================");
+    openBrowser(`http://localhost:${FRONTEND_PORT}`);
+  }
 }
 
-log("");
-log("Waiting for services to come up (the first run can take a minute)...");
-await waitFor(`http://localhost:${BACKEND_PORT}/`, "backend", 120);
-await waitFor(`http://localhost:${FRONTEND_PORT}/`, "app UI", 180);
-if (!shuttingDown) {
-  log("");
-  log("============================================");
-  log("  All services running!");
-  log(`  UI: http://localhost:${FRONTEND_PORT}`);
-  log("  Press Ctrl+C to stop everything");
-  log("============================================");
-  openBrowser(`http://localhost:${FRONTEND_PORT}`);
-}
+await startServicesAndWait();
 // The children hold the event loop open; nothing more to await.
