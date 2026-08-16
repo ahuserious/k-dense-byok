@@ -26,6 +26,10 @@ if (!tunnelOrigin) {
 
 export default {
   ...baseConfig,
+  // Backend-dependent page warm-up is impossible because this topology does not expose the backend.
+  globalSetup: "./e2e/global-setup.cloud.ts",
+  // This topology does not expose the real backend required by the unmocked tier.
+  grepInvert: /@live/,
   // Public-path latency is the reason these differ from the local config, and ONLY these differ.
   // Every asset crosses the internet twice (test runner -> ngrok edge -> this machine), so the
   // local budgets (45s test / 10s expect) expire during fixture setup. Raising a transport timeout

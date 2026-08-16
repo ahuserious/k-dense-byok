@@ -7,6 +7,24 @@ on:
     branches: [main]
 
 jobs:
+  e2e-config:
+    name: E2E configuration contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install root dependencies
+        run: npm ci
+      - name: Test E2E configuration contracts
+        run: npm run test:e2e-config
+      - name: Test hosted evidence contracts
+        run: npm run test:hosted-evidence
+
   vendored-dist:
     name: vendored builder dist
     runs-on: ubuntu-latest

@@ -6,16 +6,23 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   ["builder.spec.ts", 60],
   ["chat.spec.ts", 28],
   ["console-raindrop.spec.ts", 33],
+  ["live-backend.spec.ts", 3],
   ["scientific-pipelines.spec.ts", 54],
   ["studio.spec.ts", 34],
   ["workspace.spec.ts", 37],
 ]);
-const EXPECTED_SUBSTANTIVE_ITEMS = 210;
+const EXPECTED_SUBSTANTIVE_ITEMS = 213;
 const EXPECTED_THIN_ITEMS = 36;
 const EXPECTED_FIXME_ITEMS = 4;
 const EXPECTED_SKIP_ITEMS = 0;
 
 function isFullInventoryRun(config: FullConfig) {
+  const configuredGrep = Array.isArray(config.grep) ? config.grep : [config.grep];
+  const configuredFilter = (
+    configuredGrep.length !== 1 || configuredGrep[0]?.source !== ".*" ||
+    config.grepInvert !== null ||
+    config.projects.some((project) => project.grepInvert !== null)
+  );
   const hasTitleFilter = config.argv.some((argument) => (
     argument === "--grep" ||
     argument === "-g" ||
@@ -30,11 +37,12 @@ function isFullInventoryRun(config: FullConfig) {
   const hasSubsetMode = config.argv.some((argument) => (
     argument === "--last-failed" || argument === "--only-changed"
   ));
-  return !hasTitleFilter && !hasLocationFilter && !hasSubsetMode && config.shard === null;
+  return !configuredFilter && !hasTitleFilter && !hasLocationFilter && !hasSubsetMode && config.shard === null;
 }
 
 export default class ItemCountReporter implements Reporter {
   onBegin(config: FullConfig, suite: Suite) {
+    process.stdout.write(`E2E globalSetup resolved: ${config.globalSetup ?? "none"}\n`);
     const tests = suite.allTests();
     const actualItemsByFile = new Map<string, number>();
     let thinItems = 0;
