@@ -482,6 +482,13 @@
       "date": "2026-08-16",
       "path": "scripts/preview-launcher-observer.test.mjs",
       "scope": "workflow-engine readiness and fatal-exit observer regression coverage"
+    },
+    {
+      "from": "S11",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-state.test.mjs",
+      "scope": "preview lifecycle lock recovery regression"
     }
   ]
 }
