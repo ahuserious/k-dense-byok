@@ -65,6 +65,7 @@ TODO.md
 .agents/
 .claude/
 .r1-worktrees/
+/web/.preview/
 skills-lock.json
 AGENTS.md
 CLAUDE.md

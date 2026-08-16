@@ -21,6 +21,23 @@ import {
   workflowEngineRuntimeOwnership,
 } from "./vendored-dist-environment.mjs";
 
+
+// The preview lifecycle binds every recorded service to a generation and gates
+// the launcher on a published start gate. These hermetic launcher fixtures own
+// their own state root, so one fixed generation per file is enough.
+const HERMETIC_LAUNCHER_GENERATION = "hermetic-launcher-fixture-generation";
+const HERMETIC_LAUNCHER_SERVICE_STATE = `${JSON.stringify(
+  { version: 2, generation: HERMETIC_LAUNCHER_GENERATION, services: {} },
+)}\n`;
+
+function publishHermeticLauncherStartGate(environment) {
+  fs.writeFileSync(
+    environment.KADY_PREVIEW_START_GATE_FILE,
+    `${HERMETIC_LAUNCHER_GENERATION}\n`,
+    { mode: 0o600 },
+  );
+}
+
 const ownedPids = new Set([101, 102]);
 const fakeListenerOwner = (pid) => ownedPids.has(pid);
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -634,8 +651,16 @@ if (args.join(" ") !== "--version") process.exit(125);
 console.log("uv 0.8.0");
 `, { mode: 0o700 });
       serviceStatePath = path.join(stateRoot, "services.json");
-      fs.writeFileSync(serviceStatePath, '{"version":1,"services":{}}\n');
-      const environment = previewEnvironment(stateRoot, launchRoot, shimDirectory, ports);
+      fs.writeFileSync(serviceStatePath, HERMETIC_LAUNCHER_SERVICE_STATE);
+      const environment = previewEnvironment(
+        stateRoot,
+        launchRoot,
+        shimDirectory,
+        ports,
+        process.env,
+        HERMETIC_LAUNCHER_GENERATION,
+      );
+      publishHermeticLauncherStartGate(environment);
       const fixtureRoot = prepareHermeticLauncherCheckout(stateRoot, environment, ports);
       fs.rmSync(path.join(launchRoot, "server"), { force: true });
       fs.rmSync(path.join(launchRoot, "web"), { force: true });
@@ -772,10 +797,15 @@ if (args.join(" ") !== "--version") process.exit(125);
 console.log("uv 0.8.0");
 `, { mode: 0o700 });
 
-      const environment = previewEnvironment(stateRoot, launchRoot, shimDirectory, ports, {
-        PATH: process.env.PATH,
-        OLLAMA_BASE_URL: "http://127.0.0.1:9",
-      });
+      const environment = previewEnvironment(
+        stateRoot,
+        launchRoot,
+        shimDirectory,
+        ports,
+        { PATH: process.env.PATH, OLLAMA_BASE_URL: "http://127.0.0.1:9" },
+        HERMETIC_LAUNCHER_GENERATION,
+      );
+      publishHermeticLauncherStartGate(environment);
       const checkoutRoot = prepareHermeticLauncherCheckout(stateRoot, environment, ports);
       const fakeServerRoot = path.join(checkoutRoot, "server");
       const fakeWebRoot = path.join(checkoutRoot, "web");
@@ -827,7 +857,7 @@ server.listen(Number(process.argv[portIndex + 1]), "127.0.0.1");
       fs.rmSync(path.join(launchRoot, "web"), { force: true });
       fs.symlinkSync(fakeServerRoot, path.join(launchRoot, "server"), "dir");
       fs.symlinkSync(fakeWebRoot, path.join(launchRoot, "web"), "dir");
-      fs.writeFileSync(serviceStatePath, '{"version":1,"services":{}}\n');
+      fs.writeFileSync(serviceStatePath, HERMETIC_LAUNCHER_SERVICE_STATE);
 
       launcher = spawn(
         process.execPath,
@@ -1025,10 +1055,15 @@ if (args.join(" ") !== "--version") process.exit(125);
 console.log("uv 0.8.0");
 `, { mode: 0o700 });
 
-      const environment = previewEnvironment(stateRoot, launchRoot, shimDirectory, ports, {
-        PATH: process.env.PATH,
-        OLLAMA_BASE_URL: "http://127.0.0.1:9",
-      });
+      const environment = previewEnvironment(
+        stateRoot,
+        launchRoot,
+        shimDirectory,
+        ports,
+        { PATH: process.env.PATH, OLLAMA_BASE_URL: "http://127.0.0.1:9" },
+        HERMETIC_LAUNCHER_GENERATION,
+      );
+      publishHermeticLauncherStartGate(environment);
       const checkoutRoot = prepareHermeticLauncherCheckout(stateRoot, environment, ports);
       const fakeServerRoot = path.join(checkoutRoot, "server");
       const fakeWebRoot = path.join(checkoutRoot, "web");
@@ -1080,7 +1115,7 @@ server.listen(Number(process.argv[portIndex + 1]), "127.0.0.1");
       fs.rmSync(path.join(launchRoot, "web"), { force: true });
       fs.symlinkSync(fakeServerRoot, path.join(launchRoot, "server"), "dir");
       fs.symlinkSync(fakeWebRoot, path.join(launchRoot, "web"), "dir");
-      fs.writeFileSync(serviceStatePath, '{"version":1,"services":{}}\n');
+      fs.writeFileSync(serviceStatePath, HERMETIC_LAUNCHER_SERVICE_STATE);
 
       launcher = spawn(
         process.execPath,
@@ -1274,8 +1309,16 @@ fs.appendFileSync(${JSON.stringify(commandLog)}, JSON.stringify({ command: "uv",
 if (args.join(" ") !== "--version") process.exit(125);
 console.log("uv 0.8.0");
 `, { mode: 0o700 });
-      fs.writeFileSync(serviceStatePath, '{"version":1,"services":{}}\n');
-      const environment = previewEnvironment(stateRoot, launchRoot, shimDirectory, ports);
+      fs.writeFileSync(serviceStatePath, HERMETIC_LAUNCHER_SERVICE_STATE);
+      const environment = previewEnvironment(
+        stateRoot,
+        launchRoot,
+        shimDirectory,
+        ports,
+        process.env,
+        HERMETIC_LAUNCHER_GENERATION,
+      );
+      publishHermeticLauncherStartGate(environment);
       const fixtureRoot = prepareHermeticLauncherCheckout(stateRoot, environment, ports);
       fs.rmSync(path.join(launchRoot, "server"), { force: true });
       fs.rmSync(path.join(launchRoot, "web"), { force: true });

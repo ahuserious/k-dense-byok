@@ -21,8 +21,14 @@ Before opening any sockets, `preview-up` runs
 The build receives the selected engine port as `PORT`; ambient
 variables are not inherited. Its strict allowlist contains only the isolated
 `HOME`, PATH-first Node/Bun/Git shims, `NODE_ENV`, `PORT`, isolated `TMPDIR`,
-and optional `LANG`/`CI`. Preview creates that isolation and proves the Git
-transport block before running the prebuild.
+and optional `LANG`/`CI`. That prebuild child alone receives
+`NODE_ENV=production`; ambient `NODE_ENV` is discarded by the preview ambient
+allowlist and no service child inherits it. Preview creates that isolation and
+proves the Git transport block before running the prebuild. Under
+`KADY_PREVIEW=1` the builder additionally refuses to start Bun while any
+automatic env file exists under `web/` or the vendored engine — the same guard
+`preview-up` runs before it spawns the builder, and the one the launcher used
+to run around its own (now retired) in-process engine install and web build.
 
 After Vite succeeds, the wrapper writes the ignored
 `packages/web/dist/.vendored-dist-manifest.json`. Its schema-1 record contains:
@@ -172,39 +178,176 @@ and legacy port values are loaded before the launcher resolves the fallback.
 
 `preview-up` creates a unique `/tmp/kady-preview-*` directory, including fresh
 project, Pi-agent, skills-cache, workflow-supervisor, and log paths. It creates
-a launch overlay with a blank `.env`, which prevents the copied launcher from
-loading the repository file directly. However, the symlinked server currently
-resolves its physical checkout path and can reload the checkout's real `.env`;
-credential writes can also target that file. This confirmed server-side defect
-is assigned to lane C5 (`server/src/env.ts`, the credentials writer, and preview
-env-root wiring). Until C5 lands, the preview is not a credential-isolation
-boundary. The overlay symlinks the checked-out `server/` and `web/` trees and
-runs the checkout's exact `start.mjs` and `env-file.mjs` bytes.
-It also includes a minimal `scripts/` directory containing byte-exact copies of
-the three `vendored-dist-*.mjs` modules required by the launcher. Those modules
-validate and build against the checkout resolved through the `server/` symlink,
-so the overlay neither exposes `.git` nor substitutes `gitHead: "unknown"`.
-The preview npm shim allows only the launcher's exact `npm run prep --silent`
-command and rejects every other npm invocation, including install, CI, prune,
-update, exec, and rebuild operations. The vendored wrapper independently
-performs stamp-driven frozen Bun installs when required.
+a launch overlay with a blank `<launchRoot>/.env` and sets `KADY_ENV_FILE` to
+that absolute path. The preview backend loads only `<launchRoot>/.env`, and
+credential writes land there; the checkout's `.env` is never read or written
+in preview mode. The overlay symlinks the checked-out `server/` tree and runs
+the checkout's exact `start.mjs` and `env-file.mjs` bytes. Its `web/` project
+root is instead the gitignored physical directory
+`web/.preview/launch/web`. Preview startup recreates it from an explicit source
+allowlist: `src`, `public`, package metadata, and enumerated Next, TypeScript,
+PostCSS, Tailwind, and component configuration files. In-checkout source
+symlinks are dereferenced only when their canonical target remains inside one
+of those copied roots. Links to Git metadata, environment files, dependencies,
+build output, preview state/destinations, vendored dist staging, any other
+checkout path, a dangling target, or a directory cycle stop startup and name
+the rejected class. The checkout's `web/` and `server/` roots must themselves
+be real directories under the canonical checkout; every source entry is
+canonicalized and checked even when its final component is not a symlink. A
+post-copy walk requires the projected source set to
+contain no symlinks. Lockfiles stay at the checkout ancestor so Turbopack does not
+infer the projection itself as its filesystem root. The projection also copies
+`server/package.json` into its sibling `server/` directory because the copied
+Next config reads that version source through `../server/package.json`. Startup
+prints the measured copy time. The checkout's top-level `web/node_modules`
+must be a real directory; the projection links its canonical path and does not
+traverse the dependency tree, whose internal layout remains the package
+manager's responsibility. A symlinked dependency root is refused;
+`.next` is a private real directory inside the projection. The
+temporary launch overlay links its `web/` entry to this checkout-local project.
+Consequently Turbopack discovers physical App Router files while every retained
+symlink resolves under its inferred checkout filesystem root; preview creation
+rejects any root entry whose canonical target escapes that root. Next 16 has no
+supported switch that disables its forced development env-file reload, so the
+projection also keeps env files created or modified in the checkout after
+readiness outside Next's watched project root. Owned preview teardown removes
+the marked projection.
+
+The overlay also includes a minimal `scripts/` directory containing byte-exact
+copies of the `vendored-dist-*.mjs` modules the launcher imports, plus the
+`preview-environment.mjs`/`preview-launcher-observer.mjs` modules the copied
+builder imports for its automatic-env-file guard. Those modules validate and
+build against the checkout resolved through the `server/` symlink, so the
+overlay neither exposes `.git` nor substitutes `gitHead: "unknown"`.
+Dependencies must already be installed. The preview npm shim allows only the
+launcher's exact `npm run prep --silent` command and rejects every other npm
+invocation, including install, CI, prune, update, exec, and rebuild operations;
+that also suppresses the launcher's update lookup. The vendored wrapper
+independently performs stamp-driven frozen Bun installs when required.
+
+The projection is an immutable source snapshot, not a live development mirror.
+Edits to web routes, public assets, middleware, instrumentation, package
+metadata, or configuration require `preview-down.mjs` followed by
+`preview-up.mjs`. Preview startup records a SHA-256 manifest for the copied
+source set and adds a preview-only `/api/preview-health` route. Readiness probes
+that route and requires its JSON generation to match; backend and engine
+readiness additionally require their recorded PID identities to remain live.
+All three readiness ports must also be owned by the identity-validated service
+PID or its recorded process group; a foreign listener prevents readiness and
+is named without being signalled.
+Later health probes return HTTP 503 and name the first drifted checkout file
+rather than silently serving stale evidence.
+
+Preview lifecycle mutations are serialized by an exclusive lock under
+`deploy/preview/`. A unique generation is stored in both the published state
+and the checkout-local projection marker. Concurrent up/down commands refuse
+while another lifecycle operation owns the lock, and teardown removes a
+projection only when its generation matches the state it locked and read.
+`preview-up` holds this lock through generation-bound readiness and through any
+failure cleanup; `preview-down` therefore refuses with the starting preview-up
+PID instead of crossing generations.
+
+## Recovery
+
+Lifecycle state is fsynced to a same-directory temporary file and published by
+atomic rename. The lifecycle lock is the directory
+`deploy/preview/.lifecycle.lock.d`, created by atomic `mkdir`. Its atomically
+published `owner.json` records version, operation, generation, PID, host and
+boot identity, process birth identity, and creation time. Any existing lock
+directory is BUSY, including one with a missing or unreadable owner. There is
+no automatic takeover based on PID, age, or file state. CI jobs use fresh
+checkouts; after a local crash, the operator performs one explicit recovery.
+This removes every lifecycle check-then-act takeover race by construction.
+
+`node scripts/preview-down.mjs --recover-lock` is the only recovery path and
+must never run concurrently with preview-up or preview-down. A comparable owner
+record is removed only after the same host and boot are established and its
+recorded PID is absent. A missing or unreadable owner requires the explicit
+operator-confirmed `--recover-lock --force` form. Forced recovery refuses while
+any recorded preview port has a listener or `pgrep -f`/cwd inspection finds a
+process referring to the exact recorded preview state-root path. Legacy v2/v3
+lock files are parsed, but an owner lacking comparable host and boot identity
+is refused with `cannot verify owner liveness`.
+
+`preview-down` tolerates missing or malformed state when the owned projection
+marker contains a non-null generation-bound launcher record. The disposable
+launcher waits while `preview-up` atomically records its PID, PGID, birth
+identity, and generation in the marker and state, then publishes a fully
+written gate containing that exact generation. Its observer ignores absent,
+empty, and wrong-generation gates and records the same tuple for backend,
+frontend, and engine children. A recording failure kills the still-stopped
+child group before the launcher fails. Teardown quiesces the launcher,
+fresh-reads and merges service records until two consecutive reads match,
+stops every matching group, and proves both recorded process and listener
+counts are zero before deleting state. Failure retains state and the temporary
+tree; a present malformed service record also fails this proof and is named.
+Cwd remains only a secondary ownership check.
+
+Known residual: detached services become schedulable for a microsecond-scale
+window between spawn and the observer's immediate `SIGSTOP` plus durable
+record. A launcher death in that window can leave an unrecorded group. The
+existing stop-and-kill-on-record-failure logic narrows the window;
+`preview-down` reports any listener on preview ports that it cannot attribute
+and refuses to claim a clean teardown.
+
+Backend env selection fails closed. With `KADY_PREVIEW=1`, `KADY_ENV_FILE`
+must be present, non-blank, absolute, and resolve to a regular file under the
+canonical `KADY_PREVIEW_LAUNCH_ROOT`; missing, relative, outside-root, and
+outside-pointing symlink values stop startup. Outside preview mode,
+`KADY_ENV_FILE` is rejected so the launcher and backend cannot disagree about
+which file owns persisted credentials.
+
+The workflow engine receives `ARCHON_HOME=<stateRoot>/pipeline-engine-home`, a
+new empty directory created by `preview-up`; an ambient `ARCHON_HOME` is never
+preserved. The filtered Bun package runs with
+`server/vendor/pipeline-engine/packages/server` as its actual cwd. Preview boot
+therefore refuses every automatic env candidate: `.env`, `.env.local`, and the
+development, production, and test variants both with and without `.local`.
+Those checks use the canonical checkout paths for `web/`, the vendored
+workspace root, `packages/web`, and `packages/server`, plus the server package
+cwd's legacy data-directory env file. They run immediately before vendored
+preparation, Next startup, engine install/build, and engine startup, closing
+validation-to-start windows without patching vendored code. The standalone
+vendored build script repeats the same refusal in preview mode immediately
+before its Bun build spawn.
+
+Before its first child process, `preview-up` replaces its own environment with
+an explicit allowlist. It may retain ambient `PATH`, `TMPDIR`, `LANG`, `TERM`,
+`CI`, and the two validated browser-facing origin overrides. It does not retain
+ambient `NODE_ENV`; each service runtime establishes its own mode. It then adds
+only the preview's isolated `HOME`, engine home, ports, state paths, loopback
+service URLs, and safety controls. All other ambient values are dropped,
+including Docker/workspace selectors, database and cloud-tracing configuration,
+proxy variables, the host SSH agent socket, and the host Pi-agent directory.
+The sanitized environment is used by the supervisor and every service
+descendant; the prebuild gets the same base plus its build-only production
+mode.
 
 The effective environment includes:
 
 - `KADY_PREVIEW=1`;
+- `KADY_ENV_FILE=<launchRoot>/.env`;
+- `KADY_PREVIEW_LAUNCH_ROOT=<launchRoot>`;
+- `ARCHON_HOME=<stateRoot>/pipeline-engine-home`;
 - the selected `KADY_PORT`, `KADY_FRONTEND_PORT`, and `KADY_PIPELINE_ENGINE_PORT`;
 - temporary `KADY_PROJECTS_ROOT`, `KADY_PI_AGENT_DIR`,
   `PI_CODING_AGENT_DIR`, `KADY_SKILLS_CACHE_DIR`, and workflow-supervisor paths;
 - `KADY_SKILLS_REPO=kady-preview-nonexistent/none` and a blank
   `TELEGRAM_BOT_TOKEN`;
-- isolated launcher `HOME`, `PATH`, and `TMPDIR`; `NODE_ENV` is absent unless
-  the caller explicitly supplied it;
-- a separately computed strict vendored-build environment (`HOME`, `PATH`,
-  build-only `NODE_ENV`, `PORT`, `TMPDIR`, and optional `LANG`/`CI`) used only
-  by the prebuild and freshness checker;
-- scrubbed ambient variables for non-build preview services; the scrubber also
-  removes auth/PAT/key/token/secret/password/credential names and common
-  database secrets such as `PGPASSWORD`, `MYSQL_PWD`, and `DATABASE_URL`.
+- isolated launcher `HOME`, `PATH`, and `TMPDIR`; `NODE_ENV` is absent — the
+  ambient allowlist never carries it through;
+- a separately computed strict vendored-build environment (`HOME`, the same
+  shim-first `PATH`, build-only `NODE_ENV`, `PORT`, the same isolated `TMPDIR`,
+  and optional `LANG`/`CI`) used only by the prebuild and freshness checker.
+  Its `TMPDIR` and `PATH` must equal the launcher's, because the launcher
+  re-fingerprints those values when it re-checks the prebuilt bundle;
+- only the ambient interoperability variables named by the allowlist above. The
+  allowlist supersedes the earlier credential-name scrubber for the preview
+  environment: nothing outside the allowlist reaches a preview service, so
+  auth/PAT/key/token/secret/password/credential names and database secrets such
+  as `PGPASSWORD`, `MYSQL_PWD`, and `DATABASE_URL` are dropped by construction.
+  The name-based scrubber is still what filters the non-preview launcher's own
+  vendored-build environment.
 
 The example values are in `deploy/preview/preview.env.example`; `preview-up`
 replaces the state paths with its unique temporary root. Startup succeeds only

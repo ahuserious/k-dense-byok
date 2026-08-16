@@ -20,6 +20,7 @@ import {
   recoverVendoredDistBuildLock,
   scrubSensitiveEnvironment,
 } from "./vendored-dist-environment.mjs";
+import { assertPreviewAutomaticEnvironmentFilesAbsent } from "./preview-environment.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const defaultRepositoryRoot = path.resolve(scriptDirectory, "..");
@@ -213,6 +214,14 @@ try {
 
 let stagingDirectory = null;
 try {
+  // Preview isolation: neither `bun install` nor the web build may run while an
+  // automatic env file exists under web/ or the vendored engine, because Bun
+  // and Next would load it into the build. This is the guard the launcher used
+  // to run around its own engine install/build, which the staged rebuild here
+  // replaced.
+  if (process.env.KADY_PREVIEW === "1") {
+    assertPreviewAutomaticEnvironmentFilesAbsent(options.root);
+  }
   let installStatus = vendoredInstallStatus(options.root, buildEnvironment);
   if (installStatus.needsInstall) {
     const installInputsBefore = expectedVendoredInstallStamp(options.root, buildEnvironment);
@@ -245,6 +254,9 @@ try {
     stagingDirectory = path.join(vendoredRoot, "node_modules", `.vendored-dist-stage-${buildLock.token}`);
     fs.rmSync(stagingDirectory, { recursive: true, force: true });
     console.log(`vendored-dist-build: running \`bun run build -- --outDir ${stagingDirectory}\` in ${webRoot}`);
+    if (process.env.KADY_PREVIEW === "1") {
+      assertPreviewAutomaticEnvironmentFilesAbsent(options.root);
+    }
     const build = await runMutatingCommand(
       "bun",
       ["run", "build", "--", "--outDir", stagingDirectory],

@@ -9,22 +9,73 @@ export async function probePreviewService(service, fetchImplementation = fetch) 
     const response = await fetchImplementation(service.url, {
       signal: AbortSignal.timeout(service.probeTimeoutMs ?? 2_000),
     });
-    return response.ok
-      ? { ok: true, detail: `HTTP ${response.status}` }
-      : { ok: false, detail: `HTTP ${response.status}` };
+    if (response.ok) {
+      if (service.expectedGeneration) {
+        let payload;
+        try {
+          payload = JSON.parse(await response.text());
+        } catch {
+          return { ok: false, detail: `HTTP ${response.status}: invalid generation body` };
+        }
+        if (payload?.generation !== service.expectedGeneration) {
+          return {
+            ok: false,
+            detail: `HTTP ${response.status}: generation ${payload?.generation ?? "missing"} does not match ${service.expectedGeneration}`,
+          };
+        }
+      }
+      return { ok: true, detail: `HTTP ${response.status}` };
+    }
+    let responseDetail = "";
+    try {
+      responseDetail = (await response.text()).replace(/\s+/g, " ").trim().slice(0, 1_000);
+    } catch {
+      // The status alone remains useful when an unhealthy service has no readable body.
+    }
+    return {
+      ok: false,
+      detail: `HTTP ${response.status}${responseDetail ? `: ${responseDetail}` : ""}`,
+    };
   } catch (error) {
     return { ok: false, detail: errorText(error) };
   }
 }
 
-export function readPreviewServiceStates(serviceStatePath) {
+export function readPreviewServiceStates(serviceStatePath, expectedGeneration) {
+  return readPreviewServiceStateSnapshot(serviceStatePath, expectedGeneration).services;
+}
+
+export function readPreviewServiceStateSnapshot(serviceStatePath, expectedGeneration) {
+  let raw;
   try {
-    const parsed = JSON.parse(fs.readFileSync(serviceStatePath, "utf-8"));
-    return parsed && typeof parsed === "object" && parsed.services && typeof parsed.services === "object"
-      ? parsed.services
-      : {};
+    raw = fs.readFileSync(serviceStatePath, "utf-8");
+  } catch (error) {
+    return {
+      status: error?.code === "ENOENT" ? "missing" : "unreadable",
+      signature: error?.code === "ENOENT" ? "<missing>" : `<unreadable:${error?.code ?? "unknown"}>`,
+      services: {},
+    };
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (expectedGeneration && parsed?.generation !== expectedGeneration) {
+      return { status: "generation-mismatch", signature: raw, services: {} };
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) ||
+        !parsed.services || typeof parsed.services !== "object" || Array.isArray(parsed.services)) {
+      return { status: "invalid", signature: raw, services: {} };
+    }
+    return {
+      status: "valid",
+      signature: raw,
+      services: parsed.services,
+    };
   } catch {
-    return {};
+    return {
+      status: "malformed",
+      signature: "<malformed>",
+      services: {},
+    };
   }
 }
 
@@ -72,6 +123,8 @@ export async function waitForPreviewReadiness({
   now = Date.now,
   pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   pollIntervalMs = 500,
+  expectedGeneration,
+  validateReady = () => {},
 }) {
   const startedAt = now();
   const lastProbeByRole = new Map(services.map((service) => [service.role, "not ready"]));
@@ -85,12 +138,25 @@ export async function waitForPreviewReadiness({
     for (const [service, result] of probeResults) {
       lastProbeByRole.set(service.role, result.detail);
     }
-    if (probeResults.every(([, result]) => result.ok)) return probeResults;
-
-    const serviceStates = readServiceStates();
+    const serviceStates = readServiceStates(expectedGeneration);
+    let processBindingPending = false;
+    if (probeResults.every(([, result]) => result.ok)) {
+      try {
+        validateReady(serviceStates);
+        return probeResults;
+      } catch (error) {
+        processBindingPending = true;
+        for (const [service] of probeResults) {
+          lastProbeByRole.set(
+            service.role,
+            `process binding pending: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+    }
     const currentTime = now();
     for (const [service, result] of probeResults) {
-      if (result.ok) continue;
+      if (result.ok && !processBindingPending) continue;
       const processState = serviceStates[service.role];
       if (processState?.state === "exited") {
         throw new Error(

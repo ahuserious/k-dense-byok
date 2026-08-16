@@ -21,8 +21,10 @@
  * (MODAL_TOKEN_ID + MODAL_TOKEN_SECRET) that enables the `modal_run` tool.
  *
  * Keys are stored exactly where the app already expects them (repo-root
- * `.env`, plaintext, on the user's own machine) — we are removing friction,
- * not changing the trust model. The server binds to localhost only.
+ * `.env`, or the absolute KADY_ENV_FILE when configured, plaintext, on the
+ * user's own machine) — we are removing friction, not changing the trust
+ * model. Preview mode writes only to its configured KADY_ENV_FILE. The server
+ * binds to localhost only.
  *
  * Cross-process writes are serialized through a `.env.lock` owner-token file
  * created next to `.env` (same directory, so the O_EXCL create is atomic on
@@ -39,12 +41,16 @@ import os from "node:os";
 import path from "node:path";
 import type { FastifyInstance } from "fastify";
 import { REPO_ROOT } from "../config.ts";
+import {
+  credentialEnvironmentFilePath,
+  explicitEnvironmentFile,
+} from "../environment-files.ts";
 import { getModelRuntime } from "../agent/session-registry.ts";
 import { validateModalCredentials } from "../modal/adapter.ts";
 import { modalJobManager } from "../modal/manager.ts";
 import type { WorkflowSupervisorCredentialKey } from "../workflows/supervisor/credential-contract.ts";
 
-const ENV_PATH = path.join(REPO_ROOT, ".env");
+const ENV_PATH = credentialEnvironmentFilePath(REPO_ROOT);
 export const MAX_CREDENTIAL_ENV_BYTES = 1024 * 1024;
 const MAX_CREDENTIAL_LOCK_BYTES = 4_096;
 const CREDENTIAL_LOCK_TIMEOUT_MS = 2_000;
@@ -139,6 +145,18 @@ export function setModalCredentialValidatorForTests(
 /** Redirect persistence in tests so the user's real repo .env is never touched. */
 export function setCredentialEnvPathForTests(file: string | null): void {
   credentialEnvPath = file ?? ENV_PATH;
+}
+
+function previewCredentialPathError(): string | null {
+  if (process.env.KADY_PREVIEW !== "1") return null;
+  const configuredPath = explicitEnvironmentFile();
+  if (!configuredPath) {
+    return "Preview credential changes require an absolute KADY_ENV_FILE.";
+  }
+  if (path.resolve(credentialEnvPath) !== configuredPath) {
+    return "Preview credential changes may write only to KADY_ENV_FILE.";
+  }
+  return null;
 }
 
 let credentialAfterSnapshotHook: (() => void | Promise<void>) | null = null;
@@ -714,6 +732,15 @@ export async function registerCredentialRoutes(
         return { detail: `Provide at least one of: ${fields} (a string, or null to clear)` };
       }
       return withCredentialMutationLock(async () => {
+        const previewPathError = previewCredentialPathError();
+        if (previewPathError) {
+          reply.code(409);
+          return {
+            detail: previewPathError,
+            reason: "preview_credential_path_refused",
+            saved: false,
+          };
+        }
         const changes: CredentialChange[] = [];
         const valuesByField = new Map<string, string | null>();
         for (const spec of provided) {

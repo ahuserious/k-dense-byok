@@ -1,26 +1,58 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createLaunchOverlay, previewEnvironment } from "./preview-environment.mjs";
+import {
+  allowlistedPreviewEnvironment,
+  assertPreviewAutomaticEnvironmentFilesAbsent,
+  createLaunchOverlay,
+  preparePreviewEngineHome,
+  preparePreviewWebRoot,
+  previewEngineHome,
+  previewEnvironment,
+  previewPrebuildEnvironment,
+  readPreviewWebProjectionMarker,
+  removePreviewWebRoot,
+  updatePreviewWebProjectionMarker,
+} from "./preview-environment.mjs";
 import { previewVendoredDistEnvironment } from "./vendored-dist-environment.mjs";
 import {
-  collectPreviewListenerGroups,
-  stopProcessGroups,
+  collectRecordedPreviewProcessGroups,
+  processGroupId,
+  assertPreviewServiceListenersOwned,
+  quiescePreviewGeneration,
   waitForPreviewPortsFree,
 } from "./preview-processes.mjs";
-import { waitForPreviewReadiness } from "./preview-readiness.mjs";
+import {
+  readPreviewServiceStateSnapshot,
+  waitForPreviewReadiness,
+} from "./preview-readiness.mjs";
+import {
+  acquirePreviewLifecycleLock,
+  previewPidStartIdentity,
+  publishPreviewStartGate,
+  publishPreviewStateFile,
+  readPreviewStateCandidate,
+} from "./preview-state.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = fs.realpathSync(path.resolve(scriptDirectory, ".."));
 const previewDirectory = path.join(repositoryRoot, "deploy", "preview");
 const stateFile = path.join(previewDirectory, ".state.json");
+const lifecycleLockDirectory = path.join(previewDirectory, ".lifecycle.lock.d");
+const legacyLifecycleLockFile = path.join(previewDirectory, ".lifecycle.lock");
 
 function fail(message) {
   console.error(message);
   process.exit(1);
+}
+
+function replaceProcessEnvironment(environment) {
+  for (const name of Object.keys(process.env)) delete process.env[name];
+  Object.assign(process.env, environment);
 }
 
 function optionValue(name, fallback) {
@@ -57,6 +89,7 @@ function prepareVendoredDist({ skipBuild, environment }) {
   } else {
     console.log("Preparing the vendored Pipeline Engine web bundle.");
   }
+  assertPreviewAutomaticEnvironmentFilesAbsent(repositoryRoot);
   const result = spawnSync(process.execPath, arguments_, {
     cwd: repositoryRoot,
     env: environment,
@@ -89,46 +122,29 @@ function runPushBlockProbe(realGit, environment) {
   console.log(`Push-block probe: BLOCKED (exit ${probe.status})`);
 }
 
-function processGroupAlive(processGroupId) {
-  try {
-    process.kill(-processGroupId, 0);
-    return true;
-  } catch (error) {
-    if (error?.code === "ESRCH") return false;
-    throw error;
+async function stopFailedLaunch(state) {
+  const marker = readPreviewWebProjectionMarker(repositoryRoot);
+  if (marker?.generation !== state.generation) {
+    throw new Error("Preview failure cleanup refuses a different projection generation.");
   }
-}
-
-async function waitForOwnedTree(processGroupId, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (processGroupAlive(processGroupId) && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
+  const publishedState = readPreviewStateCandidate(stateFile);
+  if (
+    publishedState.status === "malformed" ||
+    (publishedState.status === "valid" &&
+      publishedState.state?.generation !== state.generation)
+  ) {
+    throw new Error("Preview failure cleanup refuses malformed or different lifecycle state.");
   }
-  return !processGroupAlive(processGroupId);
-}
-
-async function stopFailedLaunch(rootPid, ports) {
-  if (processGroupAlive(rootPid)) {
-    process.kill(-rootPid, "SIGTERM");
-    if (!(await waitForOwnedTree(rootPid, 30_000))) {
-      process.kill(-rootPid, "SIGTERM");
-      await waitForOwnedTree(rootPid, 10_000);
-    }
-  }
-
-  const listenerGroups = collectPreviewListenerGroups(repositoryRoot, ports);
-  const survivors = await stopProcessGroups(listenerGroups);
-  if (survivors.length > 0) {
-    throw new Error(
-      `Preview listener process groups survived failed-launch cleanup: ${survivors.map(({ groupId }) => groupId).join(", ")}`,
-    );
-  }
-  const occupied = await waitForPreviewPortsFree(ports, 15_000);
-  if (occupied.length > 0) {
-    throw new Error(
-      `Preview ports did not become free after failed-launch cleanup: ${formatOccupiedPorts(occupied)}`,
-    );
-  }
+  await quiescePreviewGeneration(
+    repositoryRoot,
+    state,
+    {
+      readServiceSnapshot: () => readPreviewServiceStateSnapshot(
+        state.serviceStatePath,
+        state.generation,
+      ),
+    },
+  );
 }
 
 function formatOccupiedPorts(occupied) {
@@ -140,36 +156,51 @@ function formatOccupiedPorts(occupied) {
 if (process.platform === "win32") {
   fail("The preview lifecycle currently requires POSIX process-group semantics.");
 }
+const previewGeneration = randomUUID();
+let lifecycleLock;
+try {
+  lifecycleLock = acquirePreviewLifecycleLock(lifecycleLockDirectory, {
+    operation: "preview-up",
+    generation: previewGeneration,
+    legacyLockFiles: [legacyLifecycleLockFile],
+  });
+} catch (error) {
+  fail(error instanceof Error ? error.message : String(error));
+}
+let projectionPrepared = false;
+let statePublished = false;
+let preserveFailedLaunchArtifacts = false;
+function releaseLifecycleLock() {
+  if (!lifecycleLock) return;
+  const heldLock = lifecycleLock;
+  lifecycleLock = null;
+  heldLock.release();
+}
+process.once("exit", () => {
+  if (projectionPrepared && !statePublished && !preserveFailedLaunchArtifacts) {
+    try {
+      removePreviewWebRoot(repositoryRoot, previewGeneration);
+    } catch (error) {
+      console.error(
+        `Preview pre-publication projection cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  try {
+    releaseLifecycleLock();
+  } catch (error) {
+    console.error(
+      `Preview lifecycle lock release failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+});
 if (fs.existsSync(stateFile)) {
   fail(`Preview state already exists at ${stateFile}; run scripts/preview-down.mjs first.`);
 }
 
-const ports = {
-  backend: portOption("--backend-port", Number(process.env.KADY_PORT || 18000)),
-  frontend: portOption("--frontend-port", Number(process.env.KADY_FRONTEND_PORT || 13000)),
-  engine: portOption(
-    "--engine-port",
-    Number(
-      process.env.KADY_PIPELINE_ENGINE_PORT ||
-        process.env.KADY_ARCHON_PORT ||
-        13091,
-    ),
-  ),
-};
-if (!process.env.KADY_PIPELINE_ENGINE_PORT && process.env.KADY_ARCHON_PORT) {
-  console.warn(
-    "[deprecated] KADY_ARCHON_PORT is deprecated; use KADY_PIPELINE_ENGINE_PORT instead.",
-  );
-}
-if (new Set(Object.values(ports)).size !== 3) fail("Preview ports must be distinct.");
-
-const initiallyOccupied = await waitForPreviewPortsFree(ports, 15_000);
-if (initiallyOccupied.length > 0) {
-  fail(
-    `Preview ports are still occupied after the startup free-port barrier: ${formatOccupiedPorts(initiallyOccupied)}`,
-  );
-}
-
+// process.env is replaced by the preview allowlist below, so the ports and the
+// deprecated-variable warning are resolved from this pristine copy further down.
+const ambientEnvironment = { ...process.env };
 const requestedStateRoot = optionValue("--state-root", "");
 let stateRoot = requestedStateRoot
   ? path.resolve(requestedStateRoot)
@@ -188,6 +219,49 @@ if (requestedStateRoot) {
   fs.mkdirSync(stateRoot, { recursive: false, mode: 0o700 });
 }
 stateRoot = fs.realpathSync(stateRoot);
+fs.mkdirSync(path.join(stateRoot, "home"), { recursive: true, mode: 0o700 });
+preparePreviewEngineHome(stateRoot);
+
+replaceProcessEnvironment(
+  allowlistedPreviewEnvironment(ambientEnvironment, {
+    HOME: path.join(stateRoot, "home"),
+    ARCHON_HOME: previewEngineHome(stateRoot),
+    KADY_PREVIEW: "1",
+  }),
+);
+// prepareVendoredDist() runs further down, once the launch overlay exists: the
+// prebuild must use previewVendoredDistEnvironment(), whose PATH (shim first)
+// and TMPDIR are exactly what the launcher fingerprints when it re-checks the
+// bundle, and a failed build must be cleaned up by the launch failure path.
+
+const ports = {
+  backend: portOption("--backend-port", Number(ambientEnvironment.KADY_PORT || 18000)),
+  frontend: portOption(
+    "--frontend-port",
+    Number(ambientEnvironment.KADY_FRONTEND_PORT || 13000),
+  ),
+  engine: portOption(
+    "--engine-port",
+    Number(
+      ambientEnvironment.KADY_PIPELINE_ENGINE_PORT ||
+        ambientEnvironment.KADY_ARCHON_PORT ||
+        13091,
+    ),
+  ),
+};
+if (!ambientEnvironment.KADY_PIPELINE_ENGINE_PORT && ambientEnvironment.KADY_ARCHON_PORT) {
+  console.warn(
+    "[deprecated] KADY_ARCHON_PORT is deprecated; use KADY_PIPELINE_ENGINE_PORT instead.",
+  );
+}
+if (new Set(Object.values(ports)).size !== 3) fail("Preview ports must be distinct.");
+
+const initiallyOccupied = await waitForPreviewPortsFree(ports, 15_000);
+if (initiallyOccupied.length > 0) {
+  fail(
+    `Preview ports are still occupied after the startup free-port barrier: ${formatOccupiedPorts(initiallyOccupied)}`,
+  );
+}
 
 const realNpm = commandPath("npm");
 const realGit = commandPath("git");
@@ -197,19 +271,39 @@ const { launchRoot, shimDirectory } = createLaunchOverlay(
   realNpm,
   realGit,
 );
-const environment = previewEnvironment(stateRoot, launchRoot, shimDirectory, ports);
-const vendoredDistEnvironment = previewVendoredDistEnvironment(
+preparePreviewWebRoot(repositoryRoot, launchRoot, previewGeneration, { stateRoot, ports });
+projectionPrepared = true;
+const environment = previewEnvironment(
   stateRoot,
+  launchRoot,
   shimDirectory,
-  ports.engine,
+  ports,
+  ambientEnvironment,
+  previewGeneration,
 );
+// Same allowlisted ambient values the launcher will see, so the prebuilt
+// manifest's build-env fingerprint matches the launcher's re-check exactly.
+const vendoredDistEnvironment = previewPrebuildEnvironment(
+  previewVendoredDistEnvironment(
+    stateRoot,
+    shimDirectory,
+    ports.engine,
+    allowlistedPreviewEnvironment(ambientEnvironment),
+  ),
+);
+replaceProcessEnvironment(environment);
 const logPath = path.join(stateRoot, "preview.log");
 const serviceStatePath = environment.KADY_PREVIEW_SERVICE_STATE_FILE;
-fs.writeFileSync(serviceStatePath, `${JSON.stringify({ version: 1, services: {} }, null, 2)}\n`, {
+fs.writeFileSync(serviceStatePath, `${JSON.stringify({
+  version: 2,
+  generation: previewGeneration,
+  services: {},
+}, null, 2)}\n`, {
   mode: 0o600,
 });
 
 let rootProcess;
+let lifecycleState;
 try {
   runPushBlockProbe(realGit, environment);
   prepareVendoredDist({
@@ -227,9 +321,16 @@ try {
   if (!Number.isSafeInteger(rootProcess.pid) || rootProcess.pid < 1) {
     throw new Error("Preview launcher did not report a valid root PID.");
   }
-
-  const state = {
-    version: 1,
+  const rootIdentity = previewPidStartIdentity(rootProcess.pid);
+  const rootProcessRecord = {
+    pid: rootProcess.pid,
+    pgid: processGroupId(rootProcess.pid),
+    identity: rootIdentity,
+    generation: previewGeneration,
+  };
+  lifecycleState = {
+    version: 2,
+    generation: previewGeneration,
     repositoryRoot,
     stateRoot,
     launchRoot,
@@ -237,12 +338,19 @@ try {
     piAgentDirectory: environment.PI_CODING_AGENT_DIR,
     workflowSupervisorDirectory: environment.KADY_WORKFLOW_SUPERVISOR_DIR,
     serviceStatePath,
-    rootPid: rootProcess.pid,
+    rootProcess: rootProcessRecord,
     ports,
     logPath,
     startedAt: new Date().toISOString(),
   };
-  fs.writeFileSync(stateFile, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+  updatePreviewWebProjectionMarker(repositoryRoot, previewGeneration, {
+    rootProcess: rootProcessRecord,
+    serviceStatePath,
+  });
+  publishPreviewStateFile(stateFile, lifecycleState);
+  statePublished = true;
+  const gateFile = environment.KADY_PREVIEW_START_GATE_FILE;
+  publishPreviewStartGate(gateFile, previewGeneration);
 
   await waitForPreviewReadiness({
     launcherProcess: rootProcess,
@@ -258,8 +366,9 @@ try {
       {
         role: "frontend",
         label: "web",
-        url: `http://127.0.0.1:${ports.frontend}/`,
+        url: `http://127.0.0.1:${ports.frontend}/api/preview-health`,
         timeoutMs: 180_000,
+        expectedGeneration: previewGeneration,
       },
       {
         role: "pipeline-engine",
@@ -268,8 +377,35 @@ try {
         timeoutMs: 120_000,
       },
     ],
+    expectedGeneration: previewGeneration,
+    validateReady: (serviceStates) => {
+      for (const role of ["backend", "frontend", "pipeline-engine"]) {
+        if (!serviceStates[role]) {
+          throw new Error(`Preview readiness lacks generation-bound ${role} process state.`);
+        }
+      }
+      const liveGroups = collectRecordedPreviewProcessGroups(
+        repositoryRoot,
+        lifecycleState,
+        serviceStates,
+      );
+      const livePids = new Set(liveGroups.map(({ record }) => record.pid));
+      for (const record of [lifecycleState.rootProcess, ...Object.values(serviceStates)]) {
+        if (!livePids.has(record.pid)) {
+          throw new Error(
+            `Preview readiness process PID ${record.pid} is no longer live for generation ${previewGeneration}.`,
+          );
+        }
+      }
+      assertPreviewServiceListenersOwned(
+        ports,
+        serviceStates,
+        previewGeneration,
+      );
+    },
   });
 
+  releaseLifecycleLock();
   rootProcess.unref();
   console.log("Preview ready:");
   console.log(`  Web:     http://127.0.0.1:${ports.frontend}`);
@@ -280,13 +416,20 @@ try {
   console.log(`  Log:      ${logPath}`);
 } catch (error) {
   let cleanupError = null;
-  if (rootProcess?.pid) {
+  if (lifecycleState) {
     try {
-      await stopFailedLaunch(rootProcess.pid, ports);
+      await stopFailedLaunch(lifecycleState);
+    } catch (caught) {
+      cleanupError = caught;
+    }
+  } else if (rootProcess?.pid) {
+    try {
+      process.kill(-rootProcess.pid, "SIGKILL");
     } catch (caught) {
       cleanupError = caught;
     }
   }
+  preserveFailedLaunchArtifacts = cleanupError !== null;
   console.error(`Preview failed: ${error instanceof Error ? error.message : String(error)}`);
   if (cleanupError) {
     console.error(

@@ -1,7 +1,7 @@
-import path from "node:path";
 import { applyEnvFile } from "../../../../env-file.mjs";
 import { getModelRuntime } from "../../agent/session-registry.ts";
 import { REPO_ROOT } from "../../config.ts";
+import { environmentFilePaths } from "../../environment-files.ts";
 import {
   isWorkflowSupervisorCredentialKey,
   type WorkflowSupervisorCredentialKey,
@@ -18,11 +18,7 @@ const CREDENTIAL_ENV_NAMES: Record<
   nvidia: ["NVIDIA_API_KEY"],
 };
 
-const ENV_FILES = [
-  path.join(REPO_ROOT, ".env"),
-  path.join(REPO_ROOT, "kady_agent", ".env"),
-  path.join(REPO_ROOT, "server", ".env"),
-] as const;
+const ENV_FILES = environmentFilePaths(REPO_ROOT);
 
 /**
  * Reload only user-managed provider keys after Settings persisted them. No

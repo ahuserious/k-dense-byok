@@ -4,7 +4,10 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { isWithin } from "./path-containment.ts";
 import { activePaths } from "./projects.ts";
+
+export { isWithin } from "./path-containment.ts";
 
 export const USER_HIDDEN_NAMES = new Set(["AGENTS.md", "GEMINI.md", "uv.lock"]);
 
@@ -18,16 +21,6 @@ export class SandboxError extends Error {
     super(message);
     this.statusCode = statusCode;
   }
-}
-
-/** Lexical containment check on resolved absolute paths. Case-insensitive on
- *  Windows to match NTFS semantics. */
-export function isWithin(root: string, target: string): boolean {
-  if (process.platform === "win32") {
-    root = root.toLowerCase();
-    target = target.toLowerCase();
-  }
-  return target === root || target.startsWith(root + path.sep);
 }
 
 /** Convert a native relative path to the API wire format (forward slashes).

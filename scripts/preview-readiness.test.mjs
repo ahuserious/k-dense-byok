@@ -1,11 +1,80 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
-import { waitForPreviewReadiness } from "./preview-readiness.mjs";
+import {
+  probePreviewService,
+  readPreviewServiceStateSnapshot,
+  waitForPreviewReadiness,
+} from "./preview-readiness.mjs";
 
 function service(role, timeoutMs = 1_000) {
   return { role, label: role, url: `http://preview.invalid/${role}`, timeoutMs };
 }
+
+test("distinguishes missing, unreadable, and malformed service-state files", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-service-state-"));
+  try {
+    assert.equal(
+      readPreviewServiceStateSnapshot(path.join(temporaryRoot, "missing.json")).status,
+      "missing",
+    );
+    assert.equal(readPreviewServiceStateSnapshot(temporaryRoot).status, "unreadable");
+    const malformedFile = path.join(temporaryRoot, "malformed.json");
+    fs.writeFileSync(malformedFile, "{");
+    assert.equal(readPreviewServiceStateSnapshot(malformedFile).status, "malformed");
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("includes a bounded unhealthy response body in readiness evidence", async () => {
+  const result = await probePreviewService(
+    service("frontend"),
+    async () => ({
+      ok: false,
+      status: 503,
+      text: async () => JSON.stringify({
+        error: "Preview web source drift detected at /checkout/web/src/app/page.tsx",
+      }),
+    }),
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.detail, /HTTP 503/);
+  assert.match(result.detail, /web\/src\/app\/page\.tsx/);
+});
+
+test("requires the frontend health body to match the preview generation", async () => {
+  const result = await probePreviewService(
+    { ...service("frontend"), expectedGeneration: "generation-new" },
+    async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ status: "ok", generation: "generation-old" }),
+    }),
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.detail, /generation generation-old does not match generation-new/);
+});
+
+test("does not declare readiness until generation-bound process validation passes", async () => {
+  let validations = 0;
+  await waitForPreviewReadiness({
+    services: [service("backend")],
+    launcherProcess: { pid: 10, exitCode: null, signalCode: null },
+    probe: async () => ({ ok: true, detail: "HTTP 200" }),
+    readServiceStates: () => ({ backend: { generation: "generation-one" } }),
+    validateReady: () => {
+      validations += 1;
+      if (validations === 1) throw new Error("identity pending");
+    },
+    now: () => 0,
+    pause: async () => {},
+  });
+  assert.equal(validations, 2);
+});
 
 test("ignores a transient launcher exit while service probes are still converging", async () => {
   const attempts = new Map();
