@@ -200,6 +200,16 @@
     ],
     "R1": [
       ".gitignore"
+    ],
+    "C4": [
+      "docs/inventory/c4-cas.json",
+      "server/test/workflow-store.test.ts",
+      "server/test/dag-workflows-api.test.ts",
+      "web/src/lib/dag-workflows.test.ts",
+      "server/test/chat-turn-runs-adapter.test.ts",
+      "server/test/raindrop-context.test.ts",
+      "server/test/steer-abort.test.ts",
+      "server/test/workflow-controller.test.ts"
     ]
   },
   "handoffs": [
@@ -531,6 +541,55 @@
       "date": "2026-08-16",
       "path": "server/src/workflows/supervisor/client.ts",
       "scope": "onOwnership callback invoked immediately when a supervisor process is acquired (spawned or inherited) \u2014 no other change"
+    },
+    {
+      "from": "S5",
+      "to": "C4",
+      "date": "2026-08-16",
+      "path": "server/src/workflows/store.ts",
+      "scope": "definition CAS outcome core (create/update/upsert intent evaluated inside the mutation lock before hash equality)"
+    },
+    {
+      "from": "S4",
+      "to": "C4",
+      "date": "2026-08-16",
+      "path": "server/src/api/dag-workflows.ts",
+      "scope": "PUT /dag-workflows CAS status/ETag matrix (201 only for created; 409 on stale-identical and absent+If-Match:\"0\")"
+    },
+    {
+      "from": "S1",
+      "to": "C4",
+      "date": "2026-08-16",
+      "path": "web/src/lib/dag-workflows.ts",
+      "scope": "client sends the chosen precondition header and consumes the outcome shape"
+    },
+    {
+      "from": "S1b",
+      "to": "C4",
+      "date": "2026-08-16",
+      "path": "web/src/components/dag-workflows-panel.tsx",
+      "scope": "panel consumes the CAS outcome shape"
+    },
+    {
+      "from": "S1b",
+      "to": "C4",
+      "date": "2026-08-16",
+      "path": "web/src/components/dag-workflows-panel.test.tsx",
+      "scope": "panel CAS outcome regression"
+    },
+    {
+      "from": "S10",
+      "to": "C4",
+      "date": "2026-08-16",
+      "path": "server/test/dag-workflow-templates.test.ts",
+      "scope": "template setup through the compatibility facade"
+    },
+    {
+      "from": "S11",
+      "to": "C4",
+      "date": "2026-08-16",
+      "path": "e2e/fixtures.ts",
+      "scope": "browser mock sends the chosen header and returns the new CAS shape"
     }
   ]
 }

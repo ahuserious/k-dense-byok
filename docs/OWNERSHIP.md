@@ -11,6 +11,7 @@ inventory path is owned exactly once.
 | C3 | Hosted and live E2E evidence | `playwright.{cloud,live-alt}.config.ts`; `scripts/hosted-evidence-*.mjs`; reviewed handoffs from C1, R1, and S11 listed in the policy. |
 | C5 | Preview credential and environment-root isolation | `config/token-ban.json`; `server/src/{env,environment-files,legacy-engine-data,path-containment,projects,sandbox-fs}.ts`; `server/src/api/credentials.ts`; `server/test/{credential-env-isolation,env-isolation}.test.ts`; reviewed handoffs from C1, R1, S4, and S11 listed in the policy. |
 | R1 | Orchestrator-held shared root files (policy files are handled separately as policy-controlled paths) | `.gitignore`; handed off to lanes for scoped edits (see handoffs). |
+| C4 | Definition CAS prerequisite (S4 design §C4) | `docs/inventory/c4-cas.json`; the previously un-inventoried tests `server/test/{workflow-store,dag-workflows-api,chat-turn-runs-adapter,raindrop-context,steer-abort,workflow-controller}.test.ts`, `web/src/lib/dag-workflows.test.ts`; product paths via reviewed handoffs from S5, S4, S1, S1b, S10, S11 (returned per the design's post-C4 return map). |
 | S1 | Consolidation and typed-surface removal | `web/src/app/page.tsx`; `web/src/components/{workspace-navigation,persistent-workspace-surfaces,dag-builder-surface,dag-builder,dag-builder-canvas,dag-builder-inspector,dag-workflow-console}.{ts,tsx}`; `web/src/lib/{workspace-persistence,dag-workflow-builder,dag-workflows}.ts` |
 | S1b | Scientific Pipelines cross-engine registry | `web/src/components/dag-workflows-panel.tsx`; `web/src/components/dag-workflows-panel.test.tsx`; `web/src/lib/scientific-pipeline-registry.ts`; `web/src/lib/scientific-pipeline-registry.test.ts`; `server/test/pipeline-engine-client.test.ts`; `docs/lanes/S1b-INTEGRATION.md` |
 | S2 | Vendor integration and naming sweep | `start.mjs`; `server/src/agent/pipeline-engine/**`; `server/src/agent/skills.ts`; `web/src/components/{pipelines-panel,pipeline-builder-panel,engine-iframe-panel}.tsx`; `web/src/lib/{engine-config,embed-config,pipelines}.ts`; vendor attribution files (`LICENSE`, `NOTICE*`, `VENDORED-FROM.md`) |
@@ -44,6 +45,13 @@ A handoff lets the recipient lane edit a path another lane owns, for the stated 
 | S11 | C1 | `scripts/preview-launcher-observer.test.mjs` | workflow-engine readiness and fatal-exit observer regression coverage; workflow-supervisor role recording |
 | S7 | C1 | `server/src/index.ts` | kady-supervisor IPC message (supervisor pid reported to the launcher parent) — no other change |
 | S5 | C1 | `server/src/workflows/supervisor/client.ts` | onOwnership callback invoked immediately when a supervisor process is acquired (spawned or inherited) — no other change |
+| S5 | C4 | `server/src/workflows/store.ts` | definition CAS outcome core (create/update/upsert intent evaluated inside the mutation lock before hash equality) |
+| S4 | C4 | `server/src/api/dag-workflows.ts` | PUT /dag-workflows CAS status/ETag matrix (201 only for created; 409 on stale-identical and absent+If-Match:"0") |
+| S1 | C4 | `web/src/lib/dag-workflows.ts` | client sends the chosen precondition header and consumes the outcome shape |
+| S1b | C4 | `web/src/components/dag-workflows-panel.tsx` | panel consumes the CAS outcome shape |
+| S1b | C4 | `web/src/components/dag-workflows-panel.test.tsx` | panel CAS outcome regression |
+| S10 | C4 | `server/test/dag-workflow-templates.test.ts` | template setup through the compatibility facade |
+| S11 | C4 | `e2e/fixtures.ts` | browser mock sends the chosen header and returns the new CAS shape |
 | S2 | C1 | `start.mjs` | vendored-dist build, engine-port ownership, readiness, and disabled-state sections; forced-shutdown ownership of the backend's detached workflow supervisor (second explicit signal) and process-group retirement |
 | S2 | C1 | `server/src/agent/pipeline-engine/client.ts` | launcher-disabled fail-before-fetch guard |
 | S5 | C1 | `server/src/config.ts` | explicit pipeline-engine disabled configuration sentinel |
