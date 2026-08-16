@@ -15,16 +15,56 @@ node scripts/preview-down.mjs
 
 Before opening any sockets, `preview-up` runs
 `node scripts/vendored-dist-build.mjs --if-stale`. The build script invokes
-`bun run build:web` from `server/vendor/pipeline-engine/`, which is the
-vendored Bun workspace owning `bun.lock` and filters the build to the web
-package. It then re-runs the fail-closed freshness check. This produces the
-ignored `packages/web/dist/` required by the workflow-engine server in a fresh
-clone without committing generated assets.
+`bun run build -- --outDir <staging-dir>` from
+`server/vendor/pipeline-engine/packages/web/`, which runs the web package's existing
+`tsc --noEmit && vite build` script while directing Vite into a staging tree.
+The build receives the selected engine port as `PORT`; ambient
+variables are not inherited. Its strict allowlist contains only the isolated
+`HOME`, PATH-first Node/Bun/Git shims, `NODE_ENV`, `PORT`, isolated `TMPDIR`,
+and optional `LANG`/`CI`. Preview creates that isolation and proves the Git
+transport block before running the prebuild.
+
+After Vite succeeds, the wrapper writes the ignored
+`packages/web/dist/.vendored-dist-manifest.json`. Its schema-1 record contains:
+
+- a SHA-256 fingerprint and per-file hashes for the complete enumerated input
+  set, including web source/public/config/env files, the core and workflows
+  package trees, every workspace package manifest/TypeScript config,
+  `bunfig.toml`, the workspace package/lock/env files, and Bun/Node versions;
+- the outer repository's full Git HEAD, or the literal `unknown` when Git
+  identity is unavailable;
+- the names and values of the non-credential Vite build environment inputs
+  `NODE_ENV` and `PORT`;
+- the dependency-install stamp derived from `bun.lock`, `bunfig.toml`, the
+  workspace root and package manifests, and the Bun version;
+- the relative path, SHA-256, and byte count for every regular output file.
+
+The wrapper runs `bun install --frozen-lockfile` when either the ignored
+`.web-built` record or the install-owned `node_modules/.bun-install-stamp`
+differs. The stamp covers every workspace package manifest and is written only
+when the install-input digest is unchanged before and after Bun runs. A
+checkout-specific directory lock records the owner PID/start identity and
+heartbeat; an existing lock is never reclaimed automatically, regardless of
+age or a dead PID. Builders revalidate ownership immediately before Bun
+can mutate dependencies and before dist promotion. Contenders wait for the
+owner and recheck freshness. Builds publish by renaming a fully validated
+staging tree instead of rewriting live `dist/`.
+The wrapper fingerprints inputs both before and after Bun runs and writes no
+manifest when those fingerprints differ. The post-build check recomputes that
+context, validates every recorded output, and verifies every browser-loaded
+local URL referenced by `dist/index.html`: `src`, `href`, `srcset`,
+`imagesrcset`, `poster`, object `data`, and CSS `url()` in style attributes and
+blocks, including root-local files such as `/favicon.png`.
+Missing roots, symlinks, a missing manifest, Git/environment drift, changed
+inputs, partial outputs, and broken asset references all fail closed. This
+produces the bundle required by the workflow-engine server in a fresh clone
+without committing generated assets or trusting filesystem timestamp
+resolution.
 
 Use `--no-build-dist` only when a caller has already built the bundle. The
 option skips compilation, not validation: `preview-up` still exits before boot
-when `dist/index.html` is missing or older than a build input. The standalone
-commands are:
+when the manifest, build context, or any recorded/referenced output fails
+validation. The standalone commands are:
 
 ```bash
 npm run check:vendored-dist
@@ -32,13 +72,122 @@ npm run build:vendored-dist
 node scripts/vendored-dist-build.mjs --if-stale
 ```
 
+### Build lock and recovery
+
+All normal launches and previews rendezvous on the checkout-local lock directory
+`server/vendor/pipeline-engine/node_modules/.vendored-dist-lock/build.lock.d`.
+The holder creates that directory with `mkdir` (atomic; `EEXIST` means busy)
+and publishes `owner.json` via a temporary file plus rename. The record contains
+`version`, the owner PID, a host- and boot-scoped process-start identity,
+`phase`, every active Bun install/build worker, `createdAt`, and `heartbeatAt`.
+Release unlinks `owner.json` and removes the directory. There are no hard
+links, recovery guards, tombstones, or nlink checks.
+
+Any existing lock directory is busy. The build and launcher paths report the
+owner record, or `unreadable owner record`, then poll until the deadline and
+print the actionable recovery command. There is no automatic reclaim on a dead
+PID, on age, or on anything else. CI uses a fresh checkout; a local crash is
+one operator command. That removes every check-then-act reclaim race by
+construction.
+
+Linux identities use `/proc/<pid>/stat` field 22 plus the kernel boot ID;
+macOS identities use `ps` start time under fixed `LC_ALL=C` and `TZ=UTC0`.
+Identity methods are never compared across representations. Host scope is
+checked before probing a PID: another host is always busy, and a different
+boot ID on the same host proves the old process is gone. The checkout must be
+used by one host, one PID namespace, and a local filesystem. Containers or VMs
+that share this checkout, shared/network filesystems, and cross-host builders
+are unsupported and therefore fail closed as busy.
+
+Release unlinks `owner.json` and then `rmdir`s the directory. An `ENOTEMPTY`
+there — a temporary owner file left behind by an interrupted write — is not an
+error: the empty-of-owner directory stays, and every later launcher and builder
+reads it as BUSY with an `unreadable owner record`. Recovering from that state
+is the same one operator command, `--recover-lock` (with `--force`, because the
+owner record is gone; see below).
+
+`--recover-lock` is the only recovery path. A parseable `owner.json` is removed
+only when the recorded wrapper PID and every recorded worker PID are dead by
+the identity rules (same host and boot, then `ESRCH`). A host mismatch or any
+unverifiable identity refuses recovery. If the directory is not empty once that
+owner record is removed, recovery stops and prints the dirty path with its
+remaining entries instead of deleting a tree it does not own; the lock stays
+BUSY (now as an unreadable owner record) until the operator inspects those
+entries and re-runs with `--force`. A missing or unreadable owner record also
+refuses unless the operator adds `--force` and the occupant proof below finds
+nothing. That `--force` path is an operator-confirmed action:
+
+```bash
+node scripts/vendored-dist-build.mjs --recover-lock
+node scripts/vendored-dist-build.mjs --recover-lock --force
+```
+
+The `--force` occupant proof is fail-closed and has two independent parts:
+
+- any process whose working directory is the vendored root or below it counts,
+  whatever its command name — the POSIX gate waiter is `sh`, and Bun's build
+  spawns `tsc`/`vite` children;
+- any `node`/`bun` process whose command line contains the vendored root
+  counts. The root is matched as a fixed string: `pgrep -f` takes an extended
+  regular expression, so the path's metacharacters are escaped before the
+  search. Non-node/bun commands that merely name the path (an editor, a `grep`)
+  do not block recovery.
+
+A proof command that cannot run — missing `pgrep`/`lsof`, a timeout, a signal
+death — refuses recovery rather than reporting zero occupants.
+
+SCOPE LIMIT: a mutator that changed its working directory away from the
+vendored root and does not name the root in its arguments is invisible to both
+parts of the proof. `--force` therefore remains an operator assertion that the
+build is really dead; it is not a proof of exclusivity.
+
+On Windows the CLI refuses `--recover-lock` (including `--force`): the gate
+helper cannot prove the identity of the eventual Bun mutator. Any existing
+lock directory remains busy. Close every Kady and Bun process, verify no build
+worker remains, then manually remove `build.lock.d`. This lane has no Windows
+CI coverage; Windows therefore uses this documented fail-closed limit rather
+than an unverified recovery path.
+
+The primary `start.mjs` launcher delegates dependency synchronization and the
+freshness-aware `--if-stale` build to that locked wrapper. Preview mode is
+check-only: the isolated prebuild is the sole builder, and the launcher fails
+with `preview prebuild should have produced a fresh manifest` if a computed
+fingerprint using the prebuild's `NODE_ENV`, `PORT`, or `TMPDIR` values does not
+validate. Build-only defaults such as `NODE_ENV=production` are passed only to
+Bun/Vite and the manifest checker; they are never exported to the launcher,
+npm, backend, or frontend. It reuses a listener
+only when the PID belongs to this checkout, the health endpoint responds, and
+the manifest is fresh. A newly spawned engine is not marked available until a
+listener in that child's process tree answers health and remains owned after
+the response. Engine-port ownership is checked before backend/frontend spawn;
+a foreign listener aborts startup rather than becoming the backend's proxy
+target. A later engine exit or listener takeover terminates the launch instead
+of leaving consumers pointed at a dead or foreign process. When the optional
+engine is unavailable, the backend receives an explicit disabled state and
+pipeline routes—including durable-admission reconciliation—return 503 without
+fetching the configured engine URL. Missing Bun still skips the engine, and a
+build/validation failure warns with the repair command above and lets the rest
+of Kady continue. CLI engine-port selection takes precedence, but `.env` modern
+and legacy port values are loaded before the launcher resolves the fallback.
+
 `preview-up` creates a unique `/tmp/kady-preview-*` directory, including fresh
 project, Pi-agent, skills-cache, workflow-supervisor, and log paths. It creates
-a launch overlay with a blank `.env`, so the repository `.env` and its provider
-credentials are not loaded. The overlay symlinks the checked-out `server/` and
-`web/` trees and runs the checkout's exact `start.mjs` and `env-file.mjs` bytes.
-Dependencies must already be installed; the preview npm shim suppresses the
-launcher's update lookup and forces npm offline.
+a launch overlay with a blank `.env`, which prevents the copied launcher from
+loading the repository file directly. However, the symlinked server currently
+resolves its physical checkout path and can reload the checkout's real `.env`;
+credential writes can also target that file. This confirmed server-side defect
+is assigned to lane C5 (`server/src/env.ts`, the credentials writer, and preview
+env-root wiring). Until C5 lands, the preview is not a credential-isolation
+boundary. The overlay symlinks the checked-out `server/` and `web/` trees and
+runs the checkout's exact `start.mjs` and `env-file.mjs` bytes.
+It also includes a minimal `scripts/` directory containing byte-exact copies of
+the three `vendored-dist-*.mjs` modules required by the launcher. Those modules
+validate and build against the checkout resolved through the `server/` symlink,
+so the overlay neither exposes `.git` nor substitutes `gitHead: "unknown"`.
+The preview npm shim allows only the launcher's exact `npm run prep --silent`
+command and rejects every other npm invocation, including install, CI, prune,
+update, exec, and rebuild operations. The vendored wrapper independently
+performs stamp-driven frozen Bun installs when required.
 
 The effective environment includes:
 
@@ -48,14 +197,27 @@ The effective environment includes:
   `PI_CODING_AGENT_DIR`, `KADY_SKILLS_CACHE_DIR`, and workflow-supervisor paths;
 - `KADY_SKILLS_REPO=kady-preview-nonexistent/none` and a blank
   `TELEGRAM_BOT_TOKEN`;
-- scrubbed ambient variables whose names contain API-key, token, secret,
-  password, or credential markers.
+- isolated launcher `HOME`, `PATH`, and `TMPDIR`; `NODE_ENV` is absent unless
+  the caller explicitly supplied it;
+- a separately computed strict vendored-build environment (`HOME`, `PATH`,
+  build-only `NODE_ENV`, `PORT`, `TMPDIR`, and optional `LANG`/`CI`) used only
+  by the prebuild and freshness checker;
+- scrubbed ambient variables for non-build preview services; the scrubber also
+  removes auth/PAT/key/token/secret/password/credential names and common
+  database secrets such as `PGPASSWORD`, `MYSQL_PWD`, and `DATABASE_URL`.
 
 The example values are in `deploy/preview/preview.env.example`; `preview-up`
 replaces the state paths with its unique temporary root. Startup succeeds only
 after the backend `/health`, web root, and workflow engine `/api/health` all
 answer successfully. It then prints those URLs, the spawned root PID, and the
 log location.
+
+Preview startup never runs `npm install`. It requires the already-installed
+backend `tsx` and frontend `next` entrypoints. When `web/tsconfig.json` exists,
+it also requires TypeScript plus the React and Node type packages that Next
+would otherwise try to repair automatically. Preview fails clearly before
+launch when any required package is missing. Normal `start.mjs` launches retain
+their existing install/update behaviour.
 
 ## Push block
 
@@ -80,6 +242,18 @@ shape, root PID, and launch working directory before signaling anything. It
 sends `SIGTERM` to the recorded launcher's process group. `start.mjs` then uses
 its normal backend IPC drain and detached-child group teardown. A second signal
 is used only if the owned tree does not quiesce within 90 seconds.
+
+The launcher has exactly one exit owner. The first explicit signal starts the
+graceful shutdown; a second latches forced mode and hands the exit to the
+forced-shutdown coordinator. When a force cannot be verified — a supervisor
+group that will not die, or an owned process group still alive after the force
+deadline — the launcher prints `forced shutdown incomplete: …; send another
+signal to retry` and deliberately stays alive so a later signal retries it.
+Every other path that would otherwise end the process defers to that
+coordinator while the retry hold is in place: the graceful shutdown, the
+boot-time caller that is still inside the workflow engine's build/readiness
+window, and `fail()`. A launcher that exits during the hold would abandon the
+owned supervisor trees the hold exists to reap.
 
 Afterward, `preview-down` runs scoped `pgrep -f` checks for
 `kady-workflow-supervisor`, `tsx/dist/preflight.cjs`, and

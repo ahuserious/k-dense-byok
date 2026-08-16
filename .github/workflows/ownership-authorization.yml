@@ -1,0 +1,40 @@
+name: Ownership authorization
+
+on:
+  pull_request_target:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  trusted-base-authorization:
+    name: trusted base changed-path authorization
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out trusted base only
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Fetch candidate commit without checking it out
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: git fetch --no-tags --no-recurse-submodules origin "$HEAD_SHA"
+      - name: Authorize candidate paths with trusted base code and policy
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_ACTOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          writer="$(node scripts/ownership-check.mjs \
+            --resolve-writer \
+            --actor "$PR_ACTOR" \
+            --head-ref "$HEAD_REF" \
+            --mapping docs/inventory/lane-writers.json)"
+          node scripts/ownership-check.mjs --writer "$writer" --base "$BASE_SHA" --head "$HEAD_SHA"

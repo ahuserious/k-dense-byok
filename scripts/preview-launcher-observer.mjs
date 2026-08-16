@@ -1,18 +1,22 @@
 const OBSERVER_HELPER_ANCHOR = "const sleep = (ms) => new Promise((r) => setTimeout(r, ms));";
-const SERVICE_EXIT_ANCHOR = `  children.push(child);
-  // Fires for both exit-code and signal deaths, during boot and after.
+const SERVICE_SPAWN_ANCHOR = `  registerChild(child, role);
+  if (role === "backend") {`;
+const SERVICE_EXIT_ANCHOR = `  // Fires for both exit-code and signal deaths, during boot and after.
   child.on("exit", () => {`;
-const ENGINE_EXIT_ANCHOR = `  children.push(child);
-  // Unlike the backend/frontend, an engine death is a degradation, not a
-  // launcher failure: the /pipelines proxy answers 503 while it is down.
-  child.on("exit", () => {`;
+const ENGINE_SPAWN_ANCHOR = `  registerChild(child, "pipeline-engine");
+  let childExited = false;
+  const trackEarlyExit = () => {
+    childExited = true;
+  };`;
+const SUPERVISOR_OWNERSHIP_ANCHOR =
+  "      const result = recordSupervisorOwnership(forcedSupervisorOwners, message.pid, identity);";
 
 const OBSERVER_HELPER = `
 
 // The hermetic preview overlay sets this path. The repository launcher stays
 // unchanged; only its disposable copy records direct service process events.
 const previewServiceStateFile = process.env.KADY_PREVIEW_SERVICE_STATE_FILE;
-function recordPreviewServiceState(role, pid, state, exitCode = null, signal = null) {
+function recordPreviewServiceState(role, pid, state, exitCode = null, signal = null, details = {}) {
   if (!previewServiceStateFile) return;
   let current = { version: 1, services: {} };
   try {
@@ -21,17 +25,23 @@ function recordPreviewServiceState(role, pid, state, exitCode = null, signal = n
     // The preview owns this new state file; an absent initial file is safe.
   }
   current.services ??= {};
+  const previous = current.services[role];
+  if (state === "spawned" && previous?.pid === pid && previous.state === "exited") return;
   current.services[role] = {
     role,
     pid,
     state,
     exitCode,
     signal,
+    ...details,
     updatedAt: new Date().toISOString(),
   };
   const temporaryPath = \`\${previewServiceStateFile}.\${process.pid}.tmp\`;
   fs.writeFileSync(temporaryPath, \`\${JSON.stringify(current, null, 2)}\\n\`, { mode: 0o600 });
   fs.renameSync(temporaryPath, previewServiceStateFile);
+}
+function recordPreviewEngineExit(child, exitCode, signal) {
+  recordPreviewServiceState(child.kadyRole, child.pid, "exited", exitCode, signal);
 }`;
 
 function replaceExactlyOnce(source, anchor, replacement, label) {
@@ -51,23 +61,45 @@ export function instrumentPreviewLauncher(source) {
   );
   instrumented = replaceExactlyOnce(
     instrumented,
-    SERVICE_EXIT_ANCHOR,
-    `  children.push(child);
+    SERVICE_SPAWN_ANCHOR,
+    `  registerChild(child, role);
   recordPreviewServiceState(child.kadyRole, child.pid, "spawned");
-  // Fires for both exit-code and signal deaths, during boot and after.
-  child.on("exit", (exitCode, signal) => {
-    recordPreviewServiceState(child.kadyRole, child.pid, "exited", exitCode, signal);`,
-    "backend/frontend service hook",
+  if (role === "backend") {`,
+    "backend/frontend service spawn hook",
   );
-  return replaceExactlyOnce(
+  instrumented = replaceExactlyOnce(
     instrumented,
-    ENGINE_EXIT_ANCHOR,
-    `  children.push(child);
-  recordPreviewServiceState(child.kadyRole, child.pid, "spawned");
-  // Unlike the backend/frontend, an engine death is a degradation, not a
-  // launcher failure: the /pipelines proxy answers 503 while it is down.
+    SERVICE_EXIT_ANCHOR,
+    `  // Fires for both exit-code and signal deaths, during boot and after.
   child.on("exit", (exitCode, signal) => {
     recordPreviewServiceState(child.kadyRole, child.pid, "exited", exitCode, signal);`,
-    "workflow-engine service hook",
+    "backend/frontend service exit hook",
   );
+  instrumented = replaceExactlyOnce(
+    instrumented,
+    ENGINE_SPAWN_ANCHOR,
+    `  registerChild(child, "pipeline-engine");
+  recordPreviewServiceState(child.kadyRole, child.pid, "spawned");
+  child.on("exit", (exitCode, signal) => recordPreviewEngineExit(child, exitCode, signal));
+  let childExited = false;
+  const trackEarlyExit = () => {
+    childExited = true;
+  };`,
+    "workflow-engine spawn hook",
+  );
+  instrumented = replaceExactlyOnce(
+    instrumented,
+    SUPERVISOR_OWNERSHIP_ANCHOR,
+    `${SUPERVISOR_OWNERSHIP_ANCHOR}
+      recordPreviewServiceState(
+        "workflow-supervisor",
+        message.pid,
+        "spawned",
+        null,
+        null,
+        { identity },
+      );`,
+    "workflow-supervisor ownership hook",
+  );
+  return instrumented;
 }

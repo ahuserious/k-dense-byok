@@ -108,6 +108,10 @@ export const PIPELINE_ENGINE_BASE_URL =
     "KADY_ARCHON_PORT",
   ) ?? "3091"}`;
 
+/** Explicit launcher-owned disabled state; avoids attempting a proxied fetch. */
+export const PIPELINE_ENGINE_DISABLED =
+  process.env.KADY_PIPELINE_ENGINE_DISABLED === "1";
+
 /**
  * Base URL of the optional local Raindrop Workshop UI (the OSS agent-trace
  * debugger, an external sibling checkout — NOT vendored). Only the

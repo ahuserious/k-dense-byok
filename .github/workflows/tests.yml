@@ -1,6 +1,8 @@
 name: Tests
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
 
@@ -10,6 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - name: Set up Node
         uses: actions/setup-node@v5
         with:
@@ -22,7 +26,26 @@ jobs:
         working-directory: server/vendor/pipeline-engine
         run: bun install --frozen-lockfile
       - name: Test vendored dist gate
-        run: node --test scripts/vendored-dist-check.test.mjs
+        run: node --test scripts/*.test.mjs
+        env:
+          KADY_SOCKET_TESTS: "1"
+      - name: Check ownership inventory uniqueness
+        run: node scripts/ownership-check.mjs
+      - name: Convenience changed-path check (candidate-controlled; not trusted)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if [[ ! "$HEAD_REF" =~ ^lane/([A-Za-z][A-Za-z0-9]*)- ]]; then
+            echo "ownership-check: FAIL (PR branch must use lane/<id>-<description>)" >&2
+            exit 2
+          fi
+          writer="$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')"
+          node scripts/ownership-check.mjs --writer "$writer" --base "$BASE_SHA"
+      - name: Note changed-path authorization skip on push
+        if: github.event_name == 'push'
+        run: echo "ownership-check changed-path authorization skipped on push; no PR base SHA is available"
       - name: Build vendored builder dist
         run: npm run build:vendored-dist
       - name: Check vendored builder dist freshness

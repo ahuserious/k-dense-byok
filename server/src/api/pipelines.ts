@@ -27,7 +27,7 @@ import {
   PipelineEngineUnavailableError,
   sumRunCost,
 } from "../agent/pipeline-engine/client.ts";
-import { PIPELINE_ENGINE_BASE_URL } from "../config.ts";
+import { PIPELINE_ENGINE_BASE_URL, PIPELINE_ENGINE_DISABLED } from "../config.ts";
 import {
   billingForProvider,
   billingForWorkflowResolution,
@@ -389,7 +389,11 @@ function engineRunSnapshotSha(run: Record<string, unknown>): string | undefined 
 export async function queryEngineRunByAdmissionId(
   projectId: string,
   engineAdmissionKey: string,
+  engineDisabled = PIPELINE_ENGINE_DISABLED,
 ): Promise<AdmissionQueryResult> {
+  if (engineDisabled) {
+    throw new PipelineEngineUnavailableError("Pipeline engine is disabled by the launcher.");
+  }
   let response: Response;
   try {
     response = await fetch(
@@ -637,6 +641,7 @@ export interface PipelineReconciliationWorkerOptions {
   queryAdmission?: (projectId: string, engineAdmissionKey: string) => Promise<AdmissionQueryResult>;
   getRun?: (runId: string) => Promise<unknown>;
   onError?: (error: unknown, admission?: PipelineAdmissionRecordV1) => void;
+  engineDisabled?: boolean;
 }
 
 export class PipelineReconciliationWorker {
@@ -661,6 +666,7 @@ export class PipelineReconciliationWorker {
     if (this.running) return;
     this.running = true;
     try {
+      const engineDisabled = this.options.engineDisabled ?? PIPELINE_ENGINE_DISABLED;
       const projects = this.options.projects?.() ?? listProjects();
       for (const project of projects) {
         recoverPipelineAdmissionIntents(project.id);
@@ -682,6 +688,10 @@ export class PipelineReconciliationWorker {
                 usage: ZERO_PIPELINE_USAGE,
                 reason: "admission owner exited before write-ahead dispatch intent",
               });
+              continue;
+            }
+            if (engineDisabled) {
+              await this.renewIfNeeded(project.id, record.admissionId);
               continue;
             }
             let engineRunId = record.engineRunId;
