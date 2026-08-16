@@ -265,6 +265,22 @@ export interface VersionedDagWorkflowDefinition {
   etag: string | null;
 }
 
+export type DagWorkflowSaveOutcome = "created" | "unchanged" | "updated";
+
+/**
+ * The caller's explicit definition intent. There is no inferred intent: a
+ * create sends `If-None-Match: *`, an update sends `If-Match: "<revision>"`,
+ * and an expected revision of `0` is a legal update precondition that can only
+ * reach the server's missing-record conflict path.
+ */
+export type DagWorkflowSaveIntent =
+  | { kind: "create" }
+  | { kind: "update"; expectedRevision: number };
+
+export interface SavedDagWorkflowDefinition extends VersionedDagWorkflowDefinition {
+  outcome: DagWorkflowSaveOutcome;
+}
+
 export type WorkflowRunStatus =
   | "queued"
   | "running"
@@ -459,6 +475,46 @@ function positiveBoundedInteger(
   return value;
 }
 
+/**
+ * Definition update preconditions accept every non-negative safe integer,
+ * including `0`. `0` never means "create": it is a precondition no persisted
+ * definition can satisfy, so the server answers 409.
+ */
+function nonNegativeSafeInteger(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError(`${label} must be a non-negative safe integer.`);
+  }
+  return value;
+}
+
+const DAG_WORKFLOW_SAVE_OUTCOMES: readonly string[] = ["created", "unchanged", "updated"];
+
+/**
+ * The minimum a caller may rely on from a definition write: a known outcome and
+ * the two fields of the `StoredDagWorkflowDefinition` interface above that
+ * callers read back — `id` to address the workflow and `revision` to seed the
+ * next update precondition. An unknown outcome or an absent revision would
+ * flow on as `undefined` and surface as a RangeError on the *next* save, far
+ * from the malformed response that caused it. The remaining stored fields stay
+ * trusted, as everywhere else in this client.
+ */
+function isSavedDefinitionEnvelope(body: unknown): body is {
+  outcome: DagWorkflowSaveOutcome;
+  definition: StoredDagWorkflowDefinition;
+} {
+  if (!isRecord(body) || !isRecord(body.definition)) return false;
+  if (typeof body.outcome !== "string" || !DAG_WORKFLOW_SAVE_OUTCOMES.includes(body.outcome)) {
+    return false;
+  }
+  const { id, revision } = body.definition;
+  return (
+    typeof id === "string"
+    && typeof revision === "number"
+    && Number.isSafeInteger(revision)
+    && revision >= 0
+  );
+}
+
 export async function listDagWorkflowDefinitions(
   projectId: string,
 ): Promise<DagWorkflowDefinitionSummary[]> {
@@ -484,19 +540,35 @@ export async function saveDagWorkflowDefinition(
   projectId: string,
   workflowId: string,
   graph: WorkflowGraphDocument,
-  expectedRevision?: number,
-): Promise<VersionedDagWorkflowDefinition> {
+  intent: DagWorkflowSaveIntent,
+): Promise<SavedDagWorkflowDefinition> {
   const headers = new Headers({ "Content-Type": "application/json" });
-  if (expectedRevision !== undefined) {
-    headers.set("If-Match", `"${positiveBoundedInteger(expectedRevision, Number.MAX_SAFE_INTEGER, "Expected revision")}"`);
+  if (intent.kind === "create") {
+    headers.set("If-None-Match", "*");
+  } else {
+    headers.set(
+      "If-Match",
+      `"${nonNegativeSafeInteger(intent.expectedRevision, "Expected revision")}"`,
+    );
   }
   const response = await apiFetch(
     `/dag-workflows/${encodeURIComponent(workflowId)}`,
     { method: "PUT", headers, body: JSON.stringify(graph) },
     projectId,
   );
-  const definition = await parseResponse<StoredDagWorkflowDefinition>(response);
-  return { definition, etag: response.headers.get("ETag") };
+  const body = await parseResponse<unknown>(response);
+  if (!isSavedDefinitionEnvelope(body)) {
+    throw new DagWorkflowApiError(
+      response.status,
+      "The workflow definition write returned no valid {outcome, definition} envelope.",
+      "MALFORMED_SAVE_RESPONSE",
+    );
+  }
+  return {
+    outcome: body.outcome,
+    definition: body.definition,
+    etag: response.headers.get("ETag"),
+  };
 }
 
 export async function createDagWorkflowRun(

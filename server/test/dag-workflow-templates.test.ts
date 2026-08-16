@@ -136,7 +136,7 @@ describe("POST-INTEGRATION(S10)", () => {
       const saved = await app.inject({
         method: "PUT",
         url: `/dag-workflows/${template.suggestedWorkflowId}`,
-        headers: { "x-project-id": projectId },
+        headers: { "x-project-id": projectId, "if-none-match": "*" },
         payload: graph,
       });
       expect(saved.statusCode).toBe(201);
@@ -229,7 +229,7 @@ describe("POST-INTEGRATION(S10)", () => {
       const saved = await app.inject({
         method: "PUT",
         url: `/dag-workflows/${graph.id}`,
-        headers: { "x-project-id": projectId },
+        headers: { "x-project-id": projectId, "if-none-match": "*" },
         payload: graph,
       });
       expect(saved.statusCode).toBe(201);
@@ -256,7 +256,7 @@ describe("POST-INTEGRATION(S10)", () => {
         url: `/dag-workflows/${graph.id}`,
         headers: {
           "x-project-id": projectId,
-          "if-match": "1",
+          "if-match": '"1"',
         },
         payload: changedGraph,
       });

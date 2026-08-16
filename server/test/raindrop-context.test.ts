@@ -427,12 +427,13 @@ describe("Raindrop bounded log context", () => {
   });
 
   it("projects only a current-project native DAG run and rejects helper or foreign ids", async () => {
-    await app.inject({
+    const savedRaindropWorkflow = await app.inject({
       method: "PUT",
       url: "/dag-workflows/raindrop-workflow",
-      headers: headers(),
+      headers: { ...headers(), "if-none-match": "*" },
       payload: graph(),
     });
+    expect(savedRaindropWorkflow.statusCode).toBe(201);
     const created = await app.inject({
       method: "POST",
       url: "/dag-workflows/raindrop-workflow/runs",

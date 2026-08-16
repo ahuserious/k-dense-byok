@@ -857,7 +857,11 @@ export function DagWorkflowsPanel({
             workflowName,
             newWorkflowDescription,
           );
-      const saved = await saveDagWorkflowDefinition(projectId, workflowId, graph);
+      // This form only ever creates: a definition that already exists must fail
+      // as a 409 rather than silently overwrite or no-op.
+      const saved = await saveDagWorkflowDefinition(projectId, workflowId, graph, {
+        kind: "create",
+      });
       const savedSummary = summaryFromDefinition(saved);
       setTypedSources((current) => [
         typedWorkflowRegistrySource(savedSummary, saved.definition.graph),
