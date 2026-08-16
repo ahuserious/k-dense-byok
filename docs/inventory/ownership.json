@@ -182,7 +182,7 @@
     "C3": [
       "playwright.cloud.config.ts",
       "playwright.live-alt.config.ts",
-      "scripts/hosted-evidence-manifest*.mjs"
+      "scripts/hosted-evidence-*.mjs"
     ],
     "C5": [
       "config/token-ban.json",
