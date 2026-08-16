@@ -1,0 +1,6 @@
+{
+  "$comment": "Base-controlled mapping of GitHub logins to the lanes they may write. Consumed by .github/workflows/ownership-authorization.yml (pull_request_target, base-only) together with the lane/<id>-* branch prefix; both must agree, otherwise authorization fails closed. Policy-controlled (R1); the orchestrator maintains it on behalf of the owner. Rescue lanes 2026-08-15/16 are driven by the orchestrator on the owner's behalf under the fork account.",
+  "writers": {
+    "ahuserious": ["C1", "C3", "C5", "C4", "C2b", "R1"]
+  }
+}
