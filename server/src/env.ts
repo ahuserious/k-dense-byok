@@ -2,25 +2,34 @@
  * Minimal .env loader (no dependency). Imported FIRST in entry points so
  * process.env is populated before config.ts reads it.
  *
- * Looks for a .env in the repo root and the legacy `kady_agent/.env` (so
- * existing users' keys keep working). Existing process.env values win —
- * when the app is started via start.mjs the launcher has already loaded
- * .env (with .env-wins precedence, like the old `set -a; source .env`).
- * The parser itself is shared with the launcher: repo-root env-file.mjs.
+ * KADY_ENV_FILE selects an explicit absolute env file. KADY_PREVIEW=1 makes
+ * that file exclusive, so preview processes never fall through to checkout
+ * env files. Outside preview mode the configured file is loaded first, then
+ * the repo-root `.env`, legacy `kady_agent/.env`, and `server/.env` paths. With
+ * no KADY_ENV_FILE, normal launch behavior is unchanged. Existing process.env
+ * values always win; start.mjs may already have loaded `.env` with override
+ * precedence. The parser itself is shared with the launcher: repo-root
+ * env-file.mjs.
  */
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { applyEnvFile } from "../../env-file.mjs";
+import { environmentFilePaths } from "./environment-files.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "..", "..");
 
-// Later files do not override earlier ones (existing env always wins), so
-// order is just discovery preference.
-applyEnvFile(path.join(repoRoot, ".env"));
-applyEnvFile(path.join(repoRoot, "kady_agent", ".env"));
-applyEnvFile(path.join(repoRoot, "server", ".env"));
+export function loadEnvironmentFiles(
+  root: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): void {
+  // Later files do not override earlier ones (existing env always wins), so
+  // order is just discovery preference.
+  for (const file of environmentFilePaths(root, environment)) applyEnvFile(file);
+}
+
+loadEnvironmentFiles(repoRoot);
 
 // Keep Kady's Pi credentials/settings separate from the user's standalone Pi
 // CLI by default. The same environment variable is inherited by pi-subagents'

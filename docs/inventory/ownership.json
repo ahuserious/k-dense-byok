@@ -3,7 +3,17 @@
     "C1": [
       "scripts/vendored-dist-*.mjs",
       "package.json",
-      ".github/workflows/tests.yml",
+      ".github/workflows/tests.yml"
+    ],
+    "C5": [
+      "server/src/env.ts",
+      "server/src/environment-files.ts",
+      "server/src/api/credentials.ts",
+      "server/src/workflows/supervisor/credentials.ts",
+      "server/test/env-isolation.test.ts",
+      "server/test/credential-env-isolation.test.ts",
+      "scripts/preview-environment.mjs",
+      "scripts/preview-environment.test.mjs",
       "docs/preview-env.md"
     ],
     "S1": [
@@ -82,7 +92,6 @@
       "server/src/workflows/kady-node-executor.ts",
       "server/src/workflows/supervised-budget.ts",
       "server/src/workflows/supervisor/credential-contract.ts",
-      "server/src/workflows/supervisor/credentials.ts",
       "web/src/components/database-selector.tsx"
     ],
     "S5": [
@@ -173,7 +182,12 @@
       ".stably/**",
       ".github/workflows/stably-cloud.yml",
       "docs/e2e/**",
-      "scripts/preview-*.mjs",
+      "scripts/preview-down.mjs",
+      "scripts/preview-launcher-observer*.mjs",
+      "scripts/preview-processes*.mjs",
+      "scripts/preview-readiness*.mjs",
+      "scripts/preview-state*.mjs",
+      "scripts/preview-up.mjs",
       "deploy/preview/**"
     ]
   }

@@ -34,15 +34,18 @@ node scripts/vendored-dist-build.mjs --if-stale
 
 `preview-up` creates a unique `/tmp/kady-preview-*` directory, including fresh
 project, Pi-agent, skills-cache, workflow-supervisor, and log paths. It creates
-a launch overlay with a blank `.env`, so the repository `.env` and its provider
-credentials are not loaded. The overlay symlinks the checked-out `server/` and
-`web/` trees and runs the checkout's exact `start.mjs` and `env-file.mjs` bytes.
-Dependencies must already be installed; the preview npm shim suppresses the
-launcher's update lookup and forces npm offline.
+a launch overlay with a blank `<launchRoot>/.env` and sets `KADY_ENV_FILE` to
+that absolute path. The preview backend loads only `<launchRoot>/.env`, and
+credential writes land there; the checkout's `.env` is never read or written
+in preview mode. The overlay symlinks the checked-out `server/` and `web/` trees
+and runs the checkout's exact `start.mjs` and `env-file.mjs` bytes. Dependencies
+must already be installed; the preview npm shim suppresses the launcher's
+update lookup and forces npm offline.
 
 The effective environment includes:
 
 - `KADY_PREVIEW=1`;
+- `KADY_ENV_FILE=<launchRoot>/.env`;
 - the selected `KADY_PORT`, `KADY_FRONTEND_PORT`, and `KADY_PIPELINE_ENGINE_PORT`;
 - temporary `KADY_PROJECTS_ROOT`, `KADY_PI_AGENT_DIR`,
   `PI_CODING_AGENT_DIR`, `KADY_SKILLS_CACHE_DIR`, and workflow-supervisor paths;

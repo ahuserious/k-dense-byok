@@ -66,6 +66,7 @@ export function previewEnvironment(
     HOME: path.join(stateRoot, "home"),
     PATH: `${shimDirectory}${path.delimiter}${environment.PATH ?? ""}`,
     KADY_PREVIEW: "1",
+    KADY_ENV_FILE: path.join(launchRoot, ".env"),
     KADY_PORT: String(ports.backend),
     KADY_FRONTEND_PORT: String(ports.frontend),
     NEXT_PUBLIC_ADK_API_URL: backendBrowserUrl,

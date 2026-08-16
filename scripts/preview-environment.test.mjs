@@ -21,6 +21,7 @@ test("pins both engine clients to the preview port by default and scrubs legacy 
   assert.equal(environment.NEXT_PUBLIC_ADK_API_URL, "http://127.0.0.1:18000");
   assert.equal(environment.NEXT_PUBLIC_SCIENTIFIC_DAG_STUDIO, "1");
   assert.equal(environment.KADY_PIPELINE_ENGINE_PORT, "13091");
+  assert.equal(environment.KADY_ENV_FILE, "/tmp/kady-preview-test/launch/.env");
   assert.equal(environment.HOME, "/tmp/kady-preview-test/home");
   assert.equal(environment.PATH, "/tmp/kady-preview-test/launch/bin:/usr/bin");
   assert.equal(environment.npm_config_cache, "/tmp/kady-preview-test/npm-cache");
