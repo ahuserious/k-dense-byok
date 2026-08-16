@@ -1,5 +1,11 @@
 {
   "lanes": {
+    "C1": [
+      "scripts/vendored-dist-*.mjs",
+      "package.json",
+      ".github/workflows/tests.yml",
+      "docs/preview-env.md"
+    ],
     "S1": [
       "web/src/app/page.tsx",
       "web/src/components/workspace-navigation.tsx",

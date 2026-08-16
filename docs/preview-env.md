@@ -13,6 +13,25 @@ node scripts/preview-up.mjs \
 node scripts/preview-down.mjs
 ```
 
+Before opening any sockets, `preview-up` runs
+`node scripts/vendored-dist-build.mjs --if-stale`. The build script invokes
+`bun run build:web` from `server/vendor/pipeline-engine/`, which is the
+vendored Bun workspace owning `bun.lock` and filters the build to the web
+package. It then re-runs the fail-closed freshness check. This produces the
+ignored `packages/web/dist/` required by the workflow-engine server in a fresh
+clone without committing generated assets.
+
+Use `--no-build-dist` only when a caller has already built the bundle. The
+option skips compilation, not validation: `preview-up` still exits before boot
+when `dist/index.html` is missing or older than a build input. The standalone
+commands are:
+
+```bash
+npm run check:vendored-dist
+npm run build:vendored-dist
+node scripts/vendored-dist-build.mjs --if-stale
+```
+
 `preview-up` creates a unique `/tmp/kady-preview-*` directory, including fresh
 project, Pi-agent, skills-cache, workflow-supervisor, and log paths. It creates
 a launch overlay with a blank `.env`, so the repository `.env` and its provider
