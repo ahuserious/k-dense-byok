@@ -5,14 +5,13 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  collectPreviewListenerGroups,
+  assertNoForeignPreviewListeners,
+  collectRecordedPreviewProcessGroups,
   listenersOnPort,
-  processAlive,
-  processGroupAlive,
-  processWorkingDirectory,
   stopProcessGroups,
   waitForPreviewPortsFree,
 } from "./preview-processes.mjs";
+import { readPreviewServiceStates } from "./preview-readiness.mjs";
 import {
   acquirePreviewLifecycleLock,
   previewTeardownRecord,
@@ -36,18 +35,32 @@ function fail(message) {
   process.exit(1);
 }
 
-function validateLifecycleRecord(state, source, { requireRootPid }) {
+function validateLifecycleRecord(state, source) {
   const allowedTemporaryRoots = [os.tmpdir(), "/tmp"].map((candidate) =>
     fs.realpathSync(candidate),
   );
+  if (!state?.rootProcess) {
+    fail(
+      `${source} has no generation-bound launcher process; refusing recovery. ` +
+        "Inspect the recorded ports and stop only processes whose PID identity you can independently prove, then remove the stale projection.",
+    );
+  }
   if (
-    state.version !== 1 ||
+    state.version !== 2 ||
     typeof state.generation !== "string" ||
     !state.generation ||
     state.repositoryRoot !== repositoryRoot ||
-    (requireRootPid && (!Number.isSafeInteger(state.rootPid) || state.rootPid < 1)) ||
-    (state.rootPid !== null && state.rootPid !== undefined &&
-      (!Number.isSafeInteger(state.rootPid) || state.rootPid < 1)) ||
+    !state.rootProcess ||
+    !Number.isSafeInteger(state.rootProcess.pid) ||
+    state.rootProcess.pid < 1 ||
+    !Number.isSafeInteger(state.rootProcess.pgid) ||
+    state.rootProcess.pgid < 1 ||
+    state.rootProcess.generation !== state.generation ||
+    !state.rootProcess.identity ||
+    typeof state.rootProcess.identity.method !== "string" ||
+    typeof state.rootProcess.identity.value !== "string" ||
+    typeof state.serviceStatePath !== "string" ||
+    path.resolve(state.serviceStatePath) !== path.join(path.resolve(state.stateRoot), "services.json") ||
     typeof state.stateRoot !== "string" ||
     typeof state.launchRoot !== "string" ||
     !state.ports ||
@@ -107,29 +120,9 @@ function readStateOrProjectionRecovery() {
     state: validateLifecycleRecord(
       selected.state,
       selected.recoveredFromMarker ? "Preview projection marker" : "Preview state",
-      { requireRootPid: !selected.recoveredFromMarker },
     ),
     recoveredFromMarker: selected.recoveredFromMarker,
   };
-}
-
-function assertRootOwnership(state) {
-  if (!state.rootPid) return;
-  if (!processAlive(state.rootPid)) return;
-  const workingDirectory = processWorkingDirectory(state.rootPid);
-  if (workingDirectory !== state.launchRoot) {
-    fail(
-      `PID ${state.rootPid} no longer belongs to the preview launch root; refusing to signal it.`,
-    );
-  }
-}
-
-async function waitFor(test, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (test() && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  return !test();
 }
 
 function printListenerProof(state) {
@@ -140,7 +133,7 @@ function printListenerProof(state) {
     total += listeners.length;
     console.log(`  ${role} :${port}: ${listeners.length}${listeners.length ? ` (${listeners.join(", ")})` : ""}`);
   }
-  console.log(`Owned preview listeners: ${total}`);
+  console.log(`Remaining listeners on preview ports: ${total}`);
   return total;
 }
 
@@ -175,10 +168,17 @@ process.once("exit", () => {
 });
 
 const { state, recoveredFromMarker } = readStateOrProjectionRecovery();
-assertRootOwnership(state);
-let listenerGroups;
+const serviceStates = readPreviewServiceStates(
+  state.serviceStatePath,
+  state.generation,
+);
+let recordedGroups;
 try {
-  listenerGroups = collectPreviewListenerGroups(repositoryRoot, state.ports);
+  recordedGroups = collectRecordedPreviewProcessGroups(
+    repositoryRoot,
+    state,
+    serviceStates,
+  );
 } catch (error) {
   fail(
     `${error instanceof Error ? error.message : String(error)} ` +
@@ -186,28 +186,33 @@ try {
   );
 }
 
-if (state.rootPid && processGroupAlive(state.rootPid)) {
-  process.kill(-state.rootPid, "SIGTERM");
-  if (!(await waitFor(() => processGroupAlive(state.rootPid), 90_000))) {
-    console.warn("Graceful shutdown did not finish; sending the launcher's second force signal.");
-    process.kill(-state.rootPid, "SIGTERM");
-    if (!(await waitFor(() => processGroupAlive(state.rootPid), 15_000))) {
-      fail("Preview launcher process group survived its owned-tree shutdown.");
-    }
-  }
-}
-
-// The launcher owns detached child groups. Capturing groups from the actual
-// listeners before shutdown lets us reap a bun wrapper even if its server
-// closes the port first or escaped the launcher's normal child accounting.
-const refreshedGroups = collectPreviewListenerGroups(repositoryRoot, state.ports);
-const groupsById = new Map(
-  [...listenerGroups, ...refreshedGroups].map((group) => [group.groupId, group]),
+const rootGroup = recordedGroups.find(
+  ({ record }) => record.pid === state.rootProcess.pid,
 );
-const survivingGroups = await stopProcessGroups([...groupsById.values()]);
+if (rootGroup) await stopProcessGroups([rootGroup], 90_000);
+let survivingRecordedGroups;
+try {
+  survivingRecordedGroups = collectRecordedPreviewProcessGroups(
+    repositoryRoot,
+    state,
+    serviceStates,
+  );
+} catch (error) {
+  fail(error instanceof Error ? error.message : String(error));
+}
+const survivingGroups = await stopProcessGroups(survivingRecordedGroups);
 if (survivingGroups.length > 0) {
   fail(
     `Preview process groups survived teardown: ${survivingGroups.map(({ groupId }) => groupId).join(", ")}`,
+  );
+}
+
+try {
+  assertNoForeignPreviewListeners(state.ports, recordedGroups);
+} catch (error) {
+  fail(
+    `${error instanceof Error ? error.message : String(error)} ` +
+      "The listener was not signalled; stop it manually or choose different preview ports, then rerun preview-down.",
   );
 }
 

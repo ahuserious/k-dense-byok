@@ -15,19 +15,27 @@ import {
   previewEnvironment,
   previewPrebuildEnvironment,
   previewWebProjectionMarkerPath,
+  readPreviewWebProjectionMarker,
   removePreviewWebRoot,
   updatePreviewWebProjectionMarker,
 } from "./preview-environment.mjs";
 import { instrumentPreviewLauncher } from "./preview-launcher-observer.mjs";
 import {
-  collectPreviewListenerGroups,
+  assertNoForeignPreviewListeners,
+  collectRecordedPreviewProcessGroups,
+  processGroupId,
   stopProcessGroups,
   waitForPreviewPortsFree,
 } from "./preview-processes.mjs";
-import { waitForPreviewReadiness } from "./preview-readiness.mjs";
+import {
+  readPreviewServiceStates,
+  waitForPreviewReadiness,
+} from "./preview-readiness.mjs";
 import {
   acquirePreviewLifecycleLock,
+  previewPidStartIdentity,
   publishPreviewStateFile,
+  readPreviewStateCandidate,
 } from "./preview-state.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -164,41 +172,36 @@ function runPushBlockProbe(realGit, environment) {
   console.log(`Push-block probe: BLOCKED (exit ${probe.status})`);
 }
 
-function processGroupAlive(processGroupId) {
-  try {
-    process.kill(-processGroupId, 0);
-    return true;
-  } catch (error) {
-    if (error?.code === "ESRCH") return false;
-    throw error;
+async function stopFailedLaunch(state) {
+  const marker = readPreviewWebProjectionMarker(repositoryRoot);
+  if (marker?.generation !== state.generation) {
+    throw new Error("Preview failure cleanup refuses a different projection generation.");
   }
-}
-
-async function waitForOwnedTree(processGroupId, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (processGroupAlive(processGroupId) && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
+  const publishedState = readPreviewStateCandidate(stateFile);
+  if (
+    publishedState.status === "malformed" ||
+    (publishedState.status === "valid" &&
+      publishedState.state?.generation !== state.generation)
+  ) {
+    throw new Error("Preview failure cleanup refuses malformed or different lifecycle state.");
   }
-  return !processGroupAlive(processGroupId);
-}
-
-async function stopFailedLaunch(rootPid, ports) {
-  if (processGroupAlive(rootPid)) {
-    process.kill(-rootPid, "SIGTERM");
-    if (!(await waitForOwnedTree(rootPid, 30_000))) {
-      process.kill(-rootPid, "SIGTERM");
-      await waitForOwnedTree(rootPid, 10_000);
-    }
-  }
-
-  const listenerGroups = collectPreviewListenerGroups(repositoryRoot, ports);
-  const survivors = await stopProcessGroups(listenerGroups);
+  const serviceStates = readPreviewServiceStates(state.serviceStatePath, state.generation);
+  let groups = collectRecordedPreviewProcessGroups(
+    repositoryRoot,
+    state,
+    serviceStates,
+  );
+  const rootGroup = groups.find(({ record }) => record.pid === state.rootProcess.pid);
+  if (rootGroup) await stopProcessGroups([rootGroup], 30_000);
+  groups = collectRecordedPreviewProcessGroups(repositoryRoot, state, serviceStates);
+  const survivors = await stopProcessGroups(groups);
   if (survivors.length > 0) {
     throw new Error(
       `Preview listener process groups survived failed-launch cleanup: ${survivors.map(({ groupId }) => groupId).join(", ")}`,
     );
   }
-  const occupied = await waitForPreviewPortsFree(ports, 15_000);
+  assertNoForeignPreviewListeners(state.ports, groups);
+  const occupied = await waitForPreviewPortsFree(state.ports, 15_000);
   if (occupied.length > 0) {
     throw new Error(
       `Preview ports did not become free after failed-launch cleanup: ${formatOccupiedPorts(occupied)}`,
@@ -335,15 +338,21 @@ const environment = previewEnvironment(
   shimDirectory,
   ports,
   ambientEnvironment,
+  previewGeneration,
 );
 replaceProcessEnvironment(environment);
 const logPath = path.join(stateRoot, "preview.log");
 const serviceStatePath = environment.KADY_PREVIEW_SERVICE_STATE_FILE;
-fs.writeFileSync(serviceStatePath, `${JSON.stringify({ version: 1, services: {} }, null, 2)}\n`, {
+fs.writeFileSync(serviceStatePath, `${JSON.stringify({
+  version: 2,
+  generation: previewGeneration,
+  services: {},
+}, null, 2)}\n`, {
   mode: 0o600,
 });
 
 let rootProcess;
+let lifecycleState;
 try {
   runPushBlockProbe(realGit, environment);
   const logDescriptor = fs.openSync(logPath, "a", 0o600);
@@ -357,12 +366,15 @@ try {
   if (!Number.isSafeInteger(rootProcess.pid) || rootProcess.pid < 1) {
     throw new Error("Preview launcher did not report a valid root PID.");
   }
-  updatePreviewWebProjectionMarker(repositoryRoot, previewGeneration, {
-    rootPid: rootProcess.pid,
-  });
-
-  const state = {
-    version: 1,
+  const rootIdentity = previewPidStartIdentity(rootProcess.pid);
+  const rootProcessRecord = {
+    pid: rootProcess.pid,
+    pgid: processGroupId(rootProcess.pid),
+    identity: rootIdentity,
+    generation: previewGeneration,
+  };
+  lifecycleState = {
+    version: 2,
     generation: previewGeneration,
     repositoryRoot,
     stateRoot,
@@ -371,14 +383,22 @@ try {
     piAgentDirectory: environment.PI_CODING_AGENT_DIR,
     workflowSupervisorDirectory: environment.KADY_WORKFLOW_SUPERVISOR_DIR,
     serviceStatePath,
-    rootPid: rootProcess.pid,
+    rootProcess: rootProcessRecord,
     ports,
     logPath,
     startedAt: new Date().toISOString(),
   };
-  publishPreviewStateFile(stateFile, state);
+  updatePreviewWebProjectionMarker(repositoryRoot, previewGeneration, {
+    rootProcess: rootProcessRecord,
+    serviceStatePath,
+  });
+  publishPreviewStateFile(stateFile, lifecycleState);
   statePublished = true;
-  releaseLifecycleLock();
+  const gateFile = environment.KADY_PREVIEW_START_GATE_FILE;
+  const gateDescriptor = fs.openSync(gateFile, "wx", 0o600);
+  fs.writeFileSync(gateDescriptor, `${previewGeneration}\n`);
+  fs.fsyncSync(gateDescriptor);
+  fs.closeSync(gateDescriptor);
 
   await waitForPreviewReadiness({
     launcherProcess: rootProcess,
@@ -396,6 +416,7 @@ try {
         label: "web",
         url: `http://127.0.0.1:${ports.frontend}/api/preview-health`,
         timeoutMs: 180_000,
+        expectedGeneration: previewGeneration,
       },
       {
         role: "pipeline-engine",
@@ -404,8 +425,30 @@ try {
         timeoutMs: 120_000,
       },
     ],
+    expectedGeneration: previewGeneration,
+    validateReady: (serviceStates) => {
+      for (const role of ["backend", "frontend", "pipeline-engine"]) {
+        if (!serviceStates[role]) {
+          throw new Error(`Preview readiness lacks generation-bound ${role} process state.`);
+        }
+      }
+      const liveGroups = collectRecordedPreviewProcessGroups(
+        repositoryRoot,
+        lifecycleState,
+        serviceStates,
+      );
+      const livePids = new Set(liveGroups.map(({ record }) => record.pid));
+      for (const record of [lifecycleState.rootProcess, ...Object.values(serviceStates)]) {
+        if (!livePids.has(record.pid)) {
+          throw new Error(
+            `Preview readiness process PID ${record.pid} is no longer live for generation ${previewGeneration}.`,
+          );
+        }
+      }
+    },
   });
 
+  releaseLifecycleLock();
   rootProcess.unref();
   console.log("Preview ready:");
   console.log(`  Web:     http://127.0.0.1:${ports.frontend}`);
@@ -416,9 +459,9 @@ try {
   console.log(`  Log:      ${logPath}`);
 } catch (error) {
   let cleanupError = null;
-  if (rootProcess?.pid) {
+  if (lifecycleState) {
     try {
-      await stopFailedLaunch(rootProcess.pid, ports);
+      await stopFailedLaunch(lifecycleState);
     } catch (caught) {
       cleanupError = caught;
     }

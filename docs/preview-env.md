@@ -42,14 +42,15 @@ credential writes land there; the checkout's `.env` is never read or written
 in preview mode. The overlay symlinks the checked-out `server/` tree and runs
 the checkout's exact `start.mjs` and `env-file.mjs` bytes. Its `web/` project
 root is instead the gitignored physical directory
-`web/.preview/launch/web`. Preview startup recreates it and copies every web-root
-entry except `.next`, `.preview`, `node_modules`, package-manager lockfiles, and
-the automatic env filenames. This includes the physical `src/app` route tree,
-`public`, package metadata, and Next, TypeScript, PostCSS, Tailwind, and other
-root configuration files. In-checkout source symlinks are dereferenced into
-physical snapshot bytes; an outside-pointing link or directory cycle stops
-startup, and a post-copy walk requires the projected source set to contain no
-symlinks. Lockfiles stay at the checkout ancestor so Turbopack does not
+`web/.preview/launch/web`. Preview startup recreates it from an explicit source
+allowlist: `src`, `public`, package metadata, and enumerated Next, TypeScript,
+PostCSS, Tailwind, and component configuration files. In-checkout source
+symlinks are dereferenced only when their canonical target remains inside one
+of those copied roots. Links to Git metadata, environment files, dependencies,
+build output, preview state/destinations, vendored dist staging, any other
+checkout path, a dangling target, or a directory cycle stop startup and name
+the rejected class. A post-copy walk requires the projected source set to
+contain no symlinks. Lockfiles stay at the checkout ancestor so Turbopack does not
 infer the projection itself as its filesystem root. The projection also copies
 `server/package.json` into its sibling `server/` directory because the copied
 Next config reads that version source through `../server/package.json`. Startup
@@ -71,31 +72,44 @@ Edits to web routes, public assets, middleware, instrumentation, package
 metadata, or configuration require `preview-down.mjs` followed by
 `preview-up.mjs`. Preview startup records a SHA-256 manifest for the copied
 source set and adds a preview-only `/api/preview-health` route. Readiness probes
-that route; later health probes return HTTP 503 and name the first drifted
-checkout file rather than silently serving stale evidence.
+that route and requires its JSON generation to match; backend and engine
+readiness additionally require their recorded PID identities to remain live.
+Later health probes return HTTP 503 and name the first drifted checkout file
+rather than silently serving stale evidence.
 
 Preview lifecycle mutations are serialized by an exclusive lock under
 `deploy/preview/`. A unique generation is stored in both the published state
 and the checkout-local projection marker. Concurrent up/down commands refuse
 while another lifecycle operation owns the lock, and teardown removes a
 projection only when its generation matches the state it locked and read.
+`preview-up` holds this lock through generation-bound readiness and through any
+failure cleanup; `preview-down` therefore refuses with the starting preview-up
+PID instead of crossing generations.
 
 ## Recovery
 
 Lifecycle state is fsynced to a same-directory temporary file and published by
-atomic rename. The exclusive lock records its PID, cross-platform process start
-identity, generation, and creation time. If that PID is dead, or the PID has
-been reused with a different start identity, the next command recovers the
-stale lock only when every readable state/projection generation agrees; a live
-owner remains busy. Recovery is logged with the stale PID and recorded start
-identity.
+atomic rename. A lock is fully written and fsynced under a temporary name, then
+hard-linked into place with no replacement. Stale takeover atomically renames
+the observed inode to a unique tombstone and verifies its inode and digest
+before publishing the new owner. An unreadable lock is recoverable only after
+it is at least 500 ms old and the same inode/digest remains unchanged across a
+second read 250 ms later.
+
+Each lock records its PID, generation, creation time, and a structured process
+birth identity. Linux uses the boot ID plus `/proc/<pid>/stat` start ticks;
+macOS uses `LC_ALL=C TZ=UTC0 ps ... lstart`. A failed lookup or method mismatch
+is treated as live. A dead PID, or a different value from the same method, is
+recoverable only when readable state/projection generations agree.
 
 `preview-down` tolerates missing or malformed state when the owned projection
-marker remains valid. It uses the marker's generation and launch metadata to
-remove only that projection, and signals a launcher or listener only after its
-working directory proves it belongs to this checkout. An unproven listener is
-never signalled: teardown refuses with the affected port and asks the operator
-to stop the unrelated listener or restore matching state before retrying.
+marker contains a non-null generation-bound launcher record. The disposable
+launcher waits on a gate while `preview-up` atomically records its PID, PGID,
+birth identity, and generation in the marker and state. Its observer records
+the same tuple for backend, frontend, and engine children. Teardown signals
+only records whose live identity and PGID still match; cwd is a secondary
+check. A listener whose PGID is absent from those records is foreign and is
+never signalled, even when its cwd is under this checkout.
 
 Backend env selection fails closed. With `KADY_PREVIEW=1`, `KADY_ENV_FILE`
 must be present, non-blank, absolute, and resolve to a regular file under the

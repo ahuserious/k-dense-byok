@@ -26,6 +26,36 @@ test("includes a bounded unhealthy response body in readiness evidence", async (
   assert.match(result.detail, /web\/src\/app\/page\.tsx/);
 });
 
+test("requires the frontend health body to match the preview generation", async () => {
+  const result = await probePreviewService(
+    { ...service("frontend"), expectedGeneration: "generation-new" },
+    async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ status: "ok", generation: "generation-old" }),
+    }),
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.detail, /generation generation-old does not match generation-new/);
+});
+
+test("does not declare readiness until generation-bound process validation passes", async () => {
+  let validations = 0;
+  await waitForPreviewReadiness({
+    services: [service("backend")],
+    launcherProcess: { pid: 10, exitCode: null, signalCode: null },
+    probe: async () => ({ ok: true, detail: "HTTP 200" }),
+    readServiceStates: () => ({ backend: { generation: "generation-one" } }),
+    validateReady: () => {
+      validations += 1;
+      if (validations === 1) throw new Error("identity pending");
+    },
+    now: () => 0,
+    pause: async () => {},
+  });
+  assert.equal(validations, 2);
+});
+
 test("ignores a transient launcher exit while service probes are still converging", async () => {
   const attempts = new Map();
   const result = await waitForPreviewReadiness({

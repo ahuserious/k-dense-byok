@@ -22,6 +22,22 @@ import {
 import { instrumentPreviewLauncher } from "./preview-launcher-observer.mjs";
 import { acquirePreviewLifecycleLock } from "./preview-state.mjs";
 
+function createMinimalProjectionCheckout(temporaryRoot) {
+  const repositoryRoot = path.join(temporaryRoot, "checkout");
+  const checkoutWebRoot = path.join(repositoryRoot, "web");
+  const checkoutPublicRoot = path.join(checkoutWebRoot, "public");
+  const launchRoot = path.join(temporaryRoot, "state", "launch");
+  fs.mkdirSync(path.join(checkoutWebRoot, "src", "app"), { recursive: true });
+  fs.mkdirSync(path.join(checkoutWebRoot, "node_modules"), { recursive: true });
+  fs.mkdirSync(path.join(repositoryRoot, "server"), { recursive: true });
+  fs.mkdirSync(checkoutPublicRoot, { recursive: true });
+  fs.mkdirSync(launchRoot, { recursive: true });
+  fs.writeFileSync(path.join(checkoutWebRoot, "src", "app", "page.tsx"), "page\n");
+  fs.writeFileSync(path.join(checkoutWebRoot, "package.json"), "{}\n");
+  fs.writeFileSync(path.join(repositoryRoot, "server", "package.json"), "{}\n");
+  return { repositoryRoot, checkoutWebRoot, checkoutPublicRoot, launchRoot };
+}
+
 test("pins both engine clients to the preview port by default and scrubs legacy engine variables", () => {
   const environment = previewEnvironment(
     "/tmp/kady-preview-test",
@@ -545,15 +561,13 @@ test("dereferences an in-checkout source link and tracks its resolved bytes", ()
     const repositoryRoot = path.join(temporaryRoot, "checkout");
     const checkoutWebRoot = path.join(repositoryRoot, "web");
     const checkoutPublicRoot = path.join(checkoutWebRoot, "public");
-    const sharedRoot = path.join(repositoryRoot, "shared-assets");
     const launchRoot = path.join(temporaryRoot, "state", "launch");
-    const linkedTarget = path.join(sharedRoot, "linked.txt");
+    const linkedTarget = path.join(checkoutPublicRoot, "source.txt");
     const checkoutLink = path.join(checkoutPublicRoot, "linked.txt");
     fs.mkdirSync(path.join(checkoutWebRoot, "src", "app"), { recursive: true });
     fs.mkdirSync(path.join(checkoutWebRoot, "node_modules"), { recursive: true });
     fs.mkdirSync(path.join(repositoryRoot, "server"), { recursive: true });
     fs.mkdirSync(checkoutPublicRoot, { recursive: true });
-    fs.mkdirSync(sharedRoot, { recursive: true });
     fs.mkdirSync(launchRoot, { recursive: true });
     fs.writeFileSync(path.join(checkoutWebRoot, "src", "app", "page.tsx"), "page\n");
     fs.writeFileSync(path.join(checkoutWebRoot, "package.json"), "{}\n");
@@ -644,11 +658,107 @@ test("refuses an in-checkout symlink directory cycle", () => {
   }
 });
 
+test("rejects every sensitive or non-source symlink target class", async (testContext) => {
+  const cases = [
+    {
+      name: "git metadata",
+      expectedClass: "git metadata",
+      target: ({ repositoryRoot }) => path.join(repositoryRoot, ".git", "config"),
+      create: true,
+    },
+    {
+      name: "environment file",
+      expectedClass: "environment file",
+      target: ({ repositoryRoot }) => path.join(repositoryRoot, "server", ".env.preview"),
+      create: true,
+    },
+    {
+      name: "preview lifecycle state",
+      expectedClass: "preview lifecycle state",
+      target: ({ repositoryRoot }) => path.join(repositoryRoot, "deploy", "preview", ".state.json"),
+      create: true,
+    },
+    {
+      name: "vendored dist staging",
+      expectedClass: "vendored dist staging",
+      target: ({ repositoryRoot }) => path.join(repositoryRoot, "server", "vendor", "engine", "dist", "secret.txt"),
+      create: true,
+    },
+    {
+      name: "outside copied source set",
+      expectedClass: "outside the copied source set",
+      target: ({ repositoryRoot }) => path.join(repositoryRoot, "server", "secret.txt"),
+      create: true,
+    },
+    {
+      name: "dependency tree",
+      expectedClass: "dependency tree",
+      target: ({ checkoutWebRoot }) => path.join(checkoutWebRoot, "node_modules", "secret.txt"),
+      create: true,
+    },
+    {
+      name: "Next build output",
+      expectedClass: "Next build output",
+      target: ({ checkoutWebRoot }) => path.join(checkoutWebRoot, ".next", "secret.txt"),
+      create: true,
+    },
+    {
+      name: "preview tree",
+      expectedClass: "preview destination",
+      target: ({ checkoutWebRoot }) => path.join(checkoutWebRoot, ".preview", "secret.txt"),
+      create: true,
+    },
+    {
+      name: "dangling link",
+      expectedClass: "dangling symlink",
+      target: ({ checkoutWebRoot }) => path.join(checkoutWebRoot, "missing.txt"),
+      create: false,
+    },
+    {
+      name: "projection destination self",
+      expectedClass: "preview destination",
+      target: ({ checkoutWebRoot }) => path.join(checkoutWebRoot, ".preview", "launch", "web"),
+      create: false,
+    },
+  ];
+
+  for (const testCase of cases) {
+    await testContext.test(testCase.name, () => {
+      const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-sensitive-link-"));
+      try {
+        const fixture = createMinimalProjectionCheckout(temporaryRoot);
+        const target = testCase.target(fixture);
+        if (testCase.create) {
+          fs.mkdirSync(path.dirname(target), { recursive: true });
+          fs.writeFileSync(target, "sentinel\n");
+        }
+        const link = path.join(fixture.checkoutPublicRoot, "sensitive-link");
+        fs.symlinkSync(target, link);
+        assert.throws(
+          () => preparePreviewWebRoot(
+            fixture.repositoryRoot,
+            fixture.launchRoot,
+            `sensitive-${testCase.name.replaceAll(" ", "-")}`,
+          ),
+          (error) => error instanceof Error &&
+            error.message.includes(link) &&
+            error.message.includes(testCase.expectedClass),
+        );
+      } finally {
+        fs.rmSync(temporaryRoot, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 test("serializes concurrent preview-up lifecycle owners at an atomic barrier", () => {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-up-"));
   try {
     const lockFile = path.join(temporaryRoot, ".lifecycle.lock");
-    const starts = new Map([[101, "start-101"], [102, "start-102"]]);
+    const starts = new Map([
+      [101, { method: "test", value: "start-101" }],
+      [102, { method: "test", value: "start-102" }],
+    ]);
     const resolvePidStartIdentity = (pid) => starts.get(pid) ?? null;
     const firstUp = acquirePreviewLifecycleLock(lockFile, {
       operation: "preview-up",
@@ -683,9 +793,9 @@ test("holds teardown's lifecycle barrier against another down and a newer up", (
   try {
     const lockFile = path.join(temporaryRoot, ".lifecycle.lock");
     const starts = new Map([
-      [201, "start-201"],
-      [202, "start-202"],
-      [203, "start-203"],
+      [201, { method: "test", value: "start-201" }],
+      [202, { method: "test", value: "start-202" }],
+      [203, { method: "test", value: "start-203" }],
     ]);
     const resolvePidStartIdentity = (pid) => starts.get(pid) ?? null;
     const down = acquirePreviewLifecycleLock(lockFile, {
@@ -847,9 +957,11 @@ test("preview-up sanitizes its process before vendored preparation and boot", ()
   const upLock = source.indexOf("acquirePreviewLifecycleLock(lifecycleLockFile");
   const stateCheck = source.indexOf("if (fs.existsSync(stateFile))");
   const statePublication = source.indexOf("publishPreviewStateFile(stateFile");
+  const readinessWait = source.indexOf("await waitForPreviewReadiness({");
   const upLockRelease = source.indexOf("releaseLifecycleLock();", statePublication);
   assert.equal(upLock < stateCheck, true);
-  assert.equal(statePublication < upLockRelease, true);
+  assert.equal(statePublication < readinessWait, true);
+  assert.equal(readinessWait < upLockRelease, true);
   const downLock = previewDownSource.indexOf(
     "acquirePreviewLifecycleLock(lifecycleLockFile",
   );

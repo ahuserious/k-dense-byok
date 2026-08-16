@@ -1,40 +1,83 @@
+import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-function readLockOwner(lockFile) {
+export const UNREADABLE_LOCK_MINIMUM_AGE_MS = 500;
+export const UNREADABLE_LOCK_STABILITY_DELAY_MS = 250;
+
+function sleepSync(milliseconds) {
+  if (milliseconds <= 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function fsyncDirectory(directory) {
+  const descriptor = fs.openSync(directory, "r");
   try {
-    const raw = fs.readFileSync(lockFile, "utf8");
-    const owner = JSON.parse(raw);
-    if (
-      ![1, 2].includes(owner?.version) ||
-      typeof owner.operation !== "string" ||
-      typeof owner.generation !== "string" ||
-      !Number.isSafeInteger(owner.pid) ||
-      owner.pid < 1 ||
-      (owner.version === 2 &&
-        (typeof owner.pidStartIdentity !== "string" || !owner.pidStartIdentity))
-    ) {
-      throw new Error("invalid lifecycle owner");
-    }
-    return { owner, raw };
-  } catch (error) {
-    throw new Error(
-      `Preview lifecycle lock ${lockFile} has an unreadable owner; ` +
-        "inspect and remove it only after proving no preview lifecycle command is running.",
-      { cause: error },
-    );
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
   }
 }
 
-function lifecycleOwnerDescription(owner) {
-  return `${owner.operation} PID ${owner.pid}`;
+function fileDigest(raw) {
+  return createHash("sha256").update(raw).digest("hex");
+}
+
+function readFileSnapshot(file) {
+  const stat = fs.statSync(file);
+  const raw = fs.readFileSync(file);
+  return {
+    stat,
+    raw,
+    digest: fileDigest(raw),
+    identity: `${stat.dev}:${stat.ino}`,
+  };
+}
+
+function sameSnapshot(left, right) {
+  return left.identity === right.identity && left.digest === right.digest;
+}
+
+function publishCompleteFile(file, value, mode = 0o600) {
+  const directory = path.dirname(file);
+  const temporaryFile = path.join(
+    directory,
+    `.${path.basename(file)}.${process.pid}.${randomUUID()}.tmp`,
+  );
+  let descriptor;
+  try {
+    descriptor = fs.openSync(temporaryFile, "wx", mode);
+    fs.writeFileSync(descriptor, value);
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    fs.linkSync(temporaryFile, file);
+    fs.unlinkSync(temporaryFile);
+    fsyncDirectory(directory);
+  } catch (error) {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+    fs.rmSync(temporaryFile, { force: true });
+    throw error;
+  }
+  return readFileSnapshot(file);
+}
+
+function parseProcStartTime(statText) {
+  const closingParenthesis = statText.lastIndexOf(")");
+  if (closingParenthesis === -1) return null;
+  const fieldsFromState = statText.slice(closingParenthesis + 2).trim().split(/\s+/);
+  return fieldsFromState[19] && /^\d+$/.test(fieldsFromState[19])
+    ? fieldsFromState[19]
+    : null;
 }
 
 export function previewPidStartIdentity(
   pid,
   {
+    platform = process.platform,
     signalProcess = process.kill,
+    readFile = fs.readFileSync,
     runCommand = spawnSync,
   } = {},
 ) {
@@ -45,8 +88,32 @@ export function previewPidStartIdentity(
     throw error;
   }
 
-  const result = runCommand("ps", ["-o", "lstart=", "-p", String(pid)], {
+  if (platform === "linux") {
+    try {
+      const bootId = String(readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim();
+      const startTime = parseProcStartTime(
+        String(readFile(`/proc/${pid}/stat`, "utf8")),
+      );
+      if (bootId && startTime) {
+        return { method: "proc-stat", value: `${bootId}:${startTime}` };
+      }
+    } catch (error) {
+      try {
+        signalProcess(pid, 0);
+      } catch (signalError) {
+        if (signalError?.code === "ESRCH") return null;
+        throw signalError;
+      }
+      throw new Error(
+        `Could not verify proc-stat identity for live preview PID ${pid}: ${error.message}.`,
+      );
+    }
+    throw new Error(`Could not parse proc-stat identity for live preview PID ${pid}.`);
+  }
+
+  const result = runCommand("ps", ["-p", String(pid), "-o", "lstart="], {
     encoding: "utf8",
+    env: { ...process.env, LC_ALL: "C", TZ: "UTC0" },
   });
   const started = result.stdout?.trim();
   if (result.status !== 0 || !started) {
@@ -57,14 +124,50 @@ export function previewPidStartIdentity(
       throw error;
     }
     throw new Error(
-      `Could not verify start identity for live preview lifecycle PID ${pid}: ` +
+      `Could not verify ps-lstart-utc identity for live preview PID ${pid}: ` +
         `${result.stderr?.trim() || `ps exit ${result.status ?? "unknown"}`}.`,
     );
   }
-  return `ps-lstart:${started}`;
+  return { method: "ps-lstart-utc", value: started };
+}
+
+function validIdentity(identity) {
+  return identity &&
+    ["proc-stat", "ps-lstart-utc", "test"].includes(identity.method) &&
+    typeof identity.value === "string" &&
+    identity.value.length > 0;
+}
+
+function parseLockOwner(snapshot) {
+  try {
+    const owner = JSON.parse(snapshot.raw.toString("utf8"));
+    if (
+      owner?.version !== 3 ||
+      typeof owner.operation !== "string" ||
+      typeof owner.generation !== "string" ||
+      !Number.isSafeInteger(owner.pid) ||
+      owner.pid < 1 ||
+      !validIdentity(owner.identity)
+    ) return null;
+    return owner;
+  } catch {
+    return null;
+  }
+}
+
+function lifecycleOwnerDescription(owner) {
+  return `${owner.operation} PID ${owner.pid}`;
+}
+
+function identityDisposition(ownerIdentity, currentIdentity) {
+  if (currentIdentity === null) return "stale";
+  if (!validIdentity(ownerIdentity) || !validIdentity(currentIdentity)) return "live";
+  if (ownerIdentity.method !== currentIdentity.method) return "live";
+  return ownerIdentity.value === currentIdentity.value ? "live" : "stale";
 }
 
 function assertStaleGenerationMatches(owner, generationFiles) {
+  if (!owner) return;
   let matchingArtifacts = 0;
   const unreadableArtifacts = [];
   for (const generationFile of generationFiles) {
@@ -102,77 +205,114 @@ function assertStaleGenerationMatches(owner, generationFiles) {
   }
 }
 
+function stableUnreadableSnapshot(lockFile, firstSnapshot, now, pauseSync) {
+  const remainingAge = Math.max(
+    0,
+    UNREADABLE_LOCK_MINIMUM_AGE_MS - (now() - firstSnapshot.stat.mtimeMs),
+  );
+  pauseSync(remainingAge + UNREADABLE_LOCK_STABILITY_DELAY_MS);
+  let secondSnapshot;
+  try {
+    secondSnapshot = readFileSnapshot(lockFile);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  return sameSnapshot(firstSnapshot, secondSnapshot) ? secondSnapshot : null;
+}
+
 export function acquirePreviewLifecycleLock(
   lockFile,
   {
     operation,
     generation,
     pid = process.pid,
-    pidStartIdentity,
+    identity,
     resolvePidStartIdentity = previewPidStartIdentity,
     generationFiles = [],
     log = console.log,
+    now = Date.now,
+    pauseSync = sleepSync,
   } = {},
 ) {
   if (!operation || !generation) {
     throw new Error("Preview lifecycle lock requires an operation and generation.");
   }
-
-  const ownerStartIdentity = pidStartIdentity ?? resolvePidStartIdentity(pid);
-  if (!ownerStartIdentity) {
-    throw new Error(`Preview lifecycle cannot acquire a lock for non-running PID ${pid}.`);
+  const ownerIdentity = identity ?? resolvePidStartIdentity(pid);
+  if (!validIdentity(ownerIdentity)) {
+    throw new Error(`Preview lifecycle cannot acquire a lock without PID identity for ${pid}.`);
   }
-
-  let descriptor;
-  for (;;) {
-    try {
-      descriptor = fs.openSync(lockFile, "wx", 0o600);
-      break;
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
-      const existing = readLockOwner(lockFile);
-      const currentStartIdentity = resolvePidStartIdentity(existing.owner.pid);
-      if (
-        currentStartIdentity &&
-        (!existing.owner.pidStartIdentity ||
-          currentStartIdentity === existing.owner.pidStartIdentity)
-      ) {
-        throw new Error(
-          `Preview lifecycle is busy: ${lifecycleOwnerDescription(existing.owner)} holds ${lockFile}.`,
-        );
-      }
-      assertStaleGenerationMatches(existing.owner, generationFiles);
-      let currentRaw;
-      try {
-        currentRaw = fs.readFileSync(lockFile, "utf8");
-      } catch (readError) {
-        if (readError?.code === "ENOENT") continue;
-        throw readError;
-      }
-      if (currentRaw !== existing.raw) continue;
-      fs.rmSync(lockFile);
-      log(
-        `Recovered stale lifecycle lock (pid ${existing.owner.pid}, ` +
-          `started ${existing.owner.pidStartIdentity ?? "unknown legacy identity"}).`,
-      );
-    }
-  }
-
   const owner = {
-    version: 2,
+    version: 3,
     operation,
     generation,
     pid,
-    pidStartIdentity: ownerStartIdentity,
-    createdAt: new Date().toISOString(),
+    identity: ownerIdentity,
+    createdAt: new Date(now()).toISOString(),
   };
-  try {
-    fs.writeFileSync(descriptor, `${JSON.stringify(owner, null, 2)}\n`);
-    fs.fsyncSync(descriptor);
-  } catch (error) {
-    fs.closeSync(descriptor);
-    fs.rmSync(lockFile, { force: true });
-    throw error;
+  const serializedOwner = `${JSON.stringify(owner, null, 2)}\n`;
+
+  let ownedSnapshot;
+  for (;;) {
+    try {
+      ownedSnapshot = publishCompleteFile(lockFile, serializedOwner);
+      break;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
+
+    let staleSnapshot;
+    try {
+      staleSnapshot = readFileSnapshot(lockFile);
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+    const staleOwner = parseLockOwner(staleSnapshot);
+    if (staleOwner) {
+      const currentIdentity = resolvePidStartIdentity(staleOwner.pid);
+      if (identityDisposition(staleOwner.identity, currentIdentity) === "live") {
+        const suffix = staleOwner.operation === "preview-up" ? " is still starting" : " is running";
+        throw new Error(
+          `Preview lifecycle is busy: ${lifecycleOwnerDescription(staleOwner)}${suffix} and holds ${lockFile}.`,
+        );
+      }
+      assertStaleGenerationMatches(staleOwner, generationFiles);
+    } else {
+      staleSnapshot = stableUnreadableSnapshot(lockFile, staleSnapshot, now, pauseSync);
+      if (!staleSnapshot) continue;
+    }
+
+    const takeoverFile = `${lockFile}.stale.${pid}.${randomUUID()}`;
+    try {
+      fs.renameSync(lockFile, takeoverFile);
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+    const takeoverSnapshot = readFileSnapshot(takeoverFile);
+    if (!sameSnapshot(staleSnapshot, takeoverSnapshot)) {
+      try {
+        fs.linkSync(takeoverFile, lockFile);
+      } catch {}
+      fs.rmSync(takeoverFile, { force: true });
+      continue;
+    }
+    try {
+      ownedSnapshot = publishCompleteFile(lockFile, serializedOwner);
+    } catch (error) {
+      fs.rmSync(takeoverFile, { force: true });
+      if (error?.code === "EEXIST") continue;
+      throw error;
+    }
+    fs.rmSync(takeoverFile, { force: true });
+    fsyncDirectory(path.dirname(lockFile));
+    log(
+      staleOwner
+        ? `Recovered stale lifecycle lock (pid ${staleOwner.pid}, started ${staleOwner.identity.method}:${staleOwner.identity.value}).`
+        : `Recovered unreadable lifecycle lock older than ${UNREADABLE_LOCK_MINIMUM_AGE_MS}ms.`,
+    );
+    break;
   }
 
   let released = false;
@@ -180,19 +320,24 @@ export function acquirePreviewLifecycleLock(
     owner,
     release() {
       if (released) return;
-      const current = readLockOwner(lockFile).owner;
-      if (
-        current.generation !== generation ||
-        current.operation !== operation ||
-        current.pid !== pid ||
-        current.pidStartIdentity !== ownerStartIdentity
-      ) {
-        throw new Error(
-          `Preview lifecycle lock ownership changed before release: ${lockFile}.`,
-        );
+      const releaseFile = `${lockFile}.release.${pid}.${randomUUID()}`;
+      try {
+        fs.renameSync(lockFile, releaseFile);
+      } catch (error) {
+        if (error?.code === "ENOENT") {
+          throw new Error(`Preview lifecycle lock disappeared before release: ${lockFile}.`);
+        }
+        throw error;
       }
-      fs.closeSync(descriptor);
-      fs.rmSync(lockFile, { force: true });
+      const releasedSnapshot = readFileSnapshot(releaseFile);
+      if (!sameSnapshot(ownedSnapshot, releasedSnapshot)) {
+        try {
+          fs.linkSync(releaseFile, lockFile);
+        } catch {}
+        throw new Error(`Preview lifecycle lock ownership changed before release: ${lockFile}.`);
+      }
+      fs.rmSync(releaseFile, { force: true });
+      fsyncDirectory(path.dirname(lockFile));
       released = true;
     },
   };
@@ -212,12 +357,7 @@ export function publishPreviewStateFile(stateFile, state) {
     fs.closeSync(descriptor);
     descriptor = undefined;
     fs.renameSync(temporaryStateFile, stateFile);
-    const directoryDescriptor = fs.openSync(stateDirectory, "r");
-    try {
-      fs.fsyncSync(directoryDescriptor);
-    } finally {
-      fs.closeSync(directoryDescriptor);
-    }
+    fsyncDirectory(stateDirectory);
   } catch (error) {
     if (descriptor !== undefined) fs.closeSync(descriptor);
     fs.rmSync(temporaryStateFile, { force: true });
@@ -250,14 +390,20 @@ export function previewTeardownRecord(stateFile, projectionMarker) {
       `No usable preview state found at ${stateFile} and no owned projection marker exists.`,
     );
   }
+  if (!projectionMarker.rootProcess) {
+    throw new Error(
+      `Preview projection generation ${projectionMarker.generation} has no generation-bound launcher process; refusing recovery.`,
+    );
+  }
   return {
     state: {
-      version: 1,
+      version: 2,
       generation: projectionMarker.generation,
       repositoryRoot: projectionMarker.repositoryRoot,
       stateRoot: projectionMarker.stateRoot,
       launchRoot: projectionMarker.launchRoot,
-      rootPid: projectionMarker.rootPid,
+      rootProcess: projectionMarker.rootProcess,
+      serviceStatePath: projectionMarker.serviceStatePath,
       ports: projectionMarker.ports,
     },
     recoveredFromMarker: true,

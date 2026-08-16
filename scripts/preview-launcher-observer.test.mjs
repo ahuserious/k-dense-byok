@@ -14,6 +14,11 @@ test("instruments every direct preview service spawn and exit", () => {
   assert.equal(instrumented.match(/recordPreviewServiceState\(child\.kadyRole, child\.pid, "spawned"\)/g)?.length, 2);
   assert.equal(instrumented.match(/recordPreviewServiceState\(child\.kadyRole, child\.pid, "exited", exitCode, signal\)/g)?.length, 2);
   assert.match(instrumented, /KADY_PREVIEW_SERVICE_STATE_FILE/);
+  assert.match(instrumented, /KADY_PREVIEW_START_GATE_FILE/);
+  assert.match(instrumented, /KADY_PREVIEW_GENERATION/);
+  assert.match(instrumented, /ps-lstart-utc/);
+  assert.equal(instrumented.match(/process\.kill\(child\.pid, "SIGSTOP"\)/g)?.length, 2);
+  assert.equal(instrumented.match(/process\.kill\(child\.pid, "SIGCONT"\)/g)?.length, 2);
 });
 
 test("fails closed when launcher anchors drift", () => {

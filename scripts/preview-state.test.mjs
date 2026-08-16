@@ -10,15 +10,17 @@ import {
   preparePreviewWebRoot,
   readPreviewWebProjectionMarker,
   removePreviewWebRoot,
+  updatePreviewWebProjectionMarker,
 } from "./preview-environment.mjs";
 import {
   acquirePreviewLifecycleLock,
+  previewPidStartIdentity,
   previewTeardownRecord,
   publishPreviewStateFile,
   removePreviewStateFile,
 } from "./preview-state.mjs";
 
-function createProjectionFixture(temporaryRoot, generation) {
+function createProjectionFixture(temporaryRoot, generation, { withRoot = true } = {}) {
   const repositoryRoot = path.join(temporaryRoot, "checkout");
   const checkoutWebRoot = path.join(repositoryRoot, "web");
   const stateRoot = path.join(temporaryRoot, `kady-preview-${generation}`);
@@ -35,8 +37,34 @@ function createProjectionFixture(temporaryRoot, generation) {
     stateRoot,
     ports,
   });
+  if (withRoot) {
+    updatePreviewWebProjectionMarker(repositoryRoot, generation, {
+      rootProcess: {
+        pid: 321,
+        pgid: 321,
+        identity: { method: "test", value: "fixture-root" },
+        generation,
+      },
+      serviceStatePath: path.join(stateRoot, "services.json"),
+    });
+  }
   return { repositoryRoot, stateRoot, launchRoot, ports };
 }
+
+test("refuses marker recovery without a generation-bound launcher process", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-null-root-"));
+  try {
+    const generation = "null-root-generation";
+    const fixture = createProjectionFixture(temporaryRoot, generation, { withRoot: false });
+    const marker = readPreviewWebProjectionMarker(fixture.repositoryRoot);
+    assert.throws(
+      () => previewTeardownRecord(path.join(temporaryRoot, ".state.json"), marker),
+      /no generation-bound launcher process; refusing recovery/,
+    );
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
 
 function waitForOutput(child, expected) {
   return new Promise((resolve, reject) => {
@@ -58,6 +86,21 @@ function waitForOutput(child, expected) {
 
 function waitForExit(child) {
   return new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
+}
+
+function waitForLockOutcome(child) {
+  return new Promise((resolve, reject) => {
+    let output = "";
+    const timeout = setTimeout(() => reject(new Error("Timed out waiting for lock outcome")), 10_000);
+    child.stdout.on("data", (chunk) => {
+      output += chunk;
+      if (output.includes("ACQUIRED") || output.includes("REFUSED:")) {
+        clearTimeout(timeout);
+        resolve(output);
+      }
+    });
+    child.once("error", reject);
+  });
 }
 
 test("publishes preview state through an atomic same-directory replacement", () => {
@@ -86,7 +129,7 @@ test("recovers a lifecycle lock left by a SIGKILLed owner", async () => {
     fs.writeFileSync(
       holderScript,
       `import { acquirePreviewLifecycleLock } from ${JSON.stringify(stateModuleUrl)};\n` +
-        `acquirePreviewLifecycleLock(${JSON.stringify(lockFile)}, { operation: "preview-up", generation: "killed-generation", pidStartIdentity: "test-child-start" });\n` +
+        `acquirePreviewLifecycleLock(${JSON.stringify(lockFile)}, { operation: "preview-up", generation: "killed-generation", identity: { method: "test", value: "test-child-start" } });\n` +
         `console.log("LOCKED");\nsetInterval(() => {}, 1000);\n`,
     );
     const child = spawn(process.execPath, [holderScript], {
@@ -102,11 +145,11 @@ test("recovers a lifecycle lock left by a SIGKILLed owner", async () => {
     const recovered = acquirePreviewLifecycleLock(lockFile, {
       operation: "preview-up",
       generation: "next-generation",
-      pidStartIdentity: "test-parent-start",
+      identity: { method: "test", value: "test-parent-start" },
       resolvePidStartIdentity: (pid) => {
         try {
           process.kill(pid, 0);
-          return "unexpected-live-owner";
+          return { method: "test", value: "unexpected-live-owner" };
         } catch (error) {
           if (error?.code === "ESRCH") return null;
           throw error;
@@ -116,7 +159,7 @@ test("recovers a lifecycle lock left by a SIGKILLed owner", async () => {
     });
     assert.match(
       messages.join("\n"),
-      /Recovered stale lifecycle lock \(pid \d+, started test-child-start\)/,
+      /Recovered stale lifecycle lock \(pid \d+, started test:test-child-start\)/,
     );
     recovered.release();
   } finally {
@@ -129,7 +172,10 @@ test("recovers a reused PID only when lifecycle generations agree", () => {
   try {
     const lockFile = path.join(temporaryRoot, ".lifecycle.lock");
     const stateFile = path.join(temporaryRoot, ".state.json");
-    const identities = new Map([[501, "old-start"], [502, "new-command-start"]]);
+    const identities = new Map([
+      [501, { method: "test", value: "old-start" }],
+      [502, { method: "test", value: "new-command-start" }],
+    ]);
     const resolvePidStartIdentity = (pid) => identities.get(pid) ?? null;
     fs.writeFileSync(stateFile, '{"generation":"owned-generation"}\n');
     acquirePreviewLifecycleLock(lockFile, {
@@ -138,7 +184,7 @@ test("recovers a reused PID only when lifecycle generations agree", () => {
       pid: 501,
       resolvePidStartIdentity,
     });
-    identities.set(501, "reused-start");
+    identities.set(501, { method: "test", value: "reused-start" });
     const messages = [];
     const recovered = acquirePreviewLifecycleLock(lockFile, {
       operation: "preview-down",
@@ -148,18 +194,18 @@ test("recovers a reused PID only when lifecycle generations agree", () => {
       generationFiles: [stateFile],
       log: (message) => messages.push(message),
     });
-    assert.match(messages.join("\n"), /pid 501, started old-start/);
+    assert.match(messages.join("\n"), /pid 501, started test:old-start/);
     recovered.release();
 
     fs.writeFileSync(stateFile, '{"generation":"different-generation"}\n');
-    identities.set(501, "second-old-start");
+    identities.set(501, { method: "test", value: "second-old-start" });
     acquirePreviewLifecycleLock(lockFile, {
       operation: "preview-up",
       generation: "owned-generation",
       pid: 501,
       resolvePidStartIdentity,
     });
-    identities.set(501, "second-reused-start");
+    identities.set(501, { method: "test", value: "second-reused-start" });
     assert.throws(
       () => acquirePreviewLifecycleLock(lockFile, {
         operation: "preview-down",
@@ -175,31 +221,160 @@ test("recovers a reused PID only when lifecycle generations agree", () => {
   }
 });
 
-test("recovers a dead version-one lock left by the previous launcher", () => {
-  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-v1-"));
+test("recovers a stable zero-byte lock left by an early SIGKILL", async () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-empty-"));
   try {
     const lockFile = path.join(temporaryRoot, ".lifecycle.lock");
+    const holderScript = path.join(temporaryRoot, "hold-empty-lock.mjs");
     fs.writeFileSync(
-      lockFile,
-      `${JSON.stringify({
-        version: 1,
-        operation: "preview-up",
-        generation: "legacy-generation",
-        pid: 601,
-        acquiredAt: "2026-08-16T00:00:00.000Z",
-      })}\n`,
+      holderScript,
+      `import fs from "node:fs";\nfs.openSync(${JSON.stringify(lockFile)}, "wx", 0o600);\nconsole.log("EMPTY");\nsetInterval(() => {}, 1000);\n`,
     );
+    const child = spawn(process.execPath, [holderScript], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    await waitForOutput(child, "EMPTY");
+    const childExit = waitForExit(child);
+    child.kill("SIGKILL");
+    await childExit;
     const messages = [];
     const recovered = acquirePreviewLifecycleLock(lockFile, {
       operation: "preview-up",
       generation: "new-generation",
       pid: 602,
-      pidStartIdentity: "new-start",
+      identity: { method: "test", value: "new-start" },
       resolvePidStartIdentity: () => null,
       log: (message) => messages.push(message),
     });
-    assert.match(messages.join("\n"), /started unknown legacy identity/);
+    assert.match(messages.join("\n"), /Recovered unreadable lifecycle lock older than 500ms/);
     recovered.release();
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("two coordinated stale-lock recoverers admit exactly one live owner", async () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-race-"));
+  const lockFile = path.join(temporaryRoot, ".lifecycle.lock");
+  const gateFile = path.join(temporaryRoot, "go");
+  const stateModuleUrl = pathToFileURL(path.join(import.meta.dirname, "preview-state.mjs")).href;
+  try {
+    fs.writeFileSync(
+      lockFile,
+      `${JSON.stringify({
+        version: 3,
+        operation: "preview-up",
+        generation: "stale-generation",
+        pid: 999_999,
+        identity: { method: "test", value: "dead" },
+        createdAt: new Date(0).toISOString(),
+      })}\n`,
+    );
+    const children = ["one", "two"].map((name) => {
+      const childScript = path.join(temporaryRoot, `${name}.mjs`);
+      fs.writeFileSync(
+        childScript,
+        `import fs from "node:fs";\n` +
+          `import { acquirePreviewLifecycleLock } from ${JSON.stringify(stateModuleUrl)};\n` +
+          `while (!fs.existsSync(${JSON.stringify(gateFile)})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);\n` +
+          `try { acquirePreviewLifecycleLock(${JSON.stringify(lockFile)}, { operation: "preview-up", generation: ${JSON.stringify(name)}, identity: { method: "test", value: "race-live" }, resolvePidStartIdentity: (pid) => { try { process.kill(pid, 0); return { method: "test", value: "race-live" }; } catch (error) { if (error.code === "ESRCH") return null; throw error; } } }); console.log("ACQUIRED"); setInterval(() => {}, 1000); } catch (error) { console.log("REFUSED:" + error.message); }\n`,
+      );
+      return spawn(process.execPath, [childScript], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    });
+    fs.writeFileSync(gateFile, "go\n");
+    const outputs = await Promise.all(children.map(waitForLockOutcome));
+    assert.equal(outputs.filter((output) => output.includes("ACQUIRED")).length, 1);
+    assert.equal(outputs.filter((output) => output.includes("REFUSED:")).length, 1);
+    for (const child of children) {
+      if (child.exitCode === null) child.kill("SIGKILL");
+    }
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("macOS PID identity forces locale and timezone invariance", () => {
+  const observedEnvironments = [];
+  const runCommand = (_command, _args, options) => {
+    observedEnvironments.push(options.env);
+    return { status: 0, stdout: "Sun Aug 16 12:34:56 2026\n", stderr: "" };
+  };
+  const originalLocale = process.env.LC_ALL;
+  const originalTimezone = process.env.TZ;
+  let first;
+  let second;
+  try {
+    process.env.LC_ALL = "fr_FR.UTF-8";
+    process.env.TZ = "Pacific/Honolulu";
+    first = previewPidStartIdentity(700, {
+      platform: "darwin",
+      signalProcess: () => {},
+      runCommand,
+    });
+    process.env.LC_ALL = "de_DE.UTF-8";
+    process.env.TZ = "Europe/Berlin";
+    second = previewPidStartIdentity(700, {
+      platform: "darwin",
+      signalProcess: () => {},
+      runCommand,
+    });
+  } finally {
+    if (originalLocale === undefined) delete process.env.LC_ALL;
+    else process.env.LC_ALL = originalLocale;
+    if (originalTimezone === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTimezone;
+  }
+  assert.deepEqual(first, second);
+  assert.deepEqual(first, {
+    method: "ps-lstart-utc",
+    value: "Sun Aug 16 12:34:56 2026",
+  });
+  for (const environment of observedEnvironments) {
+    assert.equal(environment.LC_ALL, "C");
+    assert.equal(environment.TZ, "UTC0");
+  }
+});
+
+test("Linux PID identity combines boot ID with proc start ticks", () => {
+  const fieldsFromState = ["S", ...Array.from({ length: 18 }, (_, index) => String(index + 1)), "424242"];
+  const identity = previewPidStartIdentity(710, {
+    platform: "linux",
+    signalProcess: () => {},
+    readFile: (file) => file.endsWith("boot_id")
+      ? "boot-identity\n"
+      : `710 (preview worker) ${fieldsFromState.join(" ")}\n`,
+  });
+  assert.deepEqual(identity, {
+    method: "proc-stat",
+    value: "boot-identity:424242",
+  });
+});
+
+test("treats an identity method mismatch as live and refuses takeover", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-method-"));
+  try {
+    const lockFile = path.join(temporaryRoot, ".lifecycle.lock");
+    acquirePreviewLifecycleLock(lockFile, {
+      operation: "preview-up",
+      generation: "method-generation",
+      pid: 801,
+      identity: { method: "test", value: "recorded" },
+    });
+    assert.throws(
+      () => acquirePreviewLifecycleLock(lockFile, {
+        operation: "preview-down",
+        generation: "method-generation",
+        pid: 802,
+        identity: { method: "test", value: "contender" },
+        resolvePidStartIdentity: () => ({
+          method: "proc-stat",
+          value: "same-process-different-method",
+        }),
+      }),
+      /Preview lifecycle is busy: preview-up PID 801 is still starting/,
+    );
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
