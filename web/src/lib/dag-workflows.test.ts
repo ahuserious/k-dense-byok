@@ -156,6 +156,51 @@ describe("DAG workflow client", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [
+      "an unknown outcome",
+      {
+        outcome: "deleted",
+        definition: {
+          storageVersion: 1,
+          id: "graph-a",
+          revision: 2,
+          createdAt: 1,
+          updatedAt: 2,
+          graphSha256: "abc",
+          graph,
+        },
+      },
+    ],
+    [
+      "a definition without a revision",
+      {
+        outcome: "updated",
+        definition: {
+          storageVersion: 1,
+          id: "graph-a",
+          createdAt: 1,
+          updatedAt: 2,
+          graphSha256: "abc",
+          graph,
+        },
+      },
+    ],
+  ])("rejects a 2xx save envelope with %s", async (_label, body) => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(body, { headers: { ETag: '"2"' } }));
+
+    // A missing revision would otherwise reach the caller as `undefined` and
+    // only fail on the next save's precondition, far from its cause.
+    await expect(saveDagWorkflowDefinition("project-a", "graph-a", graph, {
+      kind: "update",
+      expectedRevision: 1,
+    })).rejects.toMatchObject({
+      name: "DagWorkflowApiError",
+      status: 200,
+      code: "MALFORMED_SAVE_RESPONSE",
+    });
+  });
+
   it("preserves server error detail, code, and status", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(
       { code: "CONFLICT", detail: "Expected workflow revision 4, received 3." },

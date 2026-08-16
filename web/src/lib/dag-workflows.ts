@@ -487,6 +487,34 @@ function nonNegativeSafeInteger(value: number, label: string): number {
   return value;
 }
 
+const DAG_WORKFLOW_SAVE_OUTCOMES: readonly string[] = ["created", "unchanged", "updated"];
+
+/**
+ * The minimum a caller may rely on from a definition write: a known outcome and
+ * the two fields of the `StoredDagWorkflowDefinition` interface above that
+ * callers read back — `id` to address the workflow and `revision` to seed the
+ * next update precondition. An unknown outcome or an absent revision would
+ * flow on as `undefined` and surface as a RangeError on the *next* save, far
+ * from the malformed response that caused it. The remaining stored fields stay
+ * trusted, as everywhere else in this client.
+ */
+function isSavedDefinitionEnvelope(body: unknown): body is {
+  outcome: DagWorkflowSaveOutcome;
+  definition: StoredDagWorkflowDefinition;
+} {
+  if (!isRecord(body) || !isRecord(body.definition)) return false;
+  if (typeof body.outcome !== "string" || !DAG_WORKFLOW_SAVE_OUTCOMES.includes(body.outcome)) {
+    return false;
+  }
+  const { id, revision } = body.definition;
+  return (
+    typeof id === "string"
+    && typeof revision === "number"
+    && Number.isSafeInteger(revision)
+    && revision >= 0
+  );
+}
+
 export async function listDagWorkflowDefinitions(
   projectId: string,
 ): Promise<DagWorkflowDefinitionSummary[]> {
@@ -528,14 +556,11 @@ export async function saveDagWorkflowDefinition(
     { method: "PUT", headers, body: JSON.stringify(graph) },
     projectId,
   );
-  const body = await parseResponse<{
-    outcome: DagWorkflowSaveOutcome;
-    definition: StoredDagWorkflowDefinition;
-  }>(response);
-  if (!isRecord(body) || !isRecord(body.definition) || typeof body.outcome !== "string") {
+  const body = await parseResponse<unknown>(response);
+  if (!isSavedDefinitionEnvelope(body)) {
     throw new DagWorkflowApiError(
       response.status,
-      "The workflow definition write returned no {outcome, definition} envelope.",
+      "The workflow definition write returned no valid {outcome, definition} envelope.",
       "MALFORMED_SAVE_RESPONSE",
     );
   }

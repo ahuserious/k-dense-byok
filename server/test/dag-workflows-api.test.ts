@@ -369,6 +369,11 @@ describe("DAG workflow API", () => {
     ["array", { "if-match": ['"1"', '"2"'] }],
     ["wildcard", { "if-match": "*" }],
     ["negative", { "if-match": '"-1"' }],
+    // RFC 7232 §2.3.2 strong comparison is octet-by-octet and the route never
+    // mints a padded ETag, so a padded revision matches no issued entity-tag.
+    ["leading zero", { "if-match": '"01"' }],
+    ["zero padded", { "if-match": '"0000000001"' }],
+    ["padded zero", { "if-match": '"00"' }],
   ] as const)(
     "rejects a %s If-Match with 400 and no ETag",
     async (_label, extra) => {
@@ -381,6 +386,26 @@ describe("DAG workflow API", () => {
       expect(response.headers.etag).toBeUndefined();
     },
   );
+
+  it("keeps the canonical zero and current-revision preconditions legal", async () => {
+    expect((await putDefinition(createHeaders(), graph())).statusCode).toBe(201);
+
+    // The padded-form rejection above must not have narrowed the legal set:
+    // "0" is canonical and reaches the conflict carrying the current revision.
+    const zero = await putDefinition(updateHeaders(0), graph());
+    expect(zero.statusCode).toBe(409);
+    expect(zero.json().code).toBe("CONFLICT");
+    expect(zero.headers.etag).toBe('"1"');
+
+    // "1" is the revision the create's ETag published: still a 200.
+    const current = await putDefinition(updateHeaders(1), graph());
+    expect(current.statusCode).toBe(200);
+    expect(current.headers.etag).toBe('"1"');
+    expect(current.json()).toMatchObject({
+      outcome: "unchanged",
+      definition: { id: "api-workflow", revision: 1 },
+    });
+  });
 
   it.each([
     ["non-wildcard", { "if-none-match": '"1"' }],

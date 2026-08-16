@@ -185,17 +185,23 @@ function parseCreatePrecondition(value: string | string[] | undefined): boolean 
 /**
  * Strict strong quoted `If-Match: "<non-negative safe integer>"`. Bare, weak
  * (`W/"1"`), wildcard, and list forms are all 400.
+ *
+ * The digits must be the canonical decimal form (`0`, or no leading zero).
+ * RFC 7232 §2.3.2 strong comparison is octet-by-octet, and this route only ever
+ * mints an unpadded `"<revision>"`, so `"01"` names an entity-tag no response
+ * can have issued: accepting it as revision 1 would satisfy a precondition the
+ * client never received.
  */
 function parseUpdatePrecondition(value: string | string[] | undefined): number | undefined {
   const raw = singleConditionalHeader(value, "If-Match");
   if (raw === undefined) return undefined;
-  const match = /^"(\d+)"$/.exec(raw.trim());
+  const match = /^"(0|[1-9]\d*)"$/.exec(raw.trim());
   const revision = match ? Number(match[1]) : Number.NaN;
   if (!match || !Number.isSafeInteger(revision) || revision < 0) {
     throw new DefinitionConditionalHeaderError(
       400,
       "INVALID_CONDITIONAL_HEADER",
-      'If-Match must be exactly one strong quoted non-negative workflow revision, for example If-Match: "1".',
+      'If-Match must be exactly one strong quoted unpadded non-negative workflow revision, for example If-Match: "1".',
     );
   }
   return revision;

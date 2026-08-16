@@ -394,6 +394,39 @@ describe("WorkflowStore definitions", () => {
     expect(facade.graphSha256).toMatch(/^[a-f0-9]{64}$/);
   });
 
+  it("leaves the definition file untouched when an identical update is unchanged", () => {
+    const store = new WorkflowStore();
+    const document = workflow("unchanged-no-write-workflow");
+    expect(
+      store.saveDefinitionWithIntent(PROJECT_ID, document.id, document, { kind: "create" }).outcome,
+    ).toBe("created");
+
+    // Same location store.ts definitionPath() derives: <definitions>/<id>.json.
+    const file = path.join(
+      resolvePaths(PROJECT_ID).workflowDefinitionsDir,
+      `${document.id}.json`,
+    );
+    // Backdate the timestamps first so the assertion cannot pass on filesystem
+    // timestamp granularity alone: the store writes a temp file and renames it,
+    // so any rewrite restamps mtime to now and changes the inode.
+    const backdatedSeconds = 1_000_000;
+    fs.utimesSync(file, backdatedSeconds, backdatedSeconds);
+    const before = fs.statSync(file);
+    const beforeBytes = fs.readFileSync(file);
+
+    const unchanged = store.saveDefinitionWithIntent(PROJECT_ID, document.id, document, {
+      kind: "update",
+      expectedRevision: 1,
+    });
+    expect(unchanged.outcome).toBe("unchanged");
+    expect(unchanged.definition.revision).toBe(1);
+
+    const after = fs.statSync(file);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    expect(after.ino).toBe(before.ino);
+    expect(fs.readFileSync(file).equals(beforeBytes)).toBe(true);
+  });
+
   it("rejects a definition precondition that is not a non-negative safe integer", () => {
     const store = new WorkflowStore();
     const document = workflow("bad-precondition-workflow");
