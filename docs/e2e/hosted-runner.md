@@ -63,13 +63,14 @@ after scrubbing and never uploaded.
 
 The final artifact scan is one linear pass over each payload file while the upload tar is assembled.
 Each file is classified by magic bytes, hashed once, and searched with a fixed set of views. ZIP, TAR,
-and GZIP members are recursed (depth ≤ 4; 8 GiB total decompressed bytes, else the artifact is
-rejected). Members whose magic identifies zstd, xz, 7z, rar, or bz2 fail closed. Brotli and raw
-DEFLATE have no magic and are undetectable: they are searched on
-the latin1 view and otherwise left untouched. The payload tar and the outer bundle tar are not
-re-scanned; the seal is the recorded per-file SHA-256 digests plus the hash of the assembled payload
-tar. Malformed percent syntax, invalid UTF-8, and unknown binary content emit a WARN line and stay
-fail-open.
+and GZIP members are recursed (depth ≤ 4 per descent path; 8 GiB of inspected bytes for the whole
+seal, counted as a single global total across every payload file and every nested member, else the
+artifact is rejected). Members whose magic identifies zstd, xz, 7z, rar, or bz2 fail closed and the
+rejection names that codec. Brotli and raw DEFLATE have no magic and are undetectable: they are
+searched on the latin1 view and otherwise left untouched. The payload tar and the outer bundle tar
+are not re-scanned; the seal is the recorded per-file SHA-256 digests plus the hash of the assembled
+payload tar. Malformed percent syntax, invalid UTF-8, and unknown binary content emit a WARN line
+and stay fail-open.
 
 Reporter `2.1.16` prints the server-returned `createdSuiteRun.url` directly (the pinned CJS dist at
 `index-CdLJi9uc.cjs:9593-9594`). This evidence tool documents its checked-in Stably dashboard contract
@@ -95,8 +96,9 @@ Purpose: our own credential values (`STABLY_API_KEY`, `STABLY_PROJECT_ID`, and a
 in the secrets set) must not appear in uploaded evidence produced by our tooling. This is accidental
 inclusion, not adversarial obfuscation.
 
-Views searched, per file (recursing into ZIP, TAR, and GZIP members only; depth ≤ 4; total
-decompressed bytes bounded at 8 GiB, else reject):
+Views searched, per file (recursing into ZIP, TAR, and GZIP members only; depth ≤ 4 per descent
+path; inspected bytes bounded at 8 GiB as one global total for the whole seal — every top-level
+payload file plus every nested member counts against the same counter — else reject):
 
 1. raw bytes (latin1 view);
 2. percent-decoded view — tolerant: any `%HH` run is decoded byte-wise; malformed or incomplete
@@ -111,7 +113,8 @@ decompressed bytes bounded at 8 GiB, else reject):
    scope), no longer chains, and no per-file variant caps.
 
 Compressed members whose magic bytes are recognised but not supported for inspection are rejected,
-naming the member: zstd, xz, 7z, rar, and bz2. Brotli and raw DEFLATE have no magic and are
+naming the codec — `unsupported zstd compressed member in <hashed member ref>` — for zstd, xz, 7z,
+rar, and bz2; member paths stay hashed. Brotli and raw DEFLATE have no magic and are
 undetectable; they are out of scope and are not treated as a silent acceptance of a recognised
 framing. Unreadable members and the decompressed-bytes bound fail closed.
 

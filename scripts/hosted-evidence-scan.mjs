@@ -64,6 +64,13 @@ function toPosixPath(relativePath) {
   return relativePath.split(path.sep).join("/");
 }
 
+function unsupportedCompressionName(bytes) {
+  const signature = UNSUPPORTED_COMPRESSION_SIGNATURES.find((candidate) =>
+    bytes.subarray(0, candidate.magic.length).equals(candidate.magic),
+  );
+  return signature ? signature.name : null;
+}
+
 export function archiveKind(bytes) {
   if (
     bytes.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04])) ||
@@ -78,11 +85,7 @@ export function archiveKind(bytes) {
   if (bytes.length >= 262 && bytes.subarray(257, 262).toString("ascii") === "ustar") {
     return "tar";
   }
-  if (
-    UNSUPPORTED_COMPRESSION_SIGNATURES.some((signature) =>
-      bytes.subarray(0, signature.magic.length).equals(signature.magic),
-    )
-  ) {
+  if (unsupportedCompressionName(bytes) !== null) {
     return "unsupported";
   }
   return null;
@@ -132,12 +135,16 @@ function validateArchiveEntries(entries, artifactRef, byteRepresentations, conte
   }
 }
 
+// The counter object is shared by every frame of one seal: nested contexts are shallow
+// copies, so a number field would only ever be incremented on the child. Holding the total
+// in an object makes the bound global across all top-level artifacts and all nested members.
 function accountDecompressedBytes(size, artifactRef, context) {
-  context.decompressedBytes += size;
-  if (context.decompressedBytes > context.maxDecompressedBytes) {
+  const counter = context.decompressedByteCounter;
+  counter.total += size;
+  if (counter.total > context.maxDecompressedBytes) {
     throw new Error(
       `decompressed-bytes bound exceeded for ${artifactRef}: ` +
-        `bound=${context.maxDecompressedBytes} observed=${context.decompressedBytes}`,
+        `bound=${context.maxDecompressedBytes} observed=${counter.total}`,
     );
   }
 }
@@ -226,7 +233,9 @@ function inspectBytes(
   searchBytes(bytes, artifactRef, byteRepresentations, context);
   const kind = archiveKind(bytes);
   if (kind === "unsupported") {
-    throw new Error(`unsupported compressed member in ${artifactRef}`);
+    throw new Error(
+      `unsupported ${unsupportedCompressionName(bytes)} compressed member in ${artifactRef}`,
+    );
   }
   if (kind === null) return;
   if (context.depth >= MAX_ARCHIVE_DEPTH) return;
@@ -296,6 +305,7 @@ function scanPath(filePath, relativePath, artifactRef, byteRepresentations, cont
     throw new Error(`unreadable member in ${artifactRef}`);
   }
 
+  accountDecompressedBytes(stat.size, artifactRef, context);
   const bytes = fs.readFileSync(filePath);
   if (context.collectDigests) {
     context.digests.push({
@@ -320,7 +330,7 @@ function createScanContext({
 } = {}) {
   return {
     depth: 0,
-    decompressedBytes: 0,
+    decompressedByteCounter: { total: 0 },
     maxDecompressedBytes,
     collectDigests,
     digests: [],
@@ -426,14 +436,13 @@ export function sealHostedEvidenceBundle({
   JSON.parse(serializedManifest);
   fs.writeFileSync(manifestPath, serializedManifest);
   const manifestRef = artifactReference(PAYLOAD_ARTIFACTS.length, MANIFEST_FILE_NAME);
+  const manifestContext = createScanContext({ maxDecompressedBytes });
+  manifestContext.topLevelRef = manifestRef;
   searchBytes(
     Buffer.from(serializedManifest, "utf8"),
     manifestRef,
     collectSecretByteRepresentations(environment),
-    {
-      topLevelRef: manifestRef,
-      emittedWarnings: new Set(),
-    },
+    manifestContext,
   );
 
   const bundlePath = createTar(

@@ -261,6 +261,52 @@ test("embedded and arbitrarily spaced base64 of percent-encoded credentials fail
   }
 });
 
+test("percent-encoded base64 of a credential fails closed on scrub, scan, and seal", () => {
+  const secret = "Percent~Base64~Credential~Alpha";
+  const base64 = Buffer.from(secret, "utf8").toString("base64");
+  const fixture = `prefix:${encodeURIComponent(base64)}:suffix`;
+  // The percent layer escapes "+" and "=" inside the base64, so neither the literal base64
+  // nor any raw base64 span of the fixture carries the credential: only the composed
+  // percent-then-base64 view does.
+  assert.match(base64, /\+/);
+  assert.equal(fixture.includes(base64), false);
+  assert.equal(
+    extractBase64DecodedSpans(Buffer.from(fixture, "utf8")).some((span) =>
+      span.includes(Buffer.from(secret, "utf8")),
+    ),
+    false,
+  );
+
+  assert.throws(
+    () => scrubAndVerifyText(fixture, { STABLY_API_KEY: secret }),
+    /secret representation remained after scrubbing/,
+  );
+  withTemporaryDirectory((directory) => {
+    fs.writeFileSync(path.join(directory, "percent-of-base64.log"), fixture);
+    assertSecretDetected(
+      () =>
+        scanHostedEvidenceArtifacts({
+          workingDirectory: directory,
+          environment: { STABLY_API_KEY: secret },
+          artifactPaths: ["percent-of-base64.log"],
+        }),
+      "scan path",
+    );
+  });
+  withTemporaryDirectory((directory) => {
+    writeRequiredPayloadArtifacts(directory);
+    fs.writeFileSync(path.join(directory, "stably-test.scrubbed.log"), fixture);
+    assert.throws(
+      () =>
+        sealHostedEvidenceBundle({
+          workingDirectory: directory,
+          environment: { STABLY_API_KEY: secret },
+        }),
+      /^Error: secret representation detected in artifact\[4\]#[a-f0-9]{12}$/,
+    );
+  });
+});
+
 test("H1: %cDownload trace lines never reject scan or seal", () => {
   const reactLine =
     '{"type":"info","text":"%cDownload the React DevTools for a better development experience: https://reactjs.org/link/react-devtools"}';
@@ -541,7 +587,7 @@ test("H3: zstd magic rejects; raw DEFLATE is undetectable and accepted", () => {
           environment: { STABLY_API_KEY: secret },
           artifactPaths: ["payload.zst"],
         }),
-      /^Error: unsupported compressed member in artifact\[0\]#[a-f0-9]{12}$/,
+      /^Error: unsupported zstd compressed member in artifact\[0\]#[a-f0-9]{12}$/,
     );
 
     for (const [name, magic] of [
@@ -558,7 +604,17 @@ test("H3: zstd magic rejects; raw DEFLATE is undetectable and accepted", () => {
             environment: {},
             artifactPaths: [`${name}.bin`],
           }),
-        /unsupported compressed member in artifact\[0\]#[a-f0-9]{12}/,
+        (error) => {
+          // The codec is named; the member itself stays a hashed reference.
+          assert.equal(
+            error.message,
+            `unsupported ${name} compressed member in ${
+              error.message.match(/artifact\[0\]#[a-f0-9]{12}/)[0]
+            }`,
+          );
+          assert.equal(error.message.includes(`${name}.bin`), false);
+          return true;
+        },
         name,
       );
     }
@@ -713,15 +769,82 @@ test("decompressed-bytes bound fails closed", () => {
       encoding: "utf8",
     });
     assert.equal(zipped.status, 0, zipped.stderr);
+    // The archive file itself is accounted first, so the bound admits it and leaves less
+    // than the 64-byte member: the member is what trips it.
+    const boundAdmittingOnlyTheArchive = fs.statSync(archivePath).size + 8;
     assert.throws(
       () =>
         scanHostedEvidenceArtifacts({
           workingDirectory: directory,
           environment: {},
           artifactPaths: ["bound.zip"],
-          maxDecompressedBytes: 8,
+          maxDecompressedBytes: boundAdmittingOnlyTheArchive,
         }),
       /decompressed-bytes bound exceeded for artifact\[0\]#[a-f0-9]{12}\/entry\[\d+\]#[a-f0-9]{12}/,
+    );
+  });
+});
+
+test("the decompressed-bytes bound is one global total, not a per-artifact allowance", () => {
+  withTemporaryDirectory((directory) => {
+    const memberBytes = 64 * 1024;
+    const memberContent = Buffer.alloc(memberBytes, 0x61);
+    const firstPath = path.join(directory, "first.gz");
+    const secondPath = path.join(directory, "second.gz");
+    fs.writeFileSync(firstPath, zlib.gzipSync(memberContent));
+    fs.writeFileSync(secondPath, zlib.gzipSync(memberContent));
+    const compressedBytes =
+      fs.statSync(firstPath).size + fs.statSync(secondPath).size;
+    // Each member expands past half of what remains after the two compressed files are
+    // accounted, so either one alone fits and the two together cannot.
+    const globalBound =
+      compressedBytes + memberBytes + Math.floor(memberBytes / 2);
+
+    for (const artifactPath of ["first.gz", "second.gz"]) {
+      assert.doesNotThrow(
+        () =>
+          scanHostedEvidenceArtifacts({
+            workingDirectory: directory,
+            environment: {},
+            artifactPaths: [artifactPath],
+            maxDecompressedBytes: globalBound,
+          }),
+        artifactPath,
+      );
+    }
+
+    assert.throws(
+      () =>
+        scanHostedEvidenceArtifacts({
+          workingDirectory: directory,
+          environment: {},
+          artifactPaths: ["first.gz", "second.gz"],
+          maxDecompressedBytes: globalBound,
+        }),
+      (error) => {
+        assert.match(
+          error.message,
+          /^decompressed-bytes bound exceeded for artifact\[1\]#[a-f0-9]{12}: bound=\d+ observed=\d+$/,
+        );
+        assert.equal(error.message.includes(`bound=${globalBound}`), true);
+        return true;
+      },
+    );
+  });
+});
+
+test("the top-level payload file is accounted against the global bound", () => {
+  withTemporaryDirectory((directory) => {
+    fs.writeFileSync(path.join(directory, "plain.log"), "y".repeat(1024));
+    assert.throws(
+      () =>
+        scanHostedEvidenceArtifacts({
+          workingDirectory: directory,
+          environment: {},
+          artifactPaths: ["plain.log"],
+          maxDecompressedBytes: 512,
+        }),
+      /^Error: decompressed-bytes bound exceeded for artifact\[0\]#[a-f0-9]{12}: bound=512 observed=1024$/,
     );
   });
 });

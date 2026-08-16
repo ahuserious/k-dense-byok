@@ -230,6 +230,9 @@ function decodeBase64Span(spanBytes) {
 
 export function extractBase64DecodedSpans(buffer) {
   const decodedSpans = [];
+  // One reusable byte-wide scratch span, sized for the whole buffer: a span can be at most
+  // as long as its input, and decodeBase64Span copies out of it before the next span starts.
+  const spanScratch = Buffer.allocUnsafe(buffer.length);
   let index = 0;
   while (index < buffer.length) {
     while (
@@ -245,7 +248,7 @@ export function extractBase64DecodedSpans(buffer) {
     if (index >= buffer.length || !isBase64AlphabetOrPadByte(buffer[index])) {
       continue;
     }
-    const collected = [];
+    let collectedLength = 0;
     while (index < buffer.length) {
       const byte = buffer[index];
       if (isAsciiWhitespaceByte(byte)) {
@@ -253,14 +256,15 @@ export function extractBase64DecodedSpans(buffer) {
         continue;
       }
       if (isBase64AlphabetOrPadByte(byte)) {
-        collected.push(byte);
+        spanScratch[collectedLength] = byte;
+        collectedLength += 1;
         index += 1;
         continue;
       }
       break;
     }
-    if (collected.length >= MIN_BASE64_SPAN_LENGTH) {
-      const decoded = decodeBase64Span(Buffer.from(collected));
+    if (collectedLength >= MIN_BASE64_SPAN_LENGTH) {
+      const decoded = decodeBase64Span(spanScratch.subarray(0, collectedLength));
       if (decoded) decodedSpans.push(decoded);
     }
   }
