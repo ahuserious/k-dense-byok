@@ -4,9 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { previewEnvironment } from "./preview-environment.mjs";
+import { createLaunchOverlay, previewEnvironment } from "./preview-environment.mjs";
 import { scrubSensitiveEnvironment } from "./vendored-dist-environment.mjs";
-import { instrumentPreviewLauncher } from "./preview-launcher-observer.mjs";
 import {
   collectPreviewListenerGroups,
   stopProcessGroups,
@@ -48,10 +47,6 @@ function commandPath(command) {
   return result.stdout.trim();
 }
 
-function writeExecutable(targetPath, content) {
-  fs.writeFileSync(targetPath, content, { mode: 0o700 });
-}
-
 function prepareVendoredDist({ skipBuild, enginePort }) {
   const scriptName = skipBuild ? "vendored-dist-check.mjs" : "vendored-dist-build.mjs";
   const arguments_ = [path.join(scriptDirectory, scriptName)];
@@ -78,53 +73,6 @@ function prepareVendoredDist({ skipBuild, enginePort }) {
         "Run `node scripts/vendored-dist-build.mjs --force` or omit --no-build-dist.",
     );
   }
-}
-
-function createLaunchOverlay(stateRoot, realNpm, realGit) {
-  const launchRoot = path.join(stateRoot, "launch");
-  const isolatedHome = path.join(stateRoot, "home");
-  // start.mjs prepends ~/.local/bin after its dependency checks. Put the
-  // shims there so that normalization cannot expose the host npm/git again.
-  const shimDirectory = path.join(isolatedHome, ".local", "bin");
-  fs.mkdirSync(launchRoot, { recursive: true, mode: 0o700 });
-  fs.mkdirSync(shimDirectory, { recursive: true, mode: 0o700 });
-  const launcherSource = fs.readFileSync(path.join(repositoryRoot, "start.mjs"), "utf-8");
-  fs.writeFileSync(
-    path.join(launchRoot, "start.mjs"),
-    instrumentPreviewLauncher(launcherSource),
-    { mode: 0o700 },
-  );
-  fs.copyFileSync(path.join(repositoryRoot, "env-file.mjs"), path.join(launchRoot, "env-file.mjs"));
-  fs.writeFileSync(path.join(launchRoot, ".env"), "# Intentionally blank preview environment.\n", {
-    mode: 0o600,
-  });
-  fs.symlinkSync(path.join(repositoryRoot, "server"), path.join(launchRoot, "server"), "dir");
-  fs.symlinkSync(path.join(repositoryRoot, "web"), path.join(launchRoot, "web"), "dir");
-
-  writeExecutable(
-    path.join(shimDirectory, "npm"),
-    `#!/usr/bin/env node
-import { spawnSync } from "node:child_process";
-const args = process.argv.slice(2);
-if (args[0] === "view") process.exit(1);
-const result = spawnSync(${JSON.stringify(realNpm)}, args, { stdio: "inherit", env: process.env });
-process.exit(result.status ?? 1);
-`,
-  );
-  writeExecutable(
-    path.join(shimDirectory, "git"),
-    `#!/usr/bin/env node
-import { spawnSync } from "node:child_process";
-const args = process.argv.slice(2);
-if (args.includes("push")) {
-  console.error("[kady-preview] blocked destructive git command: push");
-  process.exit(125);
-}
-const result = spawnSync(${JSON.stringify(realGit)}, args, { stdio: "inherit", env: process.env });
-process.exit(result.status ?? 1);
-`,
-  );
-  return { launchRoot, shimDirectory };
 }
 
 function runPushBlockProbe(realGit, environment) {
@@ -252,7 +200,12 @@ stateRoot = fs.realpathSync(stateRoot);
 
 const realNpm = commandPath("npm");
 const realGit = commandPath("git");
-const { launchRoot, shimDirectory } = createLaunchOverlay(stateRoot, realNpm, realGit);
+const { launchRoot, shimDirectory } = createLaunchOverlay(
+  repositoryRoot,
+  stateRoot,
+  realNpm,
+  realGit,
+);
 const environment = previewEnvironment(stateRoot, launchRoot, shimDirectory, ports);
 const logPath = path.join(stateRoot, "preview.log");
 const serviceStatePath = environment.KADY_PREVIEW_SERVICE_STATE_FILE;

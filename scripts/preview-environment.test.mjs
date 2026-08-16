@@ -1,6 +1,69 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
-import { previewEnvironment } from "./preview-environment.mjs";
+import { fileURLToPath } from "node:url";
+import { createLaunchOverlay, previewEnvironment } from "./preview-environment.mjs";
+
+const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
+const repositoryRoot = path.resolve(scriptDirectory, "..");
+
+test("launch overlay resolves every copied start.mjs dependency without starting services", () => {
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-overlay-test-"));
+  try {
+    const { launchRoot } = createLaunchOverlay(
+      repositoryRoot,
+      stateRoot,
+      process.execPath,
+      process.execPath,
+    );
+    const launcherSource = fs.readFileSync(path.join(launchRoot, "start.mjs"), "utf-8");
+    const relativeImports = [
+      ...launcherSource.matchAll(/from\s+["'](\.\/[^"']+)["']/g),
+    ].map((match) => match[1]);
+
+    assert.deepEqual(relativeImports, [
+      "./env-file.mjs",
+      "./scripts/vendored-dist-check.mjs",
+      "./scripts/vendored-dist-environment.mjs",
+    ]);
+    assert.deepEqual(
+      fs.readFileSync(path.join(launchRoot, "env-file.mjs")),
+      fs.readFileSync(path.join(repositoryRoot, "env-file.mjs")),
+    );
+    assert.equal(fs.existsSync(path.join(launchRoot, ".git")), false);
+    assert.equal(
+      fs.readFileSync(path.join(launchRoot, ".env"), "utf-8"),
+      "# Intentionally blank preview environment.\n",
+    );
+    assert.equal(fs.lstatSync(path.join(launchRoot, "server")).isSymbolicLink(), true);
+    const importProbePath = path.join(launchRoot, "import-probe.mjs");
+    fs.writeFileSync(
+      importProbePath,
+      `${relativeImports.map((specifier) => `import ${JSON.stringify(specifier)};`).join("\n")}\n`,
+    );
+    const importProbe = spawnSync(process.execPath, [importProbePath], {
+      cwd: launchRoot,
+      encoding: "utf-8",
+    });
+    assert.equal(importProbe.status, 0, `${importProbe.stdout}\n${importProbe.stderr}`);
+
+    for (const scriptName of [
+      "vendored-dist-build.mjs",
+      "vendored-dist-check.mjs",
+      "vendored-dist-environment.mjs",
+    ]) {
+      assert.deepEqual(
+        fs.readFileSync(path.join(launchRoot, "scripts", scriptName)),
+        fs.readFileSync(path.join(repositoryRoot, "scripts", scriptName)),
+      );
+    }
+  } finally {
+    fs.rmSync(stateRoot, { recursive: true, force: true });
+  }
+});
 
 test("pins both engine clients to the preview port by default and scrubs legacy engine variables", () => {
   const environment = previewEnvironment(

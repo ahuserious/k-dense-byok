@@ -64,6 +64,10 @@ project, Pi-agent, skills-cache, workflow-supervisor, and log paths. It creates
 a launch overlay with a blank `.env`, so the repository `.env` and its provider
 credentials are not loaded. The overlay symlinks the checked-out `server/` and
 `web/` trees and runs the checkout's exact `start.mjs` and `env-file.mjs` bytes.
+It also includes a minimal `scripts/` directory containing byte-exact copies of
+the three `vendored-dist-*.mjs` modules required by the launcher. Those modules
+validate and build against the checkout resolved through the `server/` symlink,
+so the overlay neither exposes `.git` nor substitutes `gitHead: "unknown"`.
 Dependencies must already be installed; the preview npm shim suppresses the
 launcher's update lookup and forces npm offline.
 

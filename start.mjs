@@ -22,6 +22,9 @@ import {
 } from "./scripts/vendored-dist-environment.mjs";
 
 const repoRoot = path.dirname(fileURLToPath(import.meta.url));
+const vendoredDistBuilderScript = fileURLToPath(
+  new URL("./scripts/vendored-dist-build.mjs", import.meta.url),
+);
 const isWin = process.platform === "win32";
 const flags = {
   check: process.argv.includes("--check"),
@@ -485,6 +488,12 @@ async function startWorkflowEngine() {
     log(`  ${sym.warn} Workflow engine sources missing (server/vendor/pipeline-engine) — skipping it.`);
     return false;
   }
+  // In a preview overlay server/ is a symlink to the checkout. Resolve through
+  // it so manifest Git identity and inputs come from the source repository,
+  // while imports and the blank .env remain rooted in the isolated launcher.
+  const vendoredDistRepositoryRoot = path.dirname(
+    fs.realpathSync(path.join(repoRoot, "server")),
+  );
   const bun = findBun();
   if (!bun) {
     log(`  ${sym.warn} bun not found — skipping the workflow engine (install it from https://bun.sh).`);
@@ -538,14 +547,17 @@ async function startWorkflowEngine() {
         : `${bunDirectory}${path.delimiter}${process.env.PATH ?? ""}`,
     PORT: String(PIPELINE_ENGINE_PORT),
   });
-  const builderScript = path.join(repoRoot, "scripts", "vendored-dist-build.mjs");
   if (
-    run(process.execPath, [builderScript, "--if-stale"], {
-      cwd: repoRoot,
-      env: builderEnvironment,
-    }) !== 0
+    run(
+      process.execPath,
+      [vendoredDistBuilderScript, "--if-stale", "--root", vendoredDistRepositoryRoot],
+      {
+        cwd: vendoredDistRepositoryRoot,
+        env: builderEnvironment,
+      },
+    ) !== 0
   ) {
-    const distStatus = checkVendoredDist(repoRoot, builderEnvironment);
+    const distStatus = checkVendoredDist(vendoredDistRepositoryRoot, builderEnvironment);
     if (classifyVendoredDistAfterBuildFailure(distStatus) === "serve-stale") {
       log(`  ${sym.warn} WARNING: THE SERVED WORKFLOW BUILDER BUNDLE IS STALE.`);
       log(`    Offending freshness input: ${distStatus.path} (${distStatus.reason}).`);
