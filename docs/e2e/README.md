@@ -1,6 +1,9 @@
 # Hermetic preview and browser E2E loop
 
-This suite exercises the local three-service preview before the same Playwright items are submitted to Stably's cloud browser. Cloud credentials are optional locally and are read only when both `STABLY_API_KEY` and `STABLY_PROJECT_ID` are present.
+This suite has two evidence tiers over the local three-service preview. Cloud credentials are optional locally and are read only when both `STABLY_API_KEY` and `STABLY_PROJECT_ID` are present.
+
+- The mocked tier loads the real frontend and vendored DAG Builder, then intercepts backend and engine API calls with deterministic fixtures. It proves browser rendering, interaction, request serialization, and response handling against those fixtures. It does not prove server behavior or client/server compatibility.
+- The `@live` tier installs no routes and no streaming-fetch replacement. The browser talks to the preview's real backend and real pipeline engine. It proves a small set of server-truth contracts: template creation, list/read consistency, exact revision/hash/timestamp values, revision-1 idempotent-save semantics, rendered detail counts, browser-facing origins, and provider-free engine validation.
 
 ## One-time prerequisites
 
@@ -19,14 +22,27 @@ Start the hermetic preview from the repository root:
 
 ```bash
 node scripts/preview-up.mjs
-curl --fail --silent --show-error http://127.0.0.1:18000/health
-curl --fail --silent --show-error http://127.0.0.1:13000/ >/dev/null
-curl --fail --silent --show-error http://127.0.0.1:13091/api/health
-npx playwright test
+KADY_E2E_BASE_URL=http://127.0.0.1:13000 npx playwright test
 node scripts/preview-down.mjs
 ```
 
-`playwright.config.ts` defaults to `http://127.0.0.1:13000`. Override it with `KADY_E2E_BASE_URL` only when intentionally targeting another preview. API calls are hermetically mocked at the browser boundary; the real frontend and vendored DAG Builder are still loaded from the preview.
+`playwright.config.ts` defaults to `http://127.0.0.1:13000`. Override it with `KADY_E2E_BASE_URL` only when intentionally targeting another preview. Run the tiers separately with:
+
+```bash
+# Deterministic UI tier: 246 mocked items.
+KADY_E2E_BASE_URL=http://127.0.0.1:13000 npx playwright test --grep-invert @live
+
+# Server-truth tier: 3 unmocked items.
+KADY_E2E_BASE_URL=http://127.0.0.1:13000 npx playwright test --grep @live
+```
+
+Known limitation: the mocked tier's backend interception pattern is fixed to port `18000`. Run the combined or mocked tier with the default preview ports (`18000` backend, `13000` frontend, `13091` engine); changing the backend port lets mocked requests escape the fixture. The `@live` tier derives its service origins independently, but this lane deliberately does not broaden the established mocked-fixture semantics.
+
+The unmocked tier uses unique workflow ids and names on every item so a warm shared preview cannot collide with an earlier run. The typed-workflow API has no delete route, so those definitions cannot be cleaned up through the public contract; the unique names make the bounded leftovers harmless, and `preview-down.mjs` removes them with the isolated preview state. The builder validation item does not persist its draft.
+
+An identical PUT of a revision-1 typed workflow currently returns the same `201` as its first PUT because the handler derives status from the stored revision. The no-op proof is the unchanged revision, `createdAt`, `updatedAt`, `graphSha256`, and graph in the repeated response. Returning `200` for this no-op is the desired API change tracked as server-owned backlog item N-09; it is not a C3 test-fixture change.
+
+The live engine path is create-draft → validate → observe. Validation parses the submitted graph in the real engine without calling a model. A real run is deliberately out of reach in the hermetic preview: providers are unset, the fresh engine has no registered codebase to bind/save the draft, and the Builder keeps Run disabled until the graph is saved. Claim validation evidence only, not execution evidence.
 
 Always run `preview-down.mjs`, including after a failed test. It terminates the preview launcher group and the service groups discovered from the owned listener ports, verifies that all three ports are free, and removes the isolated state tree.
 
@@ -34,13 +50,17 @@ The teardown command does not return successfully until `deploy/preview/.state.j
 
 `preview-up.mjs` first waits for every fixed preview port to have no listener. It then probes all three endpoints until they are healthy in the same pass. A launcher-parent exit is diagnostic rather than a readiness failure; an observed service-child exit fails immediately with its exit status and a preview-log excerpt. Other connection failures remain retryable until the bounded service timeout.
 
+Playwright then performs its own worker barrier in `e2e/global-setup.ts`. It waits for the web root, backend `/health`, and engine `/api/health`, opens Chromium, renders the project workspace, opens Builder, and waits for the Builder name field inside the iframe. This compiles the cold Next page and vendored Builder bundle before any test worker starts. The suite always defaults to 4 workers locally and in CI; set `KADY_E2E_WORKERS` to a positive integer only for an intentional measured override. Raising timeouts or worker counts is not a substitute for investigating contention.
+
+The orchestrator's 2026-08-15 cold run printed the `rendered=workspace+builder` warm-up barrier and started all 249 items with 4 workers. Every mocked-tier item completed without failure, so the prior 72-failure cold-start phenomenon did not recur. The two failures were confined to first-run assumptions in the new `@live` items and were corrected in the following static pass; a zero-failure full-suite rerun remains required.
+
 To prove consecutive cleanup, run the complete up/curl/down sequence three times. A later `preview-up.mjs` must not encounter occupied ports or reuse state from an earlier cycle.
 
 The orchestrator's 2026-08-12 live proof completed three consecutive cycles: every service was healthy at roughly 24 seconds, every teardown removed the isolated state, and no listener or child process survived.
 
 ## Test inventory
 
-Playwright expands the parameterized declarations into 246 independent test items. A local reporter
+Playwright expands the parameterized declarations into 249 independent test items. A local reporter
 fails collection if any per-file count or the substantive/thin split changes without an intentional update:
 
 | Surface | Items |
@@ -51,10 +71,11 @@ fails collection if any per-file count or the substantive/thin split changes wit
 | DAG Builder, node cards, and every NodeSpec field | 60 |
 | Console and Raindrop | 33 |
 | Scientific DAG Studio popup | 34 |
-| **Total** | **246** |
+| Unmocked backend and engine contracts | 3 |
+| **Total** | **249** |
 
-Of those 246 items, 210 are substantive behavior checks and 36 are explicitly labelled thin inventory
-or documented-product-gap items. The split is checked at collection time as well as the per-file totals.
+Of those 249 items, 213 are substantive behavior checks and 36 are explicitly labelled thin inventory
+or documented-product-gap items. All three `@live` items are substantive because each asserts exact values returned by a real service and a corresponding browser-visible consequence. The split is checked at collection time as well as the per-file totals.
 
 Each item establishes the state required by its surface. Builder items open a named draft before using the canvas; live Scientific DAG items submit a run before expecting a projection; typed-pipeline items create and open their stored definition; Console and Raindrop items wait for durable records. Assertions use Playwright's signal-based locator waits and do not contain fixed sleeps.
 
@@ -63,6 +84,8 @@ List the expanded inventory without running browsers:
 ```bash
 npx playwright test --list
 ```
+
+Playwright's list mode only collects tests; it does not start the global warm-up or require reachable services. There is no root TypeScript project covering `e2e/` or `playwright.config.ts`; `npx playwright test --list` is the available socket-free compilation/collection check for these files.
 
 Local traces are always enabled. Playwright writes run artifacts under `.stably/test-results/`; failures retain screenshots and video.
 
