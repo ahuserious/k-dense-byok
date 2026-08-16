@@ -489,6 +489,41 @@
       "date": "2026-08-16",
       "path": "scripts/preview-state.test.mjs",
       "scope": "preview lifecycle lock recovery regression"
+    },
+    {
+      "from": "S7",
+      "to": "C1",
+      "date": "2026-08-16",
+      "path": "server/src/index.ts",
+      "scope": "kady-supervisor IPC message (supervisor pid reported to the launcher parent) \u2014 no other change"
+    },
+    {
+      "from": "C1",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-launcher-observer.mjs",
+      "scope": "generation-bound service records, launcher start gate and process identity in the preview observer"
+    },
+    {
+      "from": "C1",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-launcher-observer.test.mjs",
+      "scope": "observer generation/identity regression"
+    },
+    {
+      "from": "S11",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-processes.mjs",
+      "scope": "identity-verified preview process ownership (no cwd-only signaling)"
+    },
+    {
+      "from": "S11",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-processes.test.mjs",
+      "scope": "preview process ownership regression"
     }
   ]
 }
