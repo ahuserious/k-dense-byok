@@ -62,7 +62,9 @@ The teardown command does not return successfully until `deploy/preview/.state.j
 
 `preview-up.mjs` first waits for every fixed preview port to have no listener. It then probes all three endpoints until they are healthy in the same pass. A launcher-parent exit is diagnostic rather than a readiness failure; an observed service-child exit fails immediately with its exit status and a preview-log excerpt. Other connection failures remain retryable until the bounded service timeout.
 
-Playwright then performs its own worker barrier in `e2e/global-setup.ts`. Both its request context and Chromium context inherit the resolved project's `baseURL` and `extraHTTPHeaders`, so tunnel headers also reach health requests, navigation, iframes, and XHR. It always waits for the web root, renders the project workspace, opens Builder, and waits for the Builder name field inside the iframe. Backend and engine health probes run only for an included live topology whose resolved service origin is loopback or shares the app hostname; `KADY_E2E_WARMUP_SERVICES=1` explicitly forces both probes. The warm-up records `console.error` and `pageerror` before navigation and fails setup if either occurs, so cold-only hydration, chunk, and iframe failures cannot be hidden by the compile barrier. The suite always defaults to 4 workers locally and in CI; set `KADY_E2E_WORKERS` to a positive integer only for an intentional measured override. Raising timeouts or worker counts is not a substitute for investigating contention.
+Playwright then performs its default worker barrier in `e2e/global-setup.ts`. Both its request context and Chromium context inherit the resolved project's `baseURL` and `extraHTTPHeaders`. It waits for the web root, renders the project workspace, opens Builder, and waits for the Builder name field inside the iframe. Backend and engine health probes run only for an included live topology whose resolved service origin is loopback or shares the app hostname; `KADY_E2E_WARMUP_SERVICES=1` explicitly forces both probes. The warm-up records `console.error` and `pageerror` before navigation and fails setup if either occurs, so cold-only hydration, chunk, and iframe failures cannot be hidden by the compile barrier.
+
+The public-URL overlay replaces that barrier with `e2e/global-setup.cloud.ts`. It passes the resolved headers to a request context and verifies only that the web root returns `200` with the expected Kady HTML title. App-page, project, and Builder warm-up is impossible in that topology: the backend is deliberately not exposed, and the API mocks are installed later by worker fixtures. The suite defaults to 4 workers; set `KADY_E2E_WORKERS` to a positive integer only for an intentional measured override. Raising timeouts or worker counts is not a substitute for investigating contention.
 
 The orchestrator's 2026-08-15 cold run printed the `rendered=workspace+builder` warm-up barrier and started all 249 items with 4 workers. Every mocked-tier item completed without failure, so the prior 72-failure cold-start phenomenon did not recur. The two failures were confined to first-run assumptions in the new `@live` items and were corrected in the following static pass; a zero-failure full-suite rerun remains required.
 
@@ -101,17 +103,28 @@ Playwright's list mode only collects tests; it does not start the global warm-up
 
 Local traces are always enabled. Playwright writes run artifacts under `.stably/test-results/`; failures retain screenshots and video.
 
-## Orchestrator-owned cloud run
+## Public-URL/tunnel overlay
 
-Lane S11 must not invoke billed cloud execution. After local preview proof and review, the orchestrator supplies `STABLY_API_KEY` and `STABLY_PROJECT_ID` and runs:
+The historical public-URL topology uses the explicit overlay config:
 
 ```bash
-stably test --browser cloud --suiteName "Scientific DAG Studio S11"
+KADY_E2E_BASE_URL=https://public-preview.example \
+npx playwright test --config playwright.cloud.config.ts
 ```
 
-`playwright.cloud.config.ts` excludes `@live`: that topology deliberately exposes the frontend and vendored engine but not the real Kady backend. Cloud collection therefore contains the 246 mocked items; run server-truth evidence through the default or alternate local preview legs above.
+`playwright.cloud.config.ts` excludes `@live`: that topology deliberately exposes the frontend and vendored engine but not the real Kady backend. Its cloud-safe global setup fetches only the web root, so collection contains the 246 mocked items without pretending that a project page was warmed. Run server-truth evidence through the default or alternate local preview legs above.
 
 The conditional reporter in `playwright.config.ts` uploads results only when both credentials exist. Cloud run evidence lands in the Stably project/suite dashboard; local trace, screenshot, video, and result material remains under `.stably/test-results/`.
+
+## Hosted-runner (CI) evidence
+
+The real remote path is the `github-runner` job in `.github/workflows/stably-cloud.yml`. It runs the default `playwright.config.ts` on a GitHub-hosted runner; it does not use the public-URL overlay above. One retained evidence artifact must contain:
+
+- the exact test command and relevant environment, with secrets redacted;
+- the tested commit SHA;
+- the `246`-item collection line;
+- a runner fingerprint, including the runner OS/image and runner identity available to the job; and
+- the provider run identity when the conditional Stably reporter was attached.
 
 ## Evidence gate
 

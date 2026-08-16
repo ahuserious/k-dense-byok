@@ -42,6 +42,7 @@ function isFullInventoryRun(config: FullConfig) {
 
 export default class ItemCountReporter implements Reporter {
   onBegin(config: FullConfig, suite: Suite) {
+    process.stdout.write(`E2E globalSetup resolved: ${config.globalSetup ?? "none"}\n`);
     const tests = suite.allTests();
     const actualItemsByFile = new Map<string, number>();
     let thinItems = 0;
