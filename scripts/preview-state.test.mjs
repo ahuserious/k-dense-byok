@@ -14,12 +14,11 @@ import {
 } from "./preview-environment.mjs";
 import {
   acquirePreviewLifecycleLock,
-  PREVIEW_LIFECYCLE_LOCK_VERSION,
   previewPidStartIdentity,
   previewTeardownRecord,
   publishPreviewStartGate,
   publishPreviewStateFile,
-  recoverUnrecognizedPreviewLifecycleLock,
+  recoverPreviewLifecycleLock,
   removePreviewStateFile,
 } from "./preview-state.mjs";
 
@@ -69,28 +68,6 @@ test("refuses marker recovery without a generation-bound launcher process", () =
   }
 });
 
-function waitForOutput(child, expected) {
-  return new Promise((resolve, reject) => {
-    let output = "";
-    const timeout = setTimeout(() => reject(new Error(`Timed out waiting for ${expected}`)), 10_000);
-    child.stdout.on("data", (chunk) => {
-      output += chunk;
-      if (output.includes(expected)) {
-        clearTimeout(timeout);
-        resolve(output);
-      }
-    });
-    child.once("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-  });
-}
-
-function waitForExit(child) {
-  return new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
-}
-
 function waitForLockOutcome(child) {
   return new Promise((resolve, reject) => {
     let output = "";
@@ -123,210 +100,158 @@ test("publishes preview state through an atomic same-directory replacement", () 
   }
 });
 
-test("recovers a lifecycle lock left by a SIGKILLed owner", async () => {
-  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-kill-"));
-  const lockFile = path.join(temporaryRoot, ".lifecycle.lock");
-  const stateModuleUrl = pathToFileURL(path.join(import.meta.dirname, "preview-state.mjs")).href;
-  const holderScript = path.join(temporaryRoot, "hold-lock.mjs");
-  try {
-    fs.writeFileSync(
-      holderScript,
-      `import { acquirePreviewLifecycleLock } from ${JSON.stringify(stateModuleUrl)};\n` +
-        `acquirePreviewLifecycleLock(${JSON.stringify(lockFile)}, { operation: "preview-up", generation: "killed-generation", identity: { method: "test", value: "test-child-start" } });\n` +
-        `console.log("LOCKED");\nsetInterval(() => {}, 1000);\n`,
-    );
-    const child = spawn(process.execPath, [holderScript], {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    await waitForOutput(child, "LOCKED");
-    const childExit = waitForExit(child);
-    child.kill("SIGKILL");
-    const exit = await childExit;
-    assert.equal(exit.signal, "SIGKILL");
-
-    const messages = [];
-    const recovered = acquirePreviewLifecycleLock(lockFile, {
-      operation: "preview-up",
-      generation: "next-generation",
-      identity: { method: "test", value: "test-parent-start" },
-      resolvePidStartIdentity: (pid) => {
-        try {
-          process.kill(pid, 0);
-          return { method: "test", value: "unexpected-live-owner" };
-        } catch (error) {
-          if (error?.code === "ESRCH") return null;
-          throw error;
-        }
-      },
-      log: (message) => messages.push(message),
-    });
-    assert.match(
-      messages.join("\n"),
-      /Recovered stale lifecycle lock \(pid \d+, started test:test-child-start\)/,
-    );
-    recovered.release();
-  } finally {
-    fs.rmSync(temporaryRoot, { recursive: true, force: true });
-  }
-});
-
-test("recovers a reused PID only when lifecycle generations agree", () => {
-  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-reuse-"));
-  try {
-    const lockFile = path.join(temporaryRoot, ".lifecycle.lock");
-    const stateFile = path.join(temporaryRoot, ".state.json");
-    const identities = new Map([
-      [501, { method: "test", value: "old-start" }],
-      [502, { method: "test", value: "new-command-start" }],
-    ]);
-    const resolvePidStartIdentity = (pid) => identities.get(pid) ?? null;
-    fs.writeFileSync(stateFile, '{"generation":"owned-generation"}\n');
-    acquirePreviewLifecycleLock(lockFile, {
-      operation: "preview-up",
-      generation: "owned-generation",
-      pid: 501,
-      resolvePidStartIdentity,
-    });
-    identities.set(501, { method: "test", value: "reused-start" });
-    const messages = [];
-    const recovered = acquirePreviewLifecycleLock(lockFile, {
-      operation: "preview-down",
-      generation: "owned-generation",
-      pid: 502,
-      resolvePidStartIdentity,
-      generationFiles: [stateFile],
-      log: (message) => messages.push(message),
-    });
-    assert.match(messages.join("\n"), /pid 501, started test:old-start/);
-    recovered.release();
-
-    fs.writeFileSync(stateFile, '{"generation":"different-generation"}\n');
-    identities.set(501, { method: "test", value: "second-old-start" });
-    acquirePreviewLifecycleLock(lockFile, {
-      operation: "preview-up",
-      generation: "owned-generation",
-      pid: 501,
-      resolvePidStartIdentity,
-    });
-    identities.set(501, { method: "test", value: "second-reused-start" });
-    assert.throws(
-      () => acquirePreviewLifecycleLock(lockFile, {
-        operation: "preview-down",
-        generation: "different-generation",
-        pid: 502,
-        resolvePidStartIdentity,
-        generationFiles: [stateFile],
-      }),
-      /refuses stale-lock recovery.*different-generation.*owned-generation/s,
-    );
-  } finally {
-    fs.rmSync(temporaryRoot, { recursive: true, force: true });
-  }
-});
-
-test("legacy, unknown-identity, and zero-byte locks remain busy until explicit recovery", () => {
-  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-legacy-"));
-  try {
-    const cases = [
-      {
-        name: "live-v2",
-        value: JSON.stringify({
-          version: 2,
-          operation: "preview-up",
-          generation: "legacy-generation",
-          pid: process.pid,
-          identity: { method: "test", value: "legacy-live" },
-        }),
-      },
-      {
-        name: "unknown-method",
-        value: JSON.stringify({
-          version: PREVIEW_LIFECYCLE_LOCK_VERSION,
-          operation: "preview-up",
-          generation: "unknown-generation",
-          pid: process.pid,
-          identity: { method: "future-method", value: "opaque" },
-        }),
-      },
-      { name: "zero-byte", value: "" },
-    ];
-    for (const testCase of cases) {
-      const lockFile = path.join(temporaryRoot, `.lifecycle.${testCase.name}.lock`);
-      fs.writeFileSync(lockFile, testCase.value);
-      assert.throws(
-        () => acquirePreviewLifecycleLock(lockFile, {
-          operation: "preview-down",
-          generation: "contender-generation",
-          identity: { method: "test", value: "contender" },
-        }),
-        /legacy, malformed, or uses an unknown identity method and is busy.*--recover-lock/s,
-      );
-    }
-  } finally {
-    fs.rmSync(temporaryRoot, { recursive: true, force: true });
-  }
-});
-
-test("explicit recovery removes an unrecognized lock only after its proof succeeds", () => {
-  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-explicit-"));
-  const lockFile = path.join(temporaryRoot, ".lifecycle.lock");
-  try {
-    fs.writeFileSync(lockFile, "");
-    assert.throws(
-      () => recoverUnrecognizedPreviewLifecycleLock(lockFile, {
-        identity: { method: "test", value: "recovery-owner" },
-        verifySafeRecovery: () => { throw new Error("listener still alive"); },
-      }),
-      /listener still alive/,
-    );
-    assert.equal(fs.existsSync(lockFile), true);
-    assert.equal(recoverUnrecognizedPreviewLifecycleLock(lockFile, {
-      identity: { method: "test", value: "recovery-owner" },
-      verifySafeRecovery: () => {},
-    }), true);
-    assert.equal(fs.existsSync(lockFile), false);
-  } finally {
-    fs.rmSync(temporaryRoot, { recursive: true, force: true });
-  }
-});
-
-test("three barrier-coordinated stale-lock contenders admit exactly one live owner", async () => {
+test("mkdir contention admits one lifecycle owner and reports the other as BUSY", async () => {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-race-"));
-  const lockFile = path.join(temporaryRoot, ".lifecycle.lock");
-  const gateFile = path.join(temporaryRoot, "go");
+  const lockDirectory = path.join(temporaryRoot, ".lifecycle.lock.d");
   const stateModuleUrl = pathToFileURL(path.join(import.meta.dirname, "preview-state.mjs")).href;
   try {
-    fs.writeFileSync(
-      lockFile,
-      `${JSON.stringify({
-        version: PREVIEW_LIFECYCLE_LOCK_VERSION,
-        operation: "preview-up",
-        generation: "stale-generation",
-        pid: 999_999,
-        identity: { method: "test", value: "dead" },
-        createdAt: new Date(0).toISOString(),
-      })}\n`,
-    );
-    const children = ["one", "two", "three"].map((name) => {
+    const startContender = (name) => {
       const childScript = path.join(temporaryRoot, `${name}.mjs`);
       fs.writeFileSync(
         childScript,
-        `import fs from "node:fs";\n` +
-          `import { acquirePreviewLifecycleLock } from ${JSON.stringify(stateModuleUrl)};\n` +
-          `while (!fs.existsSync(${JSON.stringify(gateFile)})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);\n` +
-          `try { acquirePreviewLifecycleLock(${JSON.stringify(lockFile)}, { operation: "preview-up", generation: ${JSON.stringify(name)}, identity: { method: "test", value: "race-live" }, resolvePidStartIdentity: (pid) => { try { process.kill(pid, 0); return { method: "test", value: "race-live" }; } catch (error) { if (error.code === "ESRCH") return null; throw error; } } }); console.log("ACQUIRED"); setInterval(() => {}, 1000); } catch (error) { console.log("REFUSED:" + error.message); }\n`,
+        `import { acquirePreviewLifecycleLock } from ${JSON.stringify(stateModuleUrl)};\n` +
+          `try { acquirePreviewLifecycleLock(${JSON.stringify(lockDirectory)}, { operation: "preview-up", generation: ${JSON.stringify(name)}, identity: { method: "test", value: "race-live" }, hostBootIdentity: { host: "test-host", boot: "test-boot" } }); console.log("ACQUIRED"); setInterval(() => {}, 1000); } catch (error) { console.log("REFUSED:" + error.message); }\n`,
       );
       return spawn(process.execPath, [childScript], {
         stdio: ["ignore", "pipe", "pipe"],
       });
+    };
+    const first = startContender("one");
+    assert.match(await waitForLockOutcome(first), /ACQUIRED/);
+    const second = startContender("two");
+    assert.match(
+      await waitForLockOutcome(second),
+      /REFUSED:Preview lifecycle BUSY: preview-up PID \d+/,
+    );
+    if (first.exitCode === null) first.kill("SIGKILL");
+    if (second.exitCode === null) second.kill("SIGKILL");
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("release removes the directory lock and allows reacquisition", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-release-"));
+  const lockDirectory = path.join(temporaryRoot, ".lifecycle.lock.d");
+  const options = {
+    operation: "preview-up",
+    generation: "release-generation",
+    identity: { method: "test", value: "release-owner" },
+    hostBootIdentity: { host: "test-host", boot: "test-boot" },
+  };
+  try {
+    const first = acquirePreviewLifecycleLock(lockDirectory, options);
+    assert.equal(fs.existsSync(path.join(lockDirectory, "owner.json")), true);
+    const owner = JSON.parse(fs.readFileSync(path.join(lockDirectory, "owner.json"), "utf8"));
+    assert.equal(owner.version, 4);
+    assert.deepEqual(owner.identity, {
+      method: "test",
+      value: "release-owner",
+      host: "test-host",
+      boot: "test-boot",
     });
-    fs.writeFileSync(gateFile, "go\n");
-    const outputs = await Promise.all(children.map(waitForLockOutcome));
-    assert.equal(outputs.filter((output) => output.includes("ACQUIRED")).length, 1);
-    assert.equal(outputs.filter((output) => output.includes("REFUSED:")).length, 2);
-    for (const child of children) {
-      if (child.exitCode === null) child.kill("SIGKILL");
-    }
+    first.release();
+    assert.equal(fs.existsSync(lockDirectory), false);
+    const second = acquirePreviewLifecycleLock(lockDirectory, options);
+    second.release();
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("explicit recovery removes a dead current owner and refuses a live owner", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-owner-"));
+  const lockDirectory = path.join(temporaryRoot, ".lifecycle.lock.d");
+  const hostBoot = { host: "test-host", boot: "test-boot" };
+  try {
+    acquirePreviewLifecycleLock(lockDirectory, {
+      operation: "preview-up",
+      generation: "dead-generation",
+      pid: 501,
+      identity: { method: "test", value: "dead-owner" },
+      hostBootIdentity: hostBoot,
+    });
+    assert.equal(recoverPreviewLifecycleLock(lockDirectory, {
+      currentHostBootIdentity: hostBoot,
+      resolvePidStartIdentity: () => null,
+    }), true);
+    acquirePreviewLifecycleLock(lockDirectory, {
+      operation: "preview-up",
+      generation: "live-generation",
+      pid: 502,
+      identity: { method: "test", value: "live-owner" },
+      hostBootIdentity: hostBoot,
+    });
+    assert.throws(
+      () => recoverPreviewLifecycleLock(lockDirectory, {
+        currentHostBootIdentity: hostBoot,
+        resolvePidStartIdentity: () => ({ method: "test", value: "live-owner" }),
+      }),
+      /refuses live owner PID 502/,
+    );
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("unreadable owner requires force and preserves the lock when forced proof fails", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-unreadable-"));
+  const lockDirectory = path.join(temporaryRoot, ".lifecycle.lock.d");
+  try {
+    fs.mkdirSync(lockDirectory);
+    assert.throws(
+      () => recoverPreviewLifecycleLock(lockDirectory),
+      /missing or unreadable.*--recover-lock --force/s,
+    );
+    assert.throws(
+      () => recoverPreviewLifecycleLock(lockDirectory, {
+        force: true,
+        verifyForcedRecovery: () => { throw new Error("listener on preview port"); },
+      }),
+      /listener on preview port/,
+    );
+    assert.equal(fs.existsSync(lockDirectory), true);
+    assert.equal(recoverPreviewLifecycleLock(lockDirectory, {
+      force: true,
+      verifyForcedRecovery: () => {},
+    }), true);
+    assert.equal(fs.existsSync(lockDirectory), false);
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+for (const legacyOwner of [
+  {
+    version: 2,
+    operation: "preview-up",
+    generation: "legacy-v2-generation",
+    pid: 502,
+    pidStartIdentity: "ps-lstart:legacy-owner",
+  },
+  {
+    version: 3,
+    operation: "preview-up",
+    generation: "legacy-v3-generation",
+    pid: 503,
+    identity: { method: "test", value: "legacy-owner" },
+  },
+]) test(`legacy v${legacyOwner.version} owner without host and boot is parsed but cannot be recovered automatically`, () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-legacy-"));
+  const legacyLockFile = path.join(temporaryRoot, ".lifecycle.lock");
+  try {
+    fs.writeFileSync(legacyLockFile, `${JSON.stringify(legacyOwner)}\n`);
+    assert.throws(
+      () => recoverPreviewLifecycleLock(
+        path.join(temporaryRoot, ".lifecycle.lock.d"),
+        {
+          legacyLockFiles: [legacyLockFile],
+          currentHostBootIdentity: { host: "test-host", boot: "test-boot" },
+          resolvePidStartIdentity: () => null,
+        },
+      ),
+      /cannot verify owner liveness.*host or boot identity differs or is missing/,
+    );
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
@@ -405,28 +330,26 @@ test("Linux PID identity combines boot ID with proc start ticks", () => {
   });
 });
 
-test("treats an identity method mismatch as live and refuses takeover", () => {
+test("explicit recovery refuses a different host or boot identity", () => {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-method-"));
   try {
-    const lockFile = path.join(temporaryRoot, ".lifecycle.lock");
-    acquirePreviewLifecycleLock(lockFile, {
+    const lockDirectory = path.join(temporaryRoot, ".lifecycle.lock.d");
+    acquirePreviewLifecycleLock(lockDirectory, {
       operation: "preview-up",
       generation: "method-generation",
       pid: 801,
       identity: { method: "test", value: "recorded" },
+      hostBootIdentity: { host: "original-host", boot: "original-boot" },
     });
     assert.throws(
-      () => acquirePreviewLifecycleLock(lockFile, {
-        operation: "preview-down",
-        generation: "method-generation",
-        pid: 802,
-        identity: { method: "test", value: "contender" },
+      () => recoverPreviewLifecycleLock(lockDirectory, {
+        currentHostBootIdentity: { host: "other-host", boot: "other-boot" },
         resolvePidStartIdentity: () => ({
-          method: "proc-stat",
-          value: "same-process-different-method",
+          method: "test",
+          value: "recorded",
         }),
       }),
-      /Preview lifecycle is busy: preview-up PID 801 is still starting/,
+      /cannot verify owner liveness.*host or boot identity differs/,
     );
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });

@@ -5,9 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  assertExplicitPreviewLockRecoverySafe,
+  assertForcedPreviewLockRecoverySafe,
   listenersOnPort,
-  processesHoldingFile,
   quiescePreviewGeneration,
 } from "./preview-processes.mjs";
 import {
@@ -17,11 +16,10 @@ import {
   acquirePreviewLifecycleLock,
   previewTeardownRecord,
   readPreviewStateCandidate,
-  recoverUnrecognizedPreviewLifecycleLock,
+  recoverPreviewLifecycleLock,
   removePreviewStateFile,
 } from "./preview-state.mjs";
 import {
-  previewWebProjectionMarkerPath,
   readPreviewWebProjectionMarker,
   removePreviewWebRoot,
 } from "./preview-environment.mjs";
@@ -29,9 +27,11 @@ import {
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = fs.realpathSync(path.resolve(scriptDirectory, ".."));
 const stateFile = path.join(repositoryRoot, "deploy", "preview", ".state.json");
-const lifecycleLockFile = path.join(repositoryRoot, "deploy", "preview", ".lifecycle.lock");
+const lifecycleLockDirectory = path.join(repositoryRoot, "deploy", "preview", ".lifecycle.lock.d");
+const legacyLifecycleLockFile = path.join(repositoryRoot, "deploy", "preview", ".lifecycle.lock");
 const keepState = process.argv.includes("--keep-state");
 const recoverLock = process.argv.includes("--recover-lock");
+const forceRecovery = process.argv.includes("--force");
 
 function fail(message) {
   console.error(message);
@@ -140,7 +140,7 @@ function printListenerProof(state) {
   return total;
 }
 
-function explicitLockRecoveryEvidence() {
+function forcedLockRecoveryEvidence() {
   const candidate = readPreviewStateCandidate(stateFile);
   let marker = null;
   try {
@@ -150,57 +150,21 @@ function explicitLockRecoveryEvidence() {
       `Explicit preview lock recovery cannot read the projection marker: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  if (candidate.status === "malformed" && !marker) {
-    throw new Error(
-      `Explicit preview lock recovery cannot prove recorded ports or processes because ${stateFile} is malformed and no projection marker exists.`,
-    );
-  }
-  if (
-    candidate.status === "valid" &&
-    marker &&
-    candidate.state?.generation !== marker.generation
-  ) {
-    throw new Error(
-      `Explicit preview lock recovery refuses conflicting state generation ${candidate.state?.generation ?? "<missing>"} and marker generation ${marker.generation}.`,
-    );
-  }
-  const source = candidate.status === "valid" ? candidate.state : marker;
-  const generation = typeof source?.generation === "string" ? source.generation : null;
-  if (source && !generation) {
-    throw new Error("Explicit preview lock recovery cannot prove a generation from lifecycle artifacts.");
-  }
-  const ports = source?.ports && typeof source.ports === "object" ? source.ports : {};
-  if (source && Object.keys(ports).length === 0) {
-    throw new Error("Explicit preview lock recovery cannot prove preview ports from lifecycle artifacts.");
-  }
-  const records = [];
-  const lifecycleSources = [source];
-  if (candidate.status === "valid" && marker) lifecycleSources.push(marker);
-  for (const lifecycleSource of lifecycleSources) {
-    if (lifecycleSource?.rootProcess) records.push(lifecycleSource.rootProcess);
-    const serviceStatePath = lifecycleSource?.serviceStatePath;
-    if (lifecycleSource && typeof serviceStatePath !== "string") {
-      throw new Error(
-        "Explicit preview lock recovery cannot prove service processes without a recorded service-state path.",
-      );
-    }
-    if (generation && typeof serviceStatePath === "string") {
-      const serviceSnapshot = readPreviewServiceStateSnapshot(serviceStatePath, generation);
-      if (serviceSnapshot.status !== "valid") {
-        throw new Error(
-          `Explicit preview lock recovery cannot prove service processes because ${serviceStatePath} is ${serviceSnapshot.status}.`,
-        );
+  const sources = [candidate.status === "valid" ? candidate.state : null, marker]
+    .filter(Boolean);
+  const ports = {};
+  const stateRoots = new Set();
+  for (const [sourceIndex, source] of sources.entries()) {
+    if (source.ports && typeof source.ports === "object") {
+      for (const [role, port] of Object.entries(source.ports)) {
+        if (Number.isSafeInteger(port)) ports[`${sourceIndex}-${role}`] = port;
       }
-      records.push(...Object.values(serviceSnapshot.services));
+    }
+    if (typeof source.stateRoot === "string" && path.isAbsolute(source.stateRoot)) {
+      stateRoots.add(source.stateRoot);
     }
   }
-  return {
-    candidate,
-    marker,
-    generation,
-    ports,
-    records,
-  };
+  return { ports, stateRoots: [...stateRoots] };
 }
 
 if (process.platform === "win32") {
@@ -208,23 +172,26 @@ if (process.platform === "win32") {
 }
 
 if (recoverLock) {
-  let evidence;
   try {
-    evidence = explicitLockRecoveryEvidence();
-    const recovered = recoverUnrecognizedPreviewLifecycleLock(lifecycleLockFile, {
-      verifySafeRecovery: () => assertExplicitPreviewLockRecoverySafe({
-        lockFile: lifecycleLockFile,
-        lockHolderPids: processesHoldingFile(lifecycleLockFile),
-        records: evidence.records,
-        generation: evidence.generation,
-        ports: evidence.ports,
-      }),
+    const recovered = recoverPreviewLifecycleLock(lifecycleLockDirectory, {
+      legacyLockFiles: [legacyLifecycleLockFile],
+      force: forceRecovery,
+      verifyForcedRecovery: () => assertForcedPreviewLockRecoverySafe(
+        forcedLockRecoveryEvidence(),
+      ),
     });
-    if (!recovered) console.log(`No preview lifecycle lock exists at ${lifecycleLockFile}.`);
+    if (!recovered) console.log(`No preview lifecycle lock exists at ${lifecycleLockDirectory}.`);
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   }
-  if (evidence.candidate.status === "missing" && !evidence.marker) {
+  const remainingState = readPreviewStateCandidate(stateFile);
+  let remainingMarker;
+  try {
+    remainingMarker = readPreviewWebProjectionMarker(repositoryRoot);
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
+  if (remainingState.status === "missing" && !remainingMarker) {
     console.log("No preview state or projection remains after explicit lock recovery.");
     process.exit(0);
   }
@@ -232,10 +199,10 @@ if (recoverLock) {
 
 let lifecycleLock;
 try {
-  lifecycleLock = acquirePreviewLifecycleLock(lifecycleLockFile, {
+  lifecycleLock = acquirePreviewLifecycleLock(lifecycleLockDirectory, {
     operation: "preview-down",
     generation: peekLifecycleGeneration(),
-    generationFiles: [stateFile, previewWebProjectionMarkerPath(repositoryRoot)],
+    legacyLockFiles: [legacyLifecycleLockFile],
   });
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));

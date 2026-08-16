@@ -97,23 +97,24 @@ PID instead of crossing generations.
 ## Recovery
 
 Lifecycle state is fsynced to a same-directory temporary file and published by
-atomic rename. A lock is fully written and fsynced under a temporary name, then
-hard-linked into place with no replacement. Every publisher first owns the
-single `.lifecycle.lock.recovery` guard, then rechecks the canonical lock's
-inode and digest before replacing a proven-dead current owner. Guard waits and
-acquisition retries are bounded to 30 seconds; a dead guard owner is recovered
-using the same PID birth-identity rules.
+atomic rename. The lifecycle lock is the directory
+`deploy/preview/.lifecycle.lock.d`, created by atomic `mkdir`. Its atomically
+published `owner.json` records version, operation, generation, PID, host and
+boot identity, process birth identity, and creation time. Any existing lock
+directory is BUSY, including one with a missing or unreadable owner. There is
+no automatic takeover based on PID, age, or file state. CI jobs use fresh
+checkouts; after a local crash, the operator performs one explicit recovery.
+This removes every lifecycle check-then-act takeover race by construction.
 
-Each lock records its PID, generation, creation time, and a structured process
-birth identity. Linux uses the boot ID plus `/proc/<pid>/stat` start ticks;
-macOS uses `LC_ALL=C TZ=UTC0 ps ... lstart`. A failed lookup or method mismatch
-is treated as live. A dead PID, or a different value from the same method, is
-recoverable only when readable state/projection generations agree.
-Legacy, malformed, zero-byte, and unknown-identity lock records are always
-busy. They are removed only by `node scripts/preview-down.mjs --recover-lock`,
-which refuses unless `lsof` reports no holder of the lock file, no recorded
-generation-bound launcher or service remains alive, and no recorded preview
-port has a listener.
+`node scripts/preview-down.mjs --recover-lock` is the only recovery path and
+must never run concurrently with preview-up or preview-down. A comparable owner
+record is removed only after the same host and boot are established and its
+recorded PID is absent. A missing or unreadable owner requires the explicit
+operator-confirmed `--recover-lock --force` form. Forced recovery refuses while
+any recorded preview port has a listener or `pgrep -f`/cwd inspection finds a
+process referring to the exact recorded preview state-root path. Legacy v2/v3
+lock files are parsed, but an owner lacking comparable host and boot identity
+is refused with `cannot verify owner liveness`.
 
 `preview-down` tolerates missing or malformed state when the owned projection
 marker contains a non-null generation-bound launcher record. The disposable
@@ -126,7 +127,15 @@ child group before the launcher fails. Teardown quiesces the launcher,
 fresh-reads and merges service records until two consecutive reads match,
 stops every matching group, and proves both recorded process and listener
 counts are zero before deleting state. Failure retains state and the temporary
-tree; cwd remains only a secondary ownership check.
+tree; a present malformed service record also fails this proof and is named.
+Cwd remains only a secondary ownership check.
+
+Known residual: detached services become schedulable for a microsecond-scale
+window between spawn and the observer's immediate `SIGSTOP` plus durable
+record. A launcher death in that window can leave an unrecorded group. The
+existing stop-and-kill-on-record-failure logic narrows the window;
+`preview-down` reports any listener on preview ports that it cannot attribute
+and refuses to claim a clean teardown.
 
 Backend env selection fails closed. With `KADY_PREVIEW=1`, `KADY_ENV_FILE`
 must be present, non-blank, absolute, and resolve to a regular file under the

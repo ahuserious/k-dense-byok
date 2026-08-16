@@ -54,18 +54,6 @@ export function listenersOnPort(port) {
   );
 }
 
-export function processesHoldingFile(file) {
-  const result = spawnSync("lsof", ["-t", file], { encoding: "utf-8" });
-  if (result.status !== 0 && !(result.status === 1 && !result.stderr.trim())) {
-    throw new Error(
-      `lsof could not inspect preview lifecycle lock ${file}: ` +
-        `${(result.stderr || result.stdout).trim() || `exit ${result.status}`}`,
-    );
-  }
-  return [...new Set(result.stdout.trim().split(/\s+/).filter(Boolean).map(Number))]
-    .filter((pid) => Number.isSafeInteger(pid) && pid > 1);
-}
-
 export function occupiedPreviewPorts(ports, inspectPort = listenersOnPort) {
   return Object.entries(ports).flatMap(([role, port]) => {
     const listeners = inspectPort(port);
@@ -261,36 +249,63 @@ export function assertPreviewGenerationQuiesced(
   }
 }
 
-export function assertExplicitPreviewLockRecoverySafe(
-  {
-    lockFile,
-    lockHolderPids,
-    records,
-    generation,
-    ports,
-  },
-  options = {},
+function numericPids(output) {
+  return [...new Set(String(output).trim().split(/\s+/).filter(Boolean).map(Number))]
+    .filter((pid) => Number.isSafeInteger(pid) && pid > 1);
+}
+
+function regexEscape(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function processesReferencingPreviewStateRoot(
+  stateRoot,
+  { runCommand = spawnSync } = {},
 ) {
-  if (lockHolderPids.length > 0) {
+  const argumentResult = runCommand("pgrep", ["-f", regexEscape(stateRoot)], {
+    encoding: "utf-8",
+  });
+  if (argumentResult.status !== 0 && argumentResult.status !== 1) {
     throw new Error(
-      `Explicit preview lock recovery refuses ${lockFile}; lsof reports holder PID(s) ${lockHolderPids.join(", ")}.`,
+      `pgrep could not inspect preview state root ${stateRoot}: ` +
+        `${argumentResult.stderr?.trim() || `exit ${argumentResult.status}`}`,
     );
   }
-  if (generation) {
-    const invalidRecord = records.find((record) => !validRecordedProcess(record, generation));
-    if (invalidRecord) {
+  const cwdResult = runCommand("lsof", ["-nP", "-a", "-d", "cwd", "+D", stateRoot, "-t"], {
+    encoding: "utf-8",
+  });
+  if (cwdResult.status !== 0 && cwdResult.status !== 1) {
+    throw new Error(
+      `lsof could not inspect cwd references under preview state root ${stateRoot}: ` +
+        `${cwdResult.stderr?.trim() || `exit ${cwdResult.status}`}`,
+    );
+  }
+  return [...new Set([
+    ...numericPids(argumentResult.stdout),
+    ...numericPids(cwdResult.stdout),
+  ])];
+}
+
+export function assertForcedPreviewLockRecoverySafe(
+  { ports, stateRoots },
+  {
+    inspectPort = listenersOnPort,
+    inspectStateRoot = processesReferencingPreviewStateRoot,
+  } = {},
+) {
+  const occupied = occupiedPreviewPorts(ports, inspectPort);
+  if (occupied.length > 0) {
+    throw new Error(
+      `Forced preview lock recovery refuses listeners: ${occupied
+        .map(({ role, port, listeners }) => `${role} :${port} (${listeners.join(", ")})`)
+        .join("; ")}.`,
+    );
+  }
+  for (const stateRoot of stateRoots) {
+    const pids = inspectStateRoot(stateRoot);
+    if (pids.length > 0) {
       throw new Error(
-        `Explicit preview lock recovery cannot validate recorded PID ${invalidRecord?.pid ?? "<missing>"} for generation ${generation}.`,
-      );
-    }
-    assertPreviewGenerationQuiesced(records, generation, ports, options);
-  } else if (Object.keys(ports).length > 0) {
-    const occupied = occupiedPreviewPorts(ports, options.inspectPort ?? listenersOnPort);
-    if (occupied.length > 0) {
-      throw new Error(
-        `Explicit preview lock recovery refuses listeners without a provable generation: ${occupied
-          .map(({ role, port, listeners }) => `${role} :${port} (${listeners.join(", ")})`)
-          .join("; ")}.`,
+        `Forced preview lock recovery refuses process PID(s) ${pids.join(", ")} referencing exact state root ${stateRoot}.`,
       );
     }
   }
@@ -298,7 +313,11 @@ export function assertExplicitPreviewLockRecoverySafe(
 
 function mergeGenerationRecords(recordMap, serviceStates, generation) {
   for (const [role, record] of Object.entries(serviceStates)) {
-    if (!validRecordedProcess(record, generation)) continue;
+    if (!validRecordedProcess(record, generation)) {
+      throw new Error(
+        `Preview generation ${generation} service record ${role} is present but invalid; refusing teardown.`,
+      );
+    }
     const identityKey = `${record.identity.method}:${record.identity.value}`;
     recordMap.set(`${record.role ?? role}:${record.pid}:${identityKey}`, {
       ...record,

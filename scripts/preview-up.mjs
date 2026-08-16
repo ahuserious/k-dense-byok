@@ -14,7 +14,6 @@ import {
   previewEngineHome,
   previewEnvironment,
   previewPrebuildEnvironment,
-  previewWebProjectionMarkerPath,
   readPreviewWebProjectionMarker,
   removePreviewWebRoot,
   updatePreviewWebProjectionMarker,
@@ -43,7 +42,8 @@ const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = fs.realpathSync(path.resolve(scriptDirectory, ".."));
 const previewDirectory = path.join(repositoryRoot, "deploy", "preview");
 const stateFile = path.join(previewDirectory, ".state.json");
-const lifecycleLockFile = path.join(previewDirectory, ".lifecycle.lock");
+const lifecycleLockDirectory = path.join(previewDirectory, ".lifecycle.lock.d");
+const legacyLifecycleLockFile = path.join(previewDirectory, ".lifecycle.lock");
 
 function fail(message) {
   console.error(message);
@@ -210,10 +210,10 @@ if (process.platform === "win32") {
 const previewGeneration = randomUUID();
 let lifecycleLock;
 try {
-  lifecycleLock = acquirePreviewLifecycleLock(lifecycleLockFile, {
+  lifecycleLock = acquirePreviewLifecycleLock(lifecycleLockDirectory, {
     operation: "preview-up",
     generation: previewGeneration,
-    generationFiles: [stateFile, previewWebProjectionMarkerPath(repositoryRoot)],
+    legacyLockFiles: [legacyLifecycleLockFile],
   });
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));

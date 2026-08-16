@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
-  assertExplicitPreviewLockRecoverySafe,
+  assertForcedPreviewLockRecoverySafe,
   assertNoForeignPreviewListeners,
   assertPreviewServiceListenersOwned,
   occupiedPreviewPorts,
@@ -82,45 +82,28 @@ test("refuses readiness when a foreign listener races onto a recorded service po
   );
 });
 
-test("explicit lock recovery requires no holder, live generation record, or listener", () => {
+test("forced lock recovery requires no preview listener or state-root process", () => {
   const proof = {
-    lockFile: "/checkout/deploy/preview/.lifecycle.lock",
-    lockHolderPids: [],
-    generation: "generation-one",
     ports: { backend: 18100 },
-    records: [{
-      role: "backend",
-      pid: 41,
-      pgid: 41,
-      generation: "generation-one",
-      identity: { method: "test", value: "birth-one" },
-    }],
+    stateRoots: ["/tmp/kady-preview-proof"],
   };
   assert.throws(
-    () => assertExplicitPreviewLockRecoverySafe(
-      { ...proof, lockHolderPids: [99] },
-      { isAlive: () => false, inspectPort: () => [] },
-    ),
-    /lsof reports holder PID\(s\) 99/,
-  );
-  assert.throws(
-    () => assertExplicitPreviewLockRecoverySafe(proof, {
-      isAlive: () => true,
-      resolveIdentity: () => ({ method: "test", value: "birth-one" }),
-      inspectPort: () => [],
-    }),
-    /process records survived teardown: 41/,
-  );
-  assert.throws(
-    () => assertExplicitPreviewLockRecoverySafe(proof, {
-      isAlive: () => false,
+    () => assertForcedPreviewLockRecoverySafe(proof, {
       inspectPort: () => [77],
+      inspectStateRoot: () => [],
     }),
-    /ports still have listeners.*18100.*77/s,
+    /refuses listeners.*18100.*77/s,
   );
-  assert.doesNotThrow(() => assertExplicitPreviewLockRecoverySafe(proof, {
-    isAlive: () => false,
+  assert.throws(
+    () => assertForcedPreviewLockRecoverySafe(proof, {
+      inspectPort: () => [],
+      inspectStateRoot: () => [99],
+    }),
+    /PID\(s\) 99 referencing exact state root \/tmp\/kady-preview-proof/,
+  );
+  assert.doesNotThrow(() => assertForcedPreviewLockRecoverySafe(proof, {
     inspectPort: () => [],
+    inspectStateRoot: () => [],
   }));
 });
 
@@ -205,6 +188,38 @@ test("teardown fresh-reads and stops a service record published after its first 
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
+});
+
+test("teardown refuses a present semantically invalid service record", async () => {
+  const generation = "invalid-record-generation";
+  await assert.rejects(
+    quiescePreviewGeneration(
+      "/checkout",
+      {
+        generation,
+        launchRoot: "/launch",
+        rootProcess: {
+          pid: 10,
+          pgid: 10,
+          generation,
+          identity: { method: "test", value: "launcher" },
+        },
+        ports: { backend: 18100, frontend: 13100, engine: 13191 },
+      },
+      {
+        readServiceSnapshot: () => ({
+          status: "valid",
+          signature: "invalid",
+          services: { backend: { role: "backend", pid: "not-a-pid" } },
+        }),
+        stopGroups: async () => [],
+        processOptions: { isAlive: () => false },
+        now: () => 0,
+        pause: async () => {},
+      },
+    ),
+    /service record backend is present but invalid; refusing teardown/,
+  );
 });
 
 test("reports only listener-occupied preview ports", () => {

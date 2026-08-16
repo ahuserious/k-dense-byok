@@ -819,7 +819,8 @@ test("rejects every sensitive or non-source symlink target class", async (testCo
 test("serializes concurrent preview-up lifecycle owners at an atomic barrier", () => {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-up-"));
   try {
-    const lockFile = path.join(temporaryRoot, ".lifecycle.lock");
+    const lockFile = path.join(temporaryRoot, ".lifecycle.lock.d");
+    const hostBootIdentity = { host: "test-host", boot: "test-boot" };
     const starts = new Map([
       [101, { method: "test", value: "start-101" }],
       [102, { method: "test", value: "start-102" }],
@@ -830,6 +831,7 @@ test("serializes concurrent preview-up lifecycle owners at an atomic barrier", (
       generation: "up-one",
       pid: 101,
       resolvePidStartIdentity,
+      hostBootIdentity,
     });
     assert.throws(
       () => acquirePreviewLifecycleLock(lockFile, {
@@ -837,8 +839,9 @@ test("serializes concurrent preview-up lifecycle owners at an atomic barrier", (
         generation: "up-two",
         pid: 102,
         resolvePidStartIdentity,
+        hostBootIdentity,
       }),
-      /Preview lifecycle is busy: preview-up PID 101/,
+      /Preview lifecycle BUSY: preview-up PID 101/,
     );
     firstUp.release();
     const secondUp = acquirePreviewLifecycleLock(lockFile, {
@@ -846,6 +849,7 @@ test("serializes concurrent preview-up lifecycle owners at an atomic barrier", (
       generation: "up-two",
       pid: 102,
       resolvePidStartIdentity,
+      hostBootIdentity,
     });
     secondUp.release();
   } finally {
@@ -856,7 +860,8 @@ test("serializes concurrent preview-up lifecycle owners at an atomic barrier", (
 test("holds teardown's lifecycle barrier against another down and a newer up", () => {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-down-"));
   try {
-    const lockFile = path.join(temporaryRoot, ".lifecycle.lock");
+    const lockFile = path.join(temporaryRoot, ".lifecycle.lock.d");
+    const hostBootIdentity = { host: "test-host", boot: "test-boot" };
     const starts = new Map([
       [201, { method: "test", value: "start-201" }],
       [202, { method: "test", value: "start-202" }],
@@ -868,14 +873,15 @@ test("holds teardown's lifecycle barrier against another down and a newer up", (
       generation: "down-one",
       pid: 201,
       resolvePidStartIdentity,
+      hostBootIdentity,
     });
     for (const contender of [
-      { operation: "preview-down", generation: "down-two", pid: 202, resolvePidStartIdentity },
-      { operation: "preview-up", generation: "up-new", pid: 203, resolvePidStartIdentity },
+      { operation: "preview-down", generation: "down-two", pid: 202, resolvePidStartIdentity, hostBootIdentity },
+      { operation: "preview-up", generation: "up-new", pid: 203, resolvePidStartIdentity, hostBootIdentity },
     ]) {
       assert.throws(
         () => acquirePreviewLifecycleLock(lockFile, contender),
-        /Preview lifecycle is busy: preview-down PID 201/,
+        /Preview lifecycle BUSY: preview-down PID 201/,
       );
     }
     down.release();
@@ -884,6 +890,7 @@ test("holds teardown's lifecycle barrier against another down and a newer up", (
       generation: "up-new",
       pid: 203,
       resolvePidStartIdentity,
+      hostBootIdentity,
     });
     nextUp.release();
   } finally {
@@ -1019,7 +1026,7 @@ test("preview-up sanitizes its process before vendored preparation and boot", ()
     previewDownSource.includes("removePreviewWebRoot(repositoryRoot, state.generation)"),
     true,
   );
-  const upLock = source.indexOf("acquirePreviewLifecycleLock(lifecycleLockFile");
+  const upLock = source.indexOf("acquirePreviewLifecycleLock(lifecycleLockDirectory");
   const stateCheck = source.indexOf("if (fs.existsSync(stateFile))");
   const statePublication = source.indexOf("publishPreviewStateFile(stateFile");
   const readinessWait = source.indexOf("await waitForPreviewReadiness({");
@@ -1028,7 +1035,7 @@ test("preview-up sanitizes its process before vendored preparation and boot", ()
   assert.equal(statePublication < readinessWait, true);
   assert.equal(readinessWait < upLockRelease, true);
   const downLock = previewDownSource.indexOf(
-    "acquirePreviewLifecycleLock(lifecycleLockFile",
+    "acquirePreviewLifecycleLock(lifecycleLockDirectory",
   );
   const downStateRead = previewDownSource.indexOf(
     "const { state, recoveredFromMarker } = readStateOrProjectionRecovery();",

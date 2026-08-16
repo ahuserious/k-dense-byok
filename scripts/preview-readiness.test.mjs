@@ -1,14 +1,34 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
   probePreviewService,
+  readPreviewServiceStateSnapshot,
   waitForPreviewReadiness,
 } from "./preview-readiness.mjs";
 
 function service(role, timeoutMs = 1_000) {
   return { role, label: role, url: `http://preview.invalid/${role}`, timeoutMs };
 }
+
+test("distinguishes missing, unreadable, and malformed service-state files", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-service-state-"));
+  try {
+    assert.equal(
+      readPreviewServiceStateSnapshot(path.join(temporaryRoot, "missing.json")).status,
+      "missing",
+    );
+    assert.equal(readPreviewServiceStateSnapshot(temporaryRoot).status, "unreadable");
+    const malformedFile = path.join(temporaryRoot, "malformed.json");
+    fs.writeFileSync(malformedFile, "{");
+    assert.equal(readPreviewServiceStateSnapshot(malformedFile).status, "malformed");
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
 
 test("includes a bounded unhealthy response body in readiness evidence", async () => {
   const result = await probePreviewService(

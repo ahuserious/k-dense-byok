@@ -46,23 +46,34 @@ export function readPreviewServiceStates(serviceStatePath, expectedGeneration) {
 }
 
 export function readPreviewServiceStateSnapshot(serviceStatePath, expectedGeneration) {
+  let raw;
   try {
-    const raw = fs.readFileSync(serviceStatePath, "utf-8");
+    raw = fs.readFileSync(serviceStatePath, "utf-8");
+  } catch (error) {
+    return {
+      status: error?.code === "ENOENT" ? "missing" : "unreadable",
+      signature: error?.code === "ENOENT" ? "<missing>" : `<unreadable:${error?.code ?? "unknown"}>`,
+      services: {},
+    };
+  }
+  try {
     const parsed = JSON.parse(raw);
     if (expectedGeneration && parsed?.generation !== expectedGeneration) {
       return { status: "generation-mismatch", signature: raw, services: {} };
     }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) ||
+        !parsed.services || typeof parsed.services !== "object" || Array.isArray(parsed.services)) {
+      return { status: "invalid", signature: raw, services: {} };
+    }
     return {
       status: "valid",
       signature: raw,
-      services: parsed && typeof parsed === "object" && parsed.services && typeof parsed.services === "object"
-        ? parsed.services
-        : {},
+      services: parsed.services,
     };
-  } catch (error) {
+  } catch {
     return {
-      status: error?.code === "ENOENT" ? "missing" : "malformed",
-      signature: error?.code === "ENOENT" ? "<missing>" : "<malformed>",
+      status: "malformed",
+      signature: "<malformed>",
       services: {},
     };
   }

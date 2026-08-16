@@ -1,17 +1,10 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 export const PREVIEW_LIFECYCLE_LOCK_VERSION = 4;
-export const PREVIEW_LOCK_ACQUIRE_TIMEOUT_MS = 30_000;
-const PREVIEW_LOCK_POLL_INTERVAL_MS = 25;
-const PREVIEW_RECOVERY_GUARD_VERSION = 1;
-
-function sleepSync(milliseconds) {
-  if (milliseconds <= 0) return;
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
-}
 
 function fsyncDirectory(directory) {
   const descriptor = fs.openSync(directory, "r");
@@ -22,26 +15,7 @@ function fsyncDirectory(directory) {
   }
 }
 
-function fileDigest(raw) {
-  return createHash("sha256").update(raw).digest("hex");
-}
-
-function readFileSnapshot(file) {
-  const stat = fs.statSync(file);
-  const raw = fs.readFileSync(file);
-  return {
-    stat,
-    raw,
-    digest: fileDigest(raw),
-    identity: `${stat.dev}:${stat.ino}`,
-  };
-}
-
-function sameSnapshot(left, right) {
-  return left.identity === right.identity && left.digest === right.digest;
-}
-
-function publishCompleteFile(file, value, mode = 0o600) {
+function publishAtomicFile(file, value, mode = 0o600, { replace = true } = {}) {
   const directory = path.dirname(file);
   const temporaryFile = path.join(
     directory,
@@ -54,15 +28,18 @@ function publishCompleteFile(file, value, mode = 0o600) {
     fs.fsyncSync(descriptor);
     fs.closeSync(descriptor);
     descriptor = undefined;
-    fs.linkSync(temporaryFile, file);
-    fs.unlinkSync(temporaryFile);
+    if (!replace && fs.existsSync(file)) {
+      const error = new Error(`File already exists: ${file}`);
+      error.code = "EEXIST";
+      throw error;
+    }
+    fs.renameSync(temporaryFile, file);
     fsyncDirectory(directory);
   } catch (error) {
     if (descriptor !== undefined) fs.closeSync(descriptor);
     fs.rmSync(temporaryFile, { force: true });
     throw error;
   }
-  return readFileSnapshot(file);
 }
 
 function parseProcStartTime(statText) {
@@ -140,213 +117,115 @@ function validIdentity(identity) {
     identity.value.length > 0;
 }
 
-function parseLockOwner(snapshot) {
+function previewHostBootIdentity(
+  {
+    platform = process.platform,
+    hostname = os.hostname,
+    readFile = fs.readFileSync,
+    runCommand = spawnSync,
+  } = {},
+) {
+  const host = hostname();
+  let boot;
+  if (platform === "linux") {
+    boot = String(readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim();
+  } else {
+    const result = runCommand("ps", ["-p", "1", "-o", "lstart="], {
+      encoding: "utf8",
+      env: { ...process.env, LC_ALL: "C", TZ: "UTC0" },
+    });
+    boot = result.status === 0 ? result.stdout?.trim() : "";
+  }
+  if (!host || !boot) {
+    throw new Error("Preview lifecycle cannot determine the current host and boot identity.");
+  }
+  return { host, boot };
+}
+
+function parseLockOwner(raw) {
   try {
-    const owner = JSON.parse(snapshot.raw.toString("utf8"));
+    const owner = JSON.parse(raw);
     if (
-      owner?.version !== PREVIEW_LIFECYCLE_LOCK_VERSION ||
-      typeof owner.operation !== "string" ||
-      typeof owner.generation !== "string" ||
+      !Number.isSafeInteger(owner?.version) ||
+      owner.version < 2 ||
       !Number.isSafeInteger(owner.pid) ||
-      owner.pid < 1 ||
-      !validIdentity(owner.identity)
+      owner.pid < 1
     ) return null;
-    return owner;
+    const identity = owner.version === 2 && typeof owner.pidStartIdentity === "string"
+      ? { method: "legacy-pid-start", value: owner.pidStartIdentity }
+      : owner.identity;
+    if (
+      typeof identity?.method !== "string" ||
+      !identity.method ||
+      typeof identity?.value !== "string" ||
+      !identity.value
+    ) return null;
+    return { ...owner, identity };
   } catch {
     return null;
   }
 }
 
-function parseRecoveryGuardOwner(snapshot) {
-  try {
-    const owner = JSON.parse(snapshot.raw.toString("utf8"));
-    if (
-      owner?.version !== PREVIEW_RECOVERY_GUARD_VERSION ||
-      !Number.isSafeInteger(owner.pid) ||
-      owner.pid < 1 ||
-      !validIdentity(owner.identity) ||
-      typeof owner.createdAt !== "string"
-    ) return null;
-    return owner;
-  } catch {
-    return null;
+function readLockOwner(lockDirectory, legacyLockFiles = []) {
+  let lockStat;
+  if (lockDirectory) {
+    try {
+      lockStat = fs.lstatSync(lockDirectory);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
   }
+  if (lockStat) {
+    const ownerFile = path.join(lockDirectory, "owner.json");
+    let raw = null;
+    try {
+      raw = fs.readFileSync(ownerFile, "utf8");
+    } catch {}
+    return {
+      kind: "directory",
+      target: lockDirectory,
+      ownerFile,
+      owner: raw === null ? null : parseLockOwner(raw),
+    };
+  }
+  for (const legacyLockFile of legacyLockFiles) {
+    try {
+      const raw = fs.readFileSync(legacyLockFile, "utf8");
+      return {
+        kind: "legacy-file",
+        target: legacyLockFile,
+        ownerFile: legacyLockFile,
+        owner: parseLockOwner(raw),
+      };
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        return {
+          kind: "legacy-file",
+          target: legacyLockFile,
+          ownerFile: legacyLockFile,
+          owner: null,
+        };
+      }
+    }
+  }
+  return null;
 }
 
 function lifecycleOwnerDescription(owner) {
-  return `${owner.operation} PID ${owner.pid}`;
-}
-
-function identityDisposition(ownerIdentity, currentIdentity) {
-  if (currentIdentity === null) return "stale";
-  if (!validIdentity(ownerIdentity) || !validIdentity(currentIdentity)) return "live";
-  if (ownerIdentity.method !== currentIdentity.method) return "live";
-  return ownerIdentity.value === currentIdentity.value ? "live" : "stale";
-}
-
-function assertStaleGenerationMatches(owner, generationFiles) {
-  if (!owner) return;
-  let matchingArtifacts = 0;
-  const unreadableArtifacts = [];
-  for (const generationFile of generationFiles) {
-    let raw;
-    try {
-      raw = fs.readFileSync(generationFile, "utf8");
-    } catch (error) {
-      if (error?.code === "ENOENT") continue;
-      throw error;
-    }
-    let generation;
-    try {
-      generation = JSON.parse(raw)?.generation;
-    } catch {
-      unreadableArtifacts.push(generationFile);
-      continue;
-    }
-    if (typeof generation !== "string" || !generation) {
-      unreadableArtifacts.push(generationFile);
-      continue;
-    }
-    if (generation !== owner.generation) {
-      throw new Error(
-        `Preview lifecycle refuses stale-lock recovery because ${generationFile} ` +
-          `belongs to generation ${generation}, not ${owner.generation}.`,
-      );
-    }
-    matchingArtifacts += 1;
-  }
-  if (unreadableArtifacts.length > 0 && matchingArtifacts === 0) {
-    throw new Error(
-      `Preview lifecycle refuses stale-lock recovery because it cannot verify generation in ` +
-        `${unreadableArtifacts.join(", ")}.`,
-    );
-  }
-}
-
-function lockTimeoutError(lockFile, holder) {
-  const holderText = holder
-    ? ` PID ${holder.pid} (${holder.identity.method}:${holder.identity.value})`
-    : " with an unrecognized owner";
-  return new Error(
-    `Timed out after ${PREVIEW_LOCK_ACQUIRE_TIMEOUT_MS}ms waiting for preview lifecycle recovery guard${holderText} at ${lockFile}.`,
-  );
-}
-
-function acquirePreviewRecoveryGuard(
-  lockFile,
-  {
-    pid,
-    identity,
-    resolvePidStartIdentity,
-    now,
-    pauseSync,
-    deadline,
-  },
-) {
-  const guardFile = `${lockFile}.recovery`;
-  const guardOwner = {
-    version: PREVIEW_RECOVERY_GUARD_VERSION,
-    pid,
-    identity,
-    createdAt: new Date(now()).toISOString(),
-  };
-  const serializedGuardOwner = `${JSON.stringify(guardOwner, null, 2)}\n`;
-  let ownedSnapshot;
-
-  while (now() <= deadline) {
-    try {
-      ownedSnapshot = publishCompleteFile(guardFile, serializedGuardOwner);
-      break;
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
-    }
-
-    let observedSnapshot;
-    try {
-      observedSnapshot = readFileSnapshot(guardFile);
-    } catch (error) {
-      if (error?.code === "ENOENT") continue;
-      throw error;
-    }
-    const observedOwner = parseRecoveryGuardOwner(observedSnapshot);
-    if (!observedOwner) {
-      throw new Error(
-        `Preview lifecycle recovery guard is unrecognized and cannot be reclaimed automatically: ${guardFile}.`,
-      );
-    }
-    const currentIdentity = resolvePidStartIdentity(observedOwner.pid);
-    if (identityDisposition(observedOwner.identity, currentIdentity) === "live") {
-      if (now() >= deadline) throw lockTimeoutError(guardFile, observedOwner);
-      pauseSync(PREVIEW_LOCK_POLL_INTERVAL_MS);
-      continue;
-    }
-
-    // A hard-link claim keeps the observed inode alive and lets contenders use
-    // link count as an atomic election. Only the sole claimant may unlink the
-    // canonical stale guard and publish its replacement.
-    const claimFile = `${guardFile}.claim.${pid}.${randomUUID()}`;
-    try {
-      fs.linkSync(guardFile, claimFile);
-    } catch (error) {
-      if (error?.code === "ENOENT") continue;
-      throw error;
-    }
-    try {
-      const claimSnapshot = readFileSnapshot(claimFile);
-      if (!sameSnapshot(observedSnapshot, claimSnapshot)) continue;
-      let canonicalSnapshot;
-      try {
-        canonicalSnapshot = readFileSnapshot(guardFile);
-      } catch (error) {
-        if (error?.code === "ENOENT") continue;
-        throw error;
-      }
-      if (!sameSnapshot(observedSnapshot, canonicalSnapshot)) continue;
-      if (fs.statSync(claimFile).nlink !== 2) {
-        pauseSync(PREVIEW_LOCK_POLL_INTERVAL_MS);
-        continue;
-      }
-      fs.unlinkSync(guardFile);
-      fsyncDirectory(path.dirname(guardFile));
-      try {
-        ownedSnapshot = publishCompleteFile(guardFile, serializedGuardOwner);
-      } catch (error) {
-        if (error?.code !== "EEXIST") throw error;
-      }
-      if (ownedSnapshot) break;
-    } finally {
-      fs.rmSync(claimFile, { force: true });
-    }
-  }
-  if (!ownedSnapshot) throw lockTimeoutError(guardFile, null);
-
-  let released = false;
-  return {
-    release() {
-      if (released) return;
-      const currentSnapshot = readFileSnapshot(guardFile);
-      if (!sameSnapshot(ownedSnapshot, currentSnapshot)) {
-        throw new Error(`Preview lifecycle recovery guard ownership changed: ${guardFile}.`);
-      }
-      fs.unlinkSync(guardFile);
-      fsyncDirectory(path.dirname(guardFile));
-      released = true;
-    },
-  };
+  return `${owner.operation || "preview lifecycle"} PID ${owner.pid}`;
 }
 
 export function acquirePreviewLifecycleLock(
-  lockFile,
+  lockDirectory,
   {
     operation,
     generation,
     pid = process.pid,
     identity,
     resolvePidStartIdentity = previewPidStartIdentity,
-    generationFiles = [],
-    log = console.log,
+    hostBootIdentity,
+    legacyLockFiles = [],
     now = Date.now,
-    pauseSync = sleepSync,
   } = {},
 ) {
   if (!operation || !generation) {
@@ -356,159 +235,109 @@ export function acquirePreviewLifecycleLock(
   if (!validIdentity(ownerIdentity)) {
     throw new Error(`Preview lifecycle cannot acquire a lock without PID identity for ${pid}.`);
   }
+  const { host, boot } = hostBootIdentity ?? previewHostBootIdentity();
   const owner = {
     version: PREVIEW_LIFECYCLE_LOCK_VERSION,
     operation,
     generation,
     pid,
-    identity: ownerIdentity,
+    identity: { ...ownerIdentity, host, boot },
     createdAt: new Date(now()).toISOString(),
   };
-  const serializedOwner = `${JSON.stringify(owner, null, 2)}\n`;
-
-  const deadline = now() + PREVIEW_LOCK_ACQUIRE_TIMEOUT_MS;
-  let ownedSnapshot;
-  while (!ownedSnapshot && now() <= deadline) {
-    const guard = acquirePreviewRecoveryGuard(lockFile, {
-      pid,
-      identity: ownerIdentity,
-      resolvePidStartIdentity,
-      now,
-      pauseSync,
-      deadline,
-    });
-    try {
-      let observedSnapshot;
-      try {
-        observedSnapshot = readFileSnapshot(lockFile);
-      } catch (error) {
-        if (error?.code !== "ENOENT") throw error;
-      }
-      if (!observedSnapshot) {
-        ownedSnapshot = publishCompleteFile(lockFile, serializedOwner);
-        continue;
-      }
-      const staleOwner = parseLockOwner(observedSnapshot);
-      if (!staleOwner) {
-        throw new Error(
-          `Preview lifecycle lock is legacy, malformed, or uses an unknown identity method and is busy: ${lockFile}. ` +
-            "Run node scripts/preview-down.mjs --recover-lock for explicit proof-based recovery.",
-        );
-      }
-      const currentIdentity = resolvePidStartIdentity(staleOwner.pid);
-      if (identityDisposition(staleOwner.identity, currentIdentity) === "live") {
-        const suffix = staleOwner.operation === "preview-up" ? " is still starting" : " is running";
-        throw new Error(
-          `Preview lifecycle is busy: ${lifecycleOwnerDescription(staleOwner)}${suffix} and holds ${lockFile}.`,
-        );
-      }
-      assertStaleGenerationMatches(staleOwner, generationFiles);
-      const currentSnapshot = readFileSnapshot(lockFile);
-      if (!sameSnapshot(observedSnapshot, currentSnapshot)) continue;
-      fs.unlinkSync(lockFile);
-      fsyncDirectory(path.dirname(lockFile));
-      ownedSnapshot = publishCompleteFile(lockFile, serializedOwner);
-      log(
-        `Recovered stale lifecycle lock (pid ${staleOwner.pid}, started ${staleOwner.identity.method}:${staleOwner.identity.value}).`,
-      );
-    } finally {
-      guard.release();
-    }
+  try {
+    fs.mkdirSync(lockDirectory, { mode: 0o700 });
+    fsyncDirectory(path.dirname(lockDirectory));
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    const existing = readLockOwner(lockDirectory, legacyLockFiles);
+    throw new Error(
+      existing?.owner
+        ? `Preview lifecycle BUSY: ${lifecycleOwnerDescription(existing.owner)} holds ${lockDirectory}.`
+        : `Preview lifecycle BUSY: unreadable owner record at ${lockDirectory}.`,
+    );
   }
-  if (!ownedSnapshot) throw lockTimeoutError(lockFile, null);
+  const legacyLock = readLockOwner(null, legacyLockFiles);
+  if (legacyLock) {
+    fs.rmdirSync(lockDirectory);
+    fsyncDirectory(path.dirname(lockDirectory));
+    throw new Error(
+      legacyLock.owner
+        ? `Preview lifecycle BUSY: ${lifecycleOwnerDescription(legacyLock.owner)} holds ${legacyLock.target}.`
+        : `Preview lifecycle BUSY: unreadable owner record at ${legacyLock.target}.`,
+    );
+  }
+  const ownerFile = path.join(lockDirectory, "owner.json");
+  try {
+    publishAtomicFile(ownerFile, `${JSON.stringify(owner, null, 2)}\n`);
+  } catch (error) {
+    fs.rmSync(lockDirectory, { recursive: true, force: true });
+    throw error;
+  }
 
   let released = false;
   return {
     owner,
     release() {
       if (released) return;
-      const deadline = now() + PREVIEW_LOCK_ACQUIRE_TIMEOUT_MS;
-      const guard = acquirePreviewRecoveryGuard(lockFile, {
-        pid,
-        identity: ownerIdentity,
-        resolvePidStartIdentity,
-        now,
-        pauseSync,
-        deadline,
-      });
-      try {
-        const currentSnapshot = readFileSnapshot(lockFile);
-        if (!sameSnapshot(ownedSnapshot, currentSnapshot)) {
-          throw new Error(`Preview lifecycle lock ownership changed before release: ${lockFile}.`);
-        }
-        fs.unlinkSync(lockFile);
-        fsyncDirectory(path.dirname(lockFile));
-        released = true;
-      } finally {
-        guard.release();
-      }
+      fs.unlinkSync(ownerFile);
+      fs.rmdirSync(lockDirectory);
+      fsyncDirectory(path.dirname(lockDirectory));
+      released = true;
     },
   };
 }
 
-export function recoverUnrecognizedPreviewLifecycleLock(
-  lockFile,
+export function recoverPreviewLifecycleLock(
+  lockDirectory,
   {
-    verifySafeRecovery,
-    pid = process.pid,
-    identity,
+    legacyLockFiles = [],
+    force = false,
+    verifyForcedRecovery,
     resolvePidStartIdentity = previewPidStartIdentity,
+    currentHostBootIdentity,
     log = console.log,
-    now = Date.now,
-    pauseSync = sleepSync,
   } = {},
 ) {
-  if (typeof verifySafeRecovery !== "function") {
-    throw new Error("Explicit preview lock recovery requires a safety proof callback.");
-  }
-  const ownerIdentity = identity ?? resolvePidStartIdentity(pid);
-  if (!validIdentity(ownerIdentity)) {
-    throw new Error(`Preview lock recovery cannot verify PID identity for ${pid}.`);
-  }
-  const guard = acquirePreviewRecoveryGuard(lockFile, {
-    pid,
-    identity: ownerIdentity,
-    resolvePidStartIdentity,
-    now,
-    pauseSync,
-    deadline: now() + PREVIEW_LOCK_ACQUIRE_TIMEOUT_MS,
-  });
-  try {
-    let observedSnapshot;
-    try {
-      observedSnapshot = readFileSnapshot(lockFile);
-    } catch (error) {
-      if (error?.code === "ENOENT") return false;
-      throw error;
-    }
-    if (parseLockOwner(observedSnapshot)) {
+  const existing = readLockOwner(lockDirectory, legacyLockFiles);
+  if (!existing) return false;
+  if (existing.owner) {
+    const currentHostBoot = currentHostBootIdentity ?? previewHostBootIdentity();
+    const ownerHost = existing.owner.identity.host;
+    const ownerBoot = existing.owner.identity.boot;
+    if (!ownerHost || !ownerBoot ||
+        ownerHost !== currentHostBoot.host || ownerBoot !== currentHostBoot.boot) {
       throw new Error(
-        `Preview lifecycle lock is a current-version record; use normal preview-down recovery: ${lockFile}.`,
+        `Preview lock recovery cannot verify owner liveness for PID ${existing.owner.pid}: host or boot identity differs or is missing.`,
       );
     }
-    verifySafeRecovery({
-      lockFile,
-      identity: observedSnapshot.identity,
-      digest: observedSnapshot.digest,
-    });
-    const currentSnapshot = readFileSnapshot(lockFile);
-    if (!sameSnapshot(observedSnapshot, currentSnapshot)) {
-      throw new Error(`Preview lifecycle lock changed during explicit recovery: ${lockFile}.`);
+    if (resolvePidStartIdentity(existing.owner.pid) !== null) {
+      throw new Error(
+        `Preview lock recovery refuses live owner PID ${existing.owner.pid} from ${existing.ownerFile}.`,
+      );
     }
-    fs.unlinkSync(lockFile);
-    fsyncDirectory(path.dirname(lockFile));
-    log(`Recovered legacy or malformed preview lifecycle lock: ${lockFile}.`);
-    return true;
-  } finally {
-    guard.release();
+  } else {
+    if (!force) {
+      throw new Error(
+        `Preview lock owner record is missing or unreadable at ${existing.ownerFile}; rerun with --recover-lock --force only after operator confirmation.`,
+      );
+    }
+    if (typeof verifyForcedRecovery !== "function") {
+      throw new Error("Forced preview lock recovery requires port and process safety proofs.");
+    }
+    verifyForcedRecovery();
   }
+  if (existing.kind === "directory") fs.rmSync(existing.target, { recursive: true, force: true });
+  else fs.unlinkSync(existing.target);
+  fsyncDirectory(path.dirname(existing.target));
+  log(`Recovered preview lifecycle lock: ${existing.target}.`);
+  return true;
 }
 
 export function publishPreviewStartGate(gateFile, generation) {
   if (typeof generation !== "string" || !generation) {
     throw new Error("Preview start gate requires a generation.");
   }
-  publishCompleteFile(gateFile, `${generation}\n`);
+  publishAtomicFile(gateFile, `${generation}\n`, 0o600, { replace: false });
 }
 
 export function publishPreviewStateFile(stateFile, state) {
