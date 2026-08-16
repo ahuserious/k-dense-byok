@@ -904,3 +904,250 @@ server.listen(Number(process.argv[portIndex + 1]), "127.0.0.1");
     }
   },
 );
+
+test(
+  "forced shutdown stays alive after the first force failure and retries on the next signal",
+  {
+    skip: process.env.KADY_SOCKET_TESTS === "1" && process.platform !== "win32"
+      ? false
+      : "requires Unix process groups and local socket binding; orchestrator runs with KADY_SOCKET_TESTS=1",
+  },
+  async () => {
+    const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-launcher-force-retry-"));
+    const serviceStatePath = path.join(stateRoot, "services.json");
+    const shutdownReceiptPath = path.join(stateRoot, "backend-received-shutdown");
+    const supervisorPidPath = path.join(stateRoot, "supervisor.pid");
+    const supervisorDescendantPidPath = path.join(stateRoot, "supervisor-descendant.pid");
+    const observedPids = new Set();
+    let launcher;
+    let ports;
+    try {
+      ports = {
+        backend: await reserveLocalPort(),
+        frontend: await reserveLocalPort(),
+        engine: await reserveLocalPort(),
+      };
+      const commandLog = path.join(stateRoot, "commands.jsonl");
+      const fakeNpm = path.join(stateRoot, "fake-npm");
+      const fakeGit = path.join(stateRoot, "fake-git");
+      fs.writeFileSync(fakeNpm, `#!${process.execPath}
+import fs from "node:fs";
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(commandLog)}, JSON.stringify({ command: "npm", args }) + "\\n");
+if (args.join(" ") !== "run prep --silent") process.exit(125);
+`, { mode: 0o700 });
+      fs.writeFileSync(fakeGit, `#!${process.execPath}
+import fs from "node:fs";
+const argv = process.argv.slice(2);
+const args = argv.join(" ");
+fs.appendFileSync(${JSON.stringify(commandLog)}, JSON.stringify({ command: "git", args: argv }) + "\\n");
+if (args === "--version") console.log("git version 2.0.0");
+else if (args === "rev-parse HEAD") console.log("${"b".repeat(40)}");
+else process.exit(2);
+`, { mode: 0o700 });
+      const { launchRoot, shimDirectory } = createLaunchOverlay(
+        repositoryRoot,
+        stateRoot,
+        fakeNpm,
+        fakeGit,
+      );
+      const originalEnvironmentModule = path.join(repositoryRoot, "scripts", "vendored-dist-environment.mjs");
+      fs.writeFileSync(
+        path.join(launchRoot, "scripts", "vendored-dist-environment.mjs"),
+        `import { forceOwnedSupervisorProcessGroup as actualForce } from ${JSON.stringify(originalEnvironmentModule)};
+export {
+  classifyWorkflowEngineBuildOutcome,
+  classifyWorkflowEngineListener,
+  captureProcessIdentity,
+  latchOwnedProcessGroupRetirement,
+  missingPreviewLauncherDependencies,
+  prepareLauncherDependencies,
+  previewVendoredDistFingerprintEnvironment,
+  resolveWorkflowEnginePort,
+  scrubSensitiveEnvironment,
+  recordSupervisorOwnership,
+  terminateOwnedProcessTree,
+  vendoredDistBuildLockStatus,
+  waitForOwnedWorkflowEngine,
+  workflowEngineConsumerEnvironment,
+  workflowEnginePrerequisiteStatus,
+  workflowEngineRuntimeOwnership,
+} from ${JSON.stringify(originalEnvironmentModule)};
+let remainingForceFailures = 1;
+export async function forceOwnedSupervisorProcessGroup(owner, options) {
+  if (remainingForceFailures > 0) {
+    remainingForceFailures -= 1;
+    return { ok: false, status: "unverifiable" };
+  }
+  return actualForce(owner, options);
+}
+`,
+      );
+      fs.writeFileSync(
+        path.join(shimDirectory, "bun"),
+        `#!${process.execPath}
+import fs from "node:fs";
+import http from "node:http";
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(commandLog)}, JSON.stringify({ command: "bun", args }) + "\\n");
+if (args.join(" ") === "--version") { console.log("1.3.8"); process.exit(0); }
+if (args.join(" ") !== "--filter @archon/server start") process.exit(125);
+const server = http.createServer((_request, response) => response.end("healthy"));
+process.on("SIGTERM", () => {}); process.on("SIGINT", () => {});
+server.listen(Number(process.env.PORT), "127.0.0.1");
+`,
+        { mode: 0o700 },
+      );
+      fs.writeFileSync(path.join(shimDirectory, "uv"), `#!${process.execPath}
+import fs from "node:fs";
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(commandLog)}, JSON.stringify({ command: "uv", args }) + "\\n");
+if (args.join(" ") !== "--version") process.exit(125);
+console.log("uv 0.8.0");
+`, { mode: 0o700 });
+
+      const environment = previewEnvironment(stateRoot, launchRoot, shimDirectory, ports, {
+        PATH: process.env.PATH,
+        OLLAMA_BASE_URL: "http://127.0.0.1:9",
+      });
+      const checkoutRoot = prepareHermeticLauncherCheckout(stateRoot, environment, ports);
+      const fakeServerRoot = path.join(checkoutRoot, "server");
+      const fakeWebRoot = path.join(checkoutRoot, "web");
+      const fakeBackend = path.join(fakeServerRoot, "node_modules", "tsx", "dist", "cli.mjs");
+      const fakeFrontend = path.join(fakeWebRoot, "node_modules", "next", "dist", "bin", "next");
+      fs.mkdirSync(path.dirname(fakeBackend), { recursive: true });
+      fs.mkdirSync(path.dirname(fakeFrontend), { recursive: true });
+      fs.writeFileSync(
+        fakeBackend,
+        `import { spawn } from "node:child_process";
+import fs from "node:fs";
+import http from "node:http";
+const supervisor = spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(`
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+const descendant = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { stdio: "ignore" });
+fs.writeFileSync(${JSON.stringify(supervisorDescendantPidPath)}, String(descendant.pid));
+process.on("SIGTERM", () => {});
+process.on("SIGINT", () => {});
+setInterval(() => {}, 1000);
+`)}], {
+  detached: true,
+  stdio: "ignore",
+});
+supervisor.unref();
+fs.writeFileSync(${JSON.stringify(supervisorPidPath)}, String(supervisor.pid));
+process.send?.({ type: "kady-supervisor", pid: supervisor.pid });
+const server = http.createServer((_request, response) => response.end("backend"));
+process.on("message", (message) => {
+  if (message?.type === "kady-shutdown") {
+    fs.writeFileSync(${JSON.stringify(shutdownReceiptPath)}, "received\\n");
+    process.send?.({ type: "fake-shutdown-received" });
+  }
+});
+server.listen(Number(process.env.KADY_PORT), "127.0.0.1");
+`,
+      );
+      fs.writeFileSync(
+        fakeFrontend,
+        `import http from "node:http";
+const portIndex = process.argv.indexOf("-p");
+const server = http.createServer((_request, response) => response.end("frontend"));
+const stop = () => server.close(() => process.exit(0));
+process.on("SIGTERM", stop); process.on("SIGINT", stop); process.on("SIGHUP", stop);
+server.listen(Number(process.argv[portIndex + 1]), "127.0.0.1");
+`,
+      );
+      fs.rmSync(path.join(launchRoot, "server"), { force: true });
+      fs.rmSync(path.join(launchRoot, "web"), { force: true });
+      fs.symlinkSync(fakeServerRoot, path.join(launchRoot, "server"), "dir");
+      fs.symlinkSync(fakeWebRoot, path.join(launchRoot, "web"), "dir");
+      fs.writeFileSync(serviceStatePath, '{"version":1,"services":{}}\n');
+
+      launcher = spawn(
+        process.execPath,
+        [path.join(launchRoot, "start.mjs"), "--no-browser"],
+        {
+          cwd: launchRoot,
+          detached: true,
+          env: environment,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      let output = "";
+      launcher.stdout.on("data", (chunk) => { output += chunk; });
+      launcher.stderr.on("data", (chunk) => { output += chunk; });
+
+      const startupStartedAt = Date.now();
+      const startupDeadline = startupStartedAt + 45_000;
+      let state;
+      while (Date.now() < startupDeadline) {
+        state = JSON.parse(fs.readFileSync(serviceStatePath, "utf-8"));
+        for (const service of Object.values(state.services ?? {})) {
+          if (Number.isSafeInteger(service?.pid)) observedPids.add(service.pid);
+        }
+        if (state.services?.backend?.state === "spawned" &&
+            state.services?.frontend?.state === "spawned" &&
+            state.services?.["pipeline-engine"]?.state === "spawned" &&
+            state.services?.["workflow-supervisor"]?.state === "spawned") break;
+        if (launcher.exitCode !== null) {
+          assert.fail(
+            `launcher exited before fake services started after ${Date.now() - startupStartedAt}ms\n${output}`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      const backendPid = state?.services?.backend?.pid;
+      const supervisorPid = state?.services?.["workflow-supervisor"]?.pid;
+      const startupFailureDetails =
+        `launcher services incomplete after ${Date.now() - startupStartedAt}ms\n${output}`;
+      assert.ok(Number.isSafeInteger(backendPid), startupFailureDetails);
+      assert.ok(Number.isSafeInteger(supervisorPid), startupFailureDetails);
+      const supervisorDescendantPid = Number(fs.readFileSync(supervisorDescendantPidPath, "utf-8"));
+      assert.ok(Number.isSafeInteger(supervisorDescendantPid), startupFailureDetails);
+      observedPids.add(supervisorDescendantPid);
+      await waitForLocalPortOpen(ports.backend, "fake backend");
+
+      launcher.kill("SIGTERM");
+      const gracefulDeadline = Date.now() + 2_000;
+      while (!fs.existsSync(shutdownReceiptPath) && Date.now() < gracefulDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assert.equal(fs.existsSync(shutdownReceiptPath), true, output);
+      assert.equal(launcher.exitCode, null, "first signal must keep waiting for the stuck backend");
+
+      launcher.kill("SIGTERM");
+      const incompleteDeadline = Date.now() + 5_000;
+      while (!output.includes("forced shutdown incomplete:") && Date.now() < incompleteDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assert.match(output, /forced shutdown incomplete:.*send another signal to retry/);
+      assert.equal(launcher.exitCode, null, "a failed force must leave the launcher alive for retry");
+      process.kill(supervisorPid, 0);
+      process.kill(supervisorDescendantPid, 0);
+
+      const launcherExit = new Promise((resolve) => launcher.once("exit", resolve));
+      launcher.kill("SIGTERM");
+      const exitCode = await Promise.race([
+        launcherExit,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("retried forced launcher shutdown timed out")), 5_000)),
+      ]);
+      assert.equal(exitCode, 143, output);
+      assert.throws(() => process.kill(supervisorPid, 0), (error) => error?.code === "ESRCH");
+      assert.throws(() => process.kill(supervisorDescendantPid, 0), (error) => error?.code === "ESRCH");
+    } finally {
+      if (launcher?.exitCode === null) {
+        try { process.kill(-launcher.pid, "SIGKILL"); } catch { /* already gone */ }
+      }
+      await waitForChildExit(launcher);
+      for (const pid of recordedServicePids(serviceStatePath)) observedPids.add(pid);
+      if (fs.existsSync(supervisorPidPath)) observedPids.add(Number(fs.readFileSync(supervisorPidPath, "utf-8")));
+      if (fs.existsSync(supervisorDescendantPidPath)) {
+        observedPids.add(Number(fs.readFileSync(supervisorDescendantPidPath, "utf-8")));
+      }
+      await reapProcessGroups([...observedPids].filter(Number.isSafeInteger));
+      await assertLocalPortClosed(ports?.backend, "backend listener leaked during test cleanup");
+      await assertLocalPortClosed(ports?.frontend, "frontend listener leaked during test cleanup");
+      fs.rmSync(stateRoot, { recursive: true, force: true });
+    }
+  },
+);

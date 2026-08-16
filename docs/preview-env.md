@@ -43,9 +43,9 @@ The wrapper runs `bun install --frozen-lockfile` when either the ignored
 `.web-built` record or the install-owned `node_modules/.bun-install-stamp`
 differs. The stamp covers every workspace package manifest and is written only
 when the install-input digest is unchanged before and after Bun runs. A
-checkout-specific temp lock records an owner token, PID/start identity, and
-heartbeat; an exact live PID/start identity is never reclaimed merely because
-its heartbeat is old. Builders revalidate their token immediately before Bun
+checkout-specific directory lock records the owner PID/start identity and
+heartbeat; an existing lock is never reclaimed automatically, regardless of
+age or a dead PID. Builders revalidate ownership immediately before Bun
 can mutate dependencies and before dist promotion. Contenders wait for the
 owner and recheck freshness. Builds publish by renaming a fully validated
 staging tree instead of rewriting live `dist/`.
@@ -74,46 +74,50 @@ node scripts/vendored-dist-build.mjs --if-stale
 
 ### Build lock and recovery
 
-All normal launches and previews rendezvous on the checkout-local lock at
-`server/vendor/pipeline-engine/node_modules/.vendored-dist-lock/build.lock`.
-Its record contains the owner PID, a host- and boot-scoped process-start
-identity, a random owner token, a heartbeat, and every active Bun install/build
-worker. Linux identities use `/proc/<pid>/stat` field 22 plus the kernel boot
-ID; macOS identities use `ps` start time under fixed `LC_ALL=C` and `TZ=UTC0`.
-Identity methods are never compared across representations. A missed or old
-heartbeat is never enough to reclaim a lock while any recorded owner or worker
-is alive or unverifiable.
+All normal launches and previews rendezvous on the checkout-local lock directory
+`server/vendor/pipeline-engine/node_modules/.vendored-dist-lock/build.lock.d`.
+The holder creates that directory with `mkdir` (atomic; `EEXIST` means busy)
+and publishes `owner.json` via a temporary file plus rename. The record contains
+`version`, the owner PID, a host- and boot-scoped process-start identity,
+`phase`, every active Bun install/build worker, `createdAt`, and `heartbeatAt`.
+Release unlinks `owner.json` and removes the directory. There are no hard
+links, recovery guards, tombstones, or nlink checks.
 
-Host scope is checked before probing a PID: another host is always busy and a
-different boot ID on the same host proves the old process is gone. The checkout
-must be used by one host, one PID namespace, and a local filesystem. Containers
-or VMs that share this checkout, shared/network filesystems, and cross-host
-builders are unsupported and therefore fail closed as busy.
+Any existing lock directory is busy. The build and launcher paths report the
+owner record, or `unreadable owner record`, then poll until the deadline and
+print the actionable recovery command. There is no automatic reclaim on a dead
+PID, on age, or on anything else. CI uses a fresh checkout; a local crash is
+one operator command. That removes every check-then-act reclaim race by
+construction.
 
-Complete lock and guard records are fsynced to temporary inodes and published
-with no-overwrite hard links; zero-byte, partial, or unreadable records remain
-busy and require manual inspection. Recovery is serialized by a separate
-O_EXCL guard next to the main lock. The
-guard covers stale-record inode/content revalidation through acquisition of the
-replacement lock, so concurrent recoverers cannot unlink a successor. A later
-builder automatically recovers only after the wrapper and every recorded Bun
-worker are proven gone, and logs the recovered owner.
+Linux identities use `/proc/<pid>/stat` field 22 plus the kernel boot ID;
+macOS identities use `ps` start time under fixed `LC_ALL=C` and `TZ=UTC0`.
+Identity methods are never compared across representations. Host scope is
+checked before probing a PID: another host is always busy, and a different
+boot ID on the same host proves the old process is gone. The checkout must be
+used by one host, one PID namespace, and a local filesystem. Containers or VMs
+that share this checkout, shared/network filesystems, and cross-host builders
+are unsupported and therefore fail closed as busy.
 
-If the bounded wait expires, the error prints the holder PID, start identity,
-absolute lock path, owner/worker metadata, and the supported recovery command.
-The command acquires the same recovery guard and refuses removal if the record
-changed or any recorded process remains alive or unverifiable:
+`--recover-lock` is the only recovery path. A parseable `owner.json` is removed
+only when the recorded wrapper PID and every recorded worker PID are dead by
+the identity rules (same host and boot, then `ESRCH`). A host mismatch or any
+unverifiable identity refuses recovery. A missing or unreadable owner record
+also refuses unless the operator adds `--force` and no `node`/`bun` process
+has the vendored root as its cwd or in its arguments (`pgrep -f` on the exact
+vendored-root string). That `--force` path is an operator-confirmed action:
 
 ```bash
 node scripts/vendored-dist-build.mjs --recover-lock
+node scripts/vendored-dist-build.mjs --recover-lock --force
 ```
 
-On Windows, automatic recovery and `--recover-lock` are intentionally disabled:
-the gate helper cannot prove the identity of the eventual Bun mutator. Any
-existing lock remains busy. Close every Kady and Bun process, verify no build
-worker remains, then manually remove both `build.lock` and
-`build.lock.recovery`. This lane has no Windows CI coverage; Windows therefore
-uses this documented fail-closed limit rather than an unverified recovery path.
+On Windows the CLI refuses `--recover-lock` (including `--force`): the gate
+helper cannot prove the identity of the eventual Bun mutator. Any existing
+lock directory remains busy. Close every Kady and Bun process, verify no build
+worker remains, then manually remove `build.lock.d`. This lane has no Windows
+CI coverage; Windows therefore uses this documented fail-closed limit rather
+than an unverified recovery path.
 
 The primary `start.mjs` launcher delegates dependency synchronization and the
 freshness-aware `--if-stale` build to that locked wrapper. Preview mode is

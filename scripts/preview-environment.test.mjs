@@ -20,6 +20,7 @@ import {
   recoverVendoredDistBuildLock,
   recordedProcessState,
   scrubSensitiveEnvironment,
+  vendoredDistBuildLockOwnerPath,
   vendoredDistBuildLockPath,
   vendoredDistBuildLockStatus,
 } from "./vendored-dist-environment.mjs";
@@ -54,6 +55,15 @@ function preparedBuildLockPath(root) {
   const lockPath = vendoredDistBuildLockPath(root);
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
   return lockPath;
+}
+
+function writePlantedOwner(lockDirectory, record) {
+  fs.mkdirSync(lockDirectory, { recursive: true });
+  fs.writeFileSync(vendoredDistBuildLockOwnerPath(lockDirectory), `${JSON.stringify(record)}\n`);
+}
+
+function readPlantedOwner(lockDirectory) {
+  return JSON.parse(fs.readFileSync(vendoredDistBuildLockOwnerPath(lockDirectory), "utf-8"));
 }
 
 test("credential scrub catches auth, PAT, and key names without stripping path variables", () => {
@@ -426,10 +436,33 @@ test("forced supervisor teardown handles descendants, exit races, PID reuse, and
   let exitRaceProbe = 0;
   const exitRaceResult = await forceOwnedSupervisorProcessGroup(exitRace, {
     recordedState: () => exitRaceProbe++ === 0 ? "same" : "gone",
+    groupLiveness: () => "dead",
     signalGroup: () => { throw Object.assign(new Error("gone"), { code: "ESRCH" }); },
     signalPid: () => assert.fail("a naturally exited supervisor must not receive a PID fallback signal"),
   });
   assert.deepEqual(exitRaceResult, { ok: true, status: "gone" });
+
+  const orphanedGroup = { pid: 6005, identity, retired: false };
+  let orphanSignals = 0;
+  const orphanFailed = await forceOwnedSupervisorProcessGroup(orphanedGroup, {
+    recordedState: () => "gone",
+    groupLiveness: () => "alive",
+    pidLiveness: () => "dead",
+    signalGroup: () => { orphanSignals += 1; },
+    wait: async () => {},
+    now: (() => { let clock = 0; return () => { clock += 50; return clock; }; })(),
+    timeoutMs: 100,
+  });
+  assert.equal(orphanFailed.ok, false);
+  assert.equal(orphanedGroup.retired, false);
+  assert.ok(orphanSignals >= 1, "leader-gone/group-live must send another group signal");
+  const orphanKilled = await forceOwnedSupervisorProcessGroup(orphanedGroup, {
+    recordedState: () => "gone",
+    groupLiveness: () => "dead",
+    pidLiveness: () => "dead",
+    signalGroup: () => {},
+  });
+  assert.deepEqual(orphanKilled, { ok: true, status: "gone" });
 
   const stubbornTree = { pid: 6002, identity, retired: false };
   const groupStates = ["alive", "alive", "dead"];
@@ -470,6 +503,63 @@ test("forced supervisor teardown handles descendants, exit races, PID reuse, and
   assert.deepEqual(retried, { ok: true, status: "killed" });
 });
 
+test("a dead supervisor leader is not retired while a descendant remains in the group", {
+  skip: process.platform === "win32" ? "requires POSIX process groups" : false,
+}, async () => {
+  const descendantPidPath = path.join(os.tmpdir(), `kady-supervisor-descendant-${process.pid}-${Date.now()}`);
+  const leader = spawn(process.execPath, ["--input-type=module", "-e", `
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+const descendant = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{}); setInterval(()=>{}, 1000)"], {
+  stdio: "ignore",
+});
+fs.writeFileSync(${JSON.stringify(descendantPidPath)}, String(descendant.pid));
+process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+`], { detached: true, stdio: "ignore" });
+  try {
+    const deadline = Date.now() + 3_000;
+    while (!fs.existsSync(descendantPidPath) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const descendantPid = Number(fs.readFileSync(descendantPidPath, "utf-8"));
+    assert.ok(Number.isSafeInteger(descendantPid), "descendant pid was not recorded");
+    const identity = captureProcessIdentity(leader.pid);
+    assert.ok(identity, "could not capture supervisor leader identity");
+    process.kill(leader.pid, "SIGKILL");
+    const leaderGoneDeadline = Date.now() + 2_000;
+    while (Date.now() < leaderGoneDeadline) {
+      try {
+        process.kill(leader.pid, 0);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      } catch (error) {
+        if (error?.code === "ESRCH") break;
+        throw error;
+      }
+    }
+    process.kill(descendantPid, 0);
+    process.kill(-leader.pid, 0);
+    const owner = { pid: leader.pid, identity, retired: false };
+    const result = await forceOwnedSupervisorProcessGroup(owner, {
+      groupLiveness: (pid) => {
+        try {
+          process.kill(-pid, 0);
+          return "alive";
+        } catch (error) {
+          return error?.code === "ESRCH" ? "dead" : "unknown";
+        }
+      },
+    });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(owner.retired, true);
+    assert.throws(() => process.kill(descendantPid, 0), (error) => error?.code === "ESRCH");
+  } finally {
+    try { process.kill(-leader.pid, "SIGKILL"); } catch { /* already gone */ }
+    try { process.kill(leader.pid, "SIGKILL"); } catch { /* already gone */ }
+    fs.rmSync(descendantPidPath, { force: true });
+  }
+});
+
 test("failed build-lock record writes remove the partial lock", async () => {
   const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-write-failure-"));
   const lockPath = preparedBuildLockPath(repositoryRoot);
@@ -490,7 +580,7 @@ test("failed build-lock record writes remove the partial lock", async () => {
     );
     assert.equal(fs.existsSync(lockPath), false);
   } finally {
-    fs.rmSync(lockPath, { force: true });
+    fs.rmSync(lockPath, { recursive: true, force: true });
     fs.rmSync(repositoryRoot, { recursive: true, force: true });
   }
 });
@@ -499,150 +589,99 @@ test("malformed build locks are never reclaimed and time out with metadata", asy
   const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-malformed-"));
   const lockPath = preparedBuildLockPath(repositoryRoot);
   try {
-    fs.writeFileSync(lockPath, "{partial");
+    fs.mkdirSync(lockPath);
+    fs.writeFileSync(vendoredDistBuildLockOwnerPath(lockPath), "{partial");
     await assert.rejects(
       acquireVendoredDistBuildLock(repositoryRoot, { waitMs: 30, pollMs: 5 }),
-      /timed out waiting for vendored dist build lock held by pid unknown, identity "unknown".*owner=unreadable-or-malformed.*node scripts\/vendored-dist-build\.mjs --recover-lock/,
+      /timed out waiting for vendored dist build lock held by pid unknown, identity "unknown".*owner=unreadable owner record.*node scripts\/vendored-dist-build\.mjs --recover-lock/,
     );
-    assert.equal(fs.readFileSync(lockPath, "utf-8"), "{partial");
-  } finally {
-    fs.rmSync(lockPath, { force: true });
-    fs.rmSync(repositoryRoot, { recursive: true, force: true });
-  }
-});
-
-test("malformed main and recovery-guard records remain busy and the CLI refuses them", async () => {
-  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-malformed-publication-"));
-  const lockPath = preparedBuildLockPath(repositoryRoot);
-  try {
-    fs.writeFileSync(lockPath, "");
-    assert.equal(vendoredDistBuildLockStatus(repositoryRoot).reason, "malformed-lock");
-    await assert.rejects(
-      recoverVendoredDistBuildLock(repositoryRoot),
-      /malformed or unreadable/,
-    );
-
-    fs.rmSync(lockPath);
-    fs.writeFileSync(`${lockPath}.recovery`, "");
-    assert.equal(vendoredDistBuildLockStatus(repositoryRoot).reason, "malformed-recovery-guard");
-    await assert.rejects(
-      acquireVendoredDistBuildLock(repositoryRoot, { waitMs: 30, pollMs: 5 }),
-      /timed out waiting for vendored dist build lock/,
-    );
+    assert.equal(fs.readFileSync(vendoredDistBuildLockOwnerPath(lockPath), "utf-8"), "{partial");
   } finally {
     fs.rmSync(repositoryRoot, { recursive: true, force: true });
   }
 });
 
-test("Windows never automatically recovers an existing vendored-dist lock", async () => {
-  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-windows-scope-"));
+test("a dead planted owner stays busy until explicit CLI recovery", async () => {
+  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-dead-stays-busy-"));
   const lockPath = preparedBuildLockPath(repositoryRoot);
+  const deadIdentity = testIdentity("dead-owner-start");
   try {
-    fs.writeFileSync(lockPath, `${JSON.stringify({
-      schema: 2,
-      token: "dead-windows-owner",
-      pid: 989898,
-      identity: testIdentity("dead-windows"),
-      heartbeat: new Date().toISOString(),
+    writePlantedOwner(lockPath, {
+      version: 1,
+      pid: 424242,
+      identity: deadIdentity,
+      phase: "holding",
       workers: [],
-    })}\n`);
+      createdAt: "2026-08-16T00:00:00.000Z",
+      heartbeatAt: "2026-08-16T00:00:00.000Z",
+    });
     await assert.rejects(
       acquireVendoredDistBuildLock(repositoryRoot, {
-        platform: "win32",
-        captureIdentity: () => testIdentity("contender"),
-        getLiveness: () => "dead",
+        captureIdentity: () => testIdentity("contender-start"),
         waitMs: 30,
         pollMs: 5,
       }),
       /timed out waiting for vendored dist build lock/,
     );
-    assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf-8")).token, "dead-windows-owner");
+    assert.equal(readPlantedOwner(lockPath).pid, 424242);
+    const recovered = await recoverVendoredDistBuildLock(repositoryRoot, {
+      captureIdentity: (pid) => pid === process.pid ? testIdentity("operator") : deadIdentity,
+      getLiveness: (pid) => pid === process.pid ? "alive" : "dead",
+    });
+    assert.equal(recovered.recovered, true);
+    assert.equal(fs.existsSync(lockPath), false);
+  } finally {
+    fs.rmSync(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("Windows CLI recovery is refused and an existing lock stays busy", async () => {
+  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-windows-scope-"));
+  const lockPath = preparedBuildLockPath(repositoryRoot);
+  try {
+    writePlantedOwner(lockPath, {
+      version: 1,
+      pid: 989898,
+      identity: testIdentity("dead-windows"),
+      phase: "holding",
+      workers: [],
+      createdAt: new Date().toISOString(),
+      heartbeatAt: new Date().toISOString(),
+    });
+    await assert.rejects(
+      acquireVendoredDistBuildLock(repositoryRoot, { waitMs: 30, pollMs: 5 }),
+      /timed out waiting for vendored dist build lock/,
+    );
+    assert.equal(readPlantedOwner(lockPath).pid, 989898);
     await assert.rejects(
       recoverVendoredDistBuildLock(repositoryRoot, { platform: "win32" }),
-      /automatic vendored-dist lock recovery is disabled on Windows.*manually remove/s,
+      /vendored-dist lock recovery is disabled on Windows.*build\.lock\.d/s,
     );
   } finally {
     fs.rmSync(repositoryRoot, { recursive: true, force: true });
   }
 });
 
-test("dead vendored-dist build-lock owner is recovered", async () => {
-  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-dead-owner-"));
-  const lockPath = preparedBuildLockPath(repositoryRoot);
-  const recoveryMessages = [];
-  try {
-    fs.writeFileSync(lockPath, `${JSON.stringify({
-      schema: 1,
-      token: "dead-owner-token",
-      pid: 424242,
-      identity: testIdentity("dead-owner-start"),
-      heartbeat: "2026-08-16T00:00:00.000Z",
-      workers: [],
-    })}\n`);
-    const lock = await acquireVendoredDistBuildLock(repositoryRoot, {
-      captureIdentity: (pid) => testIdentity(pid === process.pid ? "contender-start" : "dead-owner-start"),
-      getLiveness: (pid) => pid === process.pid ? "alive" : "dead",
-      logRecovery: (message) => recoveryMessages.push(message),
-    });
-    assert.deepEqual(recoveryMessages, [
-      `recovered stale vendored-dist build lock (pid 424242, identity ${JSON.stringify(testIdentity("dead-owner-start"))})`,
-    ]);
-    assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf-8")).token, lock.token);
-    lock.release();
-  } finally {
-    fs.rmSync(lockPath, { force: true });
-    fs.rmSync(repositoryRoot, { recursive: true, force: true });
-  }
-});
-
-test("reused PID with a different start identity is recovered", async () => {
-  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-pid-reuse-"));
-  const lockPath = preparedBuildLockPath(repositoryRoot);
-  const recoveryMessages = [];
-  try {
-    fs.writeFileSync(lockPath, `${JSON.stringify({
-      schema: 1,
-      token: "reused-pid-token",
-      pid: 434343,
-      identity: testIdentity("previous-process-start"),
-      heartbeat: new Date().toISOString(),
-      workers: [],
-    })}\n`);
-    const lock = await acquireVendoredDistBuildLock(repositoryRoot, {
-      captureIdentity: (pid) => testIdentity(pid === process.pid
-        ? "contender-start"
-        : "replacement-process-start"),
-      getLiveness: () => "alive",
-      logRecovery: (message) => recoveryMessages.push(message),
-    });
-    assert.deepEqual(recoveryMessages, [
-      `recovered stale vendored-dist build lock (pid 434343, identity ${JSON.stringify(testIdentity("previous-process-start"))})`,
-    ]);
-    lock.release();
-  } finally {
-    fs.rmSync(lockPath, { force: true });
-    fs.rmSync(repositoryRoot, { recursive: true, force: true });
-  }
-});
-
-test("a surviving recorded Bun worker prevents dead-wrapper recovery", async () => {
+test("a surviving recorded Bun worker prevents CLI recovery and keeps acquire busy", async () => {
   const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-live-worker-"));
   const lockPath = preparedBuildLockPath(repositoryRoot);
   const workerIdentity = testIdentity("worker-start");
+  const record = {
+    version: 1,
+    pid: 454545,
+    identity: testIdentity("dead-wrapper-start"),
+    phase: "build",
+    workers: [{
+      pid: 464646,
+      identity: workerIdentity,
+      phase: "build",
+      startedAt: new Date().toISOString(),
+    }],
+    createdAt: new Date().toISOString(),
+    heartbeatAt: new Date().toISOString(),
+  };
   try {
-    fs.writeFileSync(lockPath, `${JSON.stringify({
-      schema: 2,
-      token: "dead-wrapper-live-worker",
-      pid: 454545,
-      identity: testIdentity("dead-wrapper-start"),
-      heartbeat: new Date().toISOString(),
-      workers: [{
-        pid: 464646,
-        identity: workerIdentity,
-        phase: "build",
-        startedAt: new Date().toISOString(),
-      }],
-    })}\n`);
+    writePlantedOwner(lockPath, record);
     const dependencies = {
       captureIdentity: (pid) => pid === process.pid ? testIdentity("contender") : workerIdentity,
       getLiveness: (pid) => pid === 454545 ? "dead" : "alive",
@@ -652,73 +691,54 @@ test("a surviving recorded Bun worker prevents dead-wrapper recovery", async () 
       /refusing lock recovery \(same\).*464646/,
     );
     await assert.rejects(
-      acquireVendoredDistBuildLock(repositoryRoot, {
-        ...dependencies,
-        waitMs: 30,
-        pollMs: 5,
-      }),
-      /timed out waiting for vendored dist build lock.*464646/,
+      acquireVendoredDistBuildLock(repositoryRoot, { waitMs: 30, pollMs: 5 }),
+      /timed out waiting for vendored dist build lock/,
     );
-    assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf-8")).token, "dead-wrapper-live-worker");
+    assert.equal(readPlantedOwner(lockPath).pid, 454545);
   } finally {
     fs.rmSync(repositoryRoot, { recursive: true, force: true });
   }
 });
 
-test("recovery guard serializes two stale-owner recoverers through reacquisition", async () => {
-  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-recovery-race-"));
-  const lockPath = preparedBuildLockPath(repositoryRoot);
-  const validatedPath = path.join(repositoryRoot, "first-validated");
-  const releaseValidationPath = path.join(repositoryRoot, "release-validation");
-  const firstAcquiredPath = path.join(repositoryRoot, "first-acquired");
-  const releaseFirstPath = path.join(repositoryRoot, "release-first");
-  const secondAcquiredPath = path.join(repositoryRoot, "second-acquired");
+test("mkdir contention lets one builder win and reports the other BUSY", async () => {
+  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-mkdir-contention-"));
+  const moduleUrl = new URL("./vendored-dist-environment.mjs", import.meta.url).href;
   const children = [];
-  const waitForFile = async (filePath, timeoutMs = 5_000) => {
-    const deadline = Date.now() + timeoutMs;
-    while (!fs.existsSync(filePath) && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    assert.equal(fs.existsSync(filePath), true, `timed out waiting for ${filePath}`);
-  };
   try {
-    fs.writeFileSync(lockPath, `${JSON.stringify({
-      schema: 2,
-      token: "stale-token",
-      pid: 999999,
-      identity: captureProcessIdentity(process.pid),
-      heartbeat: new Date().toISOString(),
-      workers: [],
-    })}\n`);
-    const moduleUrl = new URL("./vendored-dist-environment.mjs", import.meta.url).href;
     const childSource = `
-import fs from "node:fs";
 import { acquireVendoredDistBuildLock } from ${JSON.stringify(moduleUrl)};
-const [root, role, validated, releaseValidation, acquired, release] = process.argv.slice(1);
-const options = { waitMs: 5000, pollMs: 10 };
-if (role === "first") options.afterStaleLockValidated = async () => {
-  fs.writeFileSync(validated, "validated");
-  while (!fs.existsSync(releaseValidation)) await new Promise((resolve) => setTimeout(resolve, 10));
-};
-const lock = await acquireVendoredDistBuildLock(root, options);
-fs.writeFileSync(acquired, String(process.pid));
-while (!fs.existsSync(release)) await new Promise((resolve) => setTimeout(resolve, 10));
-lock.release();
+try {
+  const lock = await acquireVendoredDistBuildLock(process.argv[1], { waitMs: 80, pollMs: 10 });
+  process.send({ won: true });
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  lock.release();
+  process.exit(0);
+} catch (error) {
+  process.send({ won: false, message: String(error?.message ?? error) });
+  process.exit(0);
+}
 `;
-    const first = spawn(process.execPath, ["--input-type=module", "-e", childSource,
-      repositoryRoot, "first", validatedPath, releaseValidationPath, firstAcquiredPath, releaseFirstPath]);
-    children.push(first);
-    await waitForFile(validatedPath);
-    const second = spawn(process.execPath, ["--input-type=module", "-e", childSource,
-      repositoryRoot, "second", validatedPath, releaseValidationPath, secondAcquiredPath, releaseFirstPath]);
-    children.push(second);
-    await new Promise((resolve) => setTimeout(resolve, 75));
-    assert.equal(fs.existsSync(secondAcquiredPath), false, "guard loser acquired during stale-record revalidation");
-    fs.writeFileSync(releaseValidationPath, "go");
-    await waitForFile(firstAcquiredPath);
-    assert.equal(fs.existsSync(secondAcquiredPath), false, "guard loser unlinked the successor lock");
-    fs.writeFileSync(releaseFirstPath, "go");
-    await waitForFile(secondAcquiredPath);
+    const startChild = () => spawn(
+      process.execPath,
+      ["--input-type=module", "-e", childSource, repositoryRoot],
+      { stdio: ["ignore", "ignore", "inherit", "ipc"] },
+    );
+    const first = startChild();
+    const second = startChild();
+    children.push(first, second);
+    const results = await Promise.all([first, second].map((child) => new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("mkdir contender did not report")), 3_000);
+      child.once("error", reject);
+      child.once("message", (message) => {
+        clearTimeout(timeout);
+        resolve(message);
+      });
+    })));
+    const winners = results.filter((result) => result.won);
+    const losers = results.filter((result) => !result.won);
+    assert.equal(winners.length, 1);
+    assert.equal(losers.length, 1);
+    assert.match(losers[0].message, /timed out waiting for vendored dist build lock/);
     await Promise.all(children.map((child) => child.exitCode !== null
       ? Promise.resolve()
       : new Promise((resolve) => child.once("exit", resolve))));
@@ -730,28 +750,114 @@ lock.release();
   }
 });
 
+test("release then reacquire publishes a new owner record", async () => {
+  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-reacquire-"));
+  const lockPath = preparedBuildLockPath(repositoryRoot);
+  try {
+    const first = await acquireVendoredDistBuildLock(repositoryRoot);
+    const firstOwner = readPlantedOwner(lockPath);
+    first.release();
+    assert.equal(fs.existsSync(lockPath), false);
+    const second = await acquireVendoredDistBuildLock(repositoryRoot);
+    const secondOwner = readPlantedOwner(lockPath);
+    assert.notEqual(first.token, second.token);
+    assert.notEqual(firstOwner.createdAt, secondOwner.createdAt);
+    assert.equal(secondOwner.pid, process.pid);
+    second.release();
+  } finally {
+    fs.rmSync(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("CLI recovery removes a dead owner and refuses a live owner", async () => {
+  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-cli-owner-"));
+  const lockPath = preparedBuildLockPath(repositoryRoot);
+  const liveIdentity = testIdentity("live-owner");
+  const deadIdentity = testIdentity("dead-owner");
+  try {
+    writePlantedOwner(lockPath, {
+      version: 1,
+      pid: 777001,
+      identity: liveIdentity,
+      phase: "holding",
+      workers: [],
+      createdAt: new Date().toISOString(),
+      heartbeatAt: new Date().toISOString(),
+    });
+    await assert.rejects(
+      recoverVendoredDistBuildLock(repositoryRoot, {
+        captureIdentity: (pid) => pid === process.pid ? testIdentity("operator") : liveIdentity,
+        getLiveness: () => "alive",
+      }),
+      /refusing lock recovery \(same\)/,
+    );
+    assert.equal(fs.existsSync(lockPath), true);
+
+    writePlantedOwner(lockPath, {
+      version: 1,
+      pid: 777002,
+      identity: deadIdentity,
+      phase: "holding",
+      workers: [],
+      createdAt: new Date().toISOString(),
+      heartbeatAt: new Date().toISOString(),
+    });
+    const recovered = await recoverVendoredDistBuildLock(repositoryRoot, {
+      captureIdentity: (pid) => pid === process.pid ? testIdentity("operator") : deadIdentity,
+      getLiveness: (pid) => pid === process.pid ? "alive" : "dead",
+    });
+    assert.equal(recovered.recovered, true);
+    assert.equal(recovered.record.pid, 777002);
+    assert.equal(fs.existsSync(lockPath), false);
+  } finally {
+    fs.rmSync(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("unreadable owner records refuse recovery unless --force finds no occupants", async () => {
+  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-unreadable-"));
+  const lockPath = preparedBuildLockPath(repositoryRoot);
+  try {
+    fs.mkdirSync(lockPath);
+    fs.writeFileSync(vendoredDistBuildLockOwnerPath(lockPath), "{partial");
+    await assert.rejects(
+      recoverVendoredDistBuildLock(repositoryRoot),
+      /owner record is unreadable/,
+    );
+    assert.equal(fs.existsSync(lockPath), true);
+    await assert.rejects(
+      recoverVendoredDistBuildLock(repositoryRoot, {
+        force: true,
+        occupantsFor: () => [31337],
+      }),
+      /refusing forced lock recovery because node\/bun still reference/,
+    );
+    assert.equal(fs.existsSync(lockPath), true);
+    const recovered = await recoverVendoredDistBuildLock(repositoryRoot, {
+      force: true,
+      occupantsFor: () => [],
+    });
+    assert.equal(recovered.recovered, true);
+    assert.equal(recovered.forced, true);
+    assert.equal(fs.existsSync(lockPath), false);
+  } finally {
+    fs.rmSync(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
 test("persistent malformed-lock contention reaches its deadline", async () => {
   const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-deadline-"));
   const lockPath = preparedBuildLockPath(repositoryRoot);
-  const lockExistsError = Object.assign(new Error("injected contention"), { code: "EEXIST" });
   try {
-    fs.writeFileSync(lockPath, "{partial");
+    fs.mkdirSync(lockPath);
+    fs.writeFileSync(vendoredDistBuildLockOwnerPath(lockPath), "{partial");
     const startedAt = Date.now();
     await assert.rejects(
-      acquireVendoredDistBuildLock(repositoryRoot, {
-        waitMs: 30,
-        pollMs: 5,
-        lockFileSystem: {
-          openSync() {
-            throw lockExistsError;
-          },
-        },
-      }),
+      acquireVendoredDistBuildLock(repositoryRoot, { waitMs: 30, pollMs: 5 }),
       /timed out waiting for vendored dist build lock/,
     );
-    assert.ok(Date.now() - startedAt < 500, "lock recovery must not spin past its deadline");
+    assert.ok(Date.now() - startedAt < 500, "lock wait must not spin past its deadline");
   } finally {
-    fs.rmSync(lockPath, { force: true });
     fs.rmSync(repositoryRoot, { recursive: true, force: true });
   }
 });
@@ -761,9 +867,9 @@ test("an old-heartbeat build lock remains active while its exact owner is live",
   const lockPath = preparedBuildLockPath(repositoryRoot);
   try {
     const lock = await acquireVendoredDistBuildLock(repositoryRoot);
-    const ownerRecord = JSON.parse(fs.readFileSync(lockPath, "utf-8"));
-    ownerRecord.heartbeat = new Date(Date.now() - 20 * 60 * 1000).toISOString();
-    fs.writeFileSync(lockPath, `${JSON.stringify(ownerRecord)}\n`);
+    const ownerRecord = readPlantedOwner(lockPath);
+    ownerRecord.heartbeatAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    fs.writeFileSync(vendoredDistBuildLockOwnerPath(lockPath), `${JSON.stringify(ownerRecord)}\n`);
     assert.equal(vendoredDistBuildLockStatus(repositoryRoot).active, true);
     await assert.rejects(
       acquireVendoredDistBuildLock(repositoryRoot, { waitMs: 30, pollMs: 5 }),
@@ -775,10 +881,9 @@ test("an old-heartbeat build lock remains active while its exact owner is live",
         return true;
       },
     );
-    assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf-8")).token, lock.token);
+    assert.equal(readPlantedOwner(lockPath).pid, process.pid);
     lock.release();
   } finally {
-    fs.rmSync(lockPath, { force: true });
     fs.rmSync(repositoryRoot, { recursive: true, force: true });
   }
 });
@@ -788,15 +893,15 @@ test("build lock ownership is revalidated before mutations and promotion", async
   const lockPath = preparedBuildLockPath(repositoryRoot);
   try {
     const lock = await acquireVendoredDistBuildLock(repositoryRoot);
-    const replacement = JSON.parse(fs.readFileSync(lockPath, "utf-8"));
-    replacement.token = "replacement-owner-token";
-    fs.writeFileSync(lockPath, `${JSON.stringify(replacement)}\n`);
+    const replacement = readPlantedOwner(lockPath);
+    replacement.pid = 1;
+    replacement.identity = testIdentity("replacement-owner");
+    fs.writeFileSync(vendoredDistBuildLockOwnerPath(lockPath), `${JSON.stringify(replacement)}\n`);
     assert.throws(() => lock.assertOwned("dependency installation"), /ownership was lost/);
     assert.throws(() => lock.assertOwned("dist promotion"), /ownership was lost/);
     lock.release();
     assert.equal(fs.existsSync(lockPath), true, "the old owner must not remove its successor's lock");
   } finally {
-    fs.rmSync(lockPath, { force: true });
     fs.rmSync(repositoryRoot, { recursive: true, force: true });
   }
 });
@@ -806,17 +911,16 @@ test("two lock contenders serialize without deleting the first owner's record", 
   const lockPath = preparedBuildLockPath(repositoryRoot);
   try {
     const first = await acquireVendoredDistBuildLock(repositoryRoot);
-    const firstContents = fs.readFileSync(lockPath, "utf-8");
+    const firstContents = fs.readFileSync(vendoredDistBuildLockOwnerPath(lockPath), "utf-8");
     const secondPromise = acquireVendoredDistBuildLock(repositoryRoot, { waitMs: 500, pollMs: 5 });
     await new Promise((resolve) => setTimeout(resolve, 25));
-    assert.equal(fs.readFileSync(lockPath, "utf-8"), firstContents);
+    assert.equal(fs.readFileSync(vendoredDistBuildLockOwnerPath(lockPath), "utf-8"), firstContents);
     first.release();
     const second = await secondPromise;
     assert.notEqual(second.token, first.token);
-    assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf-8")).token, second.token);
+    assert.equal(readPlantedOwner(lockPath).pid, process.pid);
     second.release();
   } finally {
-    fs.rmSync(lockPath, { force: true });
     fs.rmSync(repositoryRoot, { recursive: true, force: true });
   }
 });

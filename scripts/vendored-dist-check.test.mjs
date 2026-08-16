@@ -484,7 +484,7 @@ const buildPrefix = "run build -- --outDir ";
 if (!args.startsWith(buildPrefix)) process.exit(2);
 const lock = JSON.parse(fs.readFileSync(path.join(
   process.env.FAKE_BUN_ROOT,
-  "server/vendor/pipeline-engine/node_modules/.vendored-dist-lock/build.lock",
+  "server/vendor/pipeline-engine/node_modules/.vendored-dist-lock/build.lock.d/owner.json",
 ), "utf-8"));
 if (!lock.workers.some((worker) => worker.pid === process.pid && worker.phase === "build")) {
   console.error("build worker was not durably published before mutation");
@@ -536,7 +536,7 @@ fs.appendFileSync(process.env.FAKE_BUN_COMMAND_LOG, JSON.stringify(args) + "\\n"
 if (args === "install --frozen-lockfile") {
   const lock = JSON.parse(fs.readFileSync(path.join(
     process.env.FAKE_BUN_ROOT,
-    "server/vendor/pipeline-engine/node_modules/.vendored-dist-lock/build.lock",
+    "server/vendor/pipeline-engine/node_modules/.vendored-dist-lock/build.lock.d/owner.json",
   ), "utf-8"));
   if (!lock.workers.some((worker) => worker.pid === process.pid && worker.phase === "install")) process.exit(3);
   process.exit(0);
@@ -710,16 +710,17 @@ test("--recover-lock removes only an identity-verified dead owner", () => {
       vendoredRelative,
       "node_modules",
       ".vendored-dist-lock",
-      "build.lock",
+      "build.lock.d",
     );
-    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-    fs.writeFileSync(lockPath, `${JSON.stringify({
-      schema: 2,
-      token: "dead-cli-owner",
+    fs.mkdirSync(lockPath, { recursive: true });
+    fs.writeFileSync(path.join(lockPath, "owner.json"), `${JSON.stringify({
+      version: 1,
       pid: 999999,
       identity: localIdentity,
-      heartbeat: new Date().toISOString(),
+      phase: "holding",
       workers: [],
+      createdAt: new Date().toISOString(),
+      heartbeatAt: new Date().toISOString(),
     })}\n`);
     const result = spawnSync(
       process.execPath,
@@ -729,6 +730,60 @@ test("--recover-lock removes only an identity-verified dead owner", () => {
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.match(result.stdout, /recovered lock owned by pid 999999/);
     assert.match(result.stdout, /vendored-dist-build: PASS/);
+    assert.equal(fs.existsSync(lockPath), false);
+  });
+});
+
+test("--recover-lock refuses a live owner and an unreadable record without --force", () => {
+  withFixture((fixture) => {
+    const localIdentity = captureProcessIdentity(process.pid, {
+      spawnProcess: (command, arguments_, options) => spawnSync(command, arguments_, {
+        ...options,
+        env: fixture.environment,
+      }),
+    });
+    assert.ok(localIdentity);
+    const lockPath = path.join(
+      fixture.root,
+      vendoredRelative,
+      "node_modules",
+      ".vendored-dist-lock",
+      "build.lock.d",
+    );
+    fs.mkdirSync(lockPath, { recursive: true });
+    fs.writeFileSync(path.join(lockPath, "owner.json"), `${JSON.stringify({
+      version: 1,
+      pid: process.pid,
+      identity: localIdentity,
+      phase: "holding",
+      workers: [],
+      createdAt: new Date().toISOString(),
+      heartbeatAt: new Date().toISOString(),
+    })}\n`);
+    const live = spawnSync(
+      process.execPath,
+      [builderPath, "--recover-lock", "--root", fixture.root],
+      { encoding: "utf-8", env: fixture.environment },
+    );
+    assert.equal(live.status, 1, `${live.stdout}\n${live.stderr}`);
+    assert.match(live.stderr, /refusing lock recovery \(same\)/);
+    assert.equal(fs.existsSync(lockPath), true);
+
+    fs.writeFileSync(path.join(lockPath, "owner.json"), "{partial");
+    const unreadable = spawnSync(
+      process.execPath,
+      [builderPath, "--recover-lock", "--root", fixture.root],
+      { encoding: "utf-8", env: fixture.environment },
+    );
+    assert.equal(unreadable.status, 1, `${unreadable.stdout}\n${unreadable.stderr}`);
+    assert.match(unreadable.stderr, /owner record is unreadable/);
+    const forced = spawnSync(
+      process.execPath,
+      [builderPath, "--recover-lock", "--force", "--root", fixture.root],
+      { encoding: "utf-8", env: fixture.environment },
+    );
+    assert.equal(forced.status, 0, `${forced.stdout}\n${forced.stderr}`);
+    assert.match(forced.stdout, /recovered unreadable lock/);
     assert.equal(fs.existsSync(lockPath), false);
   });
 });

@@ -2,18 +2,20 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  PipelineReconciliationWorker,
-  queryEngineRunByAdmissionId,
-} from "../src/api/pipelines.ts";
-import { createProject, getProject } from "../src/projects.ts";
 
 const previousProjectsRoot = process.env.KADY_PROJECTS_ROOT;
-let isolatedProjectsRoot: string;
+const isolatedProjectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-pipelines-disabled-"));
+process.env.KADY_PROJECTS_ROOT = isolatedProjectsRoot;
+
+const {
+  PipelineReconciliationWorker,
+  queryEngineRunByAdmissionId,
+} = await import("../src/api/pipelines.ts");
+const { createProject, getProject } = await import("../src/projects.ts");
+const { PROJECTS_ROOT } = await import("../src/config.ts");
 
 beforeAll(() => {
-  isolatedProjectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-pipelines-disabled-"));
-  process.env.KADY_PROJECTS_ROOT = isolatedProjectsRoot;
+  expect(PROJECTS_ROOT).toBe(path.resolve(isolatedProjectsRoot));
 });
 
 afterAll(() => {

@@ -447,6 +447,8 @@ const forcedSupervisorOwners = new Map();
 let shuttingDown = false;
 let shutdownPromise = null;
 let forceShutdownPromise = null;
+let forcedShutdownLatched = false;
+let forceRetryBarrier = null;
 let explicitShutdownSignalCount = 0;
 let shutdownExitCode = 0;
 let engineOwnershipMonitor = null;
@@ -947,10 +949,11 @@ async function performShutdown() {
   } catch (error) {
     console.error(`  ${sym.err} ${error instanceof Error ? error.message : String(error)}`);
     shutdownExitCode ||= 1;
+    if (await joinForcedShutdownIfActive()) return;
     process.exit(shutdownExitCode);
   }
-  const allExited = Promise.all(children.map(waitForOwnedTree));
-  await allExited;
+  await Promise.all(children.map(waitForOwnedTree));
+  if (await joinForcedShutdownIfActive()) return;
   process.exit(shutdownExitCode);
 }
 
@@ -965,6 +968,39 @@ const forcedSignalExitCodes = {
   SIGINT: 130,
   SIGTERM: 143,
 };
+
+function holdLauncherForForceRetry() {
+  if (forceRetryBarrier) return;
+  forceRetryBarrier = setInterval(() => {}, 60_000);
+}
+
+function releaseForceRetryBarrier() {
+  if (!forceRetryBarrier) return;
+  clearInterval(forceRetryBarrier);
+  forceRetryBarrier = null;
+}
+
+function survivingForcedShutdownTargets() {
+  const survivors = [];
+  for (const child of children) {
+    if (!ownedTreeGone(child)) survivors.push(`${child.kadyRole ?? "child"} pid ${child.pid}`);
+  }
+  for (const owner of forcedSupervisorOwners.values()) {
+    if (!owner.retired) survivors.push(`workflow-supervisor pid ${owner.pid}`);
+  }
+  return survivors;
+}
+
+async function joinForcedShutdownIfActive() {
+  if (!forcedShutdownLatched) return false;
+  const result = forceShutdownPromise === null ? false : await forceShutdownPromise;
+  return result !== true;
+}
+
+function exitAfterForcedShutdown() {
+  releaseForceRetryBarrier();
+  process.exit(shutdownExitCode);
+}
 
 async function performForcedShutdown(signal) {
   shuttingDown = true;
@@ -1012,14 +1048,20 @@ async function performForcedShutdown(signal) {
     console.error(`  ${sym.err} Forced child process-group shutdown did not complete within 5000ms.`);
     forceFailed = true;
   }
-  if (forceFailed) return false;
-  process.exit(shutdownExitCode);
+  if (forceFailed) {
+    const survived = survivingForcedShutdownTargets().join(", ") || "unknown owned processes";
+    console.error(`forced shutdown incomplete: ${survived}; send another signal to retry`);
+    holdLauncherForForceRetry();
+    return false;
+  }
+  exitAfterForcedShutdown();
 }
 
 function forceShutdown(signal) {
   if (!forceShutdownPromise) {
     const attempt = performForcedShutdown(signal).catch((error) => {
       console.error(`  ${sym.err} Forced shutdown attempt failed: ${error instanceof Error ? error.message : String(error)}`);
+      holdLauncherForForceRetry();
       return false;
     });
     const trackedAttempt = attempt.finally(() => {
@@ -1065,6 +1107,7 @@ function requestShutdown(signal) {
     void stopAll(0);
     return;
   }
+  forcedShutdownLatched = true;
   void forceShutdown(signal);
 }
 

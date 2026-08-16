@@ -26,6 +26,7 @@ const defaultRepositoryRoot = path.resolve(scriptDirectory, "..");
 
 function parseArguments(argv) {
   let mode = "force";
+  let recoverForce = false;
   let root = defaultRepositoryRoot;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -33,11 +34,22 @@ function parseArguments(argv) {
       if (mode !== "force") throw new Error("--if-stale, --force, and --recover-lock are mutually exclusive.");
       mode = "if-stale";
     } else if (argument === "--force") {
-      if (mode !== "force") throw new Error("--if-stale, --force, and --recover-lock are mutually exclusive.");
-      mode = "force-explicit";
+      if (mode === "recover-lock") {
+        recoverForce = true;
+      } else if (mode !== "force") {
+        throw new Error("--if-stale, --force, and --recover-lock are mutually exclusive.");
+      } else {
+        mode = "force-explicit";
+      }
     } else if (argument === "--recover-lock") {
-      if (mode !== "force") throw new Error("--if-stale, --force, and --recover-lock are mutually exclusive.");
-      mode = "recover-lock";
+      if (mode === "force-explicit") {
+        mode = "recover-lock";
+        recoverForce = true;
+      } else if (mode !== "force") {
+        throw new Error("--if-stale, --force, and --recover-lock are mutually exclusive.");
+      } else {
+        mode = "recover-lock";
+      }
     } else if (argument === "--root") {
       const value = argv[index + 1];
       if (!value || value.startsWith("--")) throw new Error("--root requires a path.");
@@ -47,7 +59,12 @@ function parseArguments(argv) {
       throw new Error(`Unknown option: ${argument}`);
     }
   }
-  return { ifStale: mode === "if-stale", recoverLock: mode === "recover-lock", root };
+  return {
+    ifStale: mode === "if-stale",
+    recoverLock: mode === "recover-lock",
+    recoverForce,
+    root,
+  };
 }
 
 function fail(message, exitCode = 1) {
@@ -166,9 +183,11 @@ try {
 const buildEnvironment = scrubSensitiveEnvironment(process.env);
 if (options.recoverLock) {
   try {
-    const result = await recoverVendoredDistBuildLock(options.root);
-    if (result.recovered) {
+    const result = await recoverVendoredDistBuildLock(options.root, { force: options.recoverForce });
+    if (result.recovered && result.record) {
       console.log(`vendored-dist-build: recovered lock owned by pid ${result.record.pid}`);
+    } else if (result.recovered) {
+      console.log("vendored-dist-build: recovered unreadable lock");
     } else {
       console.log("vendored-dist-build: no build lock exists");
     }
