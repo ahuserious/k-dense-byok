@@ -9,9 +9,10 @@
  * - every regular file under packages/core and packages/workflows. The web
  *   tsconfig exposes both as source aliases and directly includes a workflows
  *   declaration file, so the fail-closed boundary covers both complete trees;
- * - the vendored workspace package.json, bun.lock, tsconfig*.json, and .env*
- *   files when present. Vite reads the root package version and loads env files
- *   from this workspace root;
+ * - the vendored workspace package.json, bun.lock, bunfig.toml, tsconfig*.json,
+ *   and .env* files when present, plus every workspace package.json and
+ *   tsconfig*.json read while Bun resolves the web workspace filter;
+ * - the exact Bun and Node versions used for dependency resolution/building;
  * - outer-repository Git HEAD and the non-credential build environment values
  *   read by Vite: NODE_ENV and PORT.
  *
@@ -36,6 +37,7 @@ const distRootRelative = path.join(webRootRelative, "dist");
 const distIndexRelative = path.join(distRootRelative, "index.html");
 const manifestFileName = ".vendored-dist-manifest.json";
 const manifestRelative = path.join(distRootRelative, manifestFileName);
+const installStampRelative = path.join(vendoredRootRelative, ".web-built");
 const buildEnvironmentNames = ["NODE_ENV", "PORT"];
 const excludedDirectoryNames = new Set([".git", "coverage", "dist", "node_modules"]);
 
@@ -58,6 +60,24 @@ function repositoryRelative(repositoryRoot, filePath) {
 
 function sha256(content) {
   return createHash("sha256").update(content).digest("hex");
+}
+
+function commandVersion(command, environment) {
+  const result = spawnSync(command, ["--version"], {
+    env: environment,
+    encoding: "utf-8",
+    shell: process.platform === "win32",
+  });
+  const version = result.status === 0 ? result.stdout.trim() : "";
+  if (!version) {
+    throw new ValidationError(
+      "invalid-input",
+      "tool-version",
+      `@runtime/${command}`,
+      `${command} --version failed; the build runtime cannot be fingerprinted`,
+    );
+  }
+  return version;
 }
 
 function comparePathEntries(left, right) {
@@ -180,7 +200,35 @@ function collectMatchingFiles(repositoryRoot, directoryPath, predicate, { requir
   return matches;
 }
 
-export function collectVendoredDistInputEntries(repositoryRoot) {
+function workspaceManifestFiles(repositoryRoot, packagesRoot) {
+  requiredStat(repositoryRoot, packagesRoot, "directory");
+  const files = [];
+  for (const entry of fs.readdirSync(packagesRoot, { withFileTypes: true })) {
+    const packageRoot = path.join(packagesRoot, entry.name);
+    const relative = repositoryRelative(repositoryRoot, packageRoot);
+    if (entry.isSymbolicLink()) {
+      throw new ValidationError("invalid-input", "symlink", relative, `symlink is not allowed: ${relative}`);
+    }
+    if (!entry.isDirectory()) continue;
+    const packageJson = path.join(packageRoot, "package.json");
+    requiredStat(repositoryRoot, packageJson, "file");
+    files.push(packageJson);
+    files.push(
+      ...collectMatchingFiles(
+        repositoryRoot,
+        packageRoot,
+        (name) => name.startsWith("tsconfig") && name.endsWith(".json"),
+        { required: true, label: "tsconfig*.json" },
+      ),
+    );
+  }
+  return files;
+}
+
+export function collectVendoredDistInputEntries(
+  repositoryRoot,
+  environment = process.env,
+) {
   const resolvedRoot = path.resolve(repositoryRoot);
   const vendoredRoot = path.join(resolvedRoot, vendoredRootRelative);
   const packagesRoot = path.join(vendoredRoot, "packages");
@@ -200,6 +248,7 @@ export function collectVendoredDistInputEntries(repositoryRoot) {
     path.join(webRoot, "index.html"),
     path.join(webRoot, "package.json"),
     path.join(vendoredRoot, "bun.lock"),
+    path.join(vendoredRoot, "bunfig.toml"),
     path.join(vendoredRoot, "package.json"),
   ]) {
     requiredStat(resolvedRoot, filePath, "file");
@@ -207,6 +256,7 @@ export function collectVendoredDistInputEntries(repositoryRoot) {
   }
 
   filePaths.push(
+    ...workspaceManifestFiles(resolvedRoot, packagesRoot),
     ...collectMatchingFiles(resolvedRoot, webRoot, (name) => name.startsWith("vite.config."), {
       required: true,
       label: "vite.config.*",
@@ -233,10 +283,18 @@ export function collectVendoredDistInputEntries(repositoryRoot) {
     }),
   );
 
+  const runtime = {
+    bun: commandVersion("bun", environment),
+    node: process.version,
+  };
   return [...new Set(filePaths)]
     .map((filePath) => hashRegularFile(resolvedRoot, filePath))
-    .sort(comparePathEntries)
-    .map(({ path: inputPath, sha256: fileSha256 }) => ({ path: inputPath, sha256: fileSha256 }));
+    .map(({ path: inputPath, sha256: fileSha256 }) => ({ path: inputPath, sha256: fileSha256 }))
+    .concat([
+      { path: "@runtime/bun", sha256: sha256(runtime.bun) },
+      { path: "@runtime/node", sha256: sha256(runtime.node) },
+    ])
+    .sort(comparePathEntries);
 }
 
 export function inputEntriesSha256(entries) {
@@ -263,6 +321,76 @@ export function vendoredDistBuildEnvironment(environment = process.env) {
   );
 }
 
+export function vendoredDistRuntime(environment = process.env) {
+  return {
+    bun: commandVersion("bun", environment),
+    node: process.version,
+  };
+}
+
+export function expectedVendoredInstallStamp(
+  repositoryRoot = defaultRepositoryRoot,
+  environment = process.env,
+) {
+  const resolvedRoot = path.resolve(repositoryRoot);
+  const runtime = vendoredDistRuntime(environment);
+  const files = [
+    path.join(resolvedRoot, vendoredRootRelative, "bun.lock"),
+    path.join(resolvedRoot, vendoredRootRelative, "bunfig.toml"),
+  ].map((filePath) => hashRegularFile(resolvedRoot, filePath));
+  return {
+    schema: 1,
+    sha256: sha256(JSON.stringify({
+      bun: runtime.bun,
+      files: files.map(({ path: filePath, sha256: fileSha256 }) => ({
+        path: filePath,
+        sha256: fileSha256,
+      })),
+    })),
+    bun: runtime.bun,
+    files: files.map(({ path: filePath, sha256: fileSha256 }) => ({
+      path: filePath,
+      sha256: fileSha256,
+    })),
+  };
+}
+
+export function vendoredInstallStatus(
+  repositoryRoot = defaultRepositoryRoot,
+  environment = process.env,
+) {
+  const resolvedRoot = path.resolve(repositoryRoot);
+  const expected = expectedVendoredInstallStamp(resolvedRoot, environment);
+  const stampPath = path.join(resolvedRoot, installStampRelative);
+  const nodeModulesPath = path.join(resolvedRoot, vendoredRootRelative, "node_modules");
+  let actual = null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(stampPath, "utf-8"));
+    if (parsed?.schema === 1 && validSha256(parsed.sha256)) actual = parsed;
+  } catch {
+    // A missing or malformed stamp requires a frozen dependency install.
+  }
+  return {
+    needsInstall:
+      !fs.existsSync(nodeModulesPath) || !actual || actual.sha256 !== expected.sha256,
+    path: apiPath(installStampRelative),
+    stampPath,
+    expected,
+    actual,
+  };
+}
+
+export function writeVendoredInstallStamp(
+  repositoryRoot = defaultRepositoryRoot,
+  environment = process.env,
+) {
+  const status = vendoredInstallStatus(repositoryRoot, environment);
+  fs.writeFileSync(status.stampPath, `${JSON.stringify(status.expected, null, 2)}\n`, {
+    mode: 0o600,
+  });
+  return status.expected;
+}
+
 function collectOutputEntries(repositoryRoot) {
   const resolvedRoot = path.resolve(repositoryRoot);
   const distRoot = path.join(resolvedRoot, distRootRelative);
@@ -286,11 +414,15 @@ export function captureVendoredDistBuildContext(
   environment = process.env,
 ) {
   const resolvedRoot = path.resolve(repositoryRoot);
-  const inputs = collectVendoredDistInputEntries(resolvedRoot);
+  const inputs = collectVendoredDistInputEntries(resolvedRoot, environment);
+  const runtime = vendoredDistRuntime(environment);
+  const installStamp = expectedVendoredInstallStamp(resolvedRoot, environment);
   return {
     schema: 1,
     inputsSha256: inputEntriesSha256(inputs),
     inputs,
+    runtime,
+    installStampSha256: installStamp.sha256,
     gitHead: resolveGitHead(resolvedRoot, environment),
     buildEnv: vendoredDistBuildEnvironment(environment),
   };
@@ -371,6 +503,24 @@ function validateManifestShape(repositoryRoot, manifest) {
   if (manifest.inputsSha256 !== inputEntriesSha256(manifest.inputs)) {
     throw new ValidationError("invalid-manifest", "inputs", apiPath(manifestRelative), "manifest inputsSha256 does not match its input entries");
   }
+  if (
+    !manifest.runtime ||
+    typeof manifest.runtime !== "object" ||
+    typeof manifest.runtime.bun !== "string" ||
+    typeof manifest.runtime.node !== "string"
+  ) {
+    throw new ValidationError("invalid-manifest", "runtime", apiPath(manifestRelative), "manifest runtime versions are invalid");
+  }
+  const manifestInputMap = new Map(manifest.inputs.map((entry) => [entry.path, entry.sha256]));
+  if (
+    manifestInputMap.get("@runtime/bun") !== sha256(manifest.runtime.bun) ||
+    manifestInputMap.get("@runtime/node") !== sha256(manifest.runtime.node)
+  ) {
+    throw new ValidationError("invalid-manifest", "runtime", apiPath(manifestRelative), "manifest runtime versions do not match its input fingerprint");
+  }
+  if (!validSha256(manifest.installStampSha256)) {
+    throw new ValidationError("invalid-manifest", "install-stamp", apiPath(manifestRelative), "manifest install stamp is invalid");
+  }
   if (typeof manifest.gitHead !== "string" || (manifest.gitHead !== "unknown" && !/^[0-9a-f]{40,64}$/i.test(manifest.gitHead))) {
     throw new ValidationError("invalid-manifest", "git-head", apiPath(manifestRelative), "manifest gitHead is invalid");
   }
@@ -437,7 +587,6 @@ function referencedAssetPaths(indexHtml) {
     }
     const withoutQuery = rawReference.split(/[?#]/, 1)[0];
     if (!withoutQuery) continue;
-    if (withoutQuery.startsWith("/") && !withoutQuery.startsWith("/assets/")) continue;
     let decoded;
     try {
       decoded = decodeURIComponent(withoutQuery);
@@ -449,7 +598,7 @@ function referencedAssetPaths(indexHtml) {
   return [...references].sort();
 }
 
-function validateReferencedAssets(repositoryRoot) {
+function validateReferencedAssets(repositoryRoot, recordedOutputs) {
   const distRoot = path.join(repositoryRoot, distRootRelative);
   const indexPath = path.join(repositoryRoot, distIndexRelative);
   const indexRelative = apiPath(distIndexRelative);
@@ -468,6 +617,14 @@ function validateReferencedAssets(repositoryRoot) {
       }
       throw error;
     }
+    if (!recordedOutputs.has(apiPath(reference))) {
+      throw new ValidationError(
+        "invalid-output",
+        "unrecorded-referenced-asset",
+        outputRelative,
+        `index.html references an asset not recorded in the manifest: ${outputRelative}`,
+      );
+    }
   }
 }
 
@@ -482,7 +639,7 @@ export function checkVendoredDist(
 
   let currentInputs;
   try {
-    currentInputs = collectVendoredDistInputEntries(resolvedRoot);
+    currentInputs = collectVendoredDistInputEntries(resolvedRoot, environment);
   } catch (error) {
     if (error instanceof ValidationError) return validationFailure(resolvedRoot, error);
     throw error;
@@ -563,6 +720,30 @@ export function checkVendoredDist(
     );
   }
 
+  const installStatus = vendoredInstallStatus(resolvedRoot, environment);
+  if (!freshnessFailure && manifest.installStampSha256 !== installStatus.expected.sha256) {
+    freshnessFailure = failure(
+      resolvedRoot,
+      "stale-dependencies",
+      "install-input-mismatch",
+      installStatus.path,
+      "manifest dependency stamp does not match bun.lock, bunfig.toml, and the Bun version",
+      manifest.installStampSha256,
+      installStatus.expected.sha256,
+    );
+  }
+  if (!freshnessFailure && installStatus.needsInstall) {
+    freshnessFailure = failure(
+      resolvedRoot,
+      "stale-dependencies",
+      "install-stamp-mismatch",
+      installStatus.path,
+      `vendored dependency install stamp is missing or stale: ${installStatus.path}`,
+      installStatus.expected.sha256,
+      installStatus.actual?.sha256 ?? null,
+    );
+  }
+
   let currentOutputs;
   try {
     currentOutputs = collectOutputEntries(resolvedRoot);
@@ -593,7 +774,7 @@ export function checkVendoredDist(
   }
 
   try {
-    validateReferencedAssets(resolvedRoot);
+    validateReferencedAssets(resolvedRoot, recordedOutputs);
   } catch (error) {
     if (error instanceof ValidationError) return validationFailure(resolvedRoot, error);
     return failure(resolvedRoot, "invalid-output", "unreadable", apiPath(distIndexRelative), `could not validate index.html references: ${error.message}`);

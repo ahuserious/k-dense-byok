@@ -17,11 +17,15 @@ import { fileURLToPath } from "node:url";
 import { applyEnvFile } from "./env-file.mjs";
 import { checkVendoredDist } from "./scripts/vendored-dist-check.mjs";
 import {
-  classifyVendoredDistAfterBuildFailure,
+  classifyWorkflowEngineBuildOutcome,
+  classifyWorkflowEngineListener,
   scrubSensitiveEnvironment,
 } from "./scripts/vendored-dist-environment.mjs";
 
 const repoRoot = path.dirname(fileURLToPath(import.meta.url));
+const checkoutRoot = fs.existsSync(path.join(repoRoot, "server"))
+  ? path.dirname(fs.realpathSync(path.join(repoRoot, "server")))
+  : repoRoot;
 const vendoredDistBuilderScript = fileURLToPath(
   new URL("./scripts/vendored-dist-build.mjs", import.meta.url),
 );
@@ -310,6 +314,9 @@ function listenersOn(port) {
 
 /** Was this PID started from inside this repo (i.e. a leftover Kady process)? */
 function ownedByThisRepo(pid) {
+  const ownedRoots = [repoRoot, checkoutRoot].map((root) =>
+    root.replaceAll("\\", "/").toLowerCase(),
+  );
   if (isWin) {
     // No process cwd on Windows; our services' command lines embed repo paths
     // (…\server\node_modules\…, …\web\node_modules\…), so match on those.
@@ -319,10 +326,13 @@ function ownedByThisRepo(pid) {
       `(Get-CimInstance Win32_Process -Filter 'ProcessId=${Number(pid)}').CommandLine`,
     ]);
     if (!out) return false;
-    return out.replaceAll("\\", "/").toLowerCase().includes(repoRoot.replaceAll("\\", "/").toLowerCase());
+    const normalized = out.replaceAll("\\", "/").toLowerCase();
+    return ownedRoots.some((root) => normalized.includes(root));
   }
   const out = capture("sh", ["-c", `lsof -a -p ${Number(pid)} -d cwd -Fn 2>/dev/null | sed -n 's/^n//p'`]);
-  return !!out && out.split("\n")[0].startsWith(repoRoot);
+  if (!out) return false;
+  const cwd = out.split("\n")[0].replaceAll("\\", "/").toLowerCase();
+  return ownedRoots.some((root) => cwd === root || cwd.startsWith(`${root}/`));
 }
 
 function processName(pid) {
@@ -491,53 +501,13 @@ async function startWorkflowEngine() {
   // In a preview overlay server/ is a symlink to the checkout. Resolve through
   // it so manifest Git identity and inputs come from the source repository,
   // while imports and the blank .env remain rooted in the isolated launcher.
-  const vendoredDistRepositoryRoot = path.dirname(
-    fs.realpathSync(path.join(repoRoot, "server")),
-  );
+  const vendoredDistRepositoryRoot = checkoutRoot;
   const bun = findBun();
   if (!bun) {
     log(`  ${sym.warn} bun not found — skipping the workflow engine (install it from https://bun.sh).`);
     return false;
   }
 
-  // Port preflight. A healthy responder is reused (matches how the /pipelines
-  // proxy would reach it anyway); a stale repo-owned leftover is stopped; a
-  // foreign process means we skip rather than fight over the port.
-  const pids = listenersOn(PIPELINE_ENGINE_PORT);
-  if (pids.length > 0) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${PIPELINE_ENGINE_PORT}/api/health`, {
-        signal: AbortSignal.timeout(2000),
-      });
-      if (res.ok) {
-        log(`  ${sym.arrow} Workflow engine already running on port ${PIPELINE_ENGINE_PORT} — reusing it.`);
-        return false;
-      }
-    } catch {
-      /* not answering health — fall through to ownership check */
-    }
-    for (const pid of pids) {
-      if (ownedByThisRepo(pid)) {
-        log(`  Stopping a leftover workflow engine on port ${PIPELINE_ENGINE_PORT} (PID ${pid})...`);
-        await killTree(pid);
-      } else {
-        log(`  ${sym.warn} Port ${PIPELINE_ENGINE_PORT} is in use by ${processName(pid)} (PID ${pid}) and not answering`);
-        log("    the engine health check — skipping the workflow engine (set KADY_PIPELINE_ENGINE_PORT to move it).");
-        return false;
-      }
-    }
-  }
-
-  // Package installation is keyed on node_modules. The ignored web dist uses
-  // its content manifest, Git identity, safe build environment, and output
-  // hashes as the freshness boundary on every launch.
-  if (!fs.existsSync(path.join(PIPELINE_ENGINE_DIR, "node_modules"))) {
-    log("  Installing workflow engine packages (first run)...");
-    if (run(bun, ["install"], { cwd: PIPELINE_ENGINE_DIR }) !== 0) {
-      log(`  ${sym.warn} Workflow engine install failed — skipping it (everything else keeps running).`);
-      return false;
-    }
-  }
   const bunDirectory = path.dirname(bun);
   const builderEnvironment = scrubSensitiveEnvironment({
     ...process.env,
@@ -547,18 +517,68 @@ async function startWorkflowEngine() {
         : `${bunDirectory}${path.delimiter}${process.env.PATH ?? ""}`,
     PORT: String(PIPELINE_ENGINE_PORT),
   });
-  if (
-    run(
-      process.execPath,
-      [vendoredDistBuilderScript, "--if-stale", "--root", vendoredDistRepositoryRoot],
-      {
-        cwd: vendoredDistRepositoryRoot,
-        env: builderEnvironment,
-      },
-    ) !== 0
-  ) {
+
+  // A listener is reusable only when both its PID and the served bundle belong
+  // to this checkout. Foreign listeners are never adopted as the proxy target.
+  const pids = listenersOn(PIPELINE_ENGINE_PORT);
+  if (pids.length > 0) {
+    const ownershipDecision = classifyWorkflowEngineListener({
+      listenerPids: pids,
+      isOwnedByCheckout: ownedByThisRepo,
+      healthOk: false,
+      distStatus: null,
+    });
+    if (ownershipDecision.action === "skip-foreign") {
+      const pid = ownershipDecision.foreignPid;
+      log(`  ${sym.warn} Port ${PIPELINE_ENGINE_PORT} is held by a process not owned by this checkout: ${processName(pid)} (PID ${pid}).`);
+      log("    Skipping the workflow engine; choose another KADY_PIPELINE_ENGINE_PORT.");
+      return false;
+    }
+
+    const listenerDistStatus = checkVendoredDist(
+      vendoredDistRepositoryRoot,
+      builderEnvironment,
+    );
+    let healthOk = false;
+    if (listenerDistStatus.ok) {
+      try {
+        const response = await fetch(`http://127.0.0.1:${PIPELINE_ENGINE_PORT}/api/health`, {
+          signal: AbortSignal.timeout(2000),
+        });
+        healthOk = response.ok;
+      } catch {
+        // An owned but unhealthy listener is replaced below.
+      }
+    }
+    const listenerDecision = classifyWorkflowEngineListener({
+      listenerPids: pids,
+      isOwnedByCheckout: ownedByThisRepo,
+      healthOk,
+      distStatus: listenerDistStatus,
+    });
+    if (listenerDecision.action === "reuse-owned-fresh") {
+      log(`  ${sym.arrow} Reusing this checkout's fresh workflow engine on port ${PIPELINE_ENGINE_PORT}.`);
+      return false;
+    }
+    for (const pid of listenerDecision.pidsToStop) {
+      log(`  Stopping this checkout's stale or unhealthy workflow engine on port ${PIPELINE_ENGINE_PORT} (PID ${pid})...`);
+      await killTree(pid);
+    }
+  }
+
+  // The wrapper owns the stamp-aware `bun install --frozen-lockfile` and web
+  // build under one lock, including the first-run node_modules path.
+  const buildExitCode = run(
+    process.execPath,
+    [vendoredDistBuilderScript, "--if-stale", "--root", vendoredDistRepositoryRoot],
+    {
+      cwd: vendoredDistRepositoryRoot,
+      env: builderEnvironment,
+    },
+  );
+  if (buildExitCode !== 0) {
     const distStatus = checkVendoredDist(vendoredDistRepositoryRoot, builderEnvironment);
-    if (classifyVendoredDistAfterBuildFailure(distStatus) === "serve-stale") {
+    if (classifyWorkflowEngineBuildOutcome(buildExitCode, distStatus) === "warn-continue") {
       log(`  ${sym.warn} WARNING: THE SERVED WORKFLOW BUILDER BUNDLE IS STALE.`);
       log(`    Offending freshness input: ${distStatus.path} (${distStatus.reason}).`);
       log("    Its rebuild failed; run 'npm run build:vendored-dist' to repair it.");

@@ -22,7 +22,7 @@ jobs:
         working-directory: server/vendor/pipeline-engine
         run: bun install --frozen-lockfile
       - name: Test vendored dist gate
-        run: node --test scripts/vendored-dist-check.test.mjs
+        run: node --test scripts/*.test.mjs
       - name: Build vendored builder dist
         run: npm run build:vendored-dist
       - name: Check vendored builder dist freshness

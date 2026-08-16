@@ -27,6 +27,7 @@ export function createLaunchOverlay(repositoryRoot, stateRoot, realNpm, realGit)
   const launchScriptsDirectory = path.join(launchRoot, "scripts");
   fs.mkdirSync(launchScriptsDirectory, { recursive: true, mode: 0o700 });
   fs.mkdirSync(shimDirectory, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.join(stateRoot, "tmp"), { recursive: true, mode: 0o700 });
   const launcherSource = fs.readFileSync(path.join(repositoryRoot, "start.mjs"), "utf-8");
   fs.writeFileSync(
     path.join(launchRoot, "start.mjs"),
@@ -65,7 +66,13 @@ if (args.includes("push")) {
   console.error("[kady-preview] blocked destructive git command: push");
   process.exit(125);
 }
-const result = spawnSync(${JSON.stringify(realGit)}, args, { stdio: "inherit", env: process.env });
+const gitEnvironment = {
+  ...process.env,
+  GIT_ALLOW_PROTOCOL: "file",
+  GIT_PROTOCOL_FROM_USER: "0",
+  GIT_TERMINAL_PROMPT: "0",
+};
+const result = spawnSync(${JSON.stringify(realGit)}, args, { stdio: "inherit", env: gitEnvironment });
 process.exit(result.status ?? 1);
 `,
   );

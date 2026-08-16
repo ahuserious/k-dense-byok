@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createLaunchOverlay, previewEnvironment } from "./preview-environment.mjs";
-import { scrubSensitiveEnvironment } from "./vendored-dist-environment.mjs";
+import { previewVendoredDistEnvironment } from "./vendored-dist-environment.mjs";
 import {
   collectPreviewListenerGroups,
   stopProcessGroups,
@@ -47,7 +47,7 @@ function commandPath(command) {
   return result.stdout.trim();
 }
 
-function prepareVendoredDist({ skipBuild, enginePort }) {
+function prepareVendoredDist({ skipBuild, environment }) {
   const scriptName = skipBuild ? "vendored-dist-check.mjs" : "vendored-dist-build.mjs";
   const arguments_ = [path.join(scriptDirectory, scriptName)];
   if (!skipBuild) arguments_.push("--if-stale");
@@ -57,18 +57,14 @@ function prepareVendoredDist({ skipBuild, enginePort }) {
   } else {
     console.log("Preparing the vendored Pipeline Engine web bundle.");
   }
-  const buildEnvironment = scrubSensitiveEnvironment({
-    ...process.env,
-    PORT: String(enginePort),
-  });
   const result = spawnSync(process.execPath, arguments_, {
     cwd: repositoryRoot,
-    env: buildEnvironment,
+    env: environment,
     stdio: "inherit",
   });
-  if (result.error) fail(`Could not run ${scriptName}: ${result.error.message}`);
+  if (result.error) throw new Error(`Could not run ${scriptName}: ${result.error.message}`);
   if (result.status !== 0) {
-    fail(
+    throw new Error(
       `Vendored Pipeline Engine web dist preparation failed (exit ${result.status ?? "unknown"}). ` +
         "Run `node scripts/vendored-dist-build.mjs --force` or omit --no-build-dist.",
     );
@@ -167,11 +163,6 @@ if (!process.env.KADY_PIPELINE_ENGINE_PORT && process.env.KADY_ARCHON_PORT) {
 }
 if (new Set(Object.values(ports)).size !== 3) fail("Preview ports must be distinct.");
 
-prepareVendoredDist({
-  skipBuild: process.argv.includes("--no-build-dist"),
-  enginePort: ports.engine,
-});
-
 const initiallyOccupied = await waitForPreviewPortsFree(ports, 15_000);
 if (initiallyOccupied.length > 0) {
   fail(
@@ -207,6 +198,11 @@ const { launchRoot, shimDirectory } = createLaunchOverlay(
   realGit,
 );
 const environment = previewEnvironment(stateRoot, launchRoot, shimDirectory, ports);
+const vendoredDistEnvironment = previewVendoredDistEnvironment(
+  stateRoot,
+  shimDirectory,
+  ports.engine,
+);
 const logPath = path.join(stateRoot, "preview.log");
 const serviceStatePath = environment.KADY_PREVIEW_SERVICE_STATE_FILE;
 fs.writeFileSync(serviceStatePath, `${JSON.stringify({ version: 1, services: {} }, null, 2)}\n`, {
@@ -216,6 +212,10 @@ fs.writeFileSync(serviceStatePath, `${JSON.stringify({ version: 1, services: {} 
 let rootProcess;
 try {
   runPushBlockProbe(realGit, environment);
+  prepareVendoredDist({
+    skipBuild: process.argv.includes("--no-build-dist"),
+    environment: vendoredDistEnvironment,
+  });
   const logDescriptor = fs.openSync(logPath, "a", 0o600);
   rootProcess = spawn(process.execPath, [path.join(launchRoot, "start.mjs"), "--no-browser"], {
     cwd: launchRoot,

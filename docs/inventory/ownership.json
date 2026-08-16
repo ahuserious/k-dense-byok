@@ -12,7 +12,42 @@
       "to": "C1",
       "date": "2026-08-15",
       "path": "scripts/preview-up.mjs",
-      "scope": "prepareVendoredDist block"
+      "scope": "prepareVendoredDist and prebuild-isolation ordering"
+    },
+    {
+      "from": "S11",
+      "to": "C1",
+      "date": "2026-08-15",
+      "path": "scripts/preview-environment.mjs",
+      "scope": "preview isolation and vendored-dist prebuild environment"
+    },
+    {
+      "from": "S11",
+      "to": "C1",
+      "date": "2026-08-15",
+      "path": "scripts/preview-environment.test.mjs",
+      "scope": "preview isolation and vendored-dist prebuild environment tests"
+    },
+    {
+      "from": "R1",
+      "to": "C1",
+      "date": "2026-08-15",
+      "path": "docs/OWNERSHIP.md",
+      "scope": "Round 3 handoff records"
+    },
+    {
+      "from": "R1",
+      "to": "C1",
+      "date": "2026-08-15",
+      "path": "docs/inventory/ownership.json",
+      "scope": "Round 3 handoff records"
+    },
+    {
+      "from": "R1",
+      "to": "C1",
+      "date": "2026-08-15",
+      "path": "scripts/ownership-check.mjs",
+      "scope": "writer/base handoff validation"
     }
   ],
   "lanes": {

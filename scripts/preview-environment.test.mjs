@@ -6,9 +6,67 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { createLaunchOverlay, previewEnvironment } from "./preview-environment.mjs";
+import {
+  previewVendoredDistEnvironment,
+  scrubSensitiveEnvironment,
+} from "./vendored-dist-environment.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(scriptDirectory, "..");
+
+test("credential scrub catches auth, PAT, and key names without stripping path variables", () => {
+  const environment = scrubSensitiveEnvironment({
+    PATH: "/usr/bin",
+    HOME: "/tmp/home",
+    TMPDIR: "/tmp/work",
+    GITHUB_PAT: "secret",
+    SSH_AUTH_SOCK: "/tmp/agent.sock",
+    SERVICE_AUTHORIZATION: "secret",
+    SERVICE_KEY: "secret",
+    SESSION_TOKEN: "secret",
+    CLIENT_SECRET: "secret",
+    DATABASE_PASSWORD: "secret",
+    CLOUD_CREDENTIAL_FILE: "secret",
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "http.extraHeader",
+    GIT_CONFIG_VALUE_0: "Authorization: secret",
+  });
+
+  assert.deepEqual(environment, {
+    PATH: "/usr/bin",
+    HOME: "/tmp/home",
+    TMPDIR: "/tmp/work",
+  });
+});
+
+test("preview vendored dist prebuild uses only the strict allowlist", () => {
+  const environment = previewVendoredDistEnvironment(
+    "/tmp/kady-preview-test",
+    "/tmp/kady-preview-test/home/.local/bin",
+    13091,
+    {
+      PATH: "/usr/bin",
+      NODE_ENV: "test",
+      LANG: "en_US.UTF-8",
+      CI: "true",
+      PI_CODING_AGENT_DIR: "/ambient/pi",
+      SSH_AUTH_SOCK: "/tmp/agent.sock",
+      HTTPS_PROXY: "https://user:password@proxy.invalid",
+      GITHUB_PAT: "secret",
+      NORMAL_SENTINEL: "drop-me",
+    },
+  );
+
+  assert.deepEqual(environment, {
+    HOME: "/tmp/kady-preview-test/home",
+    PATH: `/tmp/kady-preview-test/home/.local/bin${path.delimiter}/usr/bin`,
+    NODE_ENV: "test",
+    PORT: "13091",
+    TMPDIR: "/tmp/kady-preview-test/tmp",
+    LANG: "en_US.UTF-8",
+    CI: "true",
+  });
+});
 
 test("launch overlay resolves every copied start.mjs dependency without starting services", () => {
   const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-overlay-test-"));
