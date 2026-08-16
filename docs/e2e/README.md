@@ -68,7 +68,7 @@ The public-URL overlay replaces that barrier with `e2e/global-setup.cloud.ts`. I
 
 At commit `640b39a`, the orchestrator ran the default-port cold, warm, and `@live` legs plus the alternate-port `@live-alt` leg. Those results established the pre-final runtime state; every leg must be rerun at the final reviewed SHA so the evidence binds to the delivered code.
 
-Orchestrator evidence at <sha>: …
+Orchestrator evidence at 01d9eb9 (2026-08-16, outside the Codex sandbox, this machine, default preview ports 18000/13000/13091 unless stated): cold fresh-preview `npx playwright test` → 249 collected (213 substantive + 36 thin + 4 fixme), 245 passed / 0 failed / 4 skipped in 2.2 m at 4 workers; warm re-run 245 / 0 / 4 in 2.2 m; `--grep @live` → 3 passed (LIVE_VALUES revision=1 nodes=4 edges=3); `@live-alt` against a second preview on 18600/13600/13691 → 3 passed; `npm run test:e2e-config` → 6 passed / 0 failed / 0 skipped (redirect sentinel included). Logs: `dfg-evidence-20260807-135127/s11/lane-gates/c3/01d9eb9-*` (outside this repository).
 
 To prove consecutive cleanup, run the complete up/curl/down sequence three times. A later `preview-up.mjs` must not encounter occupied ports or reuse state from an earlier cycle.
 
