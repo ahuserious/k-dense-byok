@@ -465,6 +465,13 @@
       "date": "2026-08-16",
       "path": "scripts/preview-down.mjs",
       "scope": "owned checkout-local preview web projection cleanup"
+    },
+    {
+      "from": "R1",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": ".gitignore",
+      "scope": "checkout-local preview web projection ignore rule"
     }
   ]
 }
