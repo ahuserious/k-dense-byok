@@ -7,8 +7,6 @@ const ENGINE_SPAWN_ANCHOR = `  registerChild(child, "pipeline-engine");
   const trackEarlyExit = () => {
     childExited = true;
   };`;
-const ENGINE_EXIT_ANCHOR = `  child.on("exit", () => {
-    if (shuttingDown) return;`;
 
 const OBSERVER_HELPER = `
 
@@ -24,6 +22,8 @@ function recordPreviewServiceState(role, pid, state, exitCode = null, signal = n
     // The preview owns this new state file; an absent initial file is safe.
   }
   current.services ??= {};
+  const previous = current.services[role];
+  if (state === "spawned" && previous?.pid === pid && previous.state === "exited") return;
   current.services[role] = {
     role,
     pid,
@@ -70,19 +70,12 @@ export function instrumentPreviewLauncher(source) {
     ENGINE_SPAWN_ANCHOR,
     `  registerChild(child, "pipeline-engine");
   recordPreviewServiceState(child.kadyRole, child.pid, "spawned");
+  child.on("exit", (exitCode, signal) => recordPreviewEngineExit(child, exitCode, signal));
   let childExited = false;
-  const trackEarlyExit = (exitCode, signal) => {
+  const trackEarlyExit = () => {
     childExited = true;
-    recordPreviewEngineExit(child, exitCode, signal);
   };`,
     "workflow-engine spawn hook",
   );
-  return replaceExactlyOnce(
-    instrumented,
-    ENGINE_EXIT_ANCHOR,
-    `  child.on("exit", (exitCode, signal) => {
-    recordPreviewEngineExit(child, exitCode, signal);
-    if (shuttingDown) return;`,
-    "workflow-engine exit hook",
-  );
+  return instrumented;
 }

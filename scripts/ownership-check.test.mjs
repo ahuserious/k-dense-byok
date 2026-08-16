@@ -77,7 +77,7 @@ test("fork branch-name spoofing cannot select a lane without base-mapped actor a
       checkout,
       "--resolve-writer",
       "--actor",
-      "trusted-maintainer",
+      "ahuserious",
       "--head-ref",
       "lane/C1-authorized",
       "--mapping",
@@ -89,7 +89,12 @@ test("fork branch-name spoofing cannot select a lane without base-mapped actor a
     writeFixtureFile(
       checkout,
       "docs/inventory/lane-writers.json",
-      `${JSON.stringify({ "trusted-maintainer": ["C1"] }, null, 2)}\n`,
+      `${JSON.stringify({
+        $comment: "Base-controlled lane writer policy.",
+        writers: {
+          ahuserious: ["C1", "C3", "C5", "C4", "C2b", "R1"],
+        },
+      }, null, 2)}\n`,
     );
     const spoofed = runChecker(
       checkout,
@@ -108,7 +113,7 @@ test("fork branch-name spoofing cannot select a lane without base-mapped actor a
       checkout,
       "--resolve-writer",
       "--actor",
-      "trusted-maintainer",
+      "ahuserious",
       "--head-ref",
       "lane/C1-authorized",
       "--mapping",
@@ -116,6 +121,19 @@ test("fork branch-name spoofing cannot select a lane without base-mapped actor a
     );
     assert.equal(authorized.status, 0, `${authorized.stdout}\n${authorized.stderr}`);
     assert.equal(authorized.stdout.trim(), "C1");
+
+    const mixedCaseLane = runChecker(
+      checkout,
+      "--resolve-writer",
+      "--actor",
+      "ahuserious",
+      "--head-ref",
+      "lane/c2b-authorized",
+      "--mapping",
+      "docs/inventory/lane-writers.json",
+    );
+    assert.equal(mixedCaseLane.status, 0, `${mixedCaseLane.stdout}\n${mixedCaseLane.stderr}`);
+    assert.equal(mixedCaseLane.stdout.trim(), "C2b");
   } finally {
     fs.rmSync(checkout, { recursive: true, force: true });
   }

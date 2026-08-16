@@ -13,6 +13,22 @@ test("instruments every direct preview service spawn and exit", () => {
   const instrumented = instrumentPreviewLauncher(source);
   assert.equal(instrumented.match(/recordPreviewServiceState\(child\.kadyRole, child\.pid, "spawned"\)/g)?.length, 2);
   assert.equal(instrumented.match(/recordPreviewServiceState\(child\.kadyRole, child\.pid, "exited", exitCode, signal\)/g)?.length, 2);
+  assert.match(
+    instrumented,
+    /recordPreviewServiceState\(child\.kadyRole, child\.pid, "spawned"\);\n  child\.on\("exit", \(exitCode, signal\) => recordPreviewEngineExit\(child, exitCode, signal\)\);/,
+  );
+  assert.match(
+    instrumented,
+    /const trackEarlyExit = \(\) => \{\n    childExited = true;\n  \};/,
+  );
+  assert.doesNotMatch(
+    instrumented,
+    /const trackEarlyExit = \([^)]*\) => \{[^}]*recordPreviewEngineExit/s,
+  );
+  assert.match(
+    instrumented,
+    /state === "spawned" && previous\?\.pid === pid && previous\.state === "exited"/,
+  );
   assert.match(instrumented, /KADY_PREVIEW_SERVICE_STATE_FILE/);
 });
 

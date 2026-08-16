@@ -94,25 +94,40 @@ function resolveWriterFromBaseMapping(actor, headRef, mappingRelativePath) {
   if (!mapping || typeof mapping !== "object" || Array.isArray(mapping)) {
     throw new Error("trusted lane-writer mapping must be an object");
   }
+  const mappingKeys = Object.keys(mapping);
+  if (mappingKeys.some((key) => key !== "$comment" && key !== "writers") ||
+      (mapping.$comment !== undefined && typeof mapping.$comment !== "string") ||
+      !mapping.writers || typeof mapping.writers !== "object" || Array.isArray(mapping.writers)) {
+    throw new Error("trusted lane-writer mapping must contain a writers object and optional $comment string");
+  }
   const normalizedMapping = new Map();
-  for (const [login, lanes] of Object.entries(mapping)) {
+  for (const [login, lanes] of Object.entries(mapping.writers)) {
     const normalizedLogin = login.toLowerCase();
     if (!login || normalizedMapping.has(normalizedLogin) || !Array.isArray(lanes) ||
         lanes.length === 0 || lanes.some((lane) => typeof lane !== "string" || !/^[A-Za-z][A-Za-z0-9]*$/.test(lane))) {
       throw new Error(`trusted lane-writer mapping has an invalid entry for ${JSON.stringify(login)}`);
     }
-    normalizedMapping.set(normalizedLogin, new Set(lanes.map((lane) => lane.toUpperCase())));
+    const canonicalLanes = new Map();
+    for (const lane of lanes) {
+      const normalizedLane = lane.toUpperCase();
+      if (canonicalLanes.has(normalizedLane)) {
+        throw new Error(`trusted lane-writer mapping repeats lane ${lane} for ${login}`);
+      }
+      canonicalLanes.set(normalizedLane, lane);
+    }
+    normalizedMapping.set(normalizedLogin, canonicalLanes);
   }
   const branchMatch = /^lane\/([A-Za-z][A-Za-z0-9]*)-/.exec(headRef);
   if (!branchMatch) throw new Error("PR branch must use lane/<id>-<description>");
-  const branchLane = branchMatch[1].toUpperCase();
+  const branchLane = branchMatch[1];
   const actorLanes = normalizedMapping.get(actor.toLowerCase());
-  if (!actorLanes?.has(branchLane)) {
+  const canonicalLane = actorLanes?.get(branchLane.toUpperCase());
+  if (!canonicalLane) {
     throw new Error(
       `PR actor ${actor} is not authorized for ${branchLane} by ${mappingRelativePath}`,
     );
   }
-  return branchLane;
+  return canonicalLane;
 }
 
 function git(arguments_) {
