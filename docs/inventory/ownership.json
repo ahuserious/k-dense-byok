@@ -390,13 +390,6 @@
       "scope": "C5 lane and reviewed handoff policy"
     },
     {
-      "from": "R1",
-      "to": "C5",
-      "date": "2026-08-16",
-      "path": ".gitignore",
-      "scope": "checkout-local preview web projection ignore rule"
-    },
-    {
       "from": "C1",
       "to": "C5",
       "date": "2026-08-16",
@@ -423,20 +416,6 @@
       "date": "2026-08-16",
       "path": "scripts/preview-up.mjs",
       "scope": "server environment-root preview wiring"
-    },
-    {
-      "from": "S11",
-      "to": "C5",
-      "date": "2026-08-16",
-      "path": "scripts/preview-down.mjs",
-      "scope": "owned checkout-local preview web projection cleanup"
-    },
-    {
-      "from": "C1",
-      "to": "C5",
-      "date": "2026-08-16",
-      "path": "scripts/vendored-dist-build.mjs",
-      "scope": "preview automatic-env refusal immediately before the Bun web-build spawn"
     },
     {
       "from": "S4",
