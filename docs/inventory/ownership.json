@@ -250,14 +250,14 @@
       "to": "C1",
       "date": "2026-08-16",
       "path": "scripts/preview-launcher-observer.mjs",
-      "scope": "workflow-engine readiness and fatal-exit observer anchors"
+      "scope": "workflow-engine readiness and fatal-exit observer anchors; workflow-supervisor role recording (pid + identity reported by the backend)"
     },
     {
       "from": "S2",
       "to": "C1",
-      "date": "2026-08-15",
+      "date": "2026-08-16",
       "path": "start.mjs",
-      "scope": "vendored-dist build, engine-port ownership, readiness, and disabled-state sections"
+      "scope": "vendored-dist build, engine-port ownership, readiness, and disabled-state sections; forced-shutdown ownership of the backend's detached workflow supervisor (second explicit signal) and process-group retirement"
     },
     {
       "from": "S2",
@@ -481,7 +481,7 @@
       "to": "C1",
       "date": "2026-08-16",
       "path": "scripts/preview-launcher-observer.test.mjs",
-      "scope": "workflow-engine readiness and fatal-exit observer regression coverage"
+      "scope": "workflow-engine readiness and fatal-exit observer regression coverage; workflow-supervisor role recording"
     },
     {
       "from": "S11",
@@ -524,6 +524,13 @@
       "date": "2026-08-16",
       "path": "scripts/preview-processes.test.mjs",
       "scope": "preview process ownership regression"
+    },
+    {
+      "from": "S5",
+      "to": "C1",
+      "date": "2026-08-16",
+      "path": "server/src/workflows/supervisor/client.ts",
+      "scope": "onOwnership callback invoked immediately when a supervisor process is acquired (spawned or inherited) \u2014 no other change"
     }
   ]
 }
