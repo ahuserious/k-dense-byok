@@ -13,6 +13,7 @@ import {
   recordedPreviewProcessGroup,
   waitForPreviewPortsFree,
 } from "./preview-processes.mjs";
+import { readPreviewServiceStateSnapshot } from "./preview-readiness.mjs";
 
 test("requires generation-bound identity before accepting a recorded process group", () => {
   const record = {
@@ -220,6 +221,179 @@ test("teardown refuses a present semantically invalid service record", async () 
     ),
     /service record backend is present but invalid; refusing teardown/,
   );
+});
+
+// Every non-"valid" service-state status must stop teardown at the first read.
+// The refusal harness below drives the real quiescePreviewGeneration loop over a
+// real on-disk service-state file classified by the real
+// readPreviewServiceStateSnapshot, so the classifier and the quiesce refusal are
+// proven together rather than in isolation.
+//
+// By design the recorded launcher group is stopped BEFORE the first service-state
+// read (quiescePreviewGeneration stops the root group, then enters the read loop),
+// so process group 10 is the only group these tests expect to see stopped. Any
+// additional group id would mean teardown signalled a service after refusing.
+const REFUSAL_GENERATION = "refusal-generation";
+const REFUSAL_LAUNCHER_GROUP_ID = 10;
+
+function previewRefusalHarness(serviceStatePath) {
+  const stoppedGroupIds = [];
+  let serviceStateReadCount = 0;
+  const rootProcessRecord = {
+    pid: REFUSAL_LAUNCHER_GROUP_ID,
+    pgid: REFUSAL_LAUNCHER_GROUP_ID,
+    generation: REFUSAL_GENERATION,
+    identity: { method: "test", value: "launcher" },
+  };
+  const runTeardown = () => quiescePreviewGeneration(
+    "/checkout",
+    {
+      generation: REFUSAL_GENERATION,
+      launchRoot: "/launch",
+      rootProcess: rootProcessRecord,
+      ports: { backend: 18100, frontend: 13100, engine: 13191 },
+    },
+    {
+      readServiceSnapshot: () => {
+        serviceStateReadCount += 1;
+        return readPreviewServiceStateSnapshot(serviceStatePath, REFUSAL_GENERATION);
+      },
+      stopGroups: async (groups) => {
+        for (const { groupId } of groups) stoppedGroupIds.push(groupId);
+        return [];
+      },
+      inspectPort: () => {
+        throw new Error("Teardown inspected a port after refusing an incomplete service record.");
+      },
+      now: () => 0,
+      pause: async () => {
+        throw new Error("Teardown polled again after refusing an incomplete service record.");
+      },
+      processOptions: {
+        isAlive: (pid) => pid === REFUSAL_LAUNCHER_GROUP_ID,
+        resolveIdentity: (pid) =>
+          (pid === REFUSAL_LAUNCHER_GROUP_ID ? rootProcessRecord.identity : null),
+        resolveProcessGroup: (pid) => pid,
+        workingDirectory: () => "/launch",
+      },
+    },
+  );
+  return {
+    runTeardown,
+    stoppedGroupIds,
+    serviceStateReadCount: () => serviceStateReadCount,
+  };
+}
+
+async function assertTeardownRefusesStatus(serviceStatePath, status) {
+  const { runTeardown, stoppedGroupIds, serviceStateReadCount } =
+    previewRefusalHarness(serviceStatePath);
+  await assert.rejects(
+    runTeardown(),
+    new RegExp(
+      `Preview generation ${REFUSAL_GENERATION} service state is ${status}; ` +
+        "refusing teardown without a complete process record\\.",
+    ),
+  );
+  // Only the recorded launcher group, stopped before the first read by design.
+  assert.deepEqual(stoppedGroupIds, [REFUSAL_LAUNCHER_GROUP_ID]);
+  assert.equal(serviceStateReadCount(), 1);
+}
+
+async function withServiceStateDirectory(run) {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-refusal-"));
+  try {
+    return await run(temporaryRoot);
+  } finally {
+    fs.chmodSync(temporaryRoot, 0o700);
+    for (const entry of fs.readdirSync(temporaryRoot)) {
+      try {
+        fs.chmodSync(path.join(temporaryRoot, entry), 0o600);
+      } catch {
+        // A file the case already removed needs no permission restoration.
+      }
+    }
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+}
+
+test("teardown refuses a missing service state without stopping any service group", async () => {
+  await withServiceStateDirectory(async (temporaryRoot) => {
+    // No file is written: readPreviewServiceStateSnapshot classifies ENOENT as missing.
+    await assertTeardownRefusesStatus(path.join(temporaryRoot, "services.json"), "missing");
+  });
+});
+
+test("teardown refuses an unreadable service state without stopping any service group", async (t) => {
+  if (process.getuid?.() === 0) {
+    t.skip("chmod 000 does not deny reads for root; the unreadable branch is unobservable here.");
+    return;
+  }
+  await withServiceStateDirectory(async (temporaryRoot) => {
+    const serviceStatePath = path.join(temporaryRoot, "services.json");
+    fs.writeFileSync(
+      serviceStatePath,
+      `${JSON.stringify({ version: 2, generation: REFUSAL_GENERATION, services: {} })}\n`,
+      { mode: 0o600 },
+    );
+    fs.chmodSync(serviceStatePath, 0o000);
+    let readDenied = false;
+    try {
+      fs.readFileSync(serviceStatePath, "utf-8");
+    } catch {
+      readDenied = true;
+    }
+    if (!readDenied) {
+      t.skip("This filesystem still permits reads at mode 000; the unreadable branch is unobservable here.");
+      return;
+    }
+    await assertTeardownRefusesStatus(serviceStatePath, "unreadable");
+  });
+});
+
+test("teardown refuses a malformed service state without stopping any service group", async () => {
+  await withServiceStateDirectory(async (temporaryRoot) => {
+    const serviceStatePath = path.join(temporaryRoot, "services.json");
+    fs.writeFileSync(serviceStatePath, "{", { mode: 0o600 });
+    await assertTeardownRefusesStatus(serviceStatePath, "malformed");
+  });
+});
+
+test("teardown refuses a generation-mismatched service state without stopping any service group", async () => {
+  await withServiceStateDirectory(async (temporaryRoot) => {
+    const serviceStatePath = path.join(temporaryRoot, "services.json");
+    fs.writeFileSync(
+      serviceStatePath,
+      `${JSON.stringify({
+        version: 2,
+        generation: "a-different-generation",
+        services: {
+          backend: {
+            role: "backend",
+            pid: 20,
+            pgid: 20,
+            generation: "a-different-generation",
+            identity: { method: "test", value: "backend" },
+          },
+        },
+      }, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    await assertTeardownRefusesStatus(serviceStatePath, "generation-mismatch");
+  });
+});
+
+test("teardown refuses a structurally invalid service state without stopping any service group", async () => {
+  await withServiceStateDirectory(async (temporaryRoot) => {
+    const serviceStatePath = path.join(temporaryRoot, "services.json");
+    // Right generation, wrong shape: `services` must be a plain object.
+    fs.writeFileSync(
+      serviceStatePath,
+      `${JSON.stringify({ version: 2, generation: REFUSAL_GENERATION, services: [] }, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    await assertTeardownRefusesStatus(serviceStatePath, "invalid");
+  });
 });
 
 test("reports only listener-occupied preview ports", () => {

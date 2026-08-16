@@ -116,6 +116,19 @@ process referring to the exact recorded preview state-root path. Legacy v2/v3
 lock files are parsed, but an owner lacking comparable host and boot identity
 is refused with `cannot verify owner liveness`.
 
+A crash between `owner.json`'s temporary-file write and its atomic rename can
+leave a `.owner.json.<pid>.<uuid>.tmp` sibling inside the lock directory. The
+normal `release()` unlinks `owner.json` and then `rmdir`s the directory, so that
+leftover makes the `rmdir` fail with `ENOTEMPTY`: the lock directory survives
+without a readable owner, and every later lifecycle command reports BUSY with an
+unreadable owner record. That state is recovered with the explicit
+`node scripts/preview-down.mjs --recover-lock --force` form, which is exactly the
+form a missing or unreadable owner already requires, and which still refuses
+while any recorded preview port has a listener or any process refers to the
+recorded state root. `release()` is deliberately left as a plain `rmdir`: making
+it delete unexpected directory contents would reintroduce a check-then-act
+window on a path that runs while another operator may be recovering.
+
 `preview-down` tolerates missing or malformed state when the owned projection
 marker contains a non-null generation-bound launcher record. The disposable
 launcher waits while `preview-up` atomically records its PID, PGID, birth
@@ -220,3 +233,64 @@ one of this preview's unique state paths, so an unrelated Kady checkout is not
 claimed. Teardown fails unless all three scoped counts are zero. The temporary
 state tree is then removed; pass `--keep-state` to retain its logs after the
 zero-process proof.
+
+## Operator verification
+
+This recipe proves on a live stack that teardown refuses an incomplete service
+record instead of half-tearing the generation down. It uses an isolated port set
+so it never collides with a default preview. Every path below is read out of the
+published state; do not hard-code one.
+
+```bash
+node scripts/preview-up.mjs \
+  --backend-port 18100 --frontend-port 13100 --engine-port 13191
+
+# The exact file readPreviewServiceStateSnapshot reads, plus a byte copy.
+SERVICE_STATE=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("deploy/preview/.state.json","utf-8")).serviceStatePath)')
+GENERATION=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("deploy/preview/.state.json","utf-8")).generation)')
+cp "$SERVICE_STATE" "$SERVICE_STATE.operator-backup"
+```
+
+Corrupt the record to one classified status at a time and rerun teardown. Each
+run must exit nonzero, name the status, and retain every artifact:
+
+```bash
+# invalid: right generation, wrong shape.
+printf '%s' "{\"generation\":\"$GENERATION\",\"services\":[]}" > "$SERVICE_STATE"
+# malformed: truncated JSON.
+printf '{' > "$SERVICE_STATE"
+# generation-mismatch: well-formed, wrong generation.
+printf '%s' '{"generation":"00000000-0000-0000-0000-000000000000","services":{}}' > "$SERVICE_STATE"
+
+node scripts/preview-down.mjs; echo "exit=$?"     # expect exit 1 + the status name
+ls -d web/.preview deploy/preview/.state.json     # both retained
+lsof -nP -iTCP:18100 -iTCP:13100 -iTCP:13191 -sTCP:LISTEN
+```
+
+Read the refusal's blast radius honestly. `preview-down` stops the recorded
+launcher group *before* its first service-state read, so on a stack whose
+launcher is still running the launcher's own teardown will already have drained
+the services by the time the refusal prints; what the refusal proves there is
+that state, projection, and temporary tree are retained and the lock is
+released. To see the refusal signal nothing at all, reproduce the crash case:
+`kill -KILL` the recorded launcher PID first, so the detached service groups are
+orphaned and keep listening. Teardown then finds no live launcher group, refuses
+on the first read, and leaves all three recorded service PIDs alive with their
+listeners bound.
+
+Restore the byte copy and tear down for real:
+
+```bash
+mv "$SERVICE_STATE.operator-backup" "$SERVICE_STATE"
+node scripts/preview-down.mjs; echo "exit=$?"     # expect exit 0
+lsof -nP -iTCP:18100 -iTCP:13100 -iTCP:13191 -sTCP:LISTEN   # expect no output
+ls -d web/.preview deploy/preview/.state.json deploy/preview/.lifecycle.lock.d
+```
+
+The final teardown removes the projection, the lifecycle state, and the
+temporary tree; the last `ls` must report all three as absent. A refused
+teardown still releases the lifecycle lock on exit, so `.lifecycle.lock.d` is
+absent throughout. If it is not, the lock is held by a dead PID or has an
+unreadable owner; recover it with one explicit
+`node scripts/preview-down.mjs --recover-lock` (adding `--force` only for the
+missing/unreadable-owner case described under Recovery) before rerunning.
