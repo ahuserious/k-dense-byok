@@ -139,13 +139,33 @@ The `--force` occupant proof is fail-closed and has two independent parts:
   search. Non-node/bun commands that merely name the path (an editor, a `grep`)
   do not block recovery.
 
+The vendored root is compared as a fully resolved path. A preview overlay
+reaches the checkout through a symlinked `<launchRoot>/server`, and both cwd
+proofs report resolved paths, so the root is `realpath`-resolved as a whole
+rather than joined onto a resolved repository root.
+
 A proof command that cannot run — missing `pgrep`/`lsof`, a timeout, a signal
-death — refuses recovery rather than reporting zero occupants.
+death, or an exit status that is not an answer — refuses recovery rather than
+reporting zero occupants. `pgrep` answers with exit 0 (matched) or 1 (nothing
+matched); the full `lsof` cwd listing must exit 0, because a non-zero lsof
+means it could not complete and its partial output could omit the very
+occupant the proof exists to find; the per-PID `lsof` cwd lookup also accepts
+exit 1, which means that PID is already gone. Anything else throws.
+
+Both `--force` exits — the unreadable owner record and a valid-but-dead record
+whose lock directory is dirty — run this same proof before removing anything.
 
 SCOPE LIMIT: a mutator that changed its working directory away from the
 vendored root and does not name the root in its arguments is invisible to both
-parts of the proof. `--force` therefore remains an operator assertion that the
-build is really dead; it is not a proof of exclusivity.
+parts of the proof. Occupants owned by another user (or by root) are also
+outside the proof: an unprivileged caller cannot read their working directory,
+and `lsof -w` suppresses the warning that would say so. On Linux a PID whose
+`/proc/<pid>/cwd` answers `EACCES`/`EPERM` is not skipped — its working
+directory is unprovable rather than known-outside, so it still goes through the
+command-name check and counts as an occupant when it is a `node`/`bun` process;
+only a PID that has gone away is dropped. `--force` therefore remains an
+operator assertion that the build is really dead; it is not a proof of
+exclusivity.
 
 On Windows the CLI refuses `--recover-lock` (including `--force`): the gate
 helper cannot prove the identity of the eventual Bun mutator. Any existing
@@ -396,7 +416,11 @@ Every other path that would otherwise end the process defers to that
 coordinator while the retry hold is in place: the graceful shutdown, the
 boot-time caller that is still inside the workflow engine's build/readiness
 window, and `fail()`. A launcher that exits during the hold would abandon the
-owned supervisor trees the hold exists to reap.
+owned supervisor trees the hold exists to reap. The hold defers only that
+deliberate handoff: a genuine crash during the hold — any non-sentinel
+`uncaughtException` or `unhandledRejection` — still prints its stack and ends
+the launcher with exit 1, because a launcher whose own state is unsound cannot
+be trusted to retry the force.
 
 Afterward, `preview-down` runs scoped `pgrep -f` checks for
 `kady-workflow-supervisor`, `tsx/dist/preflight.cjs`, and
