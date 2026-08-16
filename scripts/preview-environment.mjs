@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 
 const LEGACY_ENGINE_ENVIRONMENT_NAMES = [
@@ -35,6 +36,51 @@ function browserOrigin(environment, environmentName, fallbackUrl) {
   return parsedUrl.origin;
 }
 
+export function previewEngineHome(stateRoot) {
+  return path.join(stateRoot, "pipeline-engine-home");
+}
+
+export function preparePreviewEngineHome(stateRoot) {
+  const engineHome = previewEngineHome(stateRoot);
+  fs.mkdirSync(engineHome, { recursive: true, mode: 0o700 });
+  const engineHomeStat = fs.lstatSync(engineHome);
+  if (engineHomeStat.isSymbolicLink() || !engineHomeStat.isDirectory()) {
+    throw new Error(`Preview engine ARCHON_HOME must be a real directory: ${engineHome}`);
+  }
+  if (fs.readdirSync(engineHome).length > 0) {
+    throw new Error(`Preview engine ARCHON_HOME must be empty: ${engineHome}`);
+  }
+  return engineHome;
+}
+
+export function assertPreviewEngineCwdIsolated(repositoryRoot) {
+  const engineCwd = path.join(
+    repositoryRoot,
+    "server",
+    "vendor",
+    "pipeline-engine",
+  );
+  const forbiddenFiles = [
+    {
+      label: "vendored-root .env",
+      file: path.join(engineCwd, ".env"),
+    },
+    {
+      label: "<cwd>/.archon/.env",
+      file: path.join(engineCwd, ".archon", ".env"),
+    },
+  ];
+  for (const { label, file } of forbiddenFiles) {
+    try {
+      fs.lstatSync(file);
+      throw new Error(`Preview engine isolation refuses ${label} at ${file}.`);
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+  }
+}
+
 export function previewEnvironment(
   stateRoot,
   launchRoot,
@@ -64,6 +110,7 @@ export function previewEnvironment(
   return {
     ...environment,
     HOME: path.join(stateRoot, "home"),
+    ARCHON_HOME: previewEngineHome(stateRoot),
     PATH: `${shimDirectory}${path.delimiter}${environment.PATH ?? ""}`,
     KADY_PREVIEW: "1",
     KADY_ENV_FILE: path.join(launchRoot, ".env"),

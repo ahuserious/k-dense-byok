@@ -14,7 +14,9 @@
       "server/test/credential-env-isolation.test.ts",
       "scripts/preview-environment.mjs",
       "scripts/preview-environment.test.mjs",
-      "docs/preview-env.md"
+      "scripts/preview-up.mjs",
+      "docs/preview-env.md",
+      "config/token-ban.json"
     ],
     "S1": [
       "web/src/app/page.tsx",
@@ -187,7 +189,6 @@
       "scripts/preview-processes*.mjs",
       "scripts/preview-readiness*.mjs",
       "scripts/preview-state*.mjs",
-      "scripts/preview-up.mjs",
       "deploy/preview/**"
     ]
   }

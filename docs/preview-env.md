@@ -42,10 +42,27 @@ and runs the checkout's exact `start.mjs` and `env-file.mjs` bytes. Dependencies
 must already be installed; the preview npm shim suppresses the launcher's
 update lookup and forces npm offline.
 
+Backend env selection fails closed. With `KADY_PREVIEW=1`, `KADY_ENV_FILE`
+must be present, non-blank, absolute, and resolve to a regular file under the
+canonical `KADY_PREVIEW_LAUNCH_ROOT`; missing, relative, outside-root, and
+outside-pointing symlink values stop startup. Outside preview mode,
+`KADY_ENV_FILE` is rejected so the launcher and backend cannot disagree about
+which file owns persisted credentials.
+
+The workflow engine receives `ARCHON_HOME=<stateRoot>/pipeline-engine-home`, a
+new empty directory created by `preview-up`; an ambient `ARCHON_HOME` is never
+preserved. Before the vendored build or service boot, preview-up also refuses
+to continue if either `server/vendor/pipeline-engine/.env` or
+`server/vendor/pipeline-engine/.archon/.env` exists. Those checks cover the
+vendored server's automatic root, user-scope, and cwd-scope env loaders without
+patching vendored code.
+
 The effective environment includes:
 
 - `KADY_PREVIEW=1`;
 - `KADY_ENV_FILE=<launchRoot>/.env`;
+- `KADY_PREVIEW_LAUNCH_ROOT=<launchRoot>`;
+- `ARCHON_HOME=<stateRoot>/pipeline-engine-home`;
 - the selected `KADY_PORT`, `KADY_FRONTEND_PORT`, and `KADY_PIPELINE_ENGINE_PORT`;
 - temporary `KADY_PROJECTS_ROOT`, `KADY_PI_AGENT_DIR`,
   `PI_CODING_AGENT_DIR`, `KADY_SKILLS_CACHE_DIR`, and workflow-supervisor paths;

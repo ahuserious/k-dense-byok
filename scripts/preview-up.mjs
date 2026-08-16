@@ -4,7 +4,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { previewEnvironment } from "./preview-environment.mjs";
+import {
+  assertPreviewEngineCwdIsolated,
+  preparePreviewEngineHome,
+  previewEnvironment,
+} from "./preview-environment.mjs";
 import { instrumentPreviewLauncher } from "./preview-launcher-observer.mjs";
 import {
   collectPreviewListenerGroups,
@@ -195,6 +199,7 @@ if (fs.existsSync(stateFile)) {
   fail(`Preview state already exists at ${stateFile}; run scripts/preview-down.mjs first.`);
 }
 
+assertPreviewEngineCwdIsolated(repositoryRoot);
 prepareVendoredDist({ skipBuild: process.argv.includes("--no-build-dist") });
 
 const ports = {
@@ -241,6 +246,7 @@ if (requestedStateRoot) {
   fs.mkdirSync(stateRoot, { recursive: false, mode: 0o700 });
 }
 stateRoot = fs.realpathSync(stateRoot);
+preparePreviewEngineHome(stateRoot);
 
 const realNpm = commandPath("npm");
 const realGit = commandPath("git");

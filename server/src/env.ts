@@ -2,14 +2,14 @@
  * Minimal .env loader (no dependency). Imported FIRST in entry points so
  * process.env is populated before config.ts reads it.
  *
- * KADY_ENV_FILE selects an explicit absolute env file. KADY_PREVIEW=1 makes
- * that file exclusive, so preview processes never fall through to checkout
- * env files. Outside preview mode the configured file is loaded first, then
- * the repo-root `.env`, legacy `kady_agent/.env`, and `server/.env` paths. With
- * no KADY_ENV_FILE, normal launch behavior is unchanged. Existing process.env
- * values always win; start.mjs may already have loaded `.env` with override
- * precedence. The parser itself is shared with the launcher: repo-root
- * env-file.mjs.
+ * KADY_ENV_FILE is preview-only and must be an absolute, existing regular file
+ * whose canonical path is under the canonical KADY_PREVIEW_LAUNCH_ROOT.
+ * KADY_PREVIEW=1 fails closed unless both values satisfy that contract, then
+ * loads only KADY_ENV_FILE. Normal launches reject KADY_ENV_FILE and retain
+ * the repo-root `.env`, legacy `kady_agent/.env`, and `server/.env` precedence.
+ * Existing process.env values always win; start.mjs may already have loaded
+ * `.env` with override precedence. The parser itself is shared with the
+ * launcher: repo-root env-file.mjs.
  */
 import path from "node:path";
 import os from "node:os";

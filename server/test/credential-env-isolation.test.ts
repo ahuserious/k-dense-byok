@@ -12,22 +12,6 @@ import {
   vi,
 } from "vitest";
 
-const previewSetup = vi.hoisted(() => {
-  const temporaryRoot = `${process.env.TMPDIR ?? "/tmp"}/` +
-    `kady-credential-env-isolation-${process.pid}-${Date.now()}`;
-  const originalKadyEnvFile = process.env.KADY_ENV_FILE;
-  const originalKadyPreview = process.env.KADY_PREVIEW;
-  const previewEnvPath = `${temporaryRoot}/launch/.env`;
-  process.env.KADY_ENV_FILE = previewEnvPath;
-  process.env.KADY_PREVIEW = "1";
-  return {
-    originalKadyEnvFile,
-    originalKadyPreview,
-    previewEnvPath,
-    temporaryRoot,
-  };
-});
-
 const modelRuntime = vi.hoisted(() => ({
   setRuntimeApiKey: vi.fn(async () => undefined),
   removeRuntimeApiKey: vi.fn(async () => undefined),
@@ -37,47 +21,63 @@ vi.mock("../src/agent/session-registry.ts", () => ({
   getModelRuntime: () => modelRuntime,
 }));
 
-import {
-  registerCredentialRoutes,
-  setCredentialEnvPathForTests,
-} from "../src/api/credentials.ts";
-
-const checkoutEnvPath = path.join(previewSetup.temporaryRoot, "checkout", ".env");
+const temporaryRoot = fs.mkdtempSync(
+  path.join(process.env.TMPDIR ?? "/tmp", "kady-credential-env-isolation-"),
+);
+const launchRoot = path.join(temporaryRoot, "launch");
+const previewEnvPath = path.join(launchRoot, ".env");
+const checkoutEnvPath = path.join(temporaryRoot, "checkout", ".env");
+const originalKadyEnvFile = process.env.KADY_ENV_FILE;
+const originalKadyPreview = process.env.KADY_PREVIEW;
+const originalKadyPreviewLaunchRoot = process.env.KADY_PREVIEW_LAUNCH_ROOT;
 const originalExaApiKey = process.env.EXA_API_KEY;
+let credentialModule: typeof import("../src/api/credentials.ts");
 
-beforeAll(() => {
-  fs.mkdirSync(path.dirname(previewSetup.previewEnvPath), { recursive: true });
+beforeAll(async () => {
+  fs.mkdirSync(launchRoot, { recursive: true });
   fs.mkdirSync(path.dirname(checkoutEnvPath), { recursive: true });
+  fs.writeFileSync(previewEnvPath, "# blank preview env\n", { mode: 0o600 });
+  process.env.KADY_ENV_FILE = previewEnvPath;
+  process.env.KADY_PREVIEW = "1";
+  process.env.KADY_PREVIEW_LAUNCH_ROOT = launchRoot;
+  vi.resetModules();
+  credentialModule = await import("../src/api/credentials.ts");
 });
 
 beforeEach(() => {
-  process.env.KADY_ENV_FILE = previewSetup.previewEnvPath;
+  process.env.KADY_ENV_FILE = previewEnvPath;
   process.env.KADY_PREVIEW = "1";
+  process.env.KADY_PREVIEW_LAUNCH_ROOT = launchRoot;
   delete process.env.EXA_API_KEY;
-  fs.writeFileSync(previewSetup.previewEnvPath, "# blank preview env\n", {
+  fs.writeFileSync(previewEnvPath, "# blank preview env\n", {
     mode: 0o600,
   });
   fs.writeFileSync(checkoutEnvPath, "OPENROUTER_API_KEY=sentinel\n", { mode: 0o600 });
-  setCredentialEnvPathForTests(null);
+  credentialModule.setCredentialEnvPathForTests(null);
 });
 
 afterEach(() => {
-  setCredentialEnvPathForTests(null);
+  credentialModule.setCredentialEnvPathForTests(null);
   if (originalExaApiKey === undefined) delete process.env.EXA_API_KEY;
   else process.env.EXA_API_KEY = originalExaApiKey;
 });
 
 afterAll(() => {
-  if (previewSetup.originalKadyEnvFile === undefined) delete process.env.KADY_ENV_FILE;
-  else process.env.KADY_ENV_FILE = previewSetup.originalKadyEnvFile;
-  if (previewSetup.originalKadyPreview === undefined) delete process.env.KADY_PREVIEW;
-  else process.env.KADY_PREVIEW = previewSetup.originalKadyPreview;
-  fs.rmSync(previewSetup.temporaryRoot, { recursive: true, force: true });
+  if (originalKadyEnvFile === undefined) delete process.env.KADY_ENV_FILE;
+  else process.env.KADY_ENV_FILE = originalKadyEnvFile;
+  if (originalKadyPreview === undefined) delete process.env.KADY_PREVIEW;
+  else process.env.KADY_PREVIEW = originalKadyPreview;
+  if (originalKadyPreviewLaunchRoot === undefined) {
+    delete process.env.KADY_PREVIEW_LAUNCH_ROOT;
+  } else {
+    process.env.KADY_PREVIEW_LAUNCH_ROOT = originalKadyPreviewLaunchRoot;
+  }
+  fs.rmSync(temporaryRoot, { recursive: true, force: true });
 });
 
 async function credentialApp() {
   const app = Fastify({ logger: false });
-  await registerCredentialRoutes(app);
+  await credentialModule.registerCredentialRoutes(app);
   return app;
 }
 
@@ -92,7 +92,7 @@ describe("credential env isolation", () => {
       });
 
       expect(response.statusCode).toBe(200);
-      expect(fs.readFileSync(previewSetup.previewEnvPath, "utf8")).toContain(
+      expect(fs.readFileSync(previewEnvPath, "utf8")).toContain(
         "EXA_API_KEY=preview-exa-key",
       );
       expect(fs.readFileSync(checkoutEnvPath, "utf8")).toBe(
@@ -104,7 +104,7 @@ describe("credential env isolation", () => {
   });
 
   it("refuses a preview write redirected outside KADY_ENV_FILE", async () => {
-    setCredentialEnvPathForTests(checkoutEnvPath);
+    credentialModule.setCredentialEnvPathForTests(checkoutEnvPath);
     const app = await credentialApp();
     try {
       const response = await app.inject({
@@ -129,7 +129,8 @@ describe("credential env isolation", () => {
   it("retains the existing repo-env writer behavior outside preview mode", async () => {
     delete process.env.KADY_PREVIEW;
     delete process.env.KADY_ENV_FILE;
-    setCredentialEnvPathForTests(checkoutEnvPath);
+    delete process.env.KADY_PREVIEW_LAUNCH_ROOT;
+    credentialModule.setCredentialEnvPathForTests(checkoutEnvPath);
     const app = await credentialApp();
     try {
       const response = await app.inject({
