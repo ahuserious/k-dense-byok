@@ -23,6 +23,8 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Test vendored dist gate
         run: node --test scripts/*.test.mjs
+        env:
+          KADY_SOCKET_TESTS: "1"
       - name: Build vendored builder dist
         run: npm run build:vendored-dist
       - name: Check vendored builder dist freshness

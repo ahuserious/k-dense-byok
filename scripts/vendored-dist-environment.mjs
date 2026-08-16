@@ -1,5 +1,13 @@
+import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
+import { spawnSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+
 const sensitiveEnvironmentNamePattern =
-  /(?:^|_)(?:API_KEY|AUTH[^_]*|CREDENTIALS?|KEY|PASSWORD|PAT|SECRET|TOKEN)(?:_|$)/i;
+  /(?:^|_)(?:API_KEY|AUTH[^_]*|CREDENTIALS?|DATABASE_URL|KEY|MYSQL_PWD|PASSWORD|PAT|PGPASSWORD|SECRET|TOKEN)(?:_|$)/i;
+const previewBuildEnvironmentNames = ["HOME", "PATH", "NODE_ENV", "PORT", "TMPDIR", "LANG", "CI"];
+const buildLockHeartbeatTimeoutMs = 10 * 60 * 1000;
 const usableStaleStatuses = new Set([
   "stale-inputs",
   "stale-git-head",
@@ -35,6 +43,130 @@ export function previewVendoredDistEnvironment(
   return environment;
 }
 
+export function strictPreviewVendoredDistEnvironment(environment) {
+  return Object.fromEntries(
+    previewBuildEnvironmentNames
+      .filter((name) => environment[name] !== undefined)
+      .map((name) => [name, String(environment[name])]),
+  );
+}
+
+function processStartIdentity(pid) {
+  if (!Number.isSafeInteger(pid) || pid < 1) return null;
+  if (process.platform === "win32") {
+    const result = spawnSync(
+      "powershell.exe",
+      ["-NoProfile", "-Command", `(Get-CimInstance Win32_Process -Filter \"ProcessId=${pid}\").CreationDate`],
+      { encoding: "utf-8", windowsHide: true },
+    );
+    return result.status === 0 && result.stdout.trim() ? result.stdout.trim() : null;
+  }
+  const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf-8" });
+  if (result.status === 0 && result.stdout.trim()) return result.stdout.trim();
+  if (pid === process.pid) {
+    return `node-start-seconds:${Math.floor((Date.now() - process.uptime() * 1000) / 1000)}`;
+  }
+  return null;
+}
+
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+export function vendoredDistBuildLockPath(repositoryRoot) {
+  const identity = fs.realpathSync(path.resolve(repositoryRoot));
+  const digest = createHash("sha256").update(identity).digest("hex").slice(0, 24);
+  return path.join(os.tmpdir(), `kady-vendored-dist-${digest}.lock`);
+}
+
+function readBuildLock(lockPath) {
+  try {
+    const lock = JSON.parse(fs.readFileSync(lockPath, "utf-8"));
+    return lock && typeof lock.token === "string" ? lock : null;
+  } catch {
+    return null;
+  }
+}
+
+export function vendoredDistBuildLockStatus(repositoryRoot) {
+  const lockPath = vendoredDistBuildLockPath(repositoryRoot);
+  const lock = readBuildLock(lockPath);
+  if (!lock) return { active: false, lockPath, lock: null };
+  const currentStart = processStartIdentity(lock.pid);
+  let heartbeatAgeMs = Number.POSITIVE_INFINITY;
+  try {
+    heartbeatAgeMs = Date.now() - fs.statSync(lockPath).mtimeMs;
+  } catch {
+    return { active: false, lockPath, lock: null };
+  }
+  const startIdentityMatches = currentStart === null
+    ? processAlive(lock.pid) && String(lock.processStart).startsWith("node-start-seconds:")
+    : currentStart === lock.processStart;
+  const active = startIdentityMatches && Number.isFinite(heartbeatAgeMs) && heartbeatAgeMs <= buildLockHeartbeatTimeoutMs;
+  return { active, lockPath, lock };
+}
+
+export async function acquireVendoredDistBuildLock(
+  repositoryRoot,
+  { waitMs = 120_000, pollMs = 200 } = {},
+) {
+  const lockPath = vendoredDistBuildLockPath(repositoryRoot);
+  const token = randomUUID();
+  const processStart = processStartIdentity(process.pid);
+  if (!processStart) throw new Error(`could not determine start time for build-lock PID ${process.pid}`);
+  const deadline = Date.now() + waitMs;
+  while (true) {
+    const lock = {
+      schema: 1,
+      token,
+      pid: process.pid,
+      processStart,
+      createdAt: new Date().toISOString(),
+      heartbeatAt: new Date().toISOString(),
+    };
+    try {
+      const descriptor = fs.openSync(lockPath, "wx", 0o600);
+      fs.writeFileSync(descriptor, `${JSON.stringify(lock)}\n`);
+      fs.closeSync(descriptor);
+      const heartbeat = setInterval(() => {
+        const current = readBuildLock(lockPath);
+        if (current?.token !== token) return;
+        const now = new Date();
+        fs.utimesSync(lockPath, now, now);
+      }, 1000);
+      heartbeat.unref();
+      return {
+        lockPath,
+        token,
+        release() {
+          clearInterval(heartbeat);
+          if (readBuildLock(lockPath)?.token === token) fs.rmSync(lockPath, { force: true });
+        },
+      };
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
+    const status = vendoredDistBuildLockStatus(repositoryRoot);
+    if (!status.active) {
+      const observedToken = status.lock?.token ?? null;
+      if (readBuildLock(lockPath)?.token === observedToken) {
+        console.warn(`vendored-dist-build: WARNING reclaiming inactive build lock: ${lockPath}`);
+        fs.rmSync(lockPath, { force: true });
+      }
+      continue;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`timed out waiting for active vendored dist build lock: ${lockPath}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+}
+
 export function classifyVendoredDistAfterBuildFailure(checkResult) {
   // These statuses are emitted only after the checker has verified every
   // recorded output and index.html asset reference. All other failures mean
@@ -65,4 +197,3 @@ export function classifyWorkflowEngineBuildOutcome(buildExitCode, checkResult) {
     ? "warn-continue"
     : "skip-engine";
 }
-import path from "node:path";

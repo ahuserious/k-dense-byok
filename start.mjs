@@ -8,6 +8,7 @@
  * Flags:
  *   --check       report dependencies/environment and exit (no installs, no services)
  *   --no-browser  don't open the UI in a browser once it's up
+ *   --engine-port <port>  select the optional workflow-engine port
  */
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -20,6 +21,8 @@ import {
   classifyWorkflowEngineBuildOutcome,
   classifyWorkflowEngineListener,
   scrubSensitiveEnvironment,
+  strictPreviewVendoredDistEnvironment,
+  vendoredDistBuildLockStatus,
 } from "./scripts/vendored-dist-environment.mjs";
 
 const repoRoot = path.dirname(fileURLToPath(import.meta.url));
@@ -30,10 +33,29 @@ const vendoredDistBuilderScript = fileURLToPath(
   new URL("./scripts/vendored-dist-build.mjs", import.meta.url),
 );
 const isWin = process.platform === "win32";
+const enginePortArguments = process.argv
+  .map((argument, index) => ({ argument, index }))
+  .filter(({ argument }) => argument === "--engine-port");
+if (enginePortArguments.length > 1) {
+  console.error("--engine-port may be specified only once.");
+  process.exit(2);
+}
+const enginePortValue = enginePortArguments.length === 1
+  ? process.argv[enginePortArguments[0].index + 1]
+  : null;
+if (enginePortArguments.length === 1 && (!enginePortValue || enginePortValue.startsWith("--"))) {
+  console.error("--engine-port requires a port.");
+  process.exit(2);
+}
 const flags = {
   check: process.argv.includes("--check"),
   noBrowser: process.argv.includes("--no-browser"),
+  enginePort: enginePortValue === null ? null : Number(enginePortValue),
 };
+if (flags.enginePort !== null && (!Number.isSafeInteger(flags.enginePort) || flags.enginePort < 1 || flags.enginePort > 65535)) {
+  console.error("--engine-port must be an integer from 1 through 65535.");
+  process.exit(2);
+}
 
 // Legacy conhost garbles unicode; Windows Terminal (WT_SESSION) renders it fine.
 const sym =
@@ -481,8 +503,21 @@ if (!process.env.KADY_PIPELINE_ENGINE_PORT && legacyPipelineEnginePort) {
   log("  [deprecated] KADY_ARCHON_PORT is deprecated; use KADY_PIPELINE_ENGINE_PORT instead.");
 }
 const PIPELINE_ENGINE_PORT = Number(
-  process.env.KADY_PIPELINE_ENGINE_PORT || legacyPipelineEnginePort || 3091,
+  flags.enginePort ?? process.env.KADY_PIPELINE_ENGINE_PORT ?? legacyPipelineEnginePort ?? 3091,
 );
+
+function assertNoForeignWorkflowEngineListener() {
+  const pids = listenersOn(PIPELINE_ENGINE_PORT);
+  const foreignPid = pids.find((pid) => !ownedByThisRepo(pid));
+  if (foreignPid !== undefined) {
+    fail(
+      `  ${sym.err} Port ${PIPELINE_ENGINE_PORT} is held by a process not owned by this checkout: ` +
+        `${processName(foreignPid)} (PID ${foreignPid}). Refusing to start so the backend cannot proxy ` +
+        `pipeline traffic to it; choose a free port with --engine-port <free>.`,
+    );
+  }
+  return pids;
+}
 
 /**
  * Start the vendored workflow engine (Scientific DAG Workflow Designer) as an
@@ -491,12 +526,12 @@ const PIPELINE_ENGINE_PORT = Number(
  * NON-FATAL: without bun (or if the engine fails), the /pipelines API answers
  * 503 and the rest of Kady runs normally.
  *
- * Returns true when a child was spawned (callers may health-poll it).
+ * Returns availability and whether a child was spawned.
  */
 async function startWorkflowEngine() {
   if (!fs.existsSync(path.join(PIPELINE_ENGINE_DIR, "package.json"))) {
     log(`  ${sym.warn} Workflow engine sources missing (server/vendor/pipeline-engine) — skipping it.`);
-    return false;
+    return { available: false, spawned: false };
   }
   // In a preview overlay server/ is a symlink to the checkout. Resolve through
   // it so manifest Git identity and inputs come from the source repository,
@@ -505,36 +540,45 @@ async function startWorkflowEngine() {
   const bun = findBun();
   if (!bun) {
     log(`  ${sym.warn} bun not found — skipping the workflow engine (install it from https://bun.sh).`);
-    return false;
+    return { available: false, spawned: false };
   }
 
   const bunDirectory = path.dirname(bun);
-  const builderEnvironment = scrubSensitiveEnvironment({
+  const candidateBuilderEnvironment = {
     ...process.env,
-    PATH:
-      bunDirectory === "."
-        ? process.env.PATH ?? ""
-        : `${bunDirectory}${path.delimiter}${process.env.PATH ?? ""}`,
+    PATH: process.env.KADY_PREVIEW === "1" || bunDirectory === "."
+      ? process.env.PATH ?? ""
+      : `${bunDirectory}${path.delimiter}${process.env.PATH ?? ""}`,
     PORT: String(PIPELINE_ENGINE_PORT),
-  });
+  };
+  const builderEnvironment = process.env.KADY_PREVIEW === "1"
+    ? strictPreviewVendoredDistEnvironment(candidateBuilderEnvironment)
+    : scrubSensitiveEnvironment(candidateBuilderEnvironment);
+
+  const activeBuildLock = vendoredDistBuildLockStatus(vendoredDistRepositoryRoot);
+  if (activeBuildLock.active) {
+    const message = `another vendored dist build is active at ${activeBuildLock.lockPath}`;
+    if (process.env.KADY_PREVIEW === "1") {
+      fail(`preview prebuild should have produced a fresh manifest: ${message}`);
+    }
+    log(`  ${sym.warn} ${message}; skipping the workflow engine until the build completes.`);
+    return { available: false, spawned: false };
+  }
+
+  if (process.env.KADY_PREVIEW === "1") {
+    const previewDistStatus = checkVendoredDist(vendoredDistRepositoryRoot, builderEnvironment);
+    if (!previewDistStatus.ok) {
+      fail(
+        `preview prebuild should have produced a fresh manifest: ` +
+          `${previewDistStatus.status}: ${previewDistStatus.message}`,
+      );
+    }
+  }
 
   // A listener is reusable only when both its PID and the served bundle belong
   // to this checkout. Foreign listeners are never adopted as the proxy target.
-  const pids = listenersOn(PIPELINE_ENGINE_PORT);
+  const pids = assertNoForeignWorkflowEngineListener();
   if (pids.length > 0) {
-    const ownershipDecision = classifyWorkflowEngineListener({
-      listenerPids: pids,
-      isOwnedByCheckout: ownedByThisRepo,
-      healthOk: false,
-      distStatus: null,
-    });
-    if (ownershipDecision.action === "skip-foreign") {
-      const pid = ownershipDecision.foreignPid;
-      log(`  ${sym.warn} Port ${PIPELINE_ENGINE_PORT} is held by a process not owned by this checkout: ${processName(pid)} (PID ${pid}).`);
-      log("    Skipping the workflow engine; choose another KADY_PIPELINE_ENGINE_PORT.");
-      return false;
-    }
-
     const listenerDistStatus = checkVendoredDist(
       vendoredDistRepositoryRoot,
       builderEnvironment,
@@ -558,7 +602,7 @@ async function startWorkflowEngine() {
     });
     if (listenerDecision.action === "reuse-owned-fresh") {
       log(`  ${sym.arrow} Reusing this checkout's fresh workflow engine on port ${PIPELINE_ENGINE_PORT}.`);
-      return false;
+      return { available: true, spawned: false };
     }
     for (const pid of listenerDecision.pidsToStop) {
       log(`  Stopping this checkout's stale or unhealthy workflow engine on port ${PIPELINE_ENGINE_PORT} (PID ${pid})...`);
@@ -568,15 +612,20 @@ async function startWorkflowEngine() {
 
   // The wrapper owns the stamp-aware `bun install --frozen-lockfile` and web
   // build under one lock, including the first-run node_modules path.
-  const buildExitCode = run(
-    process.execPath,
-    [vendoredDistBuilderScript, "--if-stale", "--root", vendoredDistRepositoryRoot],
-    {
-      cwd: vendoredDistRepositoryRoot,
-      env: builderEnvironment,
-    },
-  );
+  const buildExitCode = process.env.KADY_PREVIEW === "1"
+    ? 0
+    : run(
+        process.execPath,
+        [vendoredDistBuilderScript, "--if-stale", "--root", vendoredDistRepositoryRoot],
+        { cwd: vendoredDistRepositoryRoot, env: builderEnvironment },
+      );
   if (buildExitCode !== 0) {
+    const postBuildLock = vendoredDistBuildLockStatus(vendoredDistRepositoryRoot);
+    if (postBuildLock.active) {
+      log(`  ${sym.warn} Another vendored dist build is still active at ${postBuildLock.lockPath}.`);
+      log("    Skipping the optional workflow engine rather than serving dist during publication.");
+      return { available: false, spawned: false };
+    }
     const distStatus = checkVendoredDist(vendoredDistRepositoryRoot, builderEnvironment);
     if (classifyWorkflowEngineBuildOutcome(buildExitCode, distStatus) === "warn-continue") {
       log(`  ${sym.warn} WARNING: THE SERVED WORKFLOW BUILDER BUNDLE IS STALE.`);
@@ -586,7 +635,7 @@ async function startWorkflowEngine() {
     } else {
       log(`  ${sym.warn} Workflow engine's served builder bundle is missing or invalid because its freshness-aware build failed.`);
       log("    Skipping the optional workflow engine; run 'npm run build:vendored-dist' to repair it.");
-      return false;
+      return { available: false, spawned: false };
     }
   }
 
@@ -631,7 +680,7 @@ async function startWorkflowEngine() {
       log("    unavailable until Kady is restarted. Everything else keeps running.");
     }
   });
-  return true;
+  return { available: true, spawned: true };
 }
 
 async function stopAll(code) {
@@ -761,6 +810,7 @@ setupEnv();
 await checkModelAccess();
 
 if (flags.check) {
+  if (flags.enginePort !== null) assertNoForeignWorkflowEngineListener();
   log("");
   log(`${sym.ok} Dependency check complete (no services started).`);
   process.exit(0);
@@ -784,6 +834,13 @@ log("");
 
 log("Starting services...");
 log("");
+const engineState = await startWorkflowEngine();
+if (!engineState.available) {
+  // An explicit unreachable endpoint makes optional-engine degradation a 503;
+  // it never leaves the backend pointed at a foreign or ambiguous listener.
+  process.env.PIPELINE_ENGINE_BASE_URL = "http://127.0.0.1:0";
+  log(`  ${sym.warn} Workflow engine disabled; pipeline routes will return 503.`);
+}
 startService(
   `Backend on port ${BACKEND_PORT} (Pi agent, TypeScript)`,
   "server",
@@ -796,7 +853,6 @@ startService(
   [],
   { directFrontend: true, serviceArgs: ["dev", "-p", String(FRONTEND_PORT)] },
 );
-const engineSpawned = await startWorkflowEngine();
 
 process.on("SIGINT", () => stopAll(0));
 process.on("SIGTERM", () => stopAll(0));
@@ -809,7 +865,7 @@ log("Waiting for services to come up (the first run can take a minute)...");
 await waitFor(`http://localhost:${BACKEND_PORT}/`, "backend", 120);
 await waitFor(`http://localhost:${FRONTEND_PORT}/`, "app UI", 180);
 // Bounded engine readiness poll; a timeout only warns (the engine is optional).
-if (engineSpawned) {
+if (engineState.spawned) {
   await waitFor(`http://127.0.0.1:${PIPELINE_ENGINE_PORT}/api/health`, "workflow engine", 30);
 }
 

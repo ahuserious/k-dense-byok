@@ -1,6 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import { scrubSensitiveEnvironment } from "./vendored-dist-environment.mjs";
+import {
+  previewVendoredDistEnvironment,
+  scrubSensitiveEnvironment,
+} from "./vendored-dist-environment.mjs";
 import { instrumentPreviewLauncher } from "./preview-launcher-observer.mjs";
 
 const LEGACY_ENGINE_ENVIRONMENT_NAMES = [
@@ -131,10 +134,15 @@ export function previewEnvironment(
     "NEXT_PUBLIC_PIPELINE_ENGINE_URL",
     pipelineEngineUrl,
   );
+  const vendoredDistEnvironment = previewVendoredDistEnvironment(
+    stateRoot,
+    shimDirectory,
+    ports.engine,
+    ambientEnvironment,
+  );
   return {
     ...environment,
-    HOME: path.join(stateRoot, "home"),
-    PATH: `${shimDirectory}${path.delimiter}${environment.PATH ?? ""}`,
+    ...vendoredDistEnvironment,
     KADY_PREVIEW: "1",
     KADY_PORT: String(ports.backend),
     KADY_FRONTEND_PORT: String(ports.frontend),

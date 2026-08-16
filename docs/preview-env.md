@@ -15,9 +15,10 @@ node scripts/preview-down.mjs
 
 Before opening any sockets, `preview-up` runs
 `node scripts/vendored-dist-build.mjs --if-stale`. The build script invokes
-`bun run build:web` from `server/vendor/pipeline-engine/`, which is the
-vendored Bun workspace owning `bun.lock` and filters the build to the web
-package. The build receives the selected engine port as `PORT`; ambient
+`bun run build -- --outDir <staging-dir>` from
+`server/vendor/pipeline-engine/packages/web/`, which runs the web package's existing
+`tsc --noEmit && vite build` script while directing Vite into a staging tree.
+The build receives the selected engine port as `PORT`; ambient
 variables are not inherited. Its strict allowlist contains only the isolated
 `HOME`, PATH-first Node/Bun/Git shims, `NODE_ENV`, `PORT`, isolated `TMPDIR`,
 and optional `LANG`/`CI`. Preview creates that isolation and proves the Git
@@ -34,17 +35,23 @@ After Vite succeeds, the wrapper writes the ignored
   identity is unavailable;
 - the names and values of the non-credential Vite build environment inputs
   `NODE_ENV` and `PORT`;
-- the dependency-install stamp derived from `bun.lock`, `bunfig.toml`, and the
-  Bun version;
+- the dependency-install stamp derived from `bun.lock`, `bunfig.toml`, the
+  workspace root and package manifests, and the Bun version;
 - the relative path, SHA-256, and byte count for every regular output file.
 
-The wrapper runs `bun install --frozen-lockfile` when the ignored `.web-built`
-install stamp beside `node_modules` differs, serializes installers/builders
-with an ignored lock (reclaiming it after ten minutes), and fingerprints inputs
-both before and after Bun runs. It writes no manifest when those fingerprints
-differ. The post-build check recomputes that context, validates every recorded
-output, and verifies every local `src`/`href` URL referenced by
-`dist/index.html`, including root-local files such as `/favicon.png`.
+The wrapper runs `bun install --frozen-lockfile` when either the ignored
+`.web-built` record or the install-owned `node_modules/.bun-install-stamp`
+differs. The stamp covers every workspace package manifest and is written only
+when the install-input digest is unchanged before and after Bun runs. A
+checkout-specific temp lock records an owner token, PID/start identity, and
+heartbeat; contenders wait for the owner and recheck freshness. Builds publish
+by renaming a fully validated staging tree instead of rewriting live `dist/`.
+The wrapper fingerprints inputs both before and after Bun runs and writes no
+manifest when those fingerprints differ. The post-build check recomputes that
+context, validates every recorded output, and verifies every browser-loaded
+local URL referenced by `dist/index.html`: `src`, `href`, `srcset`,
+`imagesrcset`, `poster`, object `data`, and CSS `url()` in style attributes and
+blocks, including root-local files such as `/favicon.png`.
 Missing roots, symlinks, a missing manifest, Git/environment drift, changed
 inputs, partial outputs, and broken asset references all fail closed. This
 produces the bundle required by the workflow-engine server in a fresh clone
@@ -63,9 +70,15 @@ node scripts/vendored-dist-build.mjs --if-stale
 ```
 
 The primary `start.mjs` launcher delegates dependency synchronization and the
-freshness-aware `--if-stale` build to that locked wrapper. It reuses a listener
+freshness-aware `--if-stale` build to that locked wrapper. Preview mode is
+check-only: the isolated prebuild is the sole builder, and the launcher fails
+with `preview prebuild should have produced a fresh manifest` if its identical
+`NODE_ENV`, `PORT`, or `TMPDIR` context does not validate. It reuses a listener
 only when the PID belongs to this checkout, the health endpoint responds, and
-the manifest is fresh. Foreign listeners are never adopted. The workflow
+the manifest is fresh. Engine-port ownership is checked before backend/frontend
+spawn; a foreign listener aborts startup rather than becoming the backend's
+proxy target. When the optional engine is unavailable, the backend receives an
+explicit disabled endpoint and pipeline routes return 503. The workflow
 engine remains optional: missing Bun still skips it, and a build/validation
 failure warns with the repair command above and lets the rest of Kady continue.
 
@@ -95,8 +108,11 @@ The effective environment includes:
   `PI_CODING_AGENT_DIR`, `KADY_SKILLS_CACHE_DIR`, and workflow-supervisor paths;
 - `KADY_SKILLS_REPO=kady-preview-nonexistent/none` and a blank
   `TELEGRAM_BOT_TOKEN`;
-- scrubbed ambient variables whose names contain auth, PAT, key, token, secret,
-  password, or credential markers.
+- the shared strict vendored-build values (`HOME`, `PATH`, `NODE_ENV`, `PORT`,
+  `TMPDIR`, and optional `LANG`/`CI`) used by both prebuild and launcher checks;
+- scrubbed ambient variables for non-build preview services; the scrubber also
+  removes auth/PAT/key/token/secret/password/credential names and common
+  database secrets such as `PGPASSWORD`, `MYSQL_PWD`, and `DATABASE_URL`.
 
 The example values are in `deploy/preview/preview.env.example`; `preview-up`
 replaces the state paths with its unique temporary root. Startup succeeds only

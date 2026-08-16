@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +7,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   checkVendoredDist,
+  referencedAssetPaths,
+  vendoredInstallStatus,
   writeVendoredInstallStamp,
   writeVendoredDistManifest,
 } from "./vendored-dist-check.mjs";
@@ -152,6 +154,19 @@ test("fresh manifest and complete outputs pass", () => {
   });
 });
 
+test("a preview-style launcher check leaves the prebuilt manifest byte-exact and untouched", () => {
+  withFixture((fixture) => {
+    writeManifest(fixture);
+    const manifestPath = path.join(fixture.root, manifestRelative);
+    const beforeBytes = fs.readFileSync(manifestPath);
+    const beforeMtime = fs.statSync(manifestPath).mtimeMs;
+    const result = runCheck(fixture);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.deepEqual(fs.readFileSync(manifestPath), beforeBytes);
+    assert.equal(fs.statSync(manifestPath).mtimeMs, beforeMtime);
+  });
+});
+
 test("changed source fails with a named input hash mismatch", () => {
   withFixture((fixture) => {
     writeManifest(fixture);
@@ -230,6 +245,7 @@ test("changed workspace package manifest fails with a named input mismatch", () 
     const result = checkVendoredDist(fixture.root, fixture.environment);
     assert.equal(result.status, "stale-inputs");
     assert.equal(result.path, packageRelative.split(path.sep).join("/"));
+    assert.equal(vendoredInstallStatus(fixture.root, fixture.environment).needsInstall, true);
   });
 });
 
@@ -352,6 +368,28 @@ test("index.html referencing a missing root-local asset fails", () => {
   });
 });
 
+test("index asset enumeration covers srcset, imagesrcset, poster, object data, and CSS url()", () => {
+  const references = referencedAssetPaths(`
+    <img src="/plain.png" srcset="/small.png 1x, ./large.png 2x" style="background:url('/inline.png')">
+    <link href="/site.css" imagesrcset="/wide.png 640w, /wider.png 1280w">
+    <video poster="/poster.jpg"></video>
+    <object data="./diagram.svg"></object>
+    <style>.hero { background-image: url(./style-block.webp?cache=1); }</style>
+  `);
+  assert.deepEqual(references, [
+    "diagram.svg",
+    "inline.png",
+    "large.png",
+    "plain.png",
+    "poster.jpg",
+    "site.css",
+    "small.png",
+    "style-block.webp",
+    "wide.png",
+    "wider.png",
+  ]);
+});
+
 test("missing manifest fails closed", () => {
   withFixture((fixture) => {
     const result = checkVendoredDist(fixture.root, fixture.environment);
@@ -401,9 +439,10 @@ if (args === "--version") {
   process.stdout.write("1.3.8");
   process.exit(0);
 }
-if (args !== "run build:web") process.exit(2);
+const buildPrefix = "run build -- --outDir ";
+if (!args.startsWith(buildPrefix)) process.exit(2);
 fs.writeFileSync(process.env.FAKE_BUN_ENV_DUMP, JSON.stringify(process.env));
-const dist = path.join(process.env.FAKE_BUN_ROOT, ${JSON.stringify(distRelative)});
+const dist = args.slice(buildPrefix.length);
 fs.rmSync(dist, { recursive: true, force: true });
 fs.mkdirSync(path.join(dist, "assets"), { recursive: true });
 fs.writeFileSync(path.join(dist, "index.html"), "<script src='/assets/app.js'></script>\\n");
@@ -446,8 +485,9 @@ if (args === "--version") {
 }
 fs.appendFileSync(process.env.FAKE_BUN_COMMAND_LOG, JSON.stringify(args) + "\\n");
 if (args === "install --frozen-lockfile") process.exit(0);
-if (args !== "run build:web") process.exit(2);
-const dist = path.join(process.env.FAKE_BUN_ROOT, ${JSON.stringify(distRelative)});
+const buildPrefix = "run build -- --outDir ";
+if (!args.startsWith(buildPrefix)) process.exit(2);
+const dist = args.slice(buildPrefix.length);
 fs.rmSync(dist, { recursive: true, force: true });
 fs.mkdirSync(path.join(dist, "assets"), { recursive: true });
 fs.writeFileSync(path.join(dist, "index.html"), "<script src='/assets/app.js'></script>\\n");
@@ -470,9 +510,46 @@ fs.writeFileSync(path.join(dist, "assets", "app.js"), "console.log('built');\\n"
     );
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     const commands = fs.readFileSync(commandLog, "utf-8").trim().split("\n").map(JSON.parse);
-    assert.deepEqual(commands, ["install --frozen-lockfile", "run build:web"]);
+    assert.equal(commands[0], "install --frozen-lockfile");
+    assert.match(commands[1], /^run build -- --outDir /);
     assert.match(result.stdout, /dependency stamp written/);
     assert.equal(checkVendoredDist(fixture.root, fixture.environment).status, "fresh");
+  });
+});
+
+test("builder cannot skip when node_modules was deleted but the outer stamp remains", () => {
+  withFixture((fixture) => {
+    const commandLog = path.join(fixture.root, "missing-node-modules-commands.jsonl");
+    installCommand(
+      fixture.fakeBin,
+      "bun",
+      `import fs from "node:fs";
+import path from "node:path";
+const args = process.argv.slice(2).join(" ");
+if (args === "--version") { process.stdout.write("1.3.8"); process.exit(0); }
+fs.appendFileSync(${JSON.stringify(commandLog)}, JSON.stringify(args) + "\\n");
+if (args === "install --frozen-lockfile") process.exit(0);
+const buildPrefix = "run build -- --outDir ";
+if (!args.startsWith(buildPrefix)) process.exit(2);
+const dist = args.slice(buildPrefix.length);
+fs.mkdirSync(path.join(dist, "assets"), { recursive: true });
+fs.writeFileSync(path.join(dist, "index.html"), "<script src='/assets/app.js'></script>\\n");
+fs.writeFileSync(path.join(dist, "assets", "app.js"), "console.log('built');\\n");
+`,
+    );
+    writeManifest(fixture);
+    fs.rmSync(path.join(fixture.root, vendoredRelative, "node_modules"), { recursive: true, force: true });
+    const result = spawnSync(process.execPath, [builderPath, "--if-stale", "--root", fixture.root], {
+      encoding: "utf-8",
+      env: fixture.environment,
+    });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const commands = fs.readFileSync(commandLog, "utf-8").trim().split("\n").map(JSON.parse);
+    assert.equal(commands[0], "install --frozen-lockfile");
+    assert.equal(
+      fs.existsSync(path.join(fixture.root, vendoredRelative, "node_modules", ".bun-install-stamp")),
+      true,
+    );
   });
 });
 
@@ -488,9 +565,10 @@ if (args === "--version") {
   process.stdout.write("1.3.8");
   process.exit(0);
 }
-if (args !== "run build:web") process.exit(2);
+const buildPrefix = "run build -- --outDir ";
+if (!args.startsWith(buildPrefix)) process.exit(2);
 fs.appendFileSync(path.join(process.env.FAKE_BUN_ROOT, ${JSON.stringify(sourceRelative)}), "export const raced = true;\\n");
-const dist = path.join(process.env.FAKE_BUN_ROOT, ${JSON.stringify(distRelative)});
+const dist = args.slice(buildPrefix.length);
 fs.rmSync(dist, { recursive: true, force: true });
 fs.mkdirSync(path.join(dist, "assets"), { recursive: true });
 fs.writeFileSync(path.join(dist, "index.html"), "<script src='/assets/app.js'></script>\\n");
@@ -513,28 +591,10 @@ fs.writeFileSync(path.join(dist, "assets", "app.js"), "console.log('built');\\n"
   });
 });
 
-test("builder rejects an active build lock", () => {
-  withFixture((fixture) => {
-    const lockPath = path.join(
-      fixture.root,
-      vendoredRelative,
-      "node_modules",
-      ".vendored-dist-build.lock",
-    );
-    fs.writeFileSync(lockPath, "held\n");
-
-    const result = spawnSync(
-      process.execPath,
-      [builderPath, "--force", "--root", fixture.root],
-      { encoding: "utf-8", env: fixture.environment },
-    );
-    assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
-    assert.match(result.stderr, /another vendored dist build holds/);
-  });
-});
-
-test("builder reclaims a build lock older than ten minutes", () => {
-  withFixture((fixture) => {
+test("concurrent builders serialize; the contender waits and then observes fresh dist", async () => {
+  const fixture = createFixture();
+  try {
+    const commandLog = path.join(fixture.root, "concurrent-builds.log");
     installCommand(
       fixture.fakeBin,
       "bun",
@@ -545,36 +605,39 @@ if (args === "--version") {
   process.stdout.write("1.3.8");
   process.exit(0);
 }
-if (args !== "run build:web") process.exit(2);
-const dist = path.join(process.env.FAKE_BUN_ROOT, ${JSON.stringify(distRelative)});
+const buildPrefix = "run build -- --outDir ";
+if (!args.startsWith(buildPrefix)) process.exit(2);
+fs.appendFileSync(${JSON.stringify(commandLog)}, "build\\n");
+await new Promise((resolve) => setTimeout(resolve, 600));
+const dist = args.slice(buildPrefix.length);
 fs.rmSync(dist, { recursive: true, force: true });
 fs.mkdirSync(path.join(dist, "assets"), { recursive: true });
 fs.writeFileSync(path.join(dist, "index.html"), "<script src='/assets/app.js'></script>\\n");
 fs.writeFileSync(path.join(dist, "assets", "app.js"), "console.log('built');\\n");
 `,
     );
-    const lockPath = path.join(
-      fixture.root,
-      vendoredRelative,
-      "node_modules",
-      ".vendored-dist-build.lock",
-    );
-    fs.writeFileSync(lockPath, "stale\n");
-    const staleTime = new Date(Date.now() - 11 * 60 * 1000);
-    fs.utimesSync(lockPath, staleTime, staleTime);
-
-    const result = spawnSync(
-      process.execPath,
-      [builderPath, "--force", "--root", fixture.root],
-      {
-        encoding: "utf-8",
-        env: { ...fixture.environment, FAKE_BUN_ROOT: fixture.root },
-      },
-    );
-    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-    assert.match(result.stderr, /WARNING reclaiming stale build lock older than 10 minutes/);
-    assert.equal(fs.existsSync(lockPath), false);
-  });
+    writeManifest(fixture);
+    fs.appendFileSync(path.join(fixture.root, sourceRelative), "export const concurrent = true;\n");
+    const runBuilder = () => new Promise((resolve) => {
+      const child = spawn(process.execPath, [builderPath, "--if-stale", "--root", fixture.root], {
+        env: fixture.environment,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+      child.on("exit", (code) => resolve({ code, stdout, stderr }));
+    });
+    const [first, second] = await Promise.all([runBuilder(), runBuilder()]);
+    assert.equal(first.code, 0, `${first.stdout}\n${first.stderr}`);
+    assert.equal(second.code, 0, `${second.stdout}\n${second.stderr}`);
+    assert.equal(fs.readFileSync(commandLog, "utf-8"), "build\n");
+    assert.match(`${first.stdout}${second.stdout}`, /SKIP \(dist manifest and outputs are already valid\)/);
+    assert.equal(checkVendoredDist(fixture.root, fixture.environment).status, "fresh");
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
 });
 
 test("--json emits the stable failure shape", () => {

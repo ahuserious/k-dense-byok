@@ -9,6 +9,7 @@ import { createLaunchOverlay, previewEnvironment } from "./preview-environment.m
 import {
   previewVendoredDistEnvironment,
   scrubSensitiveEnvironment,
+  strictPreviewVendoredDistEnvironment,
 } from "./vendored-dist-environment.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -27,6 +28,9 @@ test("credential scrub catches auth, PAT, and key names without stripping path v
     CLIENT_SECRET: "secret",
     DATABASE_PASSWORD: "secret",
     CLOUD_CREDENTIAL_FILE: "secret",
+    PGPASSWORD: "secret",
+    MYSQL_PWD: "secret",
+    DATABASE_URL: "postgres://secret",
     GIT_CONFIG_COUNT: "1",
     GIT_CONFIG_KEY_0: "http.extraHeader",
     GIT_CONFIG_VALUE_0: "Authorization: secret",
@@ -66,6 +70,49 @@ test("preview vendored dist prebuild uses only the strict allowlist", () => {
     LANG: "en_US.UTF-8",
     CI: "true",
   });
+});
+
+test("prebuild and launcher derive one strict environment and fake Bun receives nothing else", () => {
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-build-env-"));
+  try {
+    const fakeBin = path.join(stateRoot, "bin");
+    const dumpPath = path.join(stateRoot, "environment.json");
+    fs.mkdirSync(fakeBin, { recursive: true });
+    const fakeBun = path.join(fakeBin, "bun");
+    fs.writeFileSync(
+      fakeBun,
+      `#!${process.execPath}\nimport fs from "node:fs"; fs.writeFileSync(${JSON.stringify(dumpPath)}, JSON.stringify(process.env));\n`,
+      { mode: 0o700 },
+    );
+    const preview = previewEnvironment(
+      stateRoot,
+      path.join(stateRoot, "launch"),
+      fakeBin,
+      { backend: 18100, frontend: 13100, engine: 13191 },
+      {
+        PATH: process.env.PATH,
+        PGPASSWORD: "drop",
+        MYSQL_PWD: "drop",
+        DATABASE_URL: "drop",
+        NORMAL_SENTINEL: "drop",
+      },
+    );
+    const prebuildEnvironment = strictPreviewVendoredDistEnvironment(preview);
+    const launcherEnvironment = strictPreviewVendoredDistEnvironment(preview);
+    assert.deepEqual(launcherEnvironment, prebuildEnvironment);
+    assert.equal(prebuildEnvironment.NODE_ENV, "production");
+    assert.equal(prebuildEnvironment.PORT, "13191");
+    assert.equal(prebuildEnvironment.TMPDIR, path.join(stateRoot, "tmp"));
+    const result = spawnSync(fakeBun, ["--version"], { env: prebuildEnvironment });
+    assert.equal(result.status, 0);
+    const dumped = JSON.parse(fs.readFileSync(dumpPath, "utf-8"));
+    for (const [name, value] of Object.entries(prebuildEnvironment)) assert.equal(dumped[name], value);
+    for (const name of ["PGPASSWORD", "MYSQL_PWD", "DATABASE_URL", "NORMAL_SENTINEL", "GITHUB_PAT", "SSH_AUTH_SOCK"]) {
+      assert.equal(name in dumped, false, name);
+    }
+  } finally {
+    fs.rmSync(stateRoot, { recursive: true, force: true });
+  }
 });
 
 test("launch overlay resolves every copied start.mjs dependency without starting services", () => {

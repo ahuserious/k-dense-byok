@@ -38,6 +38,7 @@ const distIndexRelative = path.join(distRootRelative, "index.html");
 const manifestFileName = ".vendored-dist-manifest.json";
 const manifestRelative = path.join(distRootRelative, manifestFileName);
 const installStampRelative = path.join(vendoredRootRelative, ".web-built");
+const installSentinelRelative = path.join(vendoredRootRelative, "node_modules", ".bun-install-stamp");
 const buildEnvironmentNames = ["NODE_ENV", "PORT"];
 const excludedDirectoryNames = new Set([".git", "coverage", "dist", "node_modules"]);
 
@@ -225,6 +226,27 @@ function workspaceManifestFiles(repositoryRoot, packagesRoot) {
   return files;
 }
 
+function installManifestFiles(repositoryRoot) {
+  const vendoredRoot = path.join(repositoryRoot, vendoredRootRelative);
+  const packagesRoot = path.join(vendoredRoot, "packages");
+  requiredStat(repositoryRoot, packagesRoot, "directory");
+  const files = [
+    path.join(vendoredRoot, "bun.lock"),
+    path.join(vendoredRoot, "bunfig.toml"),
+    path.join(vendoredRoot, "package.json"),
+  ];
+  for (const entry of fs.readdirSync(packagesRoot, { withFileTypes: true })) {
+    const packageRoot = path.join(packagesRoot, entry.name);
+    const relative = repositoryRelative(repositoryRoot, packageRoot);
+    if (entry.isSymbolicLink()) {
+      throw new ValidationError("invalid-input", "symlink", relative, `symlink is not allowed: ${relative}`);
+    }
+    if (!entry.isDirectory()) continue;
+    files.push(path.join(packageRoot, "package.json"));
+  }
+  return files.map((filePath) => hashRegularFile(repositoryRoot, filePath));
+}
+
 export function collectVendoredDistInputEntries(
   repositoryRoot,
   environment = process.env,
@@ -334,10 +356,7 @@ export function expectedVendoredInstallStamp(
 ) {
   const resolvedRoot = path.resolve(repositoryRoot);
   const runtime = vendoredDistRuntime(environment);
-  const files = [
-    path.join(resolvedRoot, vendoredRootRelative, "bun.lock"),
-    path.join(resolvedRoot, vendoredRootRelative, "bunfig.toml"),
-  ].map((filePath) => hashRegularFile(resolvedRoot, filePath));
+  const files = installManifestFiles(resolvedRoot).sort(comparePathEntries);
   return {
     schema: 1,
     sha256: sha256(JSON.stringify({
@@ -362,21 +381,35 @@ export function vendoredInstallStatus(
   const resolvedRoot = path.resolve(repositoryRoot);
   const expected = expectedVendoredInstallStamp(resolvedRoot, environment);
   const stampPath = path.join(resolvedRoot, installStampRelative);
+  const sentinelPath = path.join(resolvedRoot, installSentinelRelative);
   const nodeModulesPath = path.join(resolvedRoot, vendoredRootRelative, "node_modules");
   let actual = null;
+  let sentinel = null;
   try {
     const parsed = JSON.parse(fs.readFileSync(stampPath, "utf-8"));
     if (parsed?.schema === 1 && validSha256(parsed.sha256)) actual = parsed;
   } catch {
     // A missing or malformed stamp requires a frozen dependency install.
   }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(sentinelPath, "utf-8"));
+    if (parsed?.schema === 1 && validSha256(parsed.sha256)) sentinel = parsed;
+  } catch {
+    // node_modules without an install-owned sentinel is not a certified install.
+  }
   return {
     needsInstall:
-      !fs.existsSync(nodeModulesPath) || !actual || actual.sha256 !== expected.sha256,
+      !fs.existsSync(nodeModulesPath) ||
+      !actual ||
+      !sentinel ||
+      actual.sha256 !== expected.sha256 ||
+      sentinel.sha256 !== expected.sha256,
     path: apiPath(installStampRelative),
     stampPath,
+    sentinelPath,
     expected,
     actual,
+    sentinel,
   };
 }
 
@@ -385,15 +418,19 @@ export function writeVendoredInstallStamp(
   environment = process.env,
 ) {
   const status = vendoredInstallStatus(repositoryRoot, environment);
+  fs.mkdirSync(path.dirname(status.sentinelPath), { recursive: true });
   fs.writeFileSync(status.stampPath, `${JSON.stringify(status.expected, null, 2)}\n`, {
+    mode: 0o600,
+  });
+  fs.writeFileSync(status.sentinelPath, `${JSON.stringify(status.expected, null, 2)}\n`, {
     mode: 0o600,
   });
   return status.expected;
 }
 
-function collectOutputEntries(repositoryRoot) {
+function collectOutputEntries(repositoryRoot, outputRoot = null) {
   const resolvedRoot = path.resolve(repositoryRoot);
-  const distRoot = path.join(resolvedRoot, distRootRelative);
+  const distRoot = outputRoot ? path.resolve(outputRoot) : path.join(resolvedRoot, distRootRelative);
   const filePaths = [];
   collectTree(resolvedRoot, distRoot, filePaths, "invalid-output");
   return filePaths
@@ -432,11 +469,12 @@ export function createVendoredDistManifest(
   repositoryRoot = defaultRepositoryRoot,
   environment = process.env,
   buildContext = captureVendoredDistBuildContext(repositoryRoot, environment),
+  outputRoot = null,
 ) {
   const resolvedRoot = path.resolve(repositoryRoot);
   return {
     ...buildContext,
-    outputs: collectOutputEntries(resolvedRoot),
+    outputs: collectOutputEntries(resolvedRoot, outputRoot),
   };
 }
 
@@ -444,10 +482,12 @@ export function writeVendoredDistManifest(
   repositoryRoot = defaultRepositoryRoot,
   environment = process.env,
   buildContext = captureVendoredDistBuildContext(repositoryRoot, environment),
+  outputRoot = null,
 ) {
   const resolvedRoot = path.resolve(repositoryRoot);
-  const manifestPath = path.join(resolvedRoot, manifestRelative);
-  const manifest = createVendoredDistManifest(resolvedRoot, environment, buildContext);
+  const distRoot = outputRoot ? path.resolve(outputRoot) : path.join(resolvedRoot, distRootRelative);
+  const manifestPath = path.join(distRoot, manifestFileName);
+  const manifest = createVendoredDistManifest(resolvedRoot, environment, buildContext, distRoot);
   // A partial manifest is safe because the checker treats malformed JSON as a
   // hard failure; avoiding replacement-by-rename keeps this path portable on
   // Windows where replacing an existing file is not consistently atomic.
@@ -573,34 +613,65 @@ function firstInputMismatch(manifestInputs, currentInputs) {
   return null;
 }
 
-function referencedAssetPaths(indexHtml) {
+function addLocalReference(references, rawReference) {
+  const trimmed = rawReference.trim();
+  if (
+    !trimmed ||
+    trimmed.startsWith("#") ||
+    trimmed.startsWith("//") ||
+    /^[a-z][a-z0-9+.-]*:/i.test(trimmed)
+  ) {
+    return;
+  }
+  const withoutQuery = trimmed.split(/[?#]/, 1)[0];
+  if (!withoutQuery) return;
+  let decoded;
+  try {
+    decoded = decodeURIComponent(withoutQuery);
+  } catch {
+    decoded = withoutQuery;
+  }
+  references.add(decoded.startsWith("/") ? decoded.slice(1) : decoded.replace(/^\.\//, ""));
+}
+
+function addCssReferences(references, css) {
+  const cssUrlPattern = /\burl\(\s*(?:"([^"]*)"|'([^']*)'|([^)'"\s]+))\s*\)/gi;
+  for (const match of css.matchAll(cssUrlPattern)) {
+    addLocalReference(references, match[1] ?? match[2] ?? match[3]);
+  }
+}
+
+export function referencedAssetPaths(indexHtml) {
   const references = new Set();
-  const attributePattern = /\b(?:src|href)\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s"'=<>`]+))/gi;
-  for (const match of indexHtml.matchAll(attributePattern)) {
-    const rawReference = match[1] ?? match[2] ?? match[3];
-    if (
-      rawReference.startsWith("#") ||
-      rawReference.startsWith("//") ||
-      /^[a-z][a-z0-9+.-]*:/i.test(rawReference)
-    ) {
-      continue;
+  const tagPattern = /<([a-z][a-z0-9:-]*)\b([^>]*)>/gi;
+  const attributePattern = /\b(src|href|srcset|imagesrcset|poster|data|style)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi;
+  for (const tagMatch of indexHtml.matchAll(tagPattern)) {
+    const tagName = tagMatch[1].toLowerCase();
+    for (const match of tagMatch[2].matchAll(attributePattern)) {
+      const attributeName = match[1].toLowerCase();
+      const value = match[2] ?? match[3] ?? match[4];
+      if (attributeName === "style") {
+        addCssReferences(references, value);
+      } else if (attributeName === "srcset" || attributeName === "imagesrcset") {
+        const candidatePattern = /(?:^|,)\s*((?:data:[^\s]+|[^,\s]+))(?:\s+[^,]+)?/gi;
+        for (const candidate of value.matchAll(candidatePattern)) {
+          addLocalReference(references, candidate[1]);
+        }
+      } else if (attributeName !== "data" || tagName === "object") {
+        addLocalReference(references, value);
+      }
     }
-    const withoutQuery = rawReference.split(/[?#]/, 1)[0];
-    if (!withoutQuery) continue;
-    let decoded;
-    try {
-      decoded = decodeURIComponent(withoutQuery);
-    } catch {
-      decoded = withoutQuery;
-    }
-    references.add(decoded.startsWith("/") ? decoded.slice(1) : decoded.replace(/^\.\//, ""));
+  }
+  const styleBlockPattern = /<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi;
+  for (const match of indexHtml.matchAll(styleBlockPattern)) {
+    addCssReferences(references, match[1]);
   }
   return [...references].sort();
 }
 
-function validateReferencedAssets(repositoryRoot, recordedOutputs) {
-  const distRoot = path.join(repositoryRoot, distRootRelative);
-  const indexPath = path.join(repositoryRoot, distIndexRelative);
+function validateReferencedAssets(repositoryRoot, recordedOutputs, outputRoot = null) {
+  const distRoot = outputRoot ? path.resolve(outputRoot) : path.join(repositoryRoot, distRootRelative);
+  const indexPath = path.join(distRoot, "index.html");
   const indexRelative = apiPath(distIndexRelative);
   const indexHtml = fs.readFileSync(indexPath, "utf-8");
   for (const reference of referencedAssetPaths(indexHtml)) {
@@ -626,6 +697,22 @@ function validateReferencedAssets(repositoryRoot, recordedOutputs) {
       );
     }
   }
+}
+
+export function validateVendoredDistOutputTree(repositoryRoot, outputRoot, manifest) {
+  const recordedOutputs = new Map(manifest.outputs.map((entry) => [entry.path, entry]));
+  const currentOutputs = collectOutputEntries(repositoryRoot, outputRoot);
+  const actualOutputs = new Map(currentOutputs.map((entry) => [entry.path, entry]));
+  for (const recorded of manifest.outputs) {
+    const actual = actualOutputs.get(recorded.path);
+    if (!actual) throw new Error(`manifest output is missing: ${recorded.path}`);
+    if (recorded.bytes !== actual.bytes) throw new Error(`output byte count mismatch: ${recorded.path}`);
+    if (recorded.sha256 !== actual.sha256) throw new Error(`output hash mismatch: ${recorded.path}`);
+  }
+  for (const actual of currentOutputs) {
+    if (!recordedOutputs.has(actual.path)) throw new Error(`unrecorded output exists: ${actual.path}`);
+  }
+  validateReferencedAssets(path.resolve(repositoryRoot), recordedOutputs, outputRoot);
 }
 
 export function checkVendoredDist(
@@ -727,7 +814,7 @@ export function checkVendoredDist(
       "stale-dependencies",
       "install-input-mismatch",
       installStatus.path,
-      "manifest dependency stamp does not match bun.lock, bunfig.toml, and the Bun version",
+      "manifest dependency stamp does not match workspace install manifests/config or the Bun version",
       manifest.installStampSha256,
       installStatus.expected.sha256,
     );
