@@ -76,7 +76,7 @@ jobs:
       - name: Install Chromium with Stably
         id: stably-browser-install
         continue-on-error: true
-        run: npx stably install --with-deps > stably-install.log 2>&1
+        run: npx --yes stably@4.12.28 install --with-deps > stably-install.log 2>&1
 
       - name: Install Chromium with Playwright fallback
         id: playwright-browser-install
@@ -157,7 +157,11 @@ jobs:
             echo "workers must be a positive integer, got: $worker_count" >&2
             exit 2
           fi
-          echo "E2E_WORKERS=$worker_count" >> "$GITHUB_ENV"
+          {
+            echo "E2E_WORKERS=$worker_count"
+            echo "E2E_RUN_STARTED_AT=$(node -e 'process.stdout.write(String(Date.now()))')"
+            echo "E2E_SUITE_NAME=sds-outer-loop-ci-${GITHUB_RUN_NUMBER}"
+          } >> "$GITHUB_ENV"
 
       - name: Run complete Stably Playwright suite
         id: suite-all
@@ -167,7 +171,8 @@ jobs:
           KADY_E2E_BASE_URL: http://127.0.0.1:13000
           STABLY_API_KEY: ${{ secrets.STABLY_API_KEY }}
           STABLY_PROJECT_ID: ${{ secrets.STABLY_PROJECT_ID }}
-        run: npx stably test --workers="$E2E_WORKERS" --suiteName "sds-outer-loop-ci-${GITHUB_RUN_NUMBER}" > stably-test.log 2>&1
+          STABLY_CLI_VERSION: "4.12.28"
+        run: npx --yes stably@4.12.28 test --workers="$E2E_WORKERS" --suiteName "$E2E_SUITE_NAME" > stably-test.log 2>&1
 
       - name: Run filtered Stably Playwright suite
         id: suite-grep
@@ -177,8 +182,9 @@ jobs:
           KADY_E2E_BASE_URL: http://127.0.0.1:13000
           STABLY_API_KEY: ${{ secrets.STABLY_API_KEY }}
           STABLY_PROJECT_ID: ${{ secrets.STABLY_PROJECT_ID }}
+          STABLY_CLI_VERSION: "4.12.28"
           INPUT_GREP: ${{ inputs.grep }}
-        run: npx stably test --workers="$E2E_WORKERS" --grep "$INPUT_GREP" --suiteName "sds-outer-loop-ci-${GITHUB_RUN_NUMBER}" > stably-test.log 2>&1
+        run: npx --yes stably@4.12.28 test --workers="$E2E_WORKERS" --grep "$INPUT_GREP" --suiteName "$E2E_SUITE_NAME" > stably-test.log 2>&1
 
       - name: Stop hermetic preview
         if: always()
@@ -206,16 +212,6 @@ jobs:
           if [[ "$SUITE_GREP_OUTCOME" != "skipped" ]]; then suite_outcome="$SUITE_GREP_OUTCOME"; fi
           echo "E2E_SUITE_OUTCOME=${suite_outcome:-not run}" >> "$GITHUB_ENV"
           if [[ "$suite_outcome" == "success" && "$E2E_FAILED" == "not detected" ]]; then echo "E2E_FAILED=0" >> "$GITHUB_ENV"; fi
-
-      - name: Extract Stably run metadata
-        if: always()
-        run: |
-          run_url="$(grep -Eo 'https://[^[:space:]]*stably\.ai[^[:space:]]*' stably-test.log 2>/dev/null | tail -1 || true)"
-          run_id="$(grep -Eio '(runId|run ID|testSuiteRunId)[^A-Za-z0-9_-]+[A-Za-z0-9_-]+' stably-test.log 2>/dev/null | tail -1 | grep -Eo '[A-Za-z0-9_-]+$' || true)"
-          {
-            echo "E2E_RUN_URL=${run_url:-not detected}"
-            echo "E2E_RUN_ID=${run_id:-not detected}"
-          } >> "$GITHUB_ENV"
 
       - name: Write hosted evidence manifest
         if: always()
@@ -265,19 +261,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: stably-github-runner-${{ github.run_id }}
-          if-no-files-found: warn
+          if-no-files-found: error
           include-hidden-files: true
-          path: |
-            playwright-report/
-            test-results/
-            .stably/test-results/
-            stably-install.log
-            playwright-install.log
-            browser-install-method.txt
-            preview-up.scrubbed.log
-            stably-test.scrubbed.log
-            runner-fingerprint.json
-            hosted-evidence-manifest.json
+          path: hosted-evidence-bundle.tar
 
   stably-cloud:
     name: Stably Cloud action spike

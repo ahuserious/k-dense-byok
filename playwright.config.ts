@@ -33,10 +33,10 @@ export default defineConfig({
     ? [
         ["./e2e/item-count-reporter.ts"],
         ["list"],
-        stablyReporter({
-          apiKey: process.env.STABLY_API_KEY,
-          projectId: process.env.STABLY_PROJECT_ID,
-        }),
+        // Reporter 2.1.16 resolves both credentials from process.env in its
+        // constructor (dist/index-D8lS6VkX.mjs:9438-9441). Passing values here
+        // leaks them through FullConfig.reporter into projectSettings.
+        stablyReporter(),
       ]
     : [["./e2e/item-count-reporter.ts"], ["list"]],
   use: {

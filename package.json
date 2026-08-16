@@ -5,6 +5,7 @@
     "start": "node start.mjs",
     "check": "node start.mjs --check",
     "test:e2e-config": "node --test e2e/config-contracts.node.mjs",
+    "test:hosted-evidence": "node --test scripts/hosted-evidence-*.test.mjs",
     "check:vendored-dist": "node scripts/vendored-dist-check.mjs",
     "build:vendored-dist": "node scripts/vendored-dist-build.mjs --force"
   },
@@ -13,6 +14,6 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",
-    "@stablyai/playwright-test": "^2.1.16"
+    "@stablyai/playwright-test": "2.1.16"
   }
 }

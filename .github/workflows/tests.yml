@@ -20,6 +20,8 @@ jobs:
         run: npm ci
       - name: Test E2E configuration contracts
         run: npm run test:e2e-config
+      - name: Test hosted evidence contracts
+        run: npm run test:hosted-evidence
 
   vendored-dist:
     name: vendored builder dist

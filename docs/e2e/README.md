@@ -127,7 +127,7 @@ The conditional reporter in `playwright.config.ts` uploads results only when bot
 
 ## Hosted-runner (CI) evidence
 
-The real remote path is the `github-runner` job in [`.github/workflows/stably-cloud.yml`](../../.github/workflows/stably-cloud.yml). It runs the complete default `playwright.config.ts` suite, including the three `@live` items, on a GitHub-hosted runner; it does not use the public-URL overlay above. The retained `hosted-evidence-manifest.json` must contain:
+The real remote path is the `github-runner` job in [`.github/workflows/stably-cloud.yml`](../../.github/workflows/stably-cloud.yml). It runs the complete default `playwright.config.ts` suite, including the three `@live` items, on a GitHub-hosted runner; it does not use the public-URL overlay above. CI pins Stably CLI `4.12.28` and reporter `2.1.16`. The retained `hosted-evidence-manifest.json` must contain:
 
 - the exact test command and relevant environment (`CI`, `KADY_E2E_BASE_URL`, workers, and `KADY_E2E_WORKERS` when set), with `STABLY_API_KEY` and `STABLY_PROJECT_ID` recorded only as variable names;
 - the tested commit SHA and GitHub run ID;
@@ -135,6 +135,8 @@ The real remote path is the `github-runner` job in [`.github/workflows/stably-cl
 - the final Playwright summary line and suite outcome;
 - the embedded runner fingerprint, including runner image/identity fields available to the job; and
 - the Stably run ID and URL when the conditional reporter attached.
+
+The job uploads only `hosted-evidence-bundle.tar`. Its inner `hosted-evidence-payload.tar` contains every mandatory runner artifact, including the fresh Stably last-run record when the reporter attached; the manifest records that sealed payload's SHA-256. The outer bundle contains only that payload and the manifest, is scanned recursively, and its SHA-256 is written to the job summary. This two-layer shape avoids claiming that a file embedded in an archive can contain the archive's own self-referential hash.
 
 A dispatch with the optional grep input is diagnostic and does not satisfy this complete-suite evidence contract.
 
