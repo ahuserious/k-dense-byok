@@ -5,16 +5,30 @@ const stablyCredentialsPresent = Boolean(
   process.env.STABLY_API_KEY && process.env.STABLY_PROJECT_ID,
 );
 
+function e2eWorkerCount(): number {
+  const configured = process.env.KADY_E2E_WORKERS;
+  if (configured === undefined) return 4;
+  if (!/^[1-9]\d*$/.test(configured)) {
+    throw new Error("KADY_E2E_WORKERS must be a positive integer.");
+  }
+  const workers = Number(configured);
+  if (!Number.isSafeInteger(workers)) {
+    throw new Error("KADY_E2E_WORKERS must be a safe positive integer.");
+  }
+  return workers;
+}
+
 export default defineConfig({
   // Playwright config has no Page lifecycle. The automatic `runtimeErrors`
   // fixture in e2e/fixtures.ts attaches console.error and pageerror listeners
   // before navigation and fails the owning test after fixture teardown.
   testDir: "./e2e",
   outputDir: ".stably/test-results",
+  globalSetup: "./e2e/global-setup.ts",
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 2 : 0,
-  workers: process.env.CI ? 4 : undefined,
+  workers: e2eWorkerCount(),
   reporter: stablyCredentialsPresent
     ? [
         ["./e2e/item-count-reporter.ts"],
