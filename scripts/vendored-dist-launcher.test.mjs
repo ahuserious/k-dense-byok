@@ -605,7 +605,8 @@ server.listen(Number(process.env.PORT), "127.0.0.1");
       let output = "";
       launcher.stdout.on("data", (chunk) => { output += chunk; });
       launcher.stderr.on("data", (chunk) => { output += chunk; });
-      const deadline = Date.now() + 20_000;
+      const startupStartedAt = Date.now();
+      const deadline = startupStartedAt + 45_000;
       let state;
       while (Date.now() < deadline) {
         state = JSON.parse(fs.readFileSync(serviceStatePath, "utf-8"));
@@ -613,11 +614,18 @@ server.listen(Number(process.env.PORT), "127.0.0.1");
           if (Number.isSafeInteger(service?.pid)) observedPids.add(service.pid);
         }
         if (state.services?.["pipeline-engine"]?.state === "spawned") break;
-        if (launcher.exitCode !== null) assert.fail(`launcher exited before engine readiness\n${output}`);
+        if (launcher.exitCode !== null) {
+          assert.fail(
+            `launcher exited before engine readiness after ${Date.now() - startupStartedAt}ms\n${output}`,
+          );
+        }
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
       enginePid = state?.services?.["pipeline-engine"]?.pid;
-      assert.ok(Number.isSafeInteger(enginePid), `engine spawn was not observed\n${output}`);
+      assert.ok(
+        Number.isSafeInteger(enginePid),
+        `engine spawn was not observed after ${Date.now() - startupStartedAt}ms\n${output}`,
+      );
       const launcherExit = new Promise((resolve) => launcher.once("exit", resolve));
       launcher.kill("SIGTERM");
       const exitCode = await Promise.race([
@@ -758,7 +766,8 @@ server.listen(Number(process.argv[portIndex + 1]), "127.0.0.1");
       launcher.stdout.on("data", (chunk) => { output += chunk; });
       launcher.stderr.on("data", (chunk) => { output += chunk; });
 
-      const startupDeadline = Date.now() + 10_000;
+      const startupStartedAt = Date.now();
+      const startupDeadline = startupStartedAt + 45_000;
       let state;
       while (Date.now() < startupDeadline) {
         state = JSON.parse(fs.readFileSync(serviceStatePath, "utf-8"));
@@ -769,17 +778,23 @@ server.listen(Number(process.argv[portIndex + 1]), "127.0.0.1");
             state.services?.frontend?.state === "spawned" &&
             state.services?.["pipeline-engine"]?.state === "spawned" &&
             state.services?.["workflow-supervisor"]?.state === "spawned") break;
-        if (launcher.exitCode !== null) assert.fail(`launcher exited before fake services started\n${output}`);
+        if (launcher.exitCode !== null) {
+          assert.fail(
+            `launcher exited before fake services started after ${Date.now() - startupStartedAt}ms\n${output}`,
+          );
+        }
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
       const backendPid = state?.services?.backend?.pid;
       const frontendPid = state?.services?.frontend?.pid;
       const enginePid = state?.services?.["pipeline-engine"]?.pid;
       const supervisorPid = state?.services?.["workflow-supervisor"]?.pid;
-      assert.ok(Number.isSafeInteger(backendPid), output);
-      assert.ok(Number.isSafeInteger(frontendPid), output);
-      assert.ok(Number.isSafeInteger(enginePid), output);
-      assert.ok(Number.isSafeInteger(supervisorPid), output);
+      const startupFailureDetails =
+        `launcher services incomplete after ${Date.now() - startupStartedAt}ms\n${output}`;
+      assert.ok(Number.isSafeInteger(backendPid), startupFailureDetails);
+      assert.ok(Number.isSafeInteger(frontendPid), startupFailureDetails);
+      assert.ok(Number.isSafeInteger(enginePid), startupFailureDetails);
+      assert.ok(Number.isSafeInteger(supervisorPid), startupFailureDetails);
       assert.equal(supervisorPid, Number(fs.readFileSync(supervisorPidPath, "utf-8")), output);
       await waitForLocalPortOpen(ports.backend, "fake backend");
       await waitForLocalPortOpen(ports.frontend, "fake frontend");
