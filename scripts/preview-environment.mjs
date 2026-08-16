@@ -57,8 +57,14 @@ const ENGINE_BUILD_ANCHOR =
 const ENGINE_ARGUMENTS_ANCHOR =
   '  const engineArgs = ["--filter", "@archon/server", "start"];';
 // A launcher that still shells out to Bun synchronously must expose the two
-// retired engine anchors below; see guardRetiredLauncherAnchor().
-const LAUNCHER_SYNCHRONOUS_BUN_PATTERN = /\brun\(\s*bun\b/;
+// retired engine anchors below; see guardRetiredLauncherAnchor(). Every
+// synchronous runner the launcher owns (run/capture/runCapture/spawnSync)
+// counts, applied to any bun-shaped identifier (bun, bunPath, previewBun), so
+// anchor drift cannot degrade into a silent skip. The asynchronous
+// `spawn(bun, engineArgs, …)` engine start is deliberately not matched: it is
+// pinned by the strict exactly-one ENGINE_ARGUMENTS_ANCHOR above.
+const LAUNCHER_SYNCHRONOUS_BUN_PATTERN =
+  /\b(?:run|capture|runCapture|spawnSync)\(\s*[\w$]*[Bb]un[\w$]*\b/;
 // The overlay's start.mjs imports the vendored-dist scripts, and the copied
 // builder imports this module (for the automatic-env-file guard), which in
 // turn imports the observer. Copy the whole closure so every overlay import
@@ -1022,8 +1028,10 @@ export function previewEnvironment(
     ARCHON_HOME: previewEngineHome(stateRoot),
     PATH: [shimDirectory, allowedAmbientEnvironment.PATH].filter(Boolean).join(path.delimiter),
     // Must stay identical to previewVendoredDistEnvironment()'s TMPDIR: the
-    // launcher fingerprints TMPDIR when it re-checks the vendored dist, so a
-    // different temp root would report the prebuilt bundle as stale.
+    // prebuild and the launcher's re-check must run every vendored tool
+    // against the same isolated temp root. Only NODE_ENV and PORT are compared
+    // against the manifest's buildEnv (vendored-dist-check.mjs:42); TMPDIR is
+    // a pass-through for tool resolution, not a fingerprint input.
     TMPDIR: path.join(stateRoot, "tmp"),
     KADY_PREVIEW: "1",
     KADY_ENV_FILE: path.join(launchRoot, ".env"),
@@ -1051,9 +1059,13 @@ export function previewEnvironment(
     npm_config_fund: "false",
     npm_config_cache: path.join(stateRoot, "npm-cache"),
     KADY_PREVIEW_LAUNCH_ROOT: launchRoot,
-    KADY_PREVIEW_SERVICE_STATE_FILE: path.join(stateRoot, "services.json"),
+    // Recording is generation-bound: every record carries the generation and
+    // the observer throws without one. Publishing the state file alone would
+    // poison the first spawn (SIGSTOP, throw, kill the stopped group), so an
+    // ungenerated environment simply disables recording instead.
     ...(generation
       ? {
+          KADY_PREVIEW_SERVICE_STATE_FILE: path.join(stateRoot, "services.json"),
           KADY_PREVIEW_GENERATION: generation,
           KADY_PREVIEW_START_GATE_FILE: path.join(
             stateRoot,

@@ -1,5 +1,14 @@
 import fs from "node:fs";
 
+import { collectRecordedPreviewProcessGroups } from "./preview-processes.mjs";
+
+// The launcher spawns and owns exactly these three roles, so it is also the
+// process that records their exits. The workflow supervisor is spawned by the
+// backend and only reported to the launcher over IPC: the launcher never
+// observes its exit, so its record stays "spawned" forever and readiness must
+// not require it to be live. Teardown keeps every recorded role, owned or not.
+export const LAUNCHER_OWNED_PREVIEW_ROLES = ["backend", "frontend", "pipeline-engine"];
+
 function errorText(error) {
   return error instanceof Error ? error.message : String(error);
 }
@@ -79,6 +88,37 @@ export function readPreviewServiceStateSnapshot(serviceStatePath, expectedGenera
   }
 }
 
+export function assertPreviewReadinessProcessesLive(
+  repositoryRoot,
+  lifecycleState,
+  serviceStates,
+  processOptions = {},
+) {
+  // Every recorded role is still resolved here: an identity-, group- or
+  // cwd-mismatched record refuses readiness exactly as it refuses teardown.
+  const liveGroups = collectRecordedPreviewProcessGroups(
+    repositoryRoot,
+    lifecycleState,
+    serviceStates,
+    processOptions,
+  );
+  const livePids = new Set(liveGroups.map(({ record }) => record.pid));
+  const ownedRecords = [
+    lifecycleState.rootProcess,
+    ...LAUNCHER_OWNED_PREVIEW_ROLES
+      .map((role) => serviceStates[role])
+      .filter(Boolean),
+  ];
+  for (const record of ownedRecords) {
+    if (!livePids.has(record.pid)) {
+      throw new Error(
+        `Preview readiness process PID ${record.pid} is no longer live for generation ${lifecycleState.generation}.`,
+      );
+    }
+  }
+  return liveGroups;
+}
+
 export function previewLogExcerpt(logPath, maximumLines = 30) {
   try {
     return fs.readFileSync(logPath, "utf-8").trimEnd().split("\n").slice(-maximumLines).join("\n");
@@ -118,7 +158,7 @@ export async function waitForPreviewReadiness({
   serviceStatePath,
   logPath,
   probe = probePreviewService,
-  readServiceStates = () => readPreviewServiceStates(serviceStatePath),
+  readServiceStates = (generation) => readPreviewServiceStates(serviceStatePath, generation),
   readLogExcerpt = () => previewLogExcerpt(logPath),
   now = Date.now,
   pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),

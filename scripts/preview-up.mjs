@@ -19,14 +19,15 @@ import {
   updatePreviewWebProjectionMarker,
 } from "./preview-environment.mjs";
 import { previewVendoredDistEnvironment } from "./vendored-dist-environment.mjs";
+import { vendoredDistBuildEnvironment } from "./vendored-dist-check.mjs";
 import {
-  collectRecordedPreviewProcessGroups,
   processGroupId,
   assertPreviewServiceListenersOwned,
   quiescePreviewGeneration,
   waitForPreviewPortsFree,
 } from "./preview-processes.mjs";
 import {
+  assertPreviewReadinessProcessesLive,
   readPreviewServiceStateSnapshot,
   waitForPreviewReadiness,
 } from "./preview-readiness.mjs";
@@ -41,6 +42,16 @@ import {
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = fs.realpathSync(path.resolve(scriptDirectory, ".."));
 const previewDirectory = path.join(repositoryRoot, "deploy", "preview");
+const vendoredDistManifestFile = path.join(
+  repositoryRoot,
+  "server",
+  "vendor",
+  "pipeline-engine",
+  "packages",
+  "web",
+  "dist",
+  ".vendored-dist-manifest.json",
+);
 const stateFile = path.join(previewDirectory, ".state.json");
 const lifecycleLockDirectory = path.join(previewDirectory, ".lifecycle.lock.d");
 const legacyLifecycleLockFile = path.join(previewDirectory, ".lifecycle.lock");
@@ -79,6 +90,31 @@ function commandPath(command) {
   return result.stdout.trim();
 }
 
+// The preview always checks the bundle with NODE_ENV=production and
+// PORT=<engine port>, and the manifest's buildEnv is compared for strict
+// equality. A bundle built outside the preview (`npm run build:vendored-dist`
+// writes buildEnv {NODE_ENV: null, PORT: null}) can therefore never satisfy
+// --no-build-dist. Name both fingerprints and the remedy instead of letting
+// the check report a bare "build environment mismatch"; never accept the
+// mismatch.
+function assertSkipBuildManifestFingerprint(environment) {
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(vendoredDistManifestFile, "utf-8"));
+  } catch {
+    // A missing or unreadable manifest is the check's own fail-closed report.
+    return;
+  }
+  const previewBuildEnvironment = vendoredDistBuildEnvironment(environment);
+  if (JSON.stringify(manifest?.buildEnv) === JSON.stringify(previewBuildEnvironment)) return;
+  throw new Error(
+    "--no-build-dist cannot verify this vendored dist: the manifest was built under " +
+      `buildEnv ${JSON.stringify(manifest?.buildEnv ?? null)}, but the preview checks it under ` +
+      `buildEnv ${JSON.stringify(previewBuildEnvironment)}. ` +
+      "Rerun preview-up without --no-build-dist so the bundle is rebuilt under the preview build environment.",
+  );
+}
+
 function prepareVendoredDist({ skipBuild, environment }) {
   const scriptName = skipBuild ? "vendored-dist-check.mjs" : "vendored-dist-build.mjs";
   const arguments_ = [path.join(scriptDirectory, scriptName)];
@@ -86,6 +122,7 @@ function prepareVendoredDist({ skipBuild, environment }) {
 
   if (skipBuild) {
     console.log("Vendored dist build disabled; verifying the existing bundle.");
+    assertSkipBuildManifestFingerprint(environment);
   } else {
     console.log("Preparing the vendored Pipeline Engine web bundle.");
   }
@@ -384,19 +421,16 @@ try {
           throw new Error(`Preview readiness lacks generation-bound ${role} process state.`);
         }
       }
-      const liveGroups = collectRecordedPreviewProcessGroups(
+      // Liveness is asserted only for the launcher's own processes: the root
+      // launcher and the three roles it spawns directly. The recorded
+      // workflow-supervisor is spawned by the backend, so the launcher never
+      // records its exit and a supervisor death would otherwise hold readiness
+      // until the service timeouts expire. It stays in the teardown set.
+      assertPreviewReadinessProcessesLive(
         repositoryRoot,
         lifecycleState,
         serviceStates,
       );
-      const livePids = new Set(liveGroups.map(({ record }) => record.pid));
-      for (const record of [lifecycleState.rootProcess, ...Object.values(serviceStates)]) {
-        if (!livePids.has(record.pid)) {
-          throw new Error(
-            `Preview readiness process PID ${record.pid} is no longer live for generation ${previewGeneration}.`,
-          );
-        }
-      }
       assertPreviewServiceListenersOwned(
         ports,
         serviceStates,

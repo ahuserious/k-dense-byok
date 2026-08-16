@@ -7,8 +7,10 @@ import { fileURLToPath } from "node:url";
 import {
   instrumentPreviewLauncher,
   previewStartGateMatches,
+  previewSupervisorOwnershipRecordable,
   recordPreviewChildOrKill,
 } from "./preview-launcher-observer.mjs";
+import { recordSupervisorOwnership } from "./vendored-dist-environment.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -38,6 +40,19 @@ test("instruments every direct preview service spawn and exit", () => {
     instrumented,
     /recordPreviewServiceState\(\s*"workflow-supervisor",\s*message\.pid,\s*"spawned",[\s\S]*\{ identity \}/,
   );
+  // The injected supervisor record must sit inside the ownership-result gate,
+  // after the launcher's own recordSupervisorOwnership() decision.
+  assert.match(
+    instrumented,
+    /const result = recordSupervisorOwnership\(forcedSupervisorOwners, message\.pid, identity\);\n(?:\s*\/\/[^\n]*\n)*\s*if \(previewSupervisorOwnershipRecordable\(result\)\) \{\n\s*recordPreviewServiceState\(\s*"workflow-supervisor",/,
+  );
+  assert.match(instrumented, /function previewSupervisorOwnershipRecordable\(ownershipResult\)/);
+  assert.equal(
+    instrumented.match(/recordPreviewServiceState\(\s*"workflow-supervisor"/g)?.length,
+    1,
+  );
+  // The launcher's own retirement branch still follows the injected record.
+  assert.match(instrumented, /if \(result === "identity-changed-retired"\) \{/);
   assert.match(instrumented, /KADY_PREVIEW_SERVICE_STATE_FILE/);
   assert.match(instrumented, /KADY_PREVIEW_START_GATE_FILE/);
   assert.match(instrumented, /KADY_PREVIEW_GENERATION/);
@@ -54,6 +69,32 @@ test("start gate refuses absent, empty, and wrong-generation publications", () =
   assert.equal(previewStartGateMatches("gate", "generation", () => ""), false);
   assert.equal(previewStartGateMatches("gate", "generation", () => "other-generation\n"), false);
   assert.equal(previewStartGateMatches("gate", "generation", () => "generation\n"), true);
+});
+
+test("a retired supervisor PID never reaches the preview service record", () => {
+  // Drives the exact composition the instrumented launcher performs: the
+  // launcher's ownership decision first, the preview record only for the
+  // results that leave the launcher owning that PID.
+  const forcedSupervisorOwners = new Map();
+  const recorded = [];
+  const reportSupervisor = (pid, identity) => {
+    const result = recordSupervisorOwnership(forcedSupervisorOwners, pid, identity);
+    if (previewSupervisorOwnershipRecordable(result)) recorded.push({ pid, identity });
+    return result;
+  };
+  const firstIdentity = { method: "proc-stat", value: "boot-id:900", host: "host", boot: "boot" };
+  const reusedIdentity = { method: "proc-stat", value: "boot-id:1700", host: "host", boot: "boot" };
+
+  assert.equal(reportSupervisor(4242, firstIdentity), "recorded");
+  assert.equal(reportSupervisor(4242, firstIdentity), "unchanged");
+  assert.equal(reportSupervisor(4242, reusedIdentity), "identity-changed-retired");
+  assert.equal(reportSupervisor(4242, null), "unverifiable");
+
+  assert.deepEqual(recorded, [
+    { pid: 4242, identity: firstIdentity },
+    { pid: 4242, identity: firstIdentity },
+  ]);
+  assert.equal(forcedSupervisorOwners.get(4242).retired, true);
 });
 
 test("recording failure kills the stopped child group before rethrowing", () => {

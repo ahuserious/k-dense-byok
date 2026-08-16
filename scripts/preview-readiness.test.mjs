@@ -3,15 +3,61 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
+  assertPreviewReadinessProcessesLive,
   probePreviewService,
   readPreviewServiceStateSnapshot,
   waitForPreviewReadiness,
 } from "./preview-readiness.mjs";
 
+const repositoryRoot = fs.realpathSync(
+  path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."),
+);
+
 function service(role, timeoutMs = 1_000) {
   return { role, label: role, url: `http://preview.invalid/${role}`, timeoutMs };
+}
+
+const READINESS_GENERATION = "readiness-generation";
+
+function recordedProcess(pid) {
+  return {
+    pid,
+    pgid: pid,
+    generation: READINESS_GENERATION,
+    identity: { method: "ps-lstart-utc", value: `identity-${pid}` },
+    state: "spawned",
+  };
+}
+
+function readinessFixture(deadPids = []) {
+  const lifecycleState = {
+    generation: READINESS_GENERATION,
+    launchRoot: repositoryRoot,
+    rootProcess: { ...recordedProcess(10), role: "launcher" },
+  };
+  const serviceStates = {
+    backend: { ...recordedProcess(20), role: "backend" },
+    frontend: { ...recordedProcess(21), role: "frontend" },
+    "pipeline-engine": { ...recordedProcess(22), role: "pipeline-engine" },
+    "workflow-supervisor": { ...recordedProcess(23), role: "workflow-supervisor" },
+  };
+  const directoryByPid = new Map([
+    [10, repositoryRoot],
+    [20, fs.realpathSync(path.join(repositoryRoot, "server"))],
+    [21, fs.realpathSync(path.join(repositoryRoot, "web"))],
+    [22, fs.realpathSync(path.join(repositoryRoot, "server", "vendor", "pipeline-engine"))],
+    [23, fs.realpathSync(path.join(repositoryRoot, "server"))],
+  ]);
+  const processOptions = {
+    isAlive: (pid) => !deadPids.includes(pid),
+    resolveIdentity: (pid) => ({ method: "ps-lstart-utc", value: `identity-${pid}` }),
+    workingDirectory: (pid) => directoryByPid.get(pid) ?? "",
+    resolveProcessGroup: (pid) => pid,
+  };
+  return { lifecycleState, serviceStates, processOptions };
 }
 
 test("distinguishes missing, unreadable, and malformed service-state files", () => {
@@ -74,6 +120,81 @@ test("does not declare readiness until generation-bound process validation passe
     pause: async () => {},
   });
   assert.equal(validations, 2);
+});
+
+test("reaches readiness with a dead workflow-supervisor record", async () => {
+  // The launcher does not own the supervisor and never records its exit, so a
+  // dead supervisor record must not hold readiness. Its record still belongs
+  // to the teardown set, which is proved by preview-processes' teardown tests.
+  const { lifecycleState, serviceStates, processOptions } = readinessFixture([23]);
+  const liveGroups = assertPreviewReadinessProcessesLive(
+    repositoryRoot,
+    lifecycleState,
+    serviceStates,
+    processOptions,
+  );
+  assert.deepEqual(liveGroups.map(({ record }) => record.pid).sort(), [10, 20, 21, 22]);
+
+  const result = await waitForPreviewReadiness({
+    services: [service("backend"), service("frontend"), service("pipeline-engine")],
+    launcherProcess: { pid: 10, exitCode: null, signalCode: null },
+    probe: async () => ({ ok: true, detail: "HTTP 200" }),
+    readServiceStates: () => serviceStates,
+    expectedGeneration: READINESS_GENERATION,
+    validateReady: (states) => assertPreviewReadinessProcessesLive(
+      repositoryRoot,
+      lifecycleState,
+      states,
+      processOptions,
+    ),
+    now: () => 0,
+    pause: async () => {},
+  });
+  assert.equal(result.every(([, probeResult]) => probeResult.ok), true);
+});
+
+test("refuses readiness when a launcher-owned process record is dead", () => {
+  for (const deadPid of [10, 20, 21, 22]) {
+    const { lifecycleState, serviceStates, processOptions } = readinessFixture([deadPid]);
+    assert.throws(
+      () => assertPreviewReadinessProcessesLive(
+        repositoryRoot,
+        lifecycleState,
+        serviceStates,
+        processOptions,
+      ),
+      new RegExp(`Preview readiness process PID ${deadPid} is no longer live`),
+    );
+  }
+});
+
+test("forwards the expected generation to the default service-state reader", async () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-readiness-"));
+  try {
+    const serviceStatePath = path.join(temporaryRoot, "services.json");
+    fs.writeFileSync(serviceStatePath, `${JSON.stringify({
+      version: 2,
+      generation: "generation-two",
+      services: { backend: { ...recordedProcess(20), role: "backend" } },
+    })}\n`);
+    const observedServiceStates = [];
+    await waitForPreviewReadiness({
+      services: [service("backend")],
+      launcherProcess: { pid: 10, exitCode: null, signalCode: null },
+      serviceStatePath,
+      logPath: path.join(temporaryRoot, "preview.log"),
+      probe: async () => ({ ok: true, detail: "HTTP 200" }),
+      expectedGeneration: "generation-one",
+      validateReady: (states) => { observedServiceStates.push(states); },
+      now: () => 0,
+      pause: async () => {},
+    });
+    // The default reader must forward the generation, so the file-level
+    // generation-mismatch classification hides every foreign record.
+    assert.deepEqual(observedServiceStates, [{}]);
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
 });
 
 test("ignores a transient launcher exit while service probes are still converging", async () => {

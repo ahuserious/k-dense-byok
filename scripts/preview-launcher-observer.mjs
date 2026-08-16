@@ -26,6 +26,17 @@ export function previewStartGateMatches(
   }
 }
 
+// recordSupervisorOwnership() returns exactly one of "unverifiable",
+// "recorded", "unchanged", or "identity-changed-retired"
+// (scripts/vendored-dist-environment.mjs:329-344). Only the two results that
+// leave the launcher owning that PID may name it in the preview service
+// record: "identity-changed-retired" means the OS reused the PID and the
+// launcher deliberately disowned it, and "unverifiable" means no identity was
+// captured at all.
+export function previewSupervisorOwnershipRecordable(ownershipResult) {
+  return ownershipResult === "recorded" || ownershipResult === "unchanged";
+}
+
 export function recordPreviewChildOrKill(
   child,
   recordChild,
@@ -151,7 +162,7 @@ export function instrumentPreviewLauncher(source) {
   let instrumented = replaceExactlyOnce(
     source,
     OBSERVER_HELPER_ANCHOR,
-    `${OBSERVER_HELPER_ANCHOR}\n${previewStartGateMatches.toString()}\n${recordPreviewChildOrKill.toString()}${OBSERVER_HELPER}`,
+    `${OBSERVER_HELPER_ANCHOR}\n${previewStartGateMatches.toString()}\n${previewSupervisorOwnershipRecordable.toString()}\n${recordPreviewChildOrKill.toString()}${OBSERVER_HELPER}`,
     "observer helper",
   );
   // registerChild() is the launcher's synchronous ownership registration, so
@@ -193,14 +204,18 @@ export function instrumentPreviewLauncher(source) {
     instrumented,
     SUPERVISOR_OWNERSHIP_ANCHOR,
     `${SUPERVISOR_OWNERSHIP_ANCHOR}
-      recordPreviewServiceState(
-        "workflow-supervisor",
-        message.pid,
-        "spawned",
-        null,
-        null,
-        { identity },
-      );`,
+      // The preview record may name only a supervisor PID the launcher still
+      // owns; a retired (reused) PID stays out of the teardown set.
+      if (previewSupervisorOwnershipRecordable(result)) {
+        recordPreviewServiceState(
+          "workflow-supervisor",
+          message.pid,
+          "spawned",
+          null,
+          null,
+          { identity },
+        );
+      }`,
     "workflow-supervisor ownership hook",
   );
   return instrumented;

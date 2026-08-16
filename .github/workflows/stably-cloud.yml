@@ -131,6 +131,12 @@ jobs:
           }' > runner-fingerprint.json
           cat runner-fingerprint.json
 
+      # Not --no-build-dist: the manifest written by the build step above
+      # carries buildEnv {NODE_ENV: null, PORT: null}, while the preview checks
+      # the bundle under NODE_ENV=production and PORT=13091. The comparison is
+      # strict, so the skip-build path can never pass here. The locked
+      # --if-stale build rebuilds the bundle once under the preview build
+      # environment instead.
       - name: Start hermetic preview
         id: preview
         shell: bash
@@ -139,8 +145,7 @@ jobs:
           node scripts/preview-up.mjs \
             --backend-port 18000 \
             --frontend-port 13000 \
-            --engine-port 13091 \
-            --no-build-dist > preview-up.log 2>&1
+            --engine-port 13091 > preview-up.log 2>&1
           preview_exit=$?
           set -e
           cat preview-up.log

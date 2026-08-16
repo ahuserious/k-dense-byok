@@ -67,10 +67,26 @@ produces the bundle required by the workflow-engine server in a fresh clone
 without committing generated assets or trusting filesystem timestamp
 resolution.
 
-Use `--no-build-dist` only when a caller has already built the bundle. The
-option skips compilation, not validation: `preview-up` still exits before boot
-when the manifest, build context, or any recorded/referenced output fails
-validation. The standalone commands are:
+Use `--no-build-dist` only when a caller has already built the bundle *under
+the preview's own build environment*. The option skips compilation, not
+validation: `preview-up` still exits before boot when the manifest, build
+context, or any recorded/referenced output fails validation.
+
+The manifest's `buildEnv` fingerprint is compared for strict equality, and the
+preview always checks the bundle with `NODE_ENV=production` and
+`PORT=<engine port>`. A bundle built by `npm run build:vendored-dist` records
+`buildEnv {"NODE_ENV": null, "PORT": null}` and therefore can never satisfy
+`--no-build-dist` under a preview. `preview-up` refuses that combination up
+front, naming both fingerprints and telling the operator to rerun without the
+flag; it never accepts a mismatched bundle. CI pipelines that prebuild the
+bundle must therefore start the preview *without* `--no-build-dist` and let its
+locked `--if-stale` build rebuild once under the preview environment.
+
+Because that rebuild writes the manifest in place, a preview boot leaves the
+checkout's `.vendored-dist-manifest.json` fingerprinted to the preview build
+environment (`NODE_ENV=production`, `PORT=<engine port>`). A subsequent plain
+`npm run check:vendored-dist` on the same checkout reports `stale-build-env`
+until the bundle is rebuilt outside the preview. The standalone commands are:
 
 ```bash
 npm run check:vendored-dist
@@ -178,8 +194,13 @@ The primary `start.mjs` launcher delegates dependency synchronization and the
 freshness-aware `--if-stale` build to that locked wrapper. Preview mode is
 check-only: the isolated prebuild is the sole builder, and the launcher fails
 with `preview prebuild should have produced a fresh manifest` if a computed
-fingerprint using the prebuild's `NODE_ENV`, `PORT`, or `TMPDIR` values does not
-validate. Build-only defaults such as `NODE_ENV=production` are passed only to
+fingerprint using the prebuild's `NODE_ENV` and `PORT` values does not
+validate — those two names are the entire `buildEnv` comparison
+(`scripts/vendored-dist-check.mjs:42`). `TMPDIR`, `HOME`, and `PATH` are passed
+through so the prebuild and the re-check resolve the same tools into the same
+isolated temp root, and `PATH` reaches the manifest only through the Bun
+version in the install stamp; none of the three is a `buildEnv` input.
+Build-only defaults such as `NODE_ENV=production` are passed only to
 Bun/Vite and the manifest checker; they are never exported to the launcher,
 npm, backend, or frontend. It reuses a listener
 only when the PID belongs to this checkout, the health endpoint responds, and
@@ -255,6 +276,18 @@ readiness additionally require their recorded PID identities to remain live.
 All three readiness ports must also be owned by the identity-validated service
 PID or its recorded process group; a foreign listener prevents readiness and
 is named without being signalled.
+
+The liveness assertion follows the launcher's ownership boundary. The launcher
+spawns and owns the root launcher process plus `backend`, `frontend`, and
+`pipeline-engine`, so it also records their exits; those four must be live for
+readiness. The `workflow-supervisor` record is different: the backend spawns
+that process detached and only reports its PID to the launcher over IPC, so the
+launcher never observes its exit and the record would stay `spawned` forever.
+Requiring it would fail an otherwise healthy preview, so readiness does not
+assert its liveness. It remains a fully recorded role for owned teardown, which
+reaps it with the rest of the generation, and every record — owned or not —
+must still pass identity, process-group, and cwd validation whenever it is
+resolved.
 Later health probes return HTTP 503 and name the first drifted checkout file
 rather than silently serving stale evidence.
 
@@ -338,11 +371,18 @@ therefore refuses every automatic env candidate: `.env`, `.env.local`, and the
 development, production, and test variants both with and without `.local`.
 Those checks use the canonical checkout paths for `web/`, the vendored
 workspace root, `packages/web`, and `packages/server`, plus the server package
-cwd's legacy data-directory env file. They run immediately before vendored
-preparation, Next startup, engine install/build, and engine startup, closing
-validation-to-start windows without patching vendored code. The standalone
-vendored build script repeats the same refusal in preview mode immediately
-before its Bun build spawn.
+cwd's legacy data-directory env file. The launcher's own in-process engine
+install and web build are retired, so on this tree the refusal runs at three
+live sites: `preview-up` immediately before vendored preparation, the
+instrumented launcher immediately before the Next (web) spawn, and the
+instrumented launcher immediately before the engine spawn. Each closes a
+validation-to-start window without patching vendored code. The standalone
+vendored build script repeats the same refusal in preview mode twice — once
+before `bun install --frozen-lockfile` and again before its `bun run build`
+spawn. Instrumentation still fails closed if a retired engine anchor ever
+returns: an absent anchor is accepted only while no synchronous Bun call
+(`run`/`capture`/`runCapture`/`spawnSync` on any bun-shaped identifier) remains
+reachable in the launcher.
 
 Before its first child process, `preview-up` replaces its own environment with
 an explicit allowlist. It may retain ambient `PATH`, `TMPDIR`, `LANG`, `TERM`,

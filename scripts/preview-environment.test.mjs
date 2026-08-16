@@ -1063,11 +1063,37 @@ test("pins both engine clients to the preview port by default and scrubs legacy 
   assert.equal(environment.HOME, "/tmp/kady-preview-test/home");
   assert.equal(environment.PATH, "/tmp/kady-preview-test/launch/bin:/usr/bin");
   assert.equal(environment.npm_config_cache, "/tmp/kady-preview-test/npm-cache");
-  assert.equal(environment.KADY_PREVIEW_SERVICE_STATE_FILE, "/tmp/kady-preview-test/services.json");
+  // Recording is generation-bound; an ungenerated environment publishes none
+  // of the three recording variables.
+  assert.equal("KADY_PREVIEW_SERVICE_STATE_FILE" in environment, false);
+  assert.equal("KADY_PREVIEW_GENERATION" in environment, false);
+  assert.equal("KADY_PREVIEW_START_GATE_FILE" in environment, false);
   assert.equal("ARCHON_BASE_URL" in environment, false);
   assert.equal("NEXT_PUBLIC_ARCHON_URL" in environment, false);
   assert.equal("KADY_ARCHON_PORT" in environment, false);
   assert.equal("npm_config_offline" in environment, false);
+});
+
+test("publishes the recording variables only together with a generation", () => {
+  const generation = "0f2a6d4c-1f7e-4a0e-9f1b-1a2b3c4d5e6f";
+  const environment = previewEnvironment(
+    "/tmp/kady-preview-test",
+    "/tmp/kady-preview-test/launch",
+    "/tmp/kady-preview-test/launch/bin",
+    { backend: 18000, frontend: 13000, engine: 13091 },
+    { PATH: "/usr/bin" },
+    generation,
+  );
+
+  assert.equal(
+    environment.KADY_PREVIEW_SERVICE_STATE_FILE,
+    "/tmp/kady-preview-test/services.json",
+  );
+  assert.equal(environment.KADY_PREVIEW_GENERATION, generation);
+  assert.equal(
+    environment.KADY_PREVIEW_START_GATE_FILE,
+    `/tmp/kady-preview-test/launcher-${generation}.go`,
+  );
 });
 
 test("honours an explicit browser-facing pipeline engine origin", () => {
@@ -1896,6 +1922,32 @@ test("holds teardown's lifecycle barrier against another down and a newer up", (
     nextUp.release();
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("refuses a retired anchor skip for every synchronous Bun call shape", () => {
+  const launcherSource = fs.readFileSync(
+    new URL("../start.mjs", import.meta.url),
+    "utf8",
+  );
+  // Neither retired engine anchor exists on this launcher, so each planted
+  // synchronous Bun call must turn the permissive skip into a refusal.
+  for (const plantedCall of [
+    '  spawnSync(bun, ["install"], { cwd: PIPELINE_ENGINE_DIR });',
+    '  runCapture(bunPath, ["run", "build:web"], { cwd: PIPELINE_ENGINE_DIR });',
+    '  capture(previewBun, ["--version"]);',
+    '  run(bun, ["install"], { cwd: PIPELINE_ENGINE_DIR });',
+  ]) {
+    assert.throws(
+      () => instrumentPreviewEnvironment(
+        instrumentPreviewLauncher(launcherSource).replace(
+          '  const engineArgs = ["--filter", "@archon/server", "start"];',
+          `${plantedCall}\n  const engineArgs = ["--filter", "@archon/server", "start"];`,
+        ),
+      ),
+      /found a synchronous Bun invocation in start\.mjs but no engine install anchor/,
+      `planting ${plantedCall.trim()} must refuse the retired-anchor skip`,
+    );
   }
 });
 
