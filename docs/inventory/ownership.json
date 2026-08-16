@@ -1,5 +1,11 @@
 {
   "lanes": {
+    "C1": [
+      "scripts/vendored-dist-*.mjs",
+      "package.json",
+      ".github/workflows/tests.yml",
+      "docs/preview-env.md"
+    ],
     "S1": [
       "web/src/app/page.tsx",
       "web/src/components/workspace-navigation.tsx",
@@ -165,6 +171,7 @@
       "e2e/**",
       "playwright.config.*",
       ".stably/**",
+      ".github/workflows/stably-cloud.yml",
       "docs/e2e/**",
       "scripts/preview-*.mjs",
       "deploy/preview/**"
