@@ -26,6 +26,8 @@ if (!tunnelOrigin) {
 
 export default {
   ...baseConfig,
+  // This topology does not expose the real backend required by the unmocked tier.
+  grepInvert: /@live/,
   // Cloud latency is the reason these differ from the local config, and ONLY these differ.
   // Every asset crosses the internet twice (Stably runner -> ngrok edge -> this machine), so the
   // local budgets (45s test / 10s expect) expire during fixture setup. Raising a transport timeout

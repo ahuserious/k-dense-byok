@@ -36,6 +36,18 @@ KADY_E2E_BASE_URL=http://127.0.0.1:13000 npx playwright test --grep-invert @live
 KADY_E2E_BASE_URL=http://127.0.0.1:13000 npx playwright test --grep @live
 ```
 
+Run the same three contracts as the `@live-alt` origin-regression leg against a preview whose backend and engine ports are both non-default:
+
+```bash
+node scripts/preview-up.mjs --backend-port 18600 --frontend-port 13600 --engine-port 13691
+KADY_E2E_BASE_URL=http://127.0.0.1:13600 \
+KADY_PORT=18600 \
+KADY_PIPELINE_ENGINE_PORT=13691 \
+npx playwright test --config playwright.live-alt.config.ts
+```
+
+The alternate config fails during configuration if `KADY_PORT` or `KADY_PIPELINE_ENGINE_PORT` is missing, invalid, or still `18000`/`13091`. Its flows assert the configured non-default origin on the initial PUT, list GET, detail GET, repeated PUT, independent post-PUT GET, Builder iframe, invalid validation, and valid validation response. The default and alternate legs therefore cover both ordinary behavior and the prior remote-browser hardcoded-origin failure class.
+
 Known limitation: the mocked tier's backend interception pattern is fixed to port `18000`. Run the combined or mocked tier with the default preview ports (`18000` backend, `13000` frontend, `13091` engine); changing the backend port lets mocked requests escape the fixture. The `@live` tier derives its service origins independently, but this lane deliberately does not broaden the established mocked-fixture semantics.
 
 The unmocked tier uses unique workflow ids and names on every item so a warm shared preview cannot collide with an earlier run. The typed-workflow API has no delete route, so those definitions cannot be cleaned up through the public contract; the unique names make the bounded leftovers harmless, and `preview-down.mjs` removes them with the isolated preview state. The builder validation item does not persist its draft.
@@ -50,7 +62,7 @@ The teardown command does not return successfully until `deploy/preview/.state.j
 
 `preview-up.mjs` first waits for every fixed preview port to have no listener. It then probes all three endpoints until they are healthy in the same pass. A launcher-parent exit is diagnostic rather than a readiness failure; an observed service-child exit fails immediately with its exit status and a preview-log excerpt. Other connection failures remain retryable until the bounded service timeout.
 
-Playwright then performs its own worker barrier in `e2e/global-setup.ts`. It waits for the web root, backend `/health`, and engine `/api/health`, opens Chromium, renders the project workspace, opens Builder, and waits for the Builder name field inside the iframe. This compiles the cold Next page and vendored Builder bundle before any test worker starts. The suite always defaults to 4 workers locally and in CI; set `KADY_E2E_WORKERS` to a positive integer only for an intentional measured override. Raising timeouts or worker counts is not a substitute for investigating contention.
+Playwright then performs its own worker barrier in `e2e/global-setup.ts`. Both its request context and Chromium context inherit the resolved project's `baseURL` and `extraHTTPHeaders`, so tunnel headers also reach health requests, navigation, iframes, and XHR. It always waits for the web root, renders the project workspace, opens Builder, and waits for the Builder name field inside the iframe. Backend and engine health probes run only for an included live topology whose resolved service origin is loopback or shares the app hostname; `KADY_E2E_WARMUP_SERVICES=1` explicitly forces both probes. The warm-up records `console.error` and `pageerror` before navigation and fails setup if either occurs, so cold-only hydration, chunk, and iframe failures cannot be hidden by the compile barrier. The suite always defaults to 4 workers locally and in CI; set `KADY_E2E_WORKERS` to a positive integer only for an intentional measured override. Raising timeouts or worker counts is not a substitute for investigating contention.
 
 The orchestrator's 2026-08-15 cold run printed the `rendered=workspace+builder` warm-up barrier and started all 249 items with 4 workers. Every mocked-tier item completed without failure, so the prior 72-failure cold-start phenomenon did not recur. The two failures were confined to first-run assumptions in the new `@live` items and were corrected in the following static pass; a zero-failure full-suite rerun remains required.
 
@@ -96,6 +108,8 @@ Lane S11 must not invoke billed cloud execution. After local preview proof and r
 ```bash
 stably test --browser cloud --suiteName "Scientific DAG Studio S11"
 ```
+
+`playwright.cloud.config.ts` excludes `@live`: that topology deliberately exposes the frontend and vendored engine but not the real Kady backend. Cloud collection therefore contains the 246 mocked items; run server-truth evidence through the default or alternate local preview legs above.
 
 The conditional reporter in `playwright.config.ts` uploads results only when both credentials exist. Cloud run evidence lands in the Stably project/suite dashboard; local trace, screenshot, video, and result material remains under `.stably/test-results/`.
 

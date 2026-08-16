@@ -17,6 +17,12 @@ const EXPECTED_FIXME_ITEMS = 4;
 const EXPECTED_SKIP_ITEMS = 0;
 
 function isFullInventoryRun(config: FullConfig) {
+  const configuredGrep = Array.isArray(config.grep) ? config.grep : [config.grep];
+  const configuredFilter = (
+    configuredGrep.length !== 1 || configuredGrep[0]?.source !== ".*" ||
+    config.grepInvert !== null ||
+    config.projects.some((project) => project.grepInvert !== null)
+  );
   const hasTitleFilter = config.argv.some((argument) => (
     argument === "--grep" ||
     argument === "-g" ||
@@ -31,7 +37,7 @@ function isFullInventoryRun(config: FullConfig) {
   const hasSubsetMode = config.argv.some((argument) => (
     argument === "--last-failed" || argument === "--only-changed"
   ));
-  return !hasTitleFilter && !hasLocationFilter && !hasSubsetMode && config.shard === null;
+  return !configuredFilter && !hasTitleFilter && !hasLocationFilter && !hasSubsetMode && config.shard === null;
 }
 
 export default class ItemCountReporter implements Reporter {

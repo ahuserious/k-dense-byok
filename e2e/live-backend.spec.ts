@@ -9,6 +9,7 @@ import {
   type LiveWorkspace,
 } from "./live-fixtures";
 import { e2eServiceOrigin } from "./service-origins";
+import { readMlModelSelectionTemplateSignature } from "./template-source";
 
 interface StoredWorkflow {
   id: string;
@@ -19,8 +20,8 @@ interface StoredWorkflow {
   graph: {
     id: string;
     name: string;
-    nodes: unknown[];
-    edges: unknown[];
+    nodes: Array<{ id: string; kind: string }>;
+    edges: Array<{ id: string; from: string; to: string; condition?: string }>;
   };
 }
 
@@ -72,6 +73,10 @@ async function createTemplateWorkflow(
     firstPutResponse.status(),
     `Initial PUT ${firstPutResponse.url()} returned ${firstPutResponse.status()} with ${JSON.stringify(created)}.`,
   ).toBe(201);
+  expect(
+    new URL(firstPutResponse.url()).origin,
+    `Initial PUT resolved to ${firstPutResponse.url()}; expected the configured backend origin.`,
+  ).toBe(e2eServiceOrigin("backend"));
   expect(created.id).toBe(workflow.id);
   expect(created.graph.id).toBe(workflow.id);
   expect(created.graph.name).toBe(workflow.name);
@@ -89,7 +94,7 @@ async function createTemplateWorkflow(
   };
 }
 
-test("@live creates a template workflow and renders API-exact details", async ({
+test("@live @live-alt creates a template workflow and renders API-exact details", async ({
   liveWorkspace,
 }, testInfo) => {
   const { page, projectsResponseUrl } = liveWorkspace;
@@ -99,6 +104,16 @@ test("@live creates a template workflow and renders API-exact details", async ({
   ).toBe(e2eServiceOrigin("backend"));
 
   const creation = await createTemplateWorkflow(liveWorkspace, testInfo);
+  const expectedTemplate = readMlModelSelectionTemplateSignature();
+  expect(creation.created.graph.nodes.map(({ id, kind }) => ({ id, kind }))).toEqual(
+    expectedTemplate.nodes,
+  );
+  expect(creation.created.graph.edges.map(({ id, from, to, condition }) => ({
+    id,
+    from,
+    to,
+    condition,
+  }))).toEqual(expectedTemplate.edges);
   const listResponsePromise = page.waitForResponse((response) => {
     const url = new URL(response.url());
     return url.pathname === "/dag-workflows" && response.request().method() === "GET";
@@ -110,7 +125,10 @@ test("@live creates a template workflow and renders API-exact details", async ({
     listResponse.status(),
     `GET ${listResponse.url()} returned ${listResponse.status()} with ${JSON.stringify(listBody)}.`,
   ).toBe(200);
-  expect(new URL(listResponse.url()).origin).toBe(e2eServiceOrigin("backend"));
+  expect(
+    new URL(listResponse.url()).origin,
+    `List GET resolved to ${listResponse.url()}; expected the configured backend origin.`,
+  ).toBe(e2eServiceOrigin("backend"));
   const summary = listBody.workflows.find((workflow) => workflow.id === creation.created.id);
   expect(
     summary,
@@ -132,8 +150,8 @@ test("@live creates a template workflow and renders API-exact details", async ({
     revision: creation.created.revision,
     createdAt: creation.created.createdAt,
     graphSha256: creation.created.graphSha256,
-    nodeCount: creation.created.graph.nodes.length,
-    edgeCount: creation.created.graph.edges.length,
+    nodeCount: expectedTemplate.nodes.length,
+    edgeCount: expectedTemplate.edges.length,
   });
 
   const details = page.getByRole("region", { name: creation.created.graph.name, exact: true });
@@ -145,7 +163,23 @@ test("@live creates a template workflow and renders API-exact details", async ({
     name: `Open ${creation.created.graph.name} details`,
   });
   await expect(openDetails).toBeVisible();
+  const detailResponsePromise = page.waitForResponse((response) => (
+    new URL(response.url()).pathname === `/dag-workflows/${creation.created.id}` &&
+    response.request().method() === "GET"
+  ));
   await openDetails.click();
+  const detailResponse = await detailResponsePromise;
+  const detailRecord = await detailResponse.json() as StoredWorkflow;
+  expect(detailResponse.status()).toBe(200);
+  expect(
+    new URL(detailResponse.url()).origin,
+    `Detail GET resolved to ${detailResponse.url()}; expected the configured backend origin.`,
+  ).toBe(e2eServiceOrigin("backend"));
+  expect(
+    detailRecord,
+    `Detail GET must equal the created record; created=${JSON.stringify(creation.created)}, ` +
+      `detail=${JSON.stringify(detailRecord)}.`,
+  ).toEqual(creation.created);
   await expect(details).toBeVisible();
   await expect(details).toContainText(
     `${creation.created.id} · revision ${summary!.revision} · ${summary!.nodeCount} nodes · ${summary!.edgeCount} edges`,
@@ -153,16 +187,14 @@ test("@live creates a template workflow and renders API-exact details", async ({
   const renderedDefinition = JSON.parse(
     await details.getByTestId("raw-typed-definition").innerText(),
   ) as StoredWorkflow;
-  expect(renderedDefinition.revision).toBe(summary!.revision);
-  expect(renderedDefinition.graph.nodes).toHaveLength(summary!.nodeCount);
-  expect(renderedDefinition.graph.edges).toHaveLength(summary!.edgeCount);
+  expect(renderedDefinition).toEqual(detailRecord);
   console.log(
     `LIVE_VALUES workflow=${summary!.id} revision=${summary!.revision} createdAt=${summary!.createdAt} ` +
       `graphSha256=${summary!.graphSha256} nodes=${summary!.nodeCount} edges=${summary!.edgeCount}`,
   );
 });
 
-test("@live identical workflow PUT is a no-op: same 201 for revision 1, unchanged record", async ({
+test("@live @live-alt identical workflow PUT is a no-op: same 201 for revision 1, unchanged record", async ({
   liveWorkspace,
 }, testInfo) => {
   const creation = await createTemplateWorkflow(liveWorkspace, testInfo);
@@ -177,6 +209,7 @@ test("@live identical workflow PUT is a no-op: same 201 for revision 1, unchange
     });
     return {
       status: response.status,
+      url: response.url,
       body: await response.json() as StoredWorkflow,
     };
   }, {
@@ -193,6 +226,10 @@ test("@live identical workflow PUT is a no-op: same 201 for revision 1, unchange
     `Identical PUT observed status=${repeated.status}, revision=${repeated.body.revision}, ` +
       `createdAt=${repeated.body.createdAt}, graphSha256=${repeated.body.graphSha256}.`,
   ).toBe(201);
+  expect(
+    new URL(repeated.url).origin,
+    `Repeated PUT resolved to ${repeated.url}; expected the configured backend origin.`,
+  ).toBe(e2eServiceOrigin("backend"));
   expect(repeated.body).toMatchObject({
     id: creation.created.id,
     revision: creation.created.revision,
@@ -205,9 +242,37 @@ test("@live identical workflow PUT is a no-op: same 201 for revision 1, unchange
     `Identical PUT must return the unchanged stored record; first=${JSON.stringify(creation.created)}, ` +
       `repeated=${JSON.stringify(repeated.body)}.`,
   ).toEqual(creation.created);
+
+  const persisted = await liveWorkspace.page.evaluate(async ({ url, projectId }) => {
+    const response = await fetch(url, { headers: { "X-Project-Id": projectId } });
+    return {
+      status: response.status,
+      url: response.url,
+      body: await response.json() as StoredWorkflow,
+    };
+  }, {
+    url: creation.firstPutUrl,
+    projectId: liveWorkspace.project.id,
+  });
+  expect(persisted.status).toBe(200);
+  expect(
+    new URL(persisted.url).origin,
+    `Independent GET resolved to ${persisted.url}; expected the configured backend origin.`,
+  ).toBe(e2eServiceOrigin("backend"));
+  expect(
+    persisted.body,
+    `Independent GET after the repeated PUT must remain unchanged; first=${JSON.stringify(creation.created)}, ` +
+      `persisted=${JSON.stringify(persisted.body)}.`,
+  ).toEqual(creation.created);
+  expect(persisted.body.graph.nodes.map(({ id, kind }) => ({ id, kind }))).toEqual(
+    creation.created.graph.nodes.map(({ id, kind }) => ({ id, kind })),
+  );
+  expect(persisted.body.graph.edges.map(({ id, from, to }) => ({ id, from, to }))).toEqual(
+    creation.created.graph.edges.map(({ id, from, to }) => ({ id, from, to })),
+  );
 });
 
-test("@live creates and validates a provider-free graph against the real engine", async ({
+test("@live @live-alt rejects an invalid graph then validates the exact provider-free graph", async ({
   liveWorkspace,
 }, testInfo) => {
   const { page } = liveWorkspace;
@@ -227,15 +292,63 @@ test("@live creates and validates a provider-free graph against the real engine"
   await expect(workflowName).toBeVisible();
   await workflowName.fill(workflow.name);
   await frame.getByTitle("Add description").click();
-  await frame.getByPlaceholder("Description...").fill(
-    "Provider-free live validation contract.",
-  );
+  const workflowDescription = "Provider-free live validation contract.";
+  await frame.getByPlaceholder("Description...").fill(workflowDescription);
+
+  const invalidRequestBody = {
+    definition: {
+      name: workflow.name,
+      description: workflowDescription,
+      nodes: [{
+        id: "consumer",
+        prompt: "Consume the missing result.",
+        depends_on: ["missing-node"],
+      }],
+    },
+  };
+  const invalidResponsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === "/api/workflows/validate" && response.request().method() === "POST";
+  });
+  const invalidResult = await frame.locator("body").evaluate(async (_body, requestBody) => {
+    const response = await fetch("/api/workflows/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody),
+    });
+    return {
+      status: response.status,
+      body: await response.json() as { valid: boolean; errors?: string[] },
+    };
+  }, invalidRequestBody);
+  const invalidResponse = await invalidResponsePromise;
+  expect(
+    new URL(invalidResponse.url()).origin,
+    `Invalid validation resolved to ${invalidResponse.url()}; expected the configured engine origin.`,
+  ).toBe(e2eServiceOrigin("engine"));
+  expect(invalidResponse.request().postDataJSON()).toEqual(invalidRequestBody);
+  expect(invalidResult.status).toBe(200);
+  expect(invalidResult.body).toEqual({
+    valid: false,
+    errors: ["Node 'consumer' depends_on unknown node 'missing-node'"],
+  });
+
   const canvas = frame.locator(".react-flow");
   await expect(canvas).toBeVisible();
   await canvas.dblclick({ position: { x: 640, y: 360 } });
   await frame.getByRole("button", { name: /^Prompt\s+Inline AI prompt$/ }).click();
   const prompt = frame.getByPlaceholder("Enter inline prompt...");
-  await prompt.fill("Validate this bounded provider-free graph without executing it.");
+  const promptText = "Validate this bounded provider-free graph without executing it.";
+  await prompt.fill(promptText);
+  const promptNodeId = await frame.locator(".react-flow__node").getAttribute("data-id");
+  expect(promptNodeId, "The valid Builder request requires the rendered prompt-node id.").not.toBeNull();
+  const validRequestBody = {
+    definition: {
+      name: workflow.name,
+      description: workflowDescription,
+      nodes: [{ id: promptNodeId!, prompt: promptText }],
+    },
+  };
 
   const validationResponsePromise = page.waitForResponse((response) => {
     const url = new URL(response.url());
@@ -244,7 +357,11 @@ test("@live creates and validates a provider-free graph against the real engine"
   await frame.getByRole("button", { name: "Validate", exact: true }).click();
   const validationResponse = await validationResponsePromise;
   const validation = await validationResponse.json() as { valid: boolean; errors?: string[] };
-  expect(new URL(validationResponse.url()).origin).toBe(e2eServiceOrigin("engine"));
+  expect(
+    new URL(validationResponse.url()).origin,
+    `Valid validation resolved to ${validationResponse.url()}; expected the configured engine origin.`,
+  ).toBe(e2eServiceOrigin("engine"));
+  expect(validationResponse.request().postDataJSON()).toEqual(validRequestBody);
   expect(
     validationResponse.status(),
     `Engine validation returned ${validationResponse.status()} with ${JSON.stringify(validation)}.`,
