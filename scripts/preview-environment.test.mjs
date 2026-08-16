@@ -14,6 +14,8 @@ import {
   previewAutomaticEnvironmentFiles,
   previewEnvironment,
   previewPrebuildEnvironment,
+  previewWebRoot,
+  removePreviewWebRoot,
 } from "./preview-environment.mjs";
 import { instrumentPreviewLauncher } from "./preview-launcher-observer.mjs";
 
@@ -362,6 +364,16 @@ test("projects the web root without automatic env files or checkout build output
     }
 
     const projectedWebRoot = preparePreviewWebRoot(repositoryRoot, launchRoot);
+    const canonicalRepositoryRoot = fs.realpathSync(repositoryRoot);
+    assert.equal(projectedWebRoot, previewWebRoot(repositoryRoot));
+    assert.equal(
+      projectedWebRoot.startsWith(`${canonicalRepositoryRoot}${path.sep}`),
+      true,
+    );
+    assert.equal(
+      fs.realpathSync(path.join(launchRoot, "web")),
+      projectedWebRoot,
+    );
     assert.equal(fs.lstatSync(projectedWebRoot).isDirectory(), true);
     assert.equal(fs.lstatSync(projectedWebRoot).isSymbolicLink(), false);
     assert.equal(fs.lstatSync(path.join(projectedWebRoot, "src")).isSymbolicLink(), true);
@@ -376,6 +388,23 @@ test("projects the web root without automatic env files or checkout build output
     assert.equal(fs.lstatSync(path.join(projectedWebRoot, ".next")).isDirectory(), true);
     assert.equal(fs.lstatSync(path.join(projectedWebRoot, ".next")).isSymbolicLink(), false);
     assert.deepEqual(fs.readdirSync(path.join(projectedWebRoot, ".next")), []);
+    assert.equal(
+      fs.realpathSync(path.join(projectedWebRoot, "node_modules")),
+      fs.realpathSync(checkoutNodeModules),
+    );
+    assert.equal(fs.existsSync(path.join(projectedWebRoot, ".preview")), false);
+    for (const fileName of [
+      ".env",
+      ".env.local",
+      ".env.development",
+      ".env.development.local",
+      ".env.production",
+      ".env.production.local",
+      ".env.test",
+      ".env.test.local",
+    ]) {
+      assert.equal(fs.existsSync(path.join(projectedWebRoot, fileName)), false);
+    }
 
     fs.writeFileSync(path.join(checkoutSourceRoot, "page.tsx"), "export default 2;\n");
     assert.equal(
@@ -395,6 +424,9 @@ test("projects the web root without automatic env files or checkout build output
       fs.writeFileSync(checkoutEnvironmentFile, "NEXT_PUBLIC_RAINDROP_URL=modified\n");
       assert.equal(fs.existsSync(path.join(projectedWebRoot, fileName)), false);
     }
+    assert.equal(removePreviewWebRoot(repositoryRoot), true);
+    assert.equal(fs.existsSync(projectedWebRoot), false);
+    assert.equal(removePreviewWebRoot(repositoryRoot), false);
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
@@ -497,6 +529,10 @@ test("preview-up sanitizes its process before vendored preparation and boot", ()
   const webProjection = source.indexOf(
     "preparePreviewWebRoot(repositoryRoot, launchRoot);",
   );
+  const previewDownSource = fs.readFileSync(
+    new URL("./preview-down.mjs", import.meta.url),
+    "utf8",
+  );
 
   assert.notEqual(isolationAssertion, -1);
   assert.notEqual(prebuildSpawn, -1);
@@ -519,6 +555,11 @@ test("preview-up sanitizes its process before vendored preparation and boot", ()
   assert.equal(
     source.includes("environment: previewPrebuildEnvironment(process.env)"),
     true,
+  );
+  assert.equal(previewDownSource.includes("removePreviewWebRoot(repositoryRoot)"), true);
+  assert.match(
+    fs.readFileSync(new URL("../.gitignore", import.meta.url), "utf8"),
+    /^\/web\/\.preview\/$/m,
   );
 });
 

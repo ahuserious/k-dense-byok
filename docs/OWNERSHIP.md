@@ -60,10 +60,12 @@ A handoff lets the recipient lane edit a path another lane owns, for the stated 
 | S11 | C3 | `playwright.config.ts` | E2E configuration split |
 | R1 | C5 | `docs/OWNERSHIP.md` | C5 ownership row |
 | R1 | C5 | `docs/inventory/ownership.json` | C5 lane and reviewed handoff policy |
+| R1 | C5 | `.gitignore` | checkout-local preview web projection ignore rule |
 | C1 | C5 | `docs/preview-env.md` | server environment-root isolation documentation |
 | S11 | C5 | `scripts/preview-environment.mjs` | server environment-root preview wiring |
 | S11 | C5 | `scripts/preview-environment.test.mjs` | server environment-root preview regression tests |
 | S11 | C5 | `scripts/preview-up.mjs` | server environment-root preview wiring |
+| S11 | C5 | `scripts/preview-down.mjs` | owned checkout-local preview web projection cleanup |
 | C1 | C5 | `scripts/vendored-dist-build.mjs` | preview automatic-env refusal immediately before the Bun web-build spawn |
 | S4 | C5 | `server/src/workflows/supervisor/credentials.ts` | credential persistence environment-root isolation |
 | S11 | C3 | `.github/workflows/stably-cloud.yml` | hosted evidence manifest step and artifact upload |

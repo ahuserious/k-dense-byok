@@ -13,6 +13,7 @@ import {
   waitForPreviewPortsFree,
 } from "./preview-processes.mjs";
 import { removePreviewStateFile } from "./preview-state.mjs";
+import { removePreviewWebRoot } from "./preview-environment.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = fs.realpathSync(path.resolve(scriptDirectory, ".."));
@@ -130,6 +131,10 @@ if (occupiedAfterShutdown.length > 0) {
 
 const remaining = printListenerProof(state);
 if (remaining !== 0) fail("Preview listeners remain after teardown.");
+
+if (removePreviewWebRoot(repositoryRoot)) {
+  console.log(`Removed preview web projection: ${path.join(repositoryRoot, "web", ".preview")}`);
+}
 
 if (!(await removePreviewStateFile(stateFile))) {
   fail(`Preview lifecycle state did not clear after teardown: ${stateFile}`);

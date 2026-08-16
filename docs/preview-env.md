@@ -41,14 +41,19 @@ that absolute path. The preview backend loads only `<launchRoot>/.env`, and
 credential writes land there; the checkout's `.env` is never read or written
 in preview mode. The overlay symlinks the checked-out `server/` tree and runs
 the checkout's exact `start.mjs` and `env-file.mjs` bytes. Its `web/` project
-root is instead a physical preview directory: each safe checkout entry,
-including source directories and `node_modules`, is linked individually; every
-automatic env filename is omitted; and `.next` is a private directory under the
-preview state root. Next 16 has no supported switch that disables its forced
-development env-file reload, so this projection also keeps env files created or
-modified in the checkout after readiness outside Next's watched project root.
-Dependencies must already be installed; the preview npm shim suppresses the
-launcher's update lookup and forces npm offline.
+root is instead the gitignored physical directory
+`web/.preview/launch/web`: each safe checkout entry, including source
+directories and `node_modules`, is linked individually; every automatic env
+filename is omitted; and `.next` is a private real directory inside that
+projection. The temporary launch overlay links its `web/` entry to this
+checkout-local projection. Consequently every projected symlink resolves under
+Turbopack's inferred checkout filesystem root; preview creation rejects any web
+entry whose canonical target escapes that root. Next 16 has no supported switch
+that disables its forced development env-file reload, so the projection also
+keeps env files created or modified in the checkout after readiness outside
+Next's watched project root. Owned preview teardown removes the marked
+projection. Dependencies must already be installed; the preview npm shim
+suppresses the launcher's update lookup and forces npm offline.
 
 Backend env selection fails closed. With `KADY_PREVIEW=1`, `KADY_ENV_FILE`
 must be present, non-blank, absolute, and resolve to a regular file under the
