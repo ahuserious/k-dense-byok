@@ -60,6 +60,7 @@ A handoff lets the recipient lane edit a path another lane owns, for the stated 
 | S11 | C3 | `playwright.config.ts` | E2E configuration split |
 | R1 | C5 | `docs/OWNERSHIP.md` | C5 ownership row |
 | R1 | C5 | `docs/inventory/ownership.json` | C5 lane and reviewed handoff policy |
+| R1 | C5 | `.gitignore` | checkout-local preview web projection ignore rule |
 | C1 | C5 | `docs/preview-env.md` | server environment-root isolation documentation |
 | S11 | C5 | `scripts/preview-environment.mjs` | server environment-root preview wiring |
 | S11 | C5 | `scripts/preview-environment.test.mjs` | server environment-root preview regression tests |
