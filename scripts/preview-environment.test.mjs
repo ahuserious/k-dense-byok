@@ -9,12 +9,14 @@ import { createLaunchOverlay, previewEnvironment } from "./preview-environment.m
 import {
   acquireVendoredDistBuildLock,
   captureProcessIdentity,
+  forceOwnedSupervisorProcessGroup,
   latchOwnedProcessGroupRetirement,
   missingPreviewLauncherDependencies,
   prepareLauncherDependencies,
   previewVendoredDistFingerprintEnvironment,
   previewVendoredDistEnvironment,
   processLiveness,
+  recordSupervisorOwnership,
   recoverVendoredDistBuildLock,
   recordedProcessState,
   scrubSensitiveEnvironment,
@@ -383,10 +385,16 @@ test("identity method, host, and liveness uncertainty fail closed", () => {
     getLiveness: () => "alive",
     captureIdentity: () => testIdentity("start", "ps-lstart-utc"),
   }), "unverifiable");
+  let hostMismatchLivenessProbes = 0;
   assert.equal(recordedProcessState(44, recorded, {
-    getLiveness: () => "alive",
+    getLiveness: () => { hostMismatchLivenessProbes += 1; return "dead"; },
     captureIdentity: () => ({ ...recorded, host: "other-host" }),
   }), "unverifiable");
+  assert.equal(hostMismatchLivenessProbes, 0, "host scope must be checked before the local PID namespace");
+  assert.equal(recordedProcessState(44, recorded, {
+    getLiveness: () => "alive",
+    captureIdentity: () => ({ ...recorded, boot: "next-boot" }),
+  }), "gone");
   for (const code of ["EPERM", "EACCES", "EINVAL"]) {
     assert.equal(processLiveness(44, () => { throw Object.assign(new Error(code), { code }); }), "unknown");
   }
@@ -397,6 +405,69 @@ test("retired process groups never reacquire ownership from a reused numeric PGI
   const ownership = { pid: 5151, retired: false };
   assert.equal(latchOwnedProcessGroupRetirement(ownership, true, "dead"), true);
   assert.equal(latchOwnedProcessGroupRetirement(ownership, true, "alive"), true);
+});
+
+test("a reused supervisor PID is recorded but retired from forced ownership", () => {
+  const records = new Map();
+  assert.equal(recordSupervisorOwnership(records, 5151, testIdentity("first")), "recorded");
+  assert.equal(recordSupervisorOwnership(records, 5151, testIdentity("replacement")), "identity-changed-retired");
+  assert.deepEqual(records.get(5151), {
+    pid: 5151,
+    identity: testIdentity("replacement"),
+    retired: true,
+    supersededIdentity: testIdentity("first"),
+  });
+});
+
+test("forced supervisor teardown handles descendants, exit races, PID reuse, and retry", async () => {
+  const identity = testIdentity("owned");
+
+  const exitRace = { pid: 6001, identity, retired: false };
+  let exitRaceProbe = 0;
+  const exitRaceResult = await forceOwnedSupervisorProcessGroup(exitRace, {
+    recordedState: () => exitRaceProbe++ === 0 ? "same" : "gone",
+    signalGroup: () => { throw Object.assign(new Error("gone"), { code: "ESRCH" }); },
+    signalPid: () => assert.fail("a naturally exited supervisor must not receive a PID fallback signal"),
+  });
+  assert.deepEqual(exitRaceResult, { ok: true, status: "gone" });
+
+  const stubbornTree = { pid: 6002, identity, retired: false };
+  const groupStates = ["alive", "alive", "dead"];
+  let clock = 0;
+  const stubbornResult = await forceOwnedSupervisorProcessGroup(stubbornTree, {
+    recordedState: () => "same",
+    groupLiveness: () => groupStates.shift() ?? "dead",
+    pidLiveness: () => "dead",
+    signalGroup: () => {},
+    wait: async () => { clock += 50; },
+    now: () => clock,
+  });
+  assert.deepEqual(stubbornResult, { ok: true, status: "killed" });
+
+  const reused = { pid: 6003, identity, retired: false };
+  let reuseProbe = 0;
+  const reuseResult = await forceOwnedSupervisorProcessGroup(reused, {
+    recordedState: () => reuseProbe++ === 0 ? "same" : "gone",
+    groupLiveness: () => "alive",
+    pidLiveness: () => "alive",
+    signalGroup: () => {},
+  });
+  assert.deepEqual(reuseResult, { ok: true, status: "pid-reused" });
+
+  const retry = { pid: 6004, identity, retired: false };
+  const failed = await forceOwnedSupervisorProcessGroup(retry, {
+    recordedState: () => "same",
+    signalGroup: () => { throw Object.assign(new Error("denied"), { code: "EPERM" }); },
+  });
+  assert.equal(failed.ok, false);
+  assert.equal(retry.retired, false);
+  const retried = await forceOwnedSupervisorProcessGroup(retry, {
+    recordedState: () => "same",
+    groupLiveness: () => "dead",
+    pidLiveness: () => "dead",
+    signalGroup: () => {},
+  });
+  assert.deepEqual(retried, { ok: true, status: "killed" });
 });
 
 test("failed build-lock record writes remove the partial lock", async () => {
@@ -436,6 +507,61 @@ test("malformed build locks are never reclaimed and time out with metadata", asy
     assert.equal(fs.readFileSync(lockPath, "utf-8"), "{partial");
   } finally {
     fs.rmSync(lockPath, { force: true });
+    fs.rmSync(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("malformed main and recovery-guard records remain busy and the CLI refuses them", async () => {
+  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-malformed-publication-"));
+  const lockPath = preparedBuildLockPath(repositoryRoot);
+  try {
+    fs.writeFileSync(lockPath, "");
+    assert.equal(vendoredDistBuildLockStatus(repositoryRoot).reason, "malformed-lock");
+    await assert.rejects(
+      recoverVendoredDistBuildLock(repositoryRoot),
+      /malformed or unreadable/,
+    );
+
+    fs.rmSync(lockPath);
+    fs.writeFileSync(`${lockPath}.recovery`, "");
+    assert.equal(vendoredDistBuildLockStatus(repositoryRoot).reason, "malformed-recovery-guard");
+    await assert.rejects(
+      acquireVendoredDistBuildLock(repositoryRoot, { waitMs: 30, pollMs: 5 }),
+      /timed out waiting for vendored dist build lock/,
+    );
+  } finally {
+    fs.rmSync(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("Windows never automatically recovers an existing vendored-dist lock", async () => {
+  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-windows-scope-"));
+  const lockPath = preparedBuildLockPath(repositoryRoot);
+  try {
+    fs.writeFileSync(lockPath, `${JSON.stringify({
+      schema: 2,
+      token: "dead-windows-owner",
+      pid: 989898,
+      identity: testIdentity("dead-windows"),
+      heartbeat: new Date().toISOString(),
+      workers: [],
+    })}\n`);
+    await assert.rejects(
+      acquireVendoredDistBuildLock(repositoryRoot, {
+        platform: "win32",
+        captureIdentity: () => testIdentity("contender"),
+        getLiveness: () => "dead",
+        waitMs: 30,
+        pollMs: 5,
+      }),
+      /timed out waiting for vendored dist build lock/,
+    );
+    assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf-8")).token, "dead-windows-owner");
+    await assert.rejects(
+      recoverVendoredDistBuildLock(repositoryRoot, { platform: "win32" }),
+      /automatic vendored-dist lock recovery is disabled on Windows.*manually remove/s,
+    );
+  } finally {
     fs.rmSync(repositoryRoot, { recursive: true, force: true });
   }
 });
@@ -560,7 +686,7 @@ test("recovery guard serializes two stale-owner recoverers through reacquisition
       schema: 2,
       token: "stale-token",
       pid: 999999,
-      identity: testIdentity("dead"),
+      identity: captureProcessIdentity(process.pid),
       heartbeat: new Date().toISOString(),
       workers: [],
     })}\n`);

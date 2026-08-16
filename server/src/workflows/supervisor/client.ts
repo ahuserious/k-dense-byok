@@ -121,6 +121,7 @@ export interface WorkflowSupervisorClientDependencies {
 }
 
 export interface EnsureWorkflowSupervisorOptions {
+  onOwnership?(pid: number): void;
   paths?: WorkflowSupervisorRuntimePaths;
   startupTimeoutMs?: number;
   connectTimeoutMs?: number;
@@ -1179,6 +1180,7 @@ async function launchFreshRuntime(
   startupTimeoutMs: number,
   connectTimeoutMs: number,
   pingTimeoutMs: number,
+  onOwnership?: (pid: number) => void,
 ): Promise<FreshWorkflowSupervisorRuntime> {
   assertSocketPathAvailable(paths);
   const child = await dependencies.spawnSupervisor(paths);
@@ -1194,6 +1196,7 @@ async function launchFreshRuntime(
         "Detached workflow supervisor returned invalid process ownership.",
       );
     }
+    onOwnership?.(child.pid);
     const deadline = dependencies.now() + startupTimeoutMs;
     for (;;) {
       const launchedState = dependencies.readRuntimeState(paths);
@@ -1745,6 +1748,7 @@ export async function ensureWorkflowSupervisor(
         pingTimeoutMs,
       );
       if (readyInheritedState) {
+        options.onOwnership?.(readyInheritedState.pid);
         const drainClient = await WorkflowSupervisorClient.attach({
           runtimeState: readyInheritedState,
           paths,
@@ -1778,6 +1782,7 @@ export async function ensureWorkflowSupervisor(
       startupTimeoutMs,
       connectTimeoutMs,
       pingTimeoutMs,
+      options.onOwnership,
     );
     try {
       return await WorkflowSupervisorClient.attach({

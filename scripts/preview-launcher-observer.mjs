@@ -9,7 +9,7 @@ const ENGINE_SPAWN_ANCHOR = `  registerChild(child, "pipeline-engine");
     childExited = true;
   };`;
 const SUPERVISOR_OWNERSHIP_ANCHOR =
-  "      forcedSupervisorOwners.set(message.pid, { pid: message.pid, identity });";
+  "      const result = recordSupervisorOwnership(forcedSupervisorOwners, message.pid, identity);";
 
 const OBSERVER_HELPER = `
 

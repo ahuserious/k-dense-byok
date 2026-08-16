@@ -45,8 +45,21 @@ test("fails closed when launcher anchors drift", () => {
 
 test("backend reports the workflow supervisor before launcher readiness", () => {
   const source = fs.readFileSync(path.join(repositoryRoot, "server", "src", "index.ts"), "utf-8");
-  assert.match(source, /process\.send\?\.\(\{ type: "kady-supervisor", pid: snapshot\.pid \}\)/);
+  assert.match(source, /process\.send\?\.\(\{ type: "kady-supervisor", pid \}\)/);
+  assert.match(source, /ensureWorkflowSupervisor\(\{\s*onOwnership: reportWorkflowSupervisorOwnership,/);
   const readyIndex = source.indexOf('process.send?.({ type: "kady-ready"');
   const finalSupervisorReportIndex = source.lastIndexOf("reportWorkflowSupervisor(", readyIndex);
   assert.ok(finalSupervisorReportIndex >= 0 && finalSupervisorReportIndex < readyIndex);
+});
+
+test("supervisor client reports fresh and inherited ownership before attachment", () => {
+  const source = fs.readFileSync(
+    path.join(repositoryRoot, "server", "src", "workflows", "supervisor", "client.ts"),
+    "utf-8",
+  );
+  assert.match(source, /onOwnership\?\.\(child\.pid\);[\s\S]*const deadline/);
+  assert.match(
+    source,
+    /if \(readyInheritedState\) \{\s*options\.onOwnership\?\.\(readyInheritedState\.pid\);\s*const drainClient = await WorkflowSupervisorClient\.attach/,
+  );
 });

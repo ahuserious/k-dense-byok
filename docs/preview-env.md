@@ -84,12 +84,20 @@ Identity methods are never compared across representations. A missed or old
 heartbeat is never enough to reclaim a lock while any recorded owner or worker
 is alive or unverifiable.
 
-Recovery is serialized by a separate O_EXCL guard next to the main lock. The
+Host scope is checked before probing a PID: another host is always busy and a
+different boot ID on the same host proves the old process is gone. The checkout
+must be used by one host, one PID namespace, and a local filesystem. Containers
+or VMs that share this checkout, shared/network filesystems, and cross-host
+builders are unsupported and therefore fail closed as busy.
+
+Complete lock and guard records are fsynced to temporary inodes and published
+with no-overwrite hard links; zero-byte, partial, or unreadable records remain
+busy and require manual inspection. Recovery is serialized by a separate
+O_EXCL guard next to the main lock. The
 guard covers stale-record inode/content revalidation through acquisition of the
 replacement lock, so concurrent recoverers cannot unlink a successor. A later
 builder automatically recovers only after the wrapper and every recorded Bun
-worker are proven gone, and logs the recovered owner. This protocol is for one
-host on a local filesystem; shared and network filesystems are unsupported.
+worker are proven gone, and logs the recovered owner.
 
 If the bounded wait expires, the error prints the holder PID, start identity,
 absolute lock path, owner/worker metadata, and the supported recovery command.
@@ -99,6 +107,13 @@ changed or any recorded process remains alive or unverifiable:
 ```bash
 node scripts/vendored-dist-build.mjs --recover-lock
 ```
+
+On Windows, automatic recovery and `--recover-lock` are intentionally disabled:
+the gate helper cannot prove the identity of the eventual Bun mutator. Any
+existing lock remains busy. Close every Kady and Bun process, verify no build
+worker remains, then manually remove both `build.lock` and
+`build.lock.recovery`. This lane has no Windows CI coverage; Windows therefore
+uses this documented fail-closed limit rather than an unverified recovery path.
 
 The primary `start.mjs` launcher delegates dependency synchronization and the
 freshness-aware `--if-stale` build to that locked wrapper. Preview mode is

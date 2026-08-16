@@ -195,18 +195,24 @@ function ownersFor(file, laneMatchers) {
 function validatedHandoffs(ownership, laneMatchers) {
   const handoffs = ownership.handoffs ?? [];
   if (!Array.isArray(handoffs)) throw new Error("ownership handoffs must be an array");
+  const delegatedLanesByPath = new Map();
   return handoffs.map((handoff, index) => {
     for (const field of ["from", "to", "path", "scope"]) {
       if (typeof handoff?.[field] !== "string" || handoff[field].trim() === "") {
         throw new Error(`handoff ${index} has invalid ${field}`);
       }
     }
+    if (!laneMatchers[handoff.from]) throw new Error(`handoff ${index} has unknown source lane: ${handoff.from}`);
     if (!laneMatchers[handoff.to]) throw new Error(`handoff ${index} has unknown recipient lane: ${handoff.to}`);
     const fromOwnsPath = ownersFor(handoff.path, laneMatchers).includes(handoff.from);
+    const fromHoldsEarlierHandoff = delegatedLanesByPath.get(handoff.path)?.has(handoff.from) ?? false;
     const policyOwnerHandoff = handoff.from === "R1" && policyControlledPaths.has(handoff.path);
-    if (!fromOwnsPath && !policyOwnerHandoff) {
+    if (!fromOwnsPath && !fromHoldsEarlierHandoff && !policyOwnerHandoff) {
       throw new Error(`handoff ${index} is not from the owner of ${handoff.path}: ${handoff.from}`);
     }
+    const delegatedLanes = delegatedLanesByPath.get(handoff.path) ?? new Set();
+    delegatedLanes.add(handoff.to);
+    delegatedLanesByPath.set(handoff.path, delegatedLanes);
     return handoff;
   });
 }

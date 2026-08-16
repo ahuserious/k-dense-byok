@@ -320,6 +320,30 @@ function validProcessIdentity(identity) {
     typeof identity.boot === "string" && identity.boot;
 }
 
+export function sameProcessIdentity(left, right) {
+  return validProcessIdentity(left) && validProcessIdentity(right) &&
+    left.method === right.method && left.value === right.value &&
+    left.host === right.host && left.boot === right.boot;
+}
+
+export function recordSupervisorOwnership(records, pid, identity) {
+  if (!Number.isSafeInteger(pid) || pid < 1 || !validProcessIdentity(identity)) {
+    return "unverifiable";
+  }
+  const previous = records.get(pid);
+  if (!previous) {
+    records.set(pid, { pid, identity, retired: false });
+    return "recorded";
+  }
+  if (sameProcessIdentity(previous.identity, identity)) return "unchanged";
+  // A later cached snapshot can name a PID that the OS has already reused.
+  // Retain the new observation for diagnostics, but never infer ownership of
+  // that different process from the reused numeric PID.
+  previous.retired = true;
+  records.set(pid, { pid, identity, retired: true, supersededIdentity: previous.identity });
+  return "identity-changed-retired";
+}
+
 export function recordedProcessState(
   pid,
   identity,
@@ -328,12 +352,18 @@ export function recordedProcessState(
     captureIdentity = captureProcessIdentity,
   } = {},
 ) {
+  if (!validProcessIdentity(identity)) return "unverifiable";
+  const localScope = captureIdentity(process.pid);
+  if (!validProcessIdentity(localScope)) return "unverifiable";
+  if (localScope.host !== identity.host) return "unverifiable";
+  if (localScope.boot !== identity.boot) return "gone";
   const liveness = getLiveness(pid);
   if (liveness === "dead") return "gone";
-  if (liveness !== "alive" || !validProcessIdentity(identity)) return "unverifiable";
+  if (liveness !== "alive") return "unverifiable";
   const current = captureIdentity(pid);
   if (!validProcessIdentity(current)) return "unverifiable";
-  if (current.host !== identity.host || current.boot !== identity.boot) return "unverifiable";
+  if (current.host !== identity.host) return "unverifiable";
+  if (current.boot !== identity.boot) return "gone";
   if (current.method !== identity.method) return "unverifiable";
   return current.value === identity.value ? "same" : "gone";
 }
@@ -342,6 +372,74 @@ export function latchOwnedProcessGroupRetirement(record, childExitObserved, grou
   if (record.retired) return true;
   if (childExitObserved && groupLiveness === "dead") record.retired = true;
   return record.retired;
+}
+
+export async function forceOwnedSupervisorProcessGroup(
+  owner,
+  {
+    isWindows = process.platform === "win32",
+    recordedState = (pid, identity) => recordedProcessState(pid, identity),
+    groupLiveness = () => "unknown",
+    pidLiveness = processLiveness,
+    signalGroup = (pid) => process.kill(-pid, "SIGKILL"),
+    signalPid = (pid) => process.kill(pid, "SIGKILL"),
+    wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    now = Date.now,
+    timeoutMs = 5_000,
+  } = {},
+) {
+  if (owner.retired) return { ok: true, status: "retired" };
+  const initialState = recordedState(owner.pid, owner.identity);
+  if (initialState === "gone") {
+    owner.retired = true;
+    return { ok: true, status: "gone" };
+  }
+  if (initialState !== "same") return { ok: false, status: "unverifiable" };
+
+  if (!isWindows) {
+    try {
+      signalGroup(owner.pid);
+    } catch (error) {
+      if (error?.code !== "ESRCH") return { ok: false, status: "signal-failed", error };
+      const fallbackState = recordedState(owner.pid, owner.identity);
+      if (fallbackState === "gone") {
+        owner.retired = true;
+        return { ok: true, status: "gone" };
+      }
+      if (fallbackState !== "same") return { ok: false, status: "unverifiable" };
+      try {
+        signalPid(owner.pid);
+      } catch (fallbackError) {
+        if (fallbackError?.code !== "ESRCH") {
+          return { ok: false, status: "signal-failed", error: fallbackError };
+        }
+      }
+    }
+  } else {
+    try {
+      signalPid(owner.pid);
+    } catch (error) {
+      if (error?.code !== "ESRCH") return { ok: false, status: "signal-failed", error };
+    }
+  }
+
+  const deadline = now() + timeoutMs;
+  while (now() < deadline) {
+    const currentGroupLiveness = isWindows ? pidLiveness(owner.pid) : groupLiveness(owner.pid);
+    if (currentGroupLiveness === "dead") {
+      owner.retired = true;
+      return { ok: true, status: "killed" };
+    }
+    if (currentGroupLiveness === "unknown") {
+      return { ok: false, status: "disappearance-unverifiable" };
+    }
+    if (pidLiveness(owner.pid) === "alive" && recordedState(owner.pid, owner.identity) === "gone") {
+      owner.retired = true;
+      return { ok: true, status: "pid-reused" };
+    }
+    await wait(50);
+  }
+  return { ok: false, status: "timeout" };
 }
 
 export function vendoredDistBuildLockPath(repositoryRoot) {
@@ -364,16 +462,26 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function readLockSnapshot(lockPath) {
+function inspectLockPath(lockPath) {
   try {
     const stat = fs.statSync(lockPath);
     const content = fs.readFileSync(lockPath);
     const record = JSON.parse(content.toString("utf-8"));
-    if (!record || typeof record.token !== "string") return null;
-    return { record, dev: stat.dev, ino: stat.ino, digest: sha256(content) };
-  } catch {
-    return null;
+    if (!stat.isFile() || !record || typeof record.token !== "string") {
+      return { kind: "malformed" };
+    }
+    return {
+      kind: "valid",
+      snapshot: { record, dev: stat.dev, ino: stat.ino, digest: sha256(content) },
+    };
+  } catch (error) {
+    return error?.code === "ENOENT" ? { kind: "absent" } : { kind: "malformed" };
   }
+}
+
+function readLockSnapshot(lockPath) {
+  const inspection = inspectLockPath(lockPath);
+  return inspection.kind === "valid" ? inspection.snapshot : null;
 }
 
 function readBuildLock(lockPath) {
@@ -419,15 +527,18 @@ function snapshotMatches(lockPath, expected) {
 }
 
 function writeExclusiveRecord(lockPath, record, lockFileSystem = fs) {
-  const descriptor = lockFileSystem.openSync(lockPath, "wx", 0o600);
+  const temporaryPath = `${lockPath}.${process.pid}.${randomUUID()}.publish`;
+  const descriptor = lockFileSystem.openSync(temporaryPath, "wx", 0o600);
   try {
     lockFileSystem.writeFileSync(descriptor, `${JSON.stringify(record)}\n`);
     if (typeof lockFileSystem.fsyncSync === "function") lockFileSystem.fsyncSync(descriptor);
     lockFileSystem.closeSync(descriptor);
+    lockFileSystem.linkSync(temporaryPath, lockPath);
   } catch (error) {
     try { lockFileSystem.closeSync(descriptor); } catch { /* original error wins */ }
-    lockFileSystem.rmSync(lockPath, { force: true });
     throw error;
+  } finally {
+    lockFileSystem.rmSync(temporaryPath, { force: true });
   }
 }
 
@@ -456,6 +567,7 @@ function ownerRecord(token, identity) {
 }
 
 async function acquireRecoveryGuard(lockPath, dependencies) {
+  if (dependencies.platform === "win32") return null;
   const guardPath = `${lockPath}.recovery`;
   const token = randomUUID();
   const identity = dependencies.captureIdentity(process.pid);
@@ -473,8 +585,10 @@ async function acquireRecoveryGuard(lockPath, dependencies) {
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
     }
-    const snapshot = readLockSnapshot(guardPath);
-    if (!snapshot) return null;
+    const guardInspection = inspectLockPath(guardPath);
+    if (guardInspection.kind === "absent") continue;
+    if (guardInspection.kind === "malformed") return null;
+    const snapshot = guardInspection.snapshot;
     const status = buildLockOwnerStatus(snapshot.record, dependencies);
     if (!status.recoverable) return null;
     // A hard-link claim pins the validated inode. Removing the public name can
@@ -501,11 +615,22 @@ async function acquireRecoveryGuard(lockPath, dependencies) {
 
 export function vendoredDistBuildLockStatus(repositoryRoot) {
   const lockPath = vendoredDistBuildLockPath(repositoryRoot);
-  const lock = readBuildLock(lockPath);
-  if (!lock) return { active: false, lockPath, lock: null };
-  if (!fs.existsSync(lockPath)) {
-    return { active: false, lockPath, lock: null };
+  const guardInspection = inspectLockPath(`${lockPath}.recovery`);
+  if (guardInspection.kind !== "absent") {
+    return {
+      active: true,
+      recoverable: false,
+      reason: guardInspection.kind === "malformed" ? "malformed-recovery-guard" : "recovery-active",
+      lockPath,
+      lock: null,
+    };
   }
+  const inspection = inspectLockPath(lockPath);
+  if (inspection.kind === "absent") return { active: false, lockPath, lock: null };
+  if (inspection.kind === "malformed") {
+    return { active: true, recoverable: false, reason: "malformed-lock", lockPath, lock: null };
+  }
+  const lock = inspection.snapshot.record;
   return { ...buildLockOwnerStatus(lock), lockPath, lock };
 }
 
@@ -517,6 +642,7 @@ export async function acquireVendoredDistBuildLock(
     lockFileSystem = fs,
     captureIdentity = captureProcessIdentity,
     getLiveness = processLiveness,
+    platform = process.platform,
     logRecovery = console.warn,
     afterStaleLockValidated = async () => {},
   } = {},
@@ -526,7 +652,7 @@ export async function acquireVendoredDistBuildLock(
   const token = randomUUID();
   const identity = captureIdentity(process.pid);
   if (!validProcessIdentity(identity)) throw new Error(`could not determine identity for build-lock PID ${process.pid}`);
-  const dependencies = { captureIdentity, getLiveness };
+  const dependencies = { captureIdentity, getLiveness, platform };
   const deadline = Date.now() + waitMs;
   let recoveryGuard = null;
   const timeoutError = () => {
@@ -550,77 +676,92 @@ export async function acquireVendoredDistBuildLock(
   };
   try {
     while (true) {
-    if (Date.now() >= deadline) {
-      throw timeoutError();
-    }
-    const lock = ownerRecord(token, identity);
-    try {
-      writeExclusiveRecord(lockPath, lock, lockFileSystem);
-      recoveryGuard?.release();
-      recoveryGuard = null;
-      const heartbeat = setInterval(() => {
-        const current = readBuildLock(lockPath);
-        if (current?.token !== token) return;
-        lock.heartbeat = new Date().toISOString();
-        try { writeOwnedRecord(lockPath, lock, token); } catch { /* ownership checks remain authoritative */ }
-      }, 1000);
-      heartbeat.unref();
-      return {
-        lockPath,
-        token,
-        publishWorker(worker) {
-          if (!Number.isSafeInteger(worker?.pid) || !validProcessIdentity(worker.identity) ||
-              !["install", "build"].includes(worker.phase)) {
-            throw new Error("cannot publish an unverifiable vendored-dist worker");
-          }
-          lock.workers = [...lock.workers.filter((entry) => entry.pid !== worker.pid), worker];
-          writeOwnedRecord(lockPath, lock, token);
-        },
-        clearWorker(pid) {
-          lock.workers = lock.workers.filter((entry) => entry.pid !== pid);
-          writeOwnedRecord(lockPath, lock, token);
-        },
-        assertOwned(operation) {
-          if (readBuildLock(lockPath)?.token !== token) {
-            throw new Error(`vendored dist build lock ownership was lost before ${operation}: ${lockPath}`);
-          }
-        },
-        release() {
-          clearInterval(heartbeat);
-          if (readBuildLock(lockPath)?.token === token) fs.rmSync(lockPath, { force: true });
-        },
-      };
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
-    }
-    recoveryGuard = await acquireRecoveryGuard(lockPath, dependencies);
-    if (recoveryGuard) {
-      const snapshot = readLockSnapshot(lockPath);
-      if (!snapshot) continue;
-      const ownerStatus = buildLockOwnerStatus(snapshot.record, dependencies);
-      if (ownerStatus.recoverable) {
-        await afterStaleLockValidated({ lockPath, record: snapshot.record });
-        if (!snapshotMatches(lockPath, snapshot)) {
-          recoveryGuard.release();
-          recoveryGuard = null;
-          continue;
-        }
-        fs.rmSync(lockPath, { force: true });
-        logRecovery(
-          `recovered stale vendored-dist build lock (pid ${snapshot.record.pid}, ` +
-            `identity ${JSON.stringify(snapshot.record.identity)})`,
-        );
+      if (Date.now() >= deadline) throw timeoutError();
+
+      if (platform === "win32" && inspectLockPath(`${lockPath}.recovery`).kind !== "absent") {
+        const remainingMs = deadline - Date.now();
+        await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, remainingMs)));
         continue;
       }
-      recoveryGuard.release();
+      if (platform !== "win32" && !recoveryGuard) {
+        recoveryGuard = await acquireRecoveryGuard(lockPath, dependencies);
+        if (!recoveryGuard) {
+          const remainingMs = deadline - Date.now();
+          await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, remainingMs)));
+          continue;
+        }
+      }
+
+      const inspection = inspectLockPath(lockPath);
+      if (inspection.kind === "absent") {
+        const lock = ownerRecord(token, identity);
+        try {
+          writeExclusiveRecord(lockPath, lock, lockFileSystem);
+        } catch (error) {
+          if (error?.code !== "EEXIST") throw error;
+          continue;
+        }
+        recoveryGuard?.release();
+        recoveryGuard = null;
+        const heartbeat = setInterval(() => {
+          const current = readBuildLock(lockPath);
+          if (current?.token !== token) return;
+          lock.heartbeat = new Date().toISOString();
+          try { writeOwnedRecord(lockPath, lock, token); } catch { /* ownership checks remain authoritative */ }
+        }, 1000);
+        heartbeat.unref();
+        return {
+          lockPath,
+          token,
+          publishWorker(worker) {
+            if (!Number.isSafeInteger(worker?.pid) || !validProcessIdentity(worker.identity) ||
+                !["install", "build"].includes(worker.phase)) {
+              throw new Error("cannot publish an unverifiable vendored-dist worker");
+            }
+            lock.workers = [...lock.workers.filter((entry) => entry.pid !== worker.pid), worker];
+            writeOwnedRecord(lockPath, lock, token);
+          },
+          clearWorker(pid) {
+            lock.workers = lock.workers.filter((entry) => entry.pid !== pid);
+            writeOwnedRecord(lockPath, lock, token);
+          },
+          assertOwned(operation) {
+            if (readBuildLock(lockPath)?.token !== token) {
+              throw new Error(`vendored dist build lock ownership was lost before ${operation}: ${lockPath}`);
+            }
+          },
+          release() {
+            clearInterval(heartbeat);
+            if (readBuildLock(lockPath)?.token === token) fs.rmSync(lockPath, { force: true });
+          },
+        };
+      }
+
+      if (inspection.kind === "valid" && platform !== "win32") {
+        const snapshot = inspection.snapshot;
+        const ownerStatus = buildLockOwnerStatus(snapshot.record, dependencies);
+        if (ownerStatus.recoverable) {
+          await afterStaleLockValidated({ lockPath, record: snapshot.record });
+          if (!snapshotMatches(lockPath, snapshot)) {
+            recoveryGuard.release();
+            recoveryGuard = null;
+            continue;
+          }
+          fs.rmSync(lockPath, { force: true });
+          logRecovery(
+            `recovered stale vendored-dist build lock (pid ${snapshot.record.pid}, ` +
+              `identity ${JSON.stringify(snapshot.record.identity)})`,
+          );
+          continue;
+        }
+      }
+
+      recoveryGuard?.release();
       recoveryGuard = null;
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) throw timeoutError();
+      await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, remainingMs)));
     }
-    const remainingMs = deadline - Date.now();
-    if (remainingMs <= 0) {
-      throw timeoutError();
-    }
-    await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, remainingMs)));
-  }
   } finally {
     recoveryGuard?.release();
   }
@@ -628,16 +769,30 @@ export async function acquireVendoredDistBuildLock(
 
 export async function recoverVendoredDistBuildLock(
   repositoryRoot,
-  { captureIdentity = captureProcessIdentity, getLiveness = processLiveness } = {},
+  {
+    captureIdentity = captureProcessIdentity,
+    getLiveness = processLiveness,
+    platform = process.platform,
+  } = {},
 ) {
   const lockPath = vendoredDistBuildLockPath(repositoryRoot);
+  if (platform === "win32") {
+    throw new Error(
+      "automatic vendored-dist lock recovery is disabled on Windows; close every Kady and Bun process, " +
+        "verify no build worker remains, then manually remove the build.lock and build.lock.recovery files",
+    );
+  }
   fs.mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
-  const dependencies = { captureIdentity, getLiveness };
+  const dependencies = { captureIdentity, getLiveness, platform };
   const guard = await acquireRecoveryGuard(lockPath, dependencies);
   if (!guard) throw new Error(`vendored-dist recovery guard is held at ${lockPath}.recovery`);
   try {
-    const snapshot = readLockSnapshot(lockPath);
-    if (!snapshot) return { recovered: false, lockPath, record: null };
+    const inspection = inspectLockPath(lockPath);
+    if (inspection.kind === "absent") return { recovered: false, lockPath, record: null };
+    if (inspection.kind === "malformed") {
+      throw new Error(`refusing lock recovery because the lock is malformed or unreadable: ${lockPath}`);
+    }
+    const snapshot = inspection.snapshot;
     const status = buildLockOwnerStatus(snapshot.record, dependencies);
     if (!status.recoverable) {
       throw new Error(`refusing lock recovery (${status.reason}): ${JSON.stringify(snapshot.record)}`);

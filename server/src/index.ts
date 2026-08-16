@@ -412,8 +412,11 @@ if (isMain) {
   process.on("message", onLauncherMessage);
 
   let initializingSupervisor: WorkflowSupervisorClient | undefined;
+  const reportWorkflowSupervisorOwnership = (pid: number) => {
+    process.send?.({ type: "kady-supervisor", pid });
+  };
   const reportWorkflowSupervisor = (snapshot: WorkflowSupervisorSnapshot) => {
-    process.send?.({ type: "kady-supervisor", pid: snapshot.pid });
+    reportWorkflowSupervisorOwnership(snapshot.pid);
   };
   const initialized = await (async () => {
     try {
@@ -421,7 +424,9 @@ if (isMain) {
       // HTTP_PROXY/HTTPS_PROXY on its own, so a proxied network would otherwise
       // only be used by the child `pi` processes that run subagents.
       const proxy = configureHttpProxy();
-      initializingSupervisor = await ensureWorkflowSupervisor();
+      initializingSupervisor = await ensureWorkflowSupervisor({
+        onOwnership: reportWorkflowSupervisorOwnership,
+      });
       let lastSupervisorSnapshot = await initializingSupervisor.snapshot();
       reportWorkflowSupervisor(lastSupervisorSnapshot);
       syncHelperVenv(); // best-effort; previews degrade gracefully if it fails

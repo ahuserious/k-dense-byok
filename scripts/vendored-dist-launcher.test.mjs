@@ -37,13 +37,23 @@ async function reserveLocalPort() {
 }
 
 function recordedServicePids(serviceStatePath) {
+  if (!serviceStatePath || !fs.existsSync(serviceStatePath)) return [];
   try {
     const state = JSON.parse(fs.readFileSync(serviceStatePath, "utf-8"));
     return Object.values(state.services ?? {})
       .map((service) => service?.pid)
       .filter((pid) => Number.isSafeInteger(pid));
-  } catch {
-    return [];
+  } catch (error) {
+    assert.fail(`could not read preview service state during cleanup: ${error.message}`);
+  }
+}
+
+function processGroupLiveness(pid) {
+  try {
+    process.kill(-pid, 0);
+    return "alive";
+  } catch (error) {
+    return error?.code === "ESRCH" ? "dead" : "unknown";
   }
 }
 
@@ -54,9 +64,7 @@ async function reapProcessGroups(pids) {
   }
   const deadline = Date.now() + 2_000;
   while (Date.now() < deadline) {
-    const livePid = [...new Set(pids)].find((pid) => {
-      try { process.kill(-pid, 0); return true; } catch { return false; }
-    });
+    const livePid = [...new Set(pids)].find((pid) => processGroupLiveness(pid) !== "dead");
     if (livePid === undefined) return;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
@@ -106,6 +114,11 @@ async function waitForChildExit(child, timeoutMs = 2_000) {
     new Promise((resolve) => child.once("exit", resolve)),
     new Promise((resolve) => setTimeout(resolve, timeoutMs)),
   ]);
+  assert.notEqual(
+    child.exitCode === null && child.signalCode === null,
+    true,
+    `launcher PID ${child.pid} did not exit within ${timeoutMs}ms`,
+  );
 }
 
 async function assertLocalPortClosed(port, message) {
@@ -555,11 +568,20 @@ test(
         frontend: await reserveLocalPort(),
         engine: await reserveLocalPort(),
       };
+      const commandLog = path.join(stateRoot, "commands.jsonl");
       const fakeNpm = path.join(stateRoot, "fake-npm");
       const fakeGit = path.join(stateRoot, "fake-git");
-      fs.writeFileSync(fakeNpm, `#!${process.execPath}\nprocess.exit(0);\n`, { mode: 0o700 });
+      fs.writeFileSync(fakeNpm, `#!${process.execPath}
+import fs from "node:fs";
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(commandLog)}, JSON.stringify({ command: "npm", args }) + "\\n");
+if (args.join(" ") !== "run prep --silent") process.exit(125);
+`, { mode: 0o700 });
       fs.writeFileSync(fakeGit, `#!${process.execPath}
-const args = process.argv.slice(2).join(" ");
+import fs from "node:fs";
+const argv = process.argv.slice(2);
+const args = argv.join(" ");
+fs.appendFileSync(${JSON.stringify(commandLog)}, JSON.stringify({ command: "git", args: argv }) + "\\n");
 if (args === "--version") console.log("git version 2.0.0");
 else if (args === "rev-parse HEAD") console.log("${"a".repeat(40)}");
 else process.exit(2);
@@ -574,8 +596,12 @@ else process.exit(2);
       fs.writeFileSync(
         fakeBun,
         `#!${process.execPath}
+import fs from "node:fs";
 import http from "node:http";
-if (process.argv.includes("--version")) { console.log("1.3.8"); process.exit(0); }
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(commandLog)}, JSON.stringify({ command: "bun", args }) + "\\n");
+if (args.join(" ") === "--version") { console.log("1.3.8"); process.exit(0); }
+if (args.join(" ") !== "--filter @archon/server start") process.exit(125);
 const server = http.createServer((_request, response) => { response.statusCode = 503; response.end("not ready"); });
 const stop = () => server.close(() => process.exit(0));
 process.on("SIGINT", stop); process.on("SIGTERM", stop); process.on("SIGHUP", stop);
@@ -583,7 +609,13 @@ server.listen(Number(process.env.PORT), "127.0.0.1");
 `,
         { mode: 0o700 },
       );
-      fs.writeFileSync(path.join(shimDirectory, "uv"), `#!${process.execPath}\nconsole.log("uv 0.8.0");\n`, { mode: 0o700 });
+      fs.writeFileSync(path.join(shimDirectory, "uv"), `#!${process.execPath}
+import fs from "node:fs";
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(commandLog)}, JSON.stringify({ command: "uv", args }) + "\\n");
+if (args.join(" ") !== "--version") process.exit(125);
+console.log("uv 0.8.0");
+`, { mode: 0o700 });
       serviceStatePath = path.join(stateRoot, "services.json");
       fs.writeFileSync(serviceStatePath, '{"version":1,"services":{}}\n');
       const environment = previewEnvironment(stateRoot, launchRoot, shimDirectory, ports);
@@ -666,6 +698,7 @@ test(
     const serviceStatePath = path.join(stateRoot, "services.json");
     const shutdownReceiptPath = path.join(stateRoot, "backend-received-shutdown");
     const supervisorPidPath = path.join(stateRoot, "supervisor.pid");
+    const supervisorDescendantPidPath = path.join(stateRoot, "supervisor-descendant.pid");
     const observedPids = new Set();
     let launcher;
     let ports;
@@ -675,11 +708,20 @@ test(
         frontend: await reserveLocalPort(),
         engine: await reserveLocalPort(),
       };
+      const commandLog = path.join(stateRoot, "commands.jsonl");
       const fakeNpm = path.join(stateRoot, "fake-npm");
       const fakeGit = path.join(stateRoot, "fake-git");
-      fs.writeFileSync(fakeNpm, `#!${process.execPath}\nprocess.exit(0);\n`, { mode: 0o700 });
+      fs.writeFileSync(fakeNpm, `#!${process.execPath}
+import fs from "node:fs";
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(commandLog)}, JSON.stringify({ command: "npm", args }) + "\\n");
+if (args.join(" ") !== "run prep --silent") process.exit(125);
+`, { mode: 0o700 });
       fs.writeFileSync(fakeGit, `#!${process.execPath}
-const args = process.argv.slice(2).join(" ");
+import fs from "node:fs";
+const argv = process.argv.slice(2);
+const args = argv.join(" ");
+fs.appendFileSync(${JSON.stringify(commandLog)}, JSON.stringify({ command: "git", args: argv }) + "\\n");
 if (args === "--version") console.log("git version 2.0.0");
 else if (args === "rev-parse HEAD") console.log("${"b".repeat(40)}");
 else process.exit(2);
@@ -693,15 +735,25 @@ else process.exit(2);
       fs.writeFileSync(
         path.join(shimDirectory, "bun"),
         `#!${process.execPath}
+import fs from "node:fs";
 import http from "node:http";
-if (process.argv.includes("--version")) { console.log("1.3.8"); process.exit(0); }
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(commandLog)}, JSON.stringify({ command: "bun", args }) + "\\n");
+if (args.join(" ") === "--version") { console.log("1.3.8"); process.exit(0); }
+if (args.join(" ") !== "--filter @archon/server start") process.exit(125);
 const server = http.createServer((_request, response) => response.end("healthy"));
 process.on("SIGTERM", () => {}); process.on("SIGINT", () => {});
 server.listen(Number(process.env.PORT), "127.0.0.1");
 `,
         { mode: 0o700 },
       );
-      fs.writeFileSync(path.join(shimDirectory, "uv"), `#!${process.execPath}\nconsole.log("uv 0.8.0");\n`, { mode: 0o700 });
+      fs.writeFileSync(path.join(shimDirectory, "uv"), `#!${process.execPath}
+import fs from "node:fs";
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(commandLog)}, JSON.stringify({ command: "uv", args }) + "\\n");
+if (args.join(" ") !== "--version") process.exit(125);
+console.log("uv 0.8.0");
+`, { mode: 0o700 });
 
       const environment = previewEnvironment(stateRoot, launchRoot, shimDirectory, ports, {
         PATH: process.env.PATH,
@@ -719,7 +771,15 @@ server.listen(Number(process.env.PORT), "127.0.0.1");
         `import { spawn } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
-const supervisor = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});process.on('SIGINT',()=>{});setInterval(()=>{},1000)"], {
+const supervisor = spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(`
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+const descendant = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { stdio: "ignore" });
+fs.writeFileSync(${JSON.stringify(supervisorDescendantPidPath)}, String(descendant.pid));
+process.on("SIGTERM", () => {});
+process.on("SIGINT", () => {});
+setInterval(() => {}, 1000);
+`)}], {
   detached: true,
   stdio: "ignore",
 });
@@ -796,6 +856,9 @@ server.listen(Number(process.argv[portIndex + 1]), "127.0.0.1");
       assert.ok(Number.isSafeInteger(enginePid), startupFailureDetails);
       assert.ok(Number.isSafeInteger(supervisorPid), startupFailureDetails);
       assert.equal(supervisorPid, Number(fs.readFileSync(supervisorPidPath, "utf-8")), output);
+      const supervisorDescendantPid = Number(fs.readFileSync(supervisorDescendantPidPath, "utf-8"));
+      assert.ok(Number.isSafeInteger(supervisorDescendantPid), startupFailureDetails);
+      observedPids.add(supervisorDescendantPid);
       await waitForLocalPortOpen(ports.backend, "fake backend");
       await waitForLocalPortOpen(ports.frontend, "fake frontend");
 
@@ -821,6 +884,7 @@ server.listen(Number(process.argv[portIndex + 1]), "127.0.0.1");
       assert.throws(() => process.kill(-frontendPid, 0), (error) => error?.code === "ESRCH");
       assert.throws(() => process.kill(-enginePid, 0), (error) => error?.code === "ESRCH");
       assert.throws(() => process.kill(supervisorPid, 0), (error) => error?.code === "ESRCH");
+      assert.throws(() => process.kill(supervisorDescendantPid, 0), (error) => error?.code === "ESRCH");
       await assertLocalPortClosed(ports.backend, "backend listener survived forced shutdown");
       await assertLocalPortClosed(ports.frontend, "frontend listener survived forced shutdown");
     } finally {
@@ -830,6 +894,9 @@ server.listen(Number(process.argv[portIndex + 1]), "127.0.0.1");
       await waitForChildExit(launcher);
       for (const pid of recordedServicePids(serviceStatePath)) observedPids.add(pid);
       if (fs.existsSync(supervisorPidPath)) observedPids.add(Number(fs.readFileSync(supervisorPidPath, "utf-8")));
+      if (fs.existsSync(supervisorDescendantPidPath)) {
+        observedPids.add(Number(fs.readFileSync(supervisorDescendantPidPath, "utf-8")));
+      }
       await reapProcessGroups([...observedPids].filter(Number.isSafeInteger));
       await assertLocalPortClosed(ports?.backend, "backend listener leaked during test cleanup");
       await assertLocalPortClosed(ports?.frontend, "frontend listener leaked during test cleanup");

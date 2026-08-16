@@ -1,10 +1,26 @@
 import fs from "node:fs";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import os from "node:os";
+import path from "node:path";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   PipelineReconciliationWorker,
   queryEngineRunByAdmissionId,
 } from "../src/api/pipelines.ts";
 import { createProject, getProject } from "../src/projects.ts";
+
+const previousProjectsRoot = process.env.KADY_PROJECTS_ROOT;
+let isolatedProjectsRoot: string;
+
+beforeAll(() => {
+  isolatedProjectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-pipelines-disabled-"));
+  process.env.KADY_PROJECTS_ROOT = isolatedProjectsRoot;
+});
+
+afterAll(() => {
+  if (previousProjectsRoot === undefined) delete process.env.KADY_PROJECTS_ROOT;
+  else process.env.KADY_PROJECTS_ROOT = previousProjectsRoot;
+  fs.rmSync(isolatedProjectsRoot, { recursive: true, force: true });
+});
 
 beforeEach(() => {
   fs.mkdirSync(process.env.KADY_PROJECTS_ROOT!, { recursive: true });

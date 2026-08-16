@@ -181,6 +181,25 @@ test("writer validation reads policy from the trusted fixture base", () => {
   }
 });
 
+test("a same-path handoff recipient may issue a later scoped handoff", () => {
+  const { checkout } = createGitFixture();
+  try {
+    const policyPath = path.join(checkout, "docs/inventory/ownership.json");
+    const policy = JSON.parse(fs.readFileSync(policyPath, "utf-8"));
+    policy.handoffs.push(
+      { from: "S2", to: "C1", path: "other/source.txt", scope: "first scoped delegation" },
+      { from: "C1", to: "R1", path: "other/source.txt", scope: "later scoped delegation" },
+    );
+    writeFixtureFile(checkout, "docs/inventory/ownership.json", `${JSON.stringify(policy, null, 2)}\n`);
+
+    const result = runChecker(checkout);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /ownership-check: PASS/);
+  } finally {
+    fs.rmSync(checkout, { recursive: true, force: true });
+  }
+});
+
 test("worktree mode includes tracked but uncommitted changes", () => {
   const { checkout, base } = createGitFixture();
   try {

@@ -13,6 +13,7 @@ import {
   writeVendoredDistManifest,
 } from "./vendored-dist-check.mjs";
 import {
+  captureProcessIdentity,
   classifyVendoredDistAfterBuildFailure,
   previewVendoredDistFingerprintEnvironment,
 } from "./vendored-dist-environment.mjs";
@@ -697,6 +698,13 @@ fs.writeFileSync(path.join(dist, "assets", "app.js"), "console.log('built');\\n"
 
 test("--recover-lock removes only an identity-verified dead owner", () => {
   withFixture((fixture) => {
+    const localIdentity = captureProcessIdentity(process.pid, {
+      spawnProcess: (command, arguments_, options) => spawnSync(command, arguments_, {
+        ...options,
+        env: fixture.environment,
+      }),
+    });
+    assert.ok(localIdentity);
     const lockPath = path.join(
       fixture.root,
       vendoredRelative,
@@ -709,12 +717,7 @@ test("--recover-lock removes only an identity-verified dead owner", () => {
       schema: 2,
       token: "dead-cli-owner",
       pid: 999999,
-      identity: {
-        method: "ps-lstart-utc",
-        value: "Sun Aug 16 09:00:00 2026",
-        host: "fixture-host",
-        boot: "darwin-boot-seconds:12345",
-      },
+      identity: localIdentity,
       heartbeat: new Date().toISOString(),
       workers: [],
     })}\n`);

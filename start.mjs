@@ -21,14 +21,14 @@ import {
   classifyWorkflowEngineBuildOutcome,
   classifyWorkflowEngineListener,
   captureProcessIdentity,
+  forceOwnedSupervisorProcessGroup,
   latchOwnedProcessGroupRetirement,
   missingPreviewLauncherDependencies,
   prepareLauncherDependencies,
   previewVendoredDistFingerprintEnvironment,
   resolveWorkflowEnginePort,
   scrubSensitiveEnvironment,
-  processLiveness,
-  recordedProcessState,
+  recordSupervisorOwnership,
   terminateOwnedProcessTree,
   vendoredDistBuildLockStatus,
   waitForOwnedWorkflowEngine,
@@ -556,7 +556,13 @@ function startService(label, dir, npmArgs, options = {}) {
         console.error(`  ${sym.err} Could not capture workflow supervisor PID ${message.pid} identity.`);
         return;
       }
-      forcedSupervisorOwners.set(message.pid, { pid: message.pid, identity });
+      const result = recordSupervisorOwnership(forcedSupervisorOwners, message.pid, identity);
+      if (result === "identity-changed-retired") {
+        console.error(
+          `  ${sym.warn} Workflow supervisor PID ${message.pid} was reused; ` +
+            "the replacement is not eligible for forced shutdown.",
+        );
+      }
     });
   }
   // Fires for both exit-code and signal deaths, during boot and after.
@@ -981,25 +987,46 @@ async function performForcedShutdown(signal) {
     }
   }
   const killedSupervisors = [];
+  let forceFailed = false;
   for (const owner of forcedSupervisorOwners.values()) {
-    const state = recordedProcessState(owner.pid, owner.identity);
-    if (state === "gone") continue;
-    if (state !== "same") {
-      throw new Error(`workflow supervisor PID ${owner.pid} identity became unverifiable during forced shutdown`);
+    const result = await forceOwnedSupervisorProcessGroup(owner, {
+      isWindows: isWin,
+      groupLiveness: processGroupLiveness,
+    });
+    if (result.ok) {
+      if (result.status === "killed") killedSupervisors.push(owner);
+      continue;
     }
-    process.kill(owner.pid, "SIGKILL");
-    killedSupervisors.push(owner);
+    console.error(
+      `  ${sym.err} Workflow supervisor PID ${owner.pid} forced shutdown failed (${result.status}); ` +
+        "a later explicit signal may retry.",
+    );
+    forceFailed = true;
   }
   log(`Forcing shutdown: ${liveChildren.length + killedSupervisors.length} owned process trees killed`);
-  await Promise.all(children.map(waitForOwnedTree));
-  for (const owner of killedSupervisors) {
-    while (processLiveness(owner.pid) !== "dead") await sleep(50);
+  const forceDeadline = Date.now() + 5_000;
+  while (children.some((child) => !ownedTreeGone(child)) && Date.now() < forceDeadline) {
+    await sleep(50);
   }
+  if (children.some((child) => !ownedTreeGone(child))) {
+    console.error(`  ${sym.err} Forced child process-group shutdown did not complete within 5000ms.`);
+    forceFailed = true;
+  }
+  if (forceFailed) return false;
   process.exit(shutdownExitCode);
 }
 
 function forceShutdown(signal) {
-  forceShutdownPromise ??= performForcedShutdown(signal);
+  if (!forceShutdownPromise) {
+    const attempt = performForcedShutdown(signal).catch((error) => {
+      console.error(`  ${sym.err} Forced shutdown attempt failed: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    });
+    const trackedAttempt = attempt.finally(() => {
+      if (forceShutdownPromise === trackedAttempt) forceShutdownPromise = null;
+    });
+    forceShutdownPromise = trackedAttempt;
+  }
   return forceShutdownPromise;
 }
 
