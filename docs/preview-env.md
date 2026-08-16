@@ -44,8 +44,11 @@ The wrapper runs `bun install --frozen-lockfile` when either the ignored
 differs. The stamp covers every workspace package manifest and is written only
 when the install-input digest is unchanged before and after Bun runs. A
 checkout-specific temp lock records an owner token, PID/start identity, and
-heartbeat; contenders wait for the owner and recheck freshness. Builds publish
-by renaming a fully validated staging tree instead of rewriting live `dist/`.
+heartbeat; an exact live PID/start identity is never reclaimed merely because
+its heartbeat is old. Builders revalidate their token immediately before Bun
+can mutate dependencies and before dist promotion. Contenders wait for the
+owner and recheck freshness. Builds publish by renaming a fully validated
+staging tree instead of rewriting live `dist/`.
 The wrapper fingerprints inputs both before and after Bun runs and writes no
 manifest when those fingerprints differ. The post-build check recomputes that
 context, validates every recorded output, and verifies every browser-loaded
@@ -78,12 +81,18 @@ validate. Build-only defaults such as `NODE_ENV=production` are passed only to
 Bun/Vite and the manifest checker; they are never exported to the launcher,
 npm, backend, or frontend. It reuses a listener
 only when the PID belongs to this checkout, the health endpoint responds, and
-the manifest is fresh. Engine-port ownership is checked before backend/frontend
-spawn; a foreign listener aborts startup rather than becoming the backend's
-proxy target. When the optional engine is unavailable, the backend receives an
-explicit disabled endpoint and pipeline routes return 503. The workflow
-engine remains optional: missing Bun still skips it, and a build/validation
-failure warns with the repair command above and lets the rest of Kady continue.
+the manifest is fresh. A newly spawned engine is not marked available until a
+listener in that child's process tree answers health and remains owned after
+the response. Engine-port ownership is checked before backend/frontend spawn;
+a foreign listener aborts startup rather than becoming the backend's proxy
+target. A later engine exit or listener takeover terminates the launch instead
+of leaving consumers pointed at a dead or foreign process. When the optional
+engine is unavailable, the backend receives an explicit disabled state and
+pipeline routes—including durable-admission reconciliation—return 503 without
+fetching the configured engine URL. Missing Bun still skips the engine, and a
+build/validation failure warns with the repair command above and lets the rest
+of Kady continue. CLI engine-port selection takes precedence, but `.env` modern
+and legacy port values are loaded before the launcher resolves the fallback.
 
 `preview-up` creates a unique `/tmp/kady-preview-*` directory, including fresh
 project, Pi-agent, skills-cache, workflow-supervisor, and log paths. It creates

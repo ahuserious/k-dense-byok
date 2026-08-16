@@ -7,7 +7,6 @@ import { createHash, randomUUID } from "node:crypto";
 const sensitiveEnvironmentNamePattern =
   /(?:^|_)(?:API_KEY|AUTH[^_]*|CREDENTIALS?|DATABASE_URL|KEY|MYSQL_PWD|PASSWORD|PAT|PGPASSWORD|SECRET|TOKEN)(?:_|$)/i;
 const previewBuildEnvironmentNames = ["HOME", "PATH", "NODE_ENV", "PORT", "TMPDIR", "LANG", "CI"];
-const buildLockHeartbeatTimeoutMs = 10 * 60 * 1000;
 const usableStaleStatuses = new Set([
   "stale-inputs",
   "stale-git-head",
@@ -80,6 +79,67 @@ export function workflowEngineConsumerEnvironment(
       : environment.NEXT_PUBLIC_PIPELINE_ENGINE_URL ?? localOrigin,
     KADY_PIPELINE_ENGINE_DISABLED: "0",
   };
+}
+
+export function resolveWorkflowEnginePort(environment, cliPort = null) {
+  const value = cliPort ?? environment.KADY_PIPELINE_ENGINE_PORT ?? environment.KADY_ARCHON_PORT ?? 3091;
+  const port = typeof value === "number" ? value : Number(value);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`workflow engine port must be an integer from 1 through 65535; received ${JSON.stringify(value)}`);
+  }
+  return port;
+}
+
+export function workflowEnginePrerequisiteStatus({ sourcesPresent, bunPath }) {
+  if (!sourcesPresent) return { available: false, reason: "missing-sources" };
+  if (!bunPath) return { available: false, reason: "missing-bun" };
+  return { available: true, reason: "ready" };
+}
+
+export async function waitForOwnedWorkflowEngine({
+  childPid,
+  childExited,
+  listenersOn,
+  isOwnedByChild,
+  probeHealth,
+  wait,
+  timeoutMs = 30_000,
+  pollMs = 200,
+  now = Date.now,
+}) {
+  const deadline = now() + timeoutMs;
+  while (now() < deadline) {
+    if (childExited()) return { status: "child-exited" };
+    const listenerPids = listenersOn();
+    const foreignPid = listenerPids.find((pid) => !isOwnedByChild(pid, childPid));
+    if (foreignPid !== undefined) return { status: "foreign-listener", foreignPid };
+    if (listenerPids.length > 0 && await probeHealth()) {
+      const verifiedPids = listenersOn();
+      const takeoverPid = verifiedPids.find((pid) => !isOwnedByChild(pid, childPid));
+      if (takeoverPid !== undefined) return { status: "foreign-listener", foreignPid: takeoverPid };
+      if (!childExited() && verifiedPids.length > 0) {
+        return { status: "ready", listenerPids: verifiedPids };
+      }
+    }
+    await wait(Math.min(pollMs, Math.max(0, deadline - now())));
+  }
+  return { status: childExited() ? "child-exited" : "timeout" };
+}
+
+export function workflowEngineRuntimeOwnership({
+  listenerPids,
+  childPid = null,
+  ownerPids = [],
+  isOwnedByChild,
+  isOwnedByCheckout,
+}) {
+  const foreignPid = listenerPids.find((pid) => !isOwnedByCheckout(pid));
+  const owned = childPid === null
+    ? listenerPids.some((pid) => ownerPids.includes(pid) && isOwnedByCheckout(pid))
+    : listenerPids.some((pid) => isOwnedByChild(pid, childPid));
+  return owned && foreignPid === undefined
+    ? { status: "owned" }
+    : { status: foreignPid === undefined ? "missing" : "foreign", foreignPid };
 }
 
 export function prepareLauncherDependencies({
@@ -185,16 +245,16 @@ export function vendoredDistBuildLockStatus(repositoryRoot) {
   const lock = readBuildLock(lockPath);
   if (!lock) return { active: false, lockPath, lock: null };
   const currentStart = processStartIdentity(lock.pid);
-  let heartbeatAgeMs = Number.POSITIVE_INFINITY;
-  try {
-    heartbeatAgeMs = Date.now() - fs.statSync(lockPath).mtimeMs;
-  } catch {
+  if (!fs.existsSync(lockPath)) {
     return { active: false, lockPath, lock: null };
   }
   const startIdentityMatches = currentStart === null
     ? processAlive(lock.pid) && String(lock.processStart).startsWith("node-start-seconds:")
     : currentStart === lock.processStart;
-  const active = startIdentityMatches && Number.isFinite(heartbeatAgeMs) && heartbeatAgeMs <= buildLockHeartbeatTimeoutMs;
+  // An exact PID/start-identity match is authoritative even if the owner was
+  // paused long enough to miss heartbeats. Reclaiming it would create two
+  // writers when that process resumes.
+  const active = startIdentityMatches;
   return { active, lockPath, lock };
 }
 
@@ -243,6 +303,11 @@ export async function acquireVendoredDistBuildLock(
       return {
         lockPath,
         token,
+        assertOwned(operation) {
+          if (readBuildLock(lockPath)?.token !== token) {
+            throw new Error(`vendored dist build lock ownership was lost before ${operation}: ${lockPath}`);
+          }
+        },
         release() {
           clearInterval(heartbeat);
           if (readBuildLock(lockPath)?.token === token) fs.rmSync(lockPath, { force: true });

@@ -2,10 +2,13 @@ const OBSERVER_HELPER_ANCHOR = "const sleep = (ms) => new Promise((r) => setTime
 const SERVICE_EXIT_ANCHOR = `  children.push(child);
   // Fires for both exit-code and signal deaths, during boot and after.
   child.on("exit", () => {`;
-const ENGINE_EXIT_ANCHOR = `  children.push(child);
-  // Unlike the backend/frontend, an engine death is a degradation, not a
-  // launcher failure: the /pipelines proxy answers 503 while it is down.
-  child.on("exit", () => {`;
+const ENGINE_SPAWN_ANCHOR = `  children.push(child);
+  let childExited = false;
+  const trackEarlyExit = () => {
+    childExited = true;
+  };`;
+const ENGINE_EXIT_ANCHOR = `  child.on("exit", () => {
+    if (shuttingDown) return;`;
 
 const OBSERVER_HELPER = `
 
@@ -32,6 +35,9 @@ function recordPreviewServiceState(role, pid, state, exitCode = null, signal = n
   const temporaryPath = \`\${previewServiceStateFile}.\${process.pid}.tmp\`;
   fs.writeFileSync(temporaryPath, \`\${JSON.stringify(current, null, 2)}\\n\`, { mode: 0o600 });
   fs.renameSync(temporaryPath, previewServiceStateFile);
+}
+function recordPreviewEngineExit(child, exitCode, signal) {
+  recordPreviewServiceState(child.kadyRole, child.pid, "exited", exitCode, signal);
 }`;
 
 function replaceExactlyOnce(source, anchor, replacement, label) {
@@ -59,15 +65,24 @@ export function instrumentPreviewLauncher(source) {
     recordPreviewServiceState(child.kadyRole, child.pid, "exited", exitCode, signal);`,
     "backend/frontend service hook",
   );
+  instrumented = replaceExactlyOnce(
+    instrumented,
+    ENGINE_SPAWN_ANCHOR,
+    `  children.push(child);
+  recordPreviewServiceState(child.kadyRole, child.pid, "spawned");
+  let childExited = false;
+  const trackEarlyExit = (exitCode, signal) => {
+    childExited = true;
+    recordPreviewEngineExit(child, exitCode, signal);
+  };`,
+    "workflow-engine spawn hook",
+  );
   return replaceExactlyOnce(
     instrumented,
     ENGINE_EXIT_ANCHOR,
-    `  children.push(child);
-  recordPreviewServiceState(child.kadyRole, child.pid, "spawned");
-  // Unlike the backend/frontend, an engine death is a degradation, not a
-  // launcher failure: the /pipelines proxy answers 503 while it is down.
-  child.on("exit", (exitCode, signal) => {
-    recordPreviewServiceState(child.kadyRole, child.pid, "exited", exitCode, signal);`,
-    "workflow-engine service hook",
+    `  child.on("exit", (exitCode, signal) => {
+    recordPreviewEngineExit(child, exitCode, signal);
+    if (shuttingDown) return;`,
+    "workflow-engine exit hook",
   );
 }

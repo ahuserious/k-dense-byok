@@ -14,6 +14,7 @@ import {
   previewVendoredDistEnvironment,
   scrubSensitiveEnvironment,
   vendoredDistBuildLockPath,
+  vendoredDistBuildLockStatus,
 } from "./vendored-dist-environment.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -371,6 +372,39 @@ test("persistent malformed-lock contention reaches its deadline", async () => {
       /timed out waiting for vendored dist build lock/,
     );
     assert.ok(Date.now() - startedAt < 500, "lock recovery must not spin past its deadline");
+  } finally {
+    fs.rmSync(lockPath, { force: true });
+    fs.rmSync(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("an old-heartbeat build lock remains active while its exact owner is live", async () => {
+  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-live-owner-"));
+  const lockPath = vendoredDistBuildLockPath(repositoryRoot);
+  try {
+    const lock = await acquireVendoredDistBuildLock(repositoryRoot);
+    const old = new Date(Date.now() - 20 * 60 * 1000);
+    fs.utimesSync(lockPath, old, old);
+    assert.equal(vendoredDistBuildLockStatus(repositoryRoot).active, true);
+    lock.release();
+  } finally {
+    fs.rmSync(lockPath, { force: true });
+    fs.rmSync(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("build lock ownership is revalidated before mutations and promotion", async () => {
+  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-token-loss-"));
+  const lockPath = vendoredDistBuildLockPath(repositoryRoot);
+  try {
+    const lock = await acquireVendoredDistBuildLock(repositoryRoot);
+    const replacement = JSON.parse(fs.readFileSync(lockPath, "utf-8"));
+    replacement.token = "replacement-owner-token";
+    fs.writeFileSync(lockPath, `${JSON.stringify(replacement)}\n`);
+    assert.throws(() => lock.assertOwned("dependency installation"), /ownership was lost/);
+    assert.throws(() => lock.assertOwned("dist promotion"), /ownership was lost/);
+    lock.release();
+    assert.equal(fs.existsSync(lockPath), true, "the old owner must not remove its successor's lock");
   } finally {
     fs.rmSync(lockPath, { force: true });
     fs.rmSync(repositoryRoot, { recursive: true, force: true });

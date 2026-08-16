@@ -6,10 +6,15 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { applyEnvFile } from "../env-file.mjs";
 import {
   classifyWorkflowEngineBuildOutcome,
   classifyWorkflowEngineListener,
+  resolveWorkflowEnginePort,
+  waitForOwnedWorkflowEngine,
   workflowEngineConsumerEnvironment,
+  workflowEnginePrerequisiteStatus,
+  workflowEngineRuntimeOwnership,
 } from "./vendored-dist-environment.mjs";
 
 const ownedPids = new Set([101, 102]);
@@ -95,6 +100,39 @@ test("resolved environment port fills missing consumers without replacing an exp
   assert.equal(environment.KADY_PIPELINE_ENGINE_PORT, "13191");
   assert.equal(environment.PIPELINE_ENGINE_BASE_URL, "http://127.0.0.1:13191");
   assert.equal(environment.NEXT_PUBLIC_PIPELINE_ENGINE_URL, "https://preview.example.test");
+});
+
+test("engine port is resolved after modern or legacy values are loaded solely from .env", () => {
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-engine-port-env-"));
+  const envPath = path.join(fixtureRoot, ".env");
+  const previousModern = process.env.KADY_PIPELINE_ENGINE_PORT;
+  const previousLegacy = process.env.KADY_ARCHON_PORT;
+  try {
+    delete process.env.KADY_PIPELINE_ENGINE_PORT;
+    delete process.env.KADY_ARCHON_PORT;
+    fs.writeFileSync(envPath, "KADY_PIPELINE_ENGINE_PORT=13191\n");
+    assert.equal(applyEnvFile(envPath, { override: true }), true);
+    assert.equal(resolveWorkflowEnginePort(process.env), 13191);
+
+    delete process.env.KADY_PIPELINE_ENGINE_PORT;
+    fs.writeFileSync(envPath, "KADY_ARCHON_PORT=13192\n");
+    assert.equal(applyEnvFile(envPath, { override: true }), true);
+    assert.equal(resolveWorkflowEnginePort(process.env), 13192);
+    assert.equal(resolveWorkflowEnginePort(process.env, 13193), 13193);
+  } finally {
+    if (previousModern === undefined) delete process.env.KADY_PIPELINE_ENGINE_PORT;
+    else process.env.KADY_PIPELINE_ENGINE_PORT = previousModern;
+    if (previousLegacy === undefined) delete process.env.KADY_ARCHON_PORT;
+    else process.env.KADY_ARCHON_PORT = previousLegacy;
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("full-start prerequisite decision disables the engine when Bun is missing", () => {
+  assert.deepEqual(
+    workflowEnginePrerequisiteStatus({ sourcesPresent: true, bunPath: null }),
+    { available: false, reason: "missing-bun" },
+  );
 });
 
 test("disabled pipeline client rejects before fetch even when HTTP_PROXY is set", async () => {
@@ -266,6 +304,66 @@ test(
       if (foreign.connected) foreign.send("stop");
       await new Promise((resolve) => foreign.once("exit", resolve));
       fs.rmSync(foreignRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "workflow engine readiness rejects a bind-race before probing foreign HTTP",
+  { skip: process.env.KADY_SOCKET_TESTS === "1" ? false : "requires local socket binding; orchestrator runs with KADY_SOCKET_TESTS=1" },
+  async () => {
+    const foreign = net.createServer();
+    await new Promise((resolve, reject) => {
+      foreign.once("error", reject);
+      foreign.listen(0, "127.0.0.1", resolve);
+    });
+    let probes = 0;
+    try {
+      const result = await waitForOwnedWorkflowEngine({
+        childPid: 101,
+        childExited: () => false,
+        listenersOn: () => [999],
+        isOwnedByChild: () => false,
+        probeHealth: async () => {
+          probes += 1;
+          return true;
+        },
+        wait: async () => {},
+        timeoutMs: 100,
+      });
+      assert.deepEqual(result, { status: "foreign-listener", foreignPid: 999 });
+      assert.equal(probes, 0);
+    } finally {
+      await new Promise((resolve) => foreign.close(resolve));
+    }
+  },
+);
+
+test(
+  "post-exit foreign takeover is classified for launcher termination without requests",
+  { skip: process.env.KADY_SOCKET_TESTS === "1" ? false : "requires local socket binding; orchestrator runs with KADY_SOCKET_TESTS=1" },
+  async () => {
+    let requests = 0;
+    const foreign = net.createServer((socket) => {
+      requests += 1;
+      socket.end();
+    });
+    await new Promise((resolve, reject) => {
+      foreign.once("error", reject);
+      foreign.listen(0, "127.0.0.1", resolve);
+    });
+    try {
+      const ownership = workflowEngineRuntimeOwnership({
+        listenerPids: [999],
+        childPid: 101,
+        ownerPids: [101],
+        isOwnedByChild: () => false,
+        isOwnedByCheckout: () => false,
+      });
+      assert.deepEqual(ownership, { status: "foreign", foreignPid: 999 });
+      assert.equal(requests, 0);
+    } finally {
+      await new Promise((resolve) => foreign.close(resolve));
     }
   },
 );

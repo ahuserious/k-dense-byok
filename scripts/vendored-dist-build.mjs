@@ -118,6 +118,7 @@ try {
   if (installStatus.needsInstall) {
     const installInputsBefore = expectedVendoredInstallStamp(options.root, buildEnvironment);
     console.log(`vendored-dist-build: dependency stamp stale; running \`bun install --frozen-lockfile\` in ${vendoredRoot}`);
+    buildLock.assertOwned("dependency installation");
     const install = await runCommand("bun", ["install", "--frozen-lockfile"], {
       cwd: vendoredRoot,
       env: buildEnvironment,
@@ -164,6 +165,7 @@ try {
       stagingDirectory,
     );
     validateVendoredDistOutputTree(options.root, stagingDirectory, manifest);
+    buildLock.assertOwned("dist promotion");
     const promotion = promoteStagingDirectory(stagingDirectory, distDirectory, buildLock.token);
     stagingDirectory = null;
 

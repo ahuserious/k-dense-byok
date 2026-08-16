@@ -23,9 +23,13 @@ import {
   missingPreviewLauncherDependencies,
   prepareLauncherDependencies,
   previewVendoredDistFingerprintEnvironment,
+  resolveWorkflowEnginePort,
   scrubSensitiveEnvironment,
   vendoredDistBuildLockStatus,
+  waitForOwnedWorkflowEngine,
   workflowEngineConsumerEnvironment,
+  workflowEnginePrerequisiteStatus,
+  workflowEngineRuntimeOwnership,
 } from "./scripts/vendored-dist-environment.mjs";
 
 const repoRoot = path.dirname(fileURLToPath(import.meta.url));
@@ -436,6 +440,7 @@ async function freePort(port, label) {
 
 const children = [];
 let shuttingDown = false;
+let engineOwnershipMonitor = null;
 
 /** True once the child has terminated — by exit code OR by signal (a
  *  signal-killed child keeps exitCode === null and sets signalCode). */
@@ -507,13 +512,7 @@ function startService(label, dir, npmArgs, options = {}) {
 // ---- Workflow engine (vendored bun workspace, optional) ----------------------
 
 const PIPELINE_ENGINE_DIR = path.join(repoRoot, "server", "vendor", "pipeline-engine");
-const legacyPipelineEnginePort = process.env.KADY_ARCHON_PORT;
-if (!process.env.KADY_PIPELINE_ENGINE_PORT && legacyPipelineEnginePort) {
-  log("  [deprecated] KADY_ARCHON_PORT is deprecated; use KADY_PIPELINE_ENGINE_PORT instead.");
-}
-const PIPELINE_ENGINE_PORT = Number(
-  flags.enginePort ?? process.env.KADY_PIPELINE_ENGINE_PORT ?? legacyPipelineEnginePort ?? 3091,
-);
+let PIPELINE_ENGINE_PORT = null;
 
 function assertNoForeignWorkflowEngineListener() {
   const pids = listenersOn(PIPELINE_ENGINE_PORT);
@@ -528,6 +527,61 @@ function assertNoForeignWorkflowEngineListener() {
   return pids;
 }
 
+function ownedByWorkflowEngineChild(pid, childPid) {
+  if (!ownedByThisRepo(pid)) return false;
+  if (Number(pid) === Number(childPid)) return true;
+  if (isWin) {
+    const script = [
+      `$current = Get-CimInstance Win32_Process -Filter 'ProcessId=${Number(pid)}'`,
+      `while ($current -and $current.ParentProcessId -gt 0) {`,
+      `  if ($current.ParentProcessId -eq ${Number(childPid)}) { Write-Output owned; exit 0 }`,
+      `  $current = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $current.ParentProcessId)`,
+      `}`,
+      `exit 1`,
+    ].join("; ");
+    return capture("powershell", ["-NoProfile", "-Command", script]) === "owned";
+  }
+  const processGroup = capture("ps", ["-o", "pgid=", "-p", String(pid)]);
+  return processGroup !== null && Number(processGroup.trim()) === Number(childPid);
+}
+
+async function stopUnreadyWorkflowEngine(child) {
+  if (gone(child)) return;
+  if (isWin) capture("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
+  else {
+    try {
+      process.kill(-child.pid, "SIGTERM");
+    } catch {
+      child.kill("SIGTERM");
+    }
+  }
+  await Promise.race([waitForOwnedTree(child), sleep(5_000)]);
+}
+
+function monitorWorkflowEngineOwnership(engineState) {
+  engineOwnershipMonitor = setInterval(() => {
+    if (shuttingDown) return;
+    const listenerPids = listenersOn(PIPELINE_ENGINE_PORT);
+    const ownership = workflowEngineRuntimeOwnership({
+      listenerPids,
+      childPid: engineState.childPid ?? null,
+      ownerPids: engineState.ownerPids,
+      isOwnedByChild: ownedByWorkflowEngineChild,
+      isOwnedByCheckout: ownedByThisRepo,
+    });
+    if (ownership.status === "owned") return;
+    clearInterval(engineOwnershipMonitor);
+    engineOwnershipMonitor = null;
+    console.error(`\n  ${sym.err} The workflow engine listener is no longer owned by this launch.`);
+    if (ownership.status === "foreign") {
+      console.error(`    Port ${PIPELINE_ENGINE_PORT} was taken over by ${processName(ownership.foreignPid)} (PID ${ownership.foreignPid}).`);
+    }
+    console.error("    Stopping Kady so consumers never target a dead or foreign engine.");
+    void stopAll(1);
+  }, 1000);
+  engineOwnershipMonitor.unref();
+}
+
 /**
  * Start the vendored workflow engine (Scientific DAG Workflow Designer) as an
  * owned child, following the same children.push / group-kill /
@@ -538,7 +592,10 @@ function assertNoForeignWorkflowEngineListener() {
  * Returns availability and whether a child was spawned.
  */
 async function startWorkflowEngine() {
-  if (!fs.existsSync(path.join(PIPELINE_ENGINE_DIR, "package.json"))) {
+  const sourcesPresent = fs.existsSync(path.join(PIPELINE_ENGINE_DIR, "package.json"));
+  const bun = sourcesPresent ? findBun() : null;
+  const prerequisiteStatus = workflowEnginePrerequisiteStatus({ sourcesPresent, bunPath: bun });
+  if (prerequisiteStatus.reason === "missing-sources") {
     log(`  ${sym.warn} Workflow engine sources missing (server/vendor/pipeline-engine) — skipping it.`);
     return { available: false, spawned: false };
   }
@@ -546,8 +603,7 @@ async function startWorkflowEngine() {
   // it so manifest Git identity and inputs come from the source repository,
   // while imports and the blank .env remain rooted in the isolated launcher.
   const vendoredDistRepositoryRoot = checkoutRoot;
-  const bun = findBun();
-  if (!bun) {
+  if (prerequisiteStatus.reason === "missing-bun") {
     log(`  ${sym.warn} bun not found — skipping the workflow engine (install it from https://bun.sh).`);
     return { available: false, spawned: false };
   }
@@ -614,7 +670,7 @@ async function startWorkflowEngine() {
     });
     if (listenerDecision.action === "reuse-owned-fresh") {
       log(`  ${sym.arrow} Reusing this checkout's fresh workflow engine on port ${PIPELINE_ENGINE_PORT}.`);
-      return { available: true, spawned: false };
+      return { available: true, spawned: false, ownerPids: [...pids] };
     }
     for (const pid of listenerDecision.pidsToStop) {
       log(`  Stopping this checkout's stale or unhealthy workflow engine on port ${PIPELINE_ENGINE_PORT} (PID ${pid})...`);
@@ -684,15 +740,54 @@ async function startWorkflowEngine() {
       });
   child.kadyRole = "pipeline-engine";
   children.push(child);
-  // Unlike the backend/frontend, an engine death is a degradation, not a
-  // launcher failure: the /pipelines proxy answers 503 while it is down.
-  child.on("exit", () => {
-    if (!shuttingDown) {
-      log(`\n  ${sym.warn} The workflow engine stopped unexpectedly — the DAG Builder will be`);
-      log("    unavailable until Kady is restarted. Everything else keeps running.");
-    }
+  let childExited = false;
+  const trackEarlyExit = () => {
+    childExited = true;
+  };
+  child.once("exit", trackEarlyExit);
+  const readiness = await waitForOwnedWorkflowEngine({
+    childPid: child.pid,
+    childExited: () => childExited || gone(child),
+    listenersOn: () => listenersOn(PIPELINE_ENGINE_PORT),
+    isOwnedByChild: ownedByWorkflowEngineChild,
+    probeHealth: async () => {
+      try {
+        const response = await fetch(`http://127.0.0.1:${PIPELINE_ENGINE_PORT}/api/health`, {
+          signal: AbortSignal.timeout(2000),
+        });
+        return response.ok;
+      } catch {
+        return false;
+      }
+    },
+    wait: sleep,
   });
-  return { available: true, spawned: true };
+  child.removeListener("exit", trackEarlyExit);
+  if (readiness.status !== "ready") {
+    await stopUnreadyWorkflowEngine(child);
+    const detail = readiness.status === "foreign-listener"
+      ? `port ${PIPELINE_ENGINE_PORT} was claimed by ${processName(readiness.foreignPid)} (PID ${readiness.foreignPid})`
+      : readiness.status === "child-exited"
+        ? "the workflow engine child exited before establishing an owned healthy listener"
+        : "the workflow engine did not establish an owned healthy listener within 30 seconds";
+    if (process.env.KADY_PREVIEW === "1" || readiness.status === "foreign-listener") {
+      fail(`  ${sym.err} Refusing workflow engine startup: ${detail}.`);
+    }
+    log(`  ${sym.warn} ${detail}; skipping the optional workflow engine.`);
+    return { available: false, spawned: false };
+  }
+  child.on("exit", () => {
+    if (shuttingDown) return;
+    console.error(`\n  ${sym.err} The workflow engine stopped unexpectedly.`);
+    console.error("    Stopping Kady so consumers never target a dead or replacement listener.");
+    void stopAll(1);
+  });
+  if (gone(child)) {
+    console.error(`  ${sym.err} The workflow engine exited immediately after readiness.`);
+    await stopAll(1);
+    return { available: false, spawned: false };
+  }
+  return { available: true, spawned: true, childPid: child.pid, ownerPids: readiness.listenerPids };
 }
 
 async function stopAll(code) {
@@ -717,6 +812,10 @@ async function stopAll(code) {
     process.exit(code === 0 ? 1 : code);
   }
   shuttingDown = true;
+  if (engineOwnershipMonitor) {
+    clearInterval(engineOwnershipMonitor);
+    engineOwnershipMonitor = null;
+  }
   log("\nShutting down...");
   for (const child of children) {
     if (ownedTreeGone(child)) continue;
@@ -819,6 +918,14 @@ log(`  Pi agent ${sym.ok} (bundled with backend packages — updated on full sta
 log("");
 
 setupEnv();
+if (!process.env.KADY_PIPELINE_ENGINE_PORT && process.env.KADY_ARCHON_PORT) {
+  log("  [deprecated] KADY_ARCHON_PORT is deprecated; use KADY_PIPELINE_ENGINE_PORT instead.");
+}
+try {
+  PIPELINE_ENGINE_PORT = resolveWorkflowEnginePort(process.env, flags.enginePort);
+} catch (error) {
+  fail(`  ${sym.err} ${error instanceof Error ? error.message : String(error)}`);
+}
 Object.assign(
   process.env,
   workflowEngineConsumerEnvironment(process.env, PIPELINE_ENGINE_PORT, {
@@ -871,6 +978,7 @@ if (!engineState.available) {
   log(`  ${sym.warn} Workflow engine disabled; pipeline routes will return 503.`);
 } else {
   process.env.KADY_PIPELINE_ENGINE_DISABLED = "0";
+  monitorWorkflowEngineOwnership(engineState);
 }
 startService(
   `Backend on port ${BACKEND_PORT} (Pi agent, TypeScript)`,
@@ -895,11 +1003,6 @@ log("");
 log("Waiting for services to come up (the first run can take a minute)...");
 await waitFor(`http://localhost:${BACKEND_PORT}/`, "backend", 120);
 await waitFor(`http://localhost:${FRONTEND_PORT}/`, "app UI", 180);
-// Bounded engine readiness poll; a timeout only warns (the engine is optional).
-if (engineState.spawned) {
-  await waitFor(`http://127.0.0.1:${PIPELINE_ENGINE_PORT}/api/health`, "workflow engine", 30);
-}
-
 if (!shuttingDown) {
   log("");
   log("============================================");
