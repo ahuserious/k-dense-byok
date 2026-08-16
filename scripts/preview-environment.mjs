@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { LEGACY_ENGINE_DATA_DIRECTORY } from "../server/src/legacy-engine-data.ts";
@@ -28,7 +29,7 @@ const PACKAGE_MANAGER_LOCK_FILE_NAMES = [
   "pnpm-lock.yaml",
   "yarn.lock",
 ];
-const PREVIEW_WEB_PROJECTION_MARKER = "kady-preview-web-projection-v1\n";
+const PREVIEW_WEB_PROJECTION_MARKER_VERSION = 2;
 const LAUNCHER_HELPER_ANCHOR =
   "const sleep = (ms) => new Promise((r) => setTimeout(r, ms));";
 const SERVICE_SPAWN_ANCHOR = "  const child = directArgs";
@@ -102,12 +103,175 @@ export function preparePreviewEngineHome(stateRoot) {
   return engineHome;
 }
 
+function isPreviewWebRootExcluded(name) {
+  return (
+    name === ".next" ||
+    name === ".preview" ||
+    name === "node_modules" ||
+    PACKAGE_MANAGER_LOCK_FILE_NAMES.includes(name) ||
+    AUTOMATIC_ENV_FILE_NAMES.includes(name)
+  );
+}
+
+export function previewWebSourceManifest(repositoryRoot) {
+  const canonicalRepositoryRoot = fs.realpathSync(repositoryRoot);
+  const checkoutWebRoot = fs.realpathSync(path.join(canonicalRepositoryRoot, "web"));
+  const entries = [];
+
+  function visit(absolutePath, manifestPath) {
+    const stat = fs.lstatSync(absolutePath);
+    if (stat.isSymbolicLink()) {
+      entries.push({ path: manifestPath, type: "symlink", target: fs.readlinkSync(absolutePath) });
+      return;
+    }
+    if (stat.isDirectory()) {
+      entries.push({ path: manifestPath, type: "directory" });
+      for (const name of fs.readdirSync(absolutePath).sort()) {
+        visit(path.join(absolutePath, name), `${manifestPath}/${name}`);
+      }
+      return;
+    }
+    if (stat.isFile()) {
+      entries.push({
+        path: manifestPath,
+        type: "file",
+        digest: createHash("sha256").update(fs.readFileSync(absolutePath)).digest("hex"),
+      });
+      return;
+    }
+    entries.push({ path: manifestPath, type: "other" });
+  }
+
+  for (const name of fs.readdirSync(checkoutWebRoot).sort()) {
+    if (!isPreviewWebRootExcluded(name)) {
+      visit(path.join(checkoutWebRoot, name), `web/${name}`);
+    }
+  }
+  visit(
+    path.join(canonicalRepositoryRoot, "server", "package.json"),
+    "server/package.json",
+  );
+  return {
+    version: 1,
+    digest: createHash("sha256").update(JSON.stringify(entries)).digest("hex"),
+    entries,
+  };
+}
+
+export function firstPreviewWebSourceDrift(expectedManifest, currentManifest) {
+  if (expectedManifest.digest === currentManifest.digest) return null;
+  const expectedByPath = new Map(
+    expectedManifest.entries.map((entry) => [entry.path, JSON.stringify(entry)]),
+  );
+  const currentByPath = new Map(
+    currentManifest.entries.map((entry) => [entry.path, JSON.stringify(entry)]),
+  );
+  const paths = [...new Set([...expectedByPath.keys(), ...currentByPath.keys()])].sort();
+  return paths.find((entryPath) => expectedByPath.get(entryPath) !== currentByPath.get(entryPath))
+    ?? "<unknown>";
+}
+
+export function assertPreviewWebProjectionCurrent(repositoryRoot, generation) {
+  const manifestPath = path.join(
+    path.dirname(previewWebRoot(repositoryRoot)),
+    ".source-manifest.json",
+  );
+  const expected = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  if (expected.generation !== generation) {
+    throw new Error(
+      `Preview web source manifest generation mismatch at ${manifestPath}.`,
+    );
+  }
+  const current = previewWebSourceManifest(repositoryRoot);
+  const driftPath = firstPreviewWebSourceDrift(expected.manifest, current);
+  if (driftPath) {
+    throw new Error(
+      `Preview web source drift detected at ${path.join(repositoryRoot, driftPath)}; ` +
+        "restart with preview-down/up.",
+    );
+  }
+  return true;
+}
+
+export function assertPreviewProjectionSymlinksContained(
+  repositoryRoot,
+  projectedWebRoot = previewWebRoot(repositoryRoot),
+) {
+  const canonicalRepositoryRoot = fs.realpathSync(repositoryRoot);
+
+  function visit(directory) {
+    for (const name of fs.readdirSync(directory)) {
+      const candidate = path.join(directory, name);
+      const stat = fs.lstatSync(candidate);
+      if (stat.isSymbolicLink()) {
+        const canonicalTarget = fs.realpathSync(candidate);
+        if (
+          canonicalTarget !== canonicalRepositoryRoot &&
+          !canonicalTarget.startsWith(`${canonicalRepositoryRoot}${path.sep}`)
+        ) {
+          throw new Error(
+            `Preview web projection refuses symlink outside the checkout: ${candidate}.`,
+          );
+        }
+      } else if (stat.isDirectory()) {
+        visit(candidate);
+      }
+    }
+  }
+
+  visit(projectedWebRoot);
+}
+
 export function previewWebRoot(repositoryRoot) {
   const checkoutWebRoot = fs.realpathSync(path.join(repositoryRoot, "web"));
   return path.join(checkoutWebRoot, ".preview", "launch", "web");
 }
 
-export function removePreviewWebRoot(repositoryRoot) {
+function previewWebHealthRouteSource(repositoryRoot, manifestPath, generation) {
+  return `import { createHash } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+
+const AUTOMATIC_ENV_FILE_NAMES = ${JSON.stringify(AUTOMATIC_ENV_FILE_NAMES)};
+const PACKAGE_MANAGER_LOCK_FILE_NAMES = ${JSON.stringify(PACKAGE_MANAGER_LOCK_FILE_NAMES)};
+const repositoryRoot = ${JSON.stringify(repositoryRoot)};
+const manifestPath = ${JSON.stringify(manifestPath)};
+const generation = ${JSON.stringify(generation)};
+
+${isPreviewWebRootExcluded.toString()}
+${previewWebSourceManifest.toString()}
+${firstPreviewWebSourceDrift.toString()}
+
+export async function GET() {
+  try {
+    const expected = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    if (expected.generation !== generation) {
+      throw new Error(\`source manifest generation mismatch at \${manifestPath}\`);
+    }
+    const current = previewWebSourceManifest(repositoryRoot);
+    const driftPath = firstPreviewWebSourceDrift(expected.manifest, current);
+    if (driftPath) {
+      return Response.json(
+        {
+          status: "unhealthy",
+          error: \`Preview web source drift detected at \${path.join(repositoryRoot, driftPath)}; restart with preview-down/up.\`,
+        },
+        { status: 503 },
+      );
+    }
+    return Response.json({ status: "ok", generation });
+  } catch (error) {
+    return Response.json(
+      { status: "unhealthy", error: error instanceof Error ? error.message : String(error) },
+      { status: 503 },
+    );
+  }
+}
+`;
+}
+
+export function removePreviewWebRoot(repositoryRoot, generation) {
+  if (!generation) throw new Error("Preview web projection cleanup requires a generation.");
   const projectedWebRoot = previewWebRoot(repositoryRoot);
   const projectionLaunchRoot = path.dirname(projectedWebRoot);
   const previewDirectory = path.dirname(projectionLaunchRoot);
@@ -147,13 +311,20 @@ export function removePreviewWebRoot(repositoryRoot) {
     }
     throw error;
   }
+  let marker;
+  try {
+    marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+  } catch {
+    marker = null;
+  }
   if (
     markerStat.isSymbolicLink() ||
     !markerStat.isFile() ||
-    fs.readFileSync(markerPath, "utf8") !== PREVIEW_WEB_PROJECTION_MARKER
+    marker?.version !== PREVIEW_WEB_PROJECTION_MARKER_VERSION ||
+    marker?.generation !== generation
   ) {
     throw new Error(
-      `Preview web projection cleanup refuses invalid marker ${markerPath}.`,
+      `Preview web projection cleanup refuses generation mismatch at ${markerPath}.`,
     );
   }
 
@@ -166,7 +337,8 @@ export function removePreviewWebRoot(repositoryRoot) {
   return true;
 }
 
-export function preparePreviewWebRoot(repositoryRoot, launchRoot) {
+export function preparePreviewWebRoot(repositoryRoot, launchRoot, generation) {
+  if (!generation) throw new Error("Preview web projection requires a generation.");
   const canonicalRepositoryRoot = fs.realpathSync(repositoryRoot);
   const checkoutWebRoot = fs.realpathSync(path.join(canonicalRepositoryRoot, "web"));
   const projectedWebRoot = previewWebRoot(canonicalRepositoryRoot);
@@ -179,16 +351,23 @@ export function preparePreviewWebRoot(repositoryRoot, launchRoot) {
     }
   }
   if (fs.existsSync(projectionLaunchRoot)) {
-    removePreviewWebRoot(canonicalRepositoryRoot);
+    throw new Error(
+      `Preview web projection already exists at ${projectionLaunchRoot}; ` +
+        "refusing to replace another lifecycle generation.",
+    );
   }
   fs.mkdirSync(projectedWebRoot, { recursive: true, mode: 0o700 });
   fs.writeFileSync(
     path.join(projectionLaunchRoot, ".kady-preview-owned"),
-    PREVIEW_WEB_PROJECTION_MARKER,
+    `${JSON.stringify({
+      version: PREVIEW_WEB_PROJECTION_MARKER_VERSION,
+      generation,
+    }, null, 2)}\n`,
     { mode: 0o600 },
   );
 
   try {
+    const sourceManifest = previewWebSourceManifest(canonicalRepositoryRoot);
     const copyStartedAt = process.hrtime.bigint();
     for (const entry of fs.readdirSync(checkoutWebRoot, { withFileTypes: true })) {
       if (
@@ -245,6 +424,39 @@ export function preparePreviewWebRoot(repositoryRoot, launchRoot) {
     const projectedNodeModules = path.join(projectedWebRoot, "node_modules");
     fs.symlinkSync(checkoutNodeModules, projectedNodeModules, "dir");
 
+    assertPreviewProjectionSymlinksContained(canonicalRepositoryRoot, projectedWebRoot);
+    const currentSourceManifest = previewWebSourceManifest(canonicalRepositoryRoot);
+    const copyDriftPath = firstPreviewWebSourceDrift(sourceManifest, currentSourceManifest);
+    if (copyDriftPath) {
+      throw new Error(
+        `Preview web source changed during projection at ` +
+          `${path.join(canonicalRepositoryRoot, copyDriftPath)}.`,
+      );
+    }
+    const manifestPath = path.join(projectionLaunchRoot, ".source-manifest.json");
+    fs.writeFileSync(
+      manifestPath,
+      `${JSON.stringify({ generation, manifest: sourceManifest }, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    const healthRouteDirectory = path.join(
+      projectedWebRoot,
+      "src",
+      "app",
+      "api",
+      "preview-health",
+    );
+    if (fs.existsSync(healthRouteDirectory)) {
+      throw new Error(
+        `Preview web projection health route conflicts with ${healthRouteDirectory}.`,
+      );
+    }
+    fs.mkdirSync(healthRouteDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(healthRouteDirectory, "route.ts"),
+      previewWebHealthRouteSource(canonicalRepositoryRoot, manifestPath, generation),
+      { mode: 0o600 },
+    );
     fs.mkdirSync(path.join(projectedWebRoot, ".next"), { mode: 0o700 });
     fs.symlinkSync(projectedWebRoot, path.join(launchRoot, "web"), "dir");
     console.log(
@@ -253,7 +465,7 @@ export function preparePreviewWebRoot(repositoryRoot, launchRoot) {
     );
     return projectedWebRoot;
   } catch (error) {
-    removePreviewWebRoot(canonicalRepositoryRoot);
+    removePreviewWebRoot(canonicalRepositoryRoot, generation);
     throw error;
   }
 }

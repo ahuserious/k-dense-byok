@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +14,7 @@ import {
   previewEngineHome,
   previewEnvironment,
   previewPrebuildEnvironment,
+  removePreviewWebRoot,
 } from "./preview-environment.mjs";
 import { instrumentPreviewLauncher } from "./preview-launcher-observer.mjs";
 import {
@@ -21,11 +23,13 @@ import {
   waitForPreviewPortsFree,
 } from "./preview-processes.mjs";
 import { waitForPreviewReadiness } from "./preview-readiness.mjs";
+import { acquirePreviewLifecycleLock } from "./preview-state.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = fs.realpathSync(path.resolve(scriptDirectory, ".."));
 const previewDirectory = path.join(repositoryRoot, "deploy", "preview");
 const stateFile = path.join(previewDirectory, ".state.json");
+const lifecycleLockFile = path.join(previewDirectory, ".lifecycle.lock");
 
 function fail(message) {
   console.error(message);
@@ -90,7 +94,7 @@ function prepareVendoredDist({ skipBuild, environment }) {
   }
 }
 
-function createLaunchOverlay(stateRoot, realNpm, realGit) {
+function createLaunchOverlay(stateRoot, realNpm, realGit, generation) {
   const launchRoot = path.join(stateRoot, "launch");
   const isolatedHome = path.join(stateRoot, "home");
   // start.mjs prepends ~/.local/bin after its dependency checks. Put the
@@ -109,7 +113,6 @@ function createLaunchOverlay(stateRoot, realNpm, realGit) {
     mode: 0o600,
   });
   fs.symlinkSync(path.join(repositoryRoot, "server"), path.join(launchRoot, "server"), "dir");
-  preparePreviewWebRoot(repositoryRoot, launchRoot);
 
   writeExecutable(
     path.join(shimDirectory, "npm"),
@@ -134,6 +137,7 @@ const result = spawnSync(${JSON.stringify(realGit)}, args, { stdio: "inherit", e
 process.exit(result.status ?? 1);
 `,
   );
+  preparePreviewWebRoot(repositoryRoot, launchRoot, generation);
   return { launchRoot, shimDirectory };
 }
 
@@ -206,6 +210,42 @@ function formatOccupiedPorts(occupied) {
 if (process.platform === "win32") {
   fail("The preview lifecycle currently requires POSIX process-group semantics.");
 }
+const previewGeneration = randomUUID();
+let lifecycleLock;
+try {
+  lifecycleLock = acquirePreviewLifecycleLock(lifecycleLockFile, {
+    operation: "preview-up",
+    generation: previewGeneration,
+  });
+} catch (error) {
+  fail(error instanceof Error ? error.message : String(error));
+}
+let projectionPrepared = false;
+let statePublished = false;
+function releaseLifecycleLock() {
+  if (!lifecycleLock) return;
+  const heldLock = lifecycleLock;
+  lifecycleLock = null;
+  heldLock.release();
+}
+process.once("exit", () => {
+  if (projectionPrepared && !statePublished) {
+    try {
+      removePreviewWebRoot(repositoryRoot, previewGeneration);
+    } catch (error) {
+      console.error(
+        `Preview pre-publication projection cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  try {
+    releaseLifecycleLock();
+  } catch (error) {
+    console.error(
+      `Preview lifecycle lock release failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+});
 if (fs.existsSync(stateFile)) {
   fail(`Preview state already exists at ${stateFile}; run scripts/preview-down.mjs first.`);
 }
@@ -275,7 +315,13 @@ if (initiallyOccupied.length > 0) {
 
 const realNpm = commandPath("npm");
 const realGit = commandPath("git");
-const { launchRoot, shimDirectory } = createLaunchOverlay(stateRoot, realNpm, realGit);
+const { launchRoot, shimDirectory } = createLaunchOverlay(
+  stateRoot,
+  realNpm,
+  realGit,
+  previewGeneration,
+);
+projectionPrepared = true;
 const environment = previewEnvironment(
   stateRoot,
   launchRoot,
@@ -307,6 +353,7 @@ try {
 
   const state = {
     version: 1,
+    generation: previewGeneration,
     repositoryRoot,
     stateRoot,
     launchRoot,
@@ -320,6 +367,8 @@ try {
     startedAt: new Date().toISOString(),
   };
   fs.writeFileSync(stateFile, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+  statePublished = true;
+  releaseLifecycleLock();
 
   await waitForPreviewReadiness({
     launcherProcess: rootProcess,
@@ -335,7 +384,7 @@ try {
       {
         role: "frontend",
         label: "web",
-        url: `http://127.0.0.1:${ports.frontend}/`,
+        url: `http://127.0.0.1:${ports.frontend}/api/preview-health`,
         timeoutMs: 180_000,
       },
       {

@@ -9,9 +9,17 @@ export async function probePreviewService(service, fetchImplementation = fetch) 
     const response = await fetchImplementation(service.url, {
       signal: AbortSignal.timeout(service.probeTimeoutMs ?? 2_000),
     });
-    return response.ok
-      ? { ok: true, detail: `HTTP ${response.status}` }
-      : { ok: false, detail: `HTTP ${response.status}` };
+    if (response.ok) return { ok: true, detail: `HTTP ${response.status}` };
+    let responseDetail = "";
+    try {
+      responseDetail = (await response.text()).replace(/\s+/g, " ").trim().slice(0, 1_000);
+    } catch {
+      // The status alone remains useful when an unhealthy service has no readable body.
+    }
+    return {
+      ok: false,
+      detail: `HTTP ${response.status}${responseDetail ? `: ${responseDetail}` : ""}`,
+    };
   } catch (error) {
     return { ok: false, detail: errorText(error) };
   }

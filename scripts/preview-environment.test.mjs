@@ -7,6 +7,7 @@ import test from "node:test";
 import { LEGACY_ENGINE_DATA_DIRECTORY } from "../server/src/legacy-engine-data.ts";
 import {
   allowlistedPreviewEnvironment,
+  assertPreviewWebProjectionCurrent,
   assertPreviewAutomaticEnvironmentFilesAbsent,
   instrumentPreviewEnvironment,
   preparePreviewEngineHome,
@@ -18,6 +19,7 @@ import {
   removePreviewWebRoot,
 } from "./preview-environment.mjs";
 import { instrumentPreviewLauncher } from "./preview-launcher-observer.mjs";
+import { acquirePreviewLifecycleLock } from "./preview-state.mjs";
 
 test("pins both engine clients to the preview port by default and scrubs legacy engine variables", () => {
   const environment = previewEnvironment(
@@ -337,6 +339,7 @@ test("rejects every automatic web and engine env file by canonical path", () => 
 
 test("projects the web root without automatic env files or checkout build output", () => {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-web-root-"));
+  const generation = "projection-generation";
   try {
     const repositoryRoot = path.join(temporaryRoot, "checkout");
     const checkoutWebRoot = path.join(repositoryRoot, "web");
@@ -376,7 +379,11 @@ test("projects the web root without automatic env files or checkout build output
       fs.writeFileSync(path.join(checkoutWebRoot, fileName), "SENTINEL=initial\n");
     }
 
-    const projectedWebRoot = preparePreviewWebRoot(repositoryRoot, launchRoot);
+    const projectedWebRoot = preparePreviewWebRoot(
+      repositoryRoot,
+      launchRoot,
+      generation,
+    );
     const canonicalRepositoryRoot = fs.realpathSync(repositoryRoot);
     assert.equal(projectedWebRoot, previewWebRoot(repositoryRoot));
     assert.equal(
@@ -421,6 +428,24 @@ test("projects the web root without automatic env files or checkout build output
     assert.equal(fs.existsSync(path.join(projectedWebRoot, ".preview")), false);
     assert.equal(fs.existsSync(path.join(projectedWebRoot, "package-lock.json")), false);
     assert.equal(
+      fs.lstatSync(
+        path.join(projectedWebRoot, "src", "app", "api", "preview-health", "route.ts"),
+      ).isFile(),
+      true,
+    );
+    const healthRouteSyntax = spawnSync(
+      process.execPath,
+      ["--input-type=module", "--check", "-"],
+      {
+        input: fs.readFileSync(
+          path.join(projectedWebRoot, "src", "app", "api", "preview-health", "route.ts"),
+          "utf8",
+        ),
+        encoding: "utf8",
+      },
+    );
+    assert.equal(healthRouteSyntax.status, 0, healthRouteSyntax.stderr);
+    assert.equal(
       fs.readFileSync(
         path.join(path.dirname(projectedWebRoot), "server", "package.json"),
         "utf8",
@@ -440,10 +465,16 @@ test("projects the web root without automatic env files or checkout build output
       assert.equal(fs.existsSync(path.join(projectedWebRoot, fileName)), false);
     }
 
-    fs.writeFileSync(path.join(checkoutAppRoot, "page.tsx"), "export default 2;\n");
+    assert.equal(assertPreviewWebProjectionCurrent(repositoryRoot, generation), true);
+    const changedRoute = path.join(checkoutAppRoot, "page.tsx");
+    fs.writeFileSync(changedRoute, "export default 2;\n");
     assert.equal(
       fs.readFileSync(path.join(projectedWebRoot, "src", "app", "page.tsx"), "utf8"),
       "export default 1;\n",
+    );
+    assert.throws(
+      () => assertPreviewWebProjectionCurrent(repositoryRoot, generation),
+      (error) => error instanceof Error && error.message.includes(changedRoute),
     );
 
     for (const fileName of [
@@ -458,9 +489,108 @@ test("projects the web root without automatic env files or checkout build output
       fs.writeFileSync(checkoutEnvironmentFile, "NEXT_PUBLIC_RAINDROP_URL=modified\n");
       assert.equal(fs.existsSync(path.join(projectedWebRoot, fileName)), false);
     }
-    assert.equal(removePreviewWebRoot(repositoryRoot), true);
+    assert.throws(
+      () => removePreviewWebRoot(repositoryRoot, "newer-generation"),
+      /generation mismatch/,
+    );
+    assert.equal(fs.existsSync(projectedWebRoot), true);
+    assert.equal(removePreviewWebRoot(repositoryRoot, generation), true);
     assert.equal(fs.existsSync(projectedWebRoot), false);
-    assert.equal(removePreviewWebRoot(repositoryRoot), false);
+    assert.equal(removePreviewWebRoot(repositoryRoot, generation), false);
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("rejects a copied nested symlink that escapes the checkout", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-web-link-"));
+  try {
+    const repositoryRoot = path.join(temporaryRoot, "checkout");
+    const checkoutWebRoot = path.join(repositoryRoot, "web");
+    const checkoutPublicRoot = path.join(checkoutWebRoot, "public");
+    const launchRoot = path.join(temporaryRoot, "state", "launch");
+    const outsideFile = path.join(temporaryRoot, "outside.txt");
+    fs.mkdirSync(path.join(checkoutWebRoot, "src", "app"), { recursive: true });
+    fs.mkdirSync(path.join(checkoutWebRoot, "node_modules"), { recursive: true });
+    fs.mkdirSync(path.join(repositoryRoot, "server"), { recursive: true });
+    fs.mkdirSync(checkoutPublicRoot, { recursive: true });
+    fs.mkdirSync(launchRoot, { recursive: true });
+    fs.writeFileSync(path.join(checkoutWebRoot, "src", "app", "page.tsx"), "page\n");
+    fs.writeFileSync(path.join(checkoutWebRoot, "package.json"), "{}\n");
+    fs.writeFileSync(path.join(repositoryRoot, "server", "package.json"), "{}\n");
+    fs.writeFileSync(outsideFile, "sentinel\n");
+    fs.symlinkSync(outsideFile, path.join(checkoutPublicRoot, "outside.txt"), "file");
+
+    const projectedOutsideLink = path.join(
+      previewWebRoot(repositoryRoot),
+      "public",
+      "outside.txt",
+    );
+    assert.throws(
+      () => preparePreviewWebRoot(repositoryRoot, launchRoot, "nested-link-generation"),
+      (error) =>
+        error instanceof Error && error.message.includes(projectedOutsideLink),
+    );
+    assert.equal(fs.existsSync(previewWebRoot(repositoryRoot)), false);
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("serializes concurrent preview-up lifecycle owners at an atomic barrier", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-up-"));
+  try {
+    const lockFile = path.join(temporaryRoot, ".lifecycle.lock");
+    const firstUp = acquirePreviewLifecycleLock(lockFile, {
+      operation: "preview-up",
+      generation: "up-one",
+      pid: 101,
+    });
+    assert.throws(
+      () => acquirePreviewLifecycleLock(lockFile, {
+        operation: "preview-up",
+        generation: "up-two",
+        pid: 102,
+      }),
+      /Preview lifecycle is busy: preview-up PID 101/,
+    );
+    firstUp.release();
+    const secondUp = acquirePreviewLifecycleLock(lockFile, {
+      operation: "preview-up",
+      generation: "up-two",
+      pid: 102,
+    });
+    secondUp.release();
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("holds teardown's lifecycle barrier against another down and a newer up", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-down-"));
+  try {
+    const lockFile = path.join(temporaryRoot, ".lifecycle.lock");
+    const down = acquirePreviewLifecycleLock(lockFile, {
+      operation: "preview-down",
+      generation: "down-one",
+      pid: 201,
+    });
+    for (const contender of [
+      { operation: "preview-down", generation: "down-two", pid: 202 },
+      { operation: "preview-up", generation: "up-new", pid: 203 },
+    ]) {
+      assert.throws(
+        () => acquirePreviewLifecycleLock(lockFile, contender),
+        /Preview lifecycle is busy: preview-down PID 201/,
+      );
+    }
+    down.release();
+    const nextUp = acquirePreviewLifecycleLock(lockFile, {
+      operation: "preview-up",
+      generation: "up-new",
+      pid: 203,
+    });
+    nextUp.release();
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
@@ -561,7 +691,7 @@ test("preview-up sanitizes its process before vendored preparation and boot", ()
     "instrumentPreviewEnvironment(instrumentPreviewLauncher(launcherSource))",
   );
   const webProjection = source.indexOf(
-    "preparePreviewWebRoot(repositoryRoot, launchRoot);",
+    "preparePreviewWebRoot(",
   );
   const previewDownSource = fs.readFileSync(
     new URL("./preview-down.mjs", import.meta.url),
@@ -590,12 +720,90 @@ test("preview-up sanitizes its process before vendored preparation and boot", ()
     source.includes("environment: previewPrebuildEnvironment(process.env)"),
     true,
   );
-  assert.equal(previewDownSource.includes("removePreviewWebRoot(repositoryRoot)"), true);
+  assert.equal(
+    previewDownSource.includes("removePreviewWebRoot(repositoryRoot, state.generation)"),
+    true,
+  );
+  const upLock = source.indexOf("acquirePreviewLifecycleLock(lifecycleLockFile");
+  const stateCheck = source.indexOf("if (fs.existsSync(stateFile))");
+  const statePublication = source.indexOf("fs.writeFileSync(stateFile");
+  const upLockRelease = source.indexOf("releaseLifecycleLock();", statePublication);
+  assert.equal(upLock < stateCheck, true);
+  assert.equal(statePublication < upLockRelease, true);
+  const downLock = previewDownSource.indexOf(
+    "acquirePreviewLifecycleLock(lifecycleLockFile",
+  );
+  const downStateRead = previewDownSource.indexOf("const state = readState();");
+  assert.equal(downLock < downStateRead, true);
+  assert.equal(
+    source.includes('url: `http://127.0.0.1:${ports.frontend}/api/preview-health`'),
+    true,
+  );
   assert.match(
     fs.readFileSync(new URL("../.gitignore", import.meta.url), "utf8"),
     /^\/web\/\.preview\/$/m,
   );
 });
+
+const previewUpSourceForNpmShim = fs.readFileSync(
+  new URL("./preview-up.mjs", import.meta.url),
+  "utf8",
+);
+const currentShimStillForwardsInstall =
+  previewUpSourceForNpmShim.includes(
+    `if (args[0] === "view") process.exit(1);
+const result = spawnSync(\${JSON.stringify(realNpm)}, args, { stdio: "inherit", env: process.env });`,
+  );
+
+test(
+  "preview npm shim refuses install at its process boundary",
+  {
+    skip: currentShimStillForwardsInstall
+      ? "pending lane C1 baf036a install-free launcher merge: current branch still forwards npm install"
+      : false,
+  },
+  () => {
+    const shimTemplate = previewUpSourceForNpmShim.match(
+      /writeExecutable\(\s*path\.join\(shimDirectory, "npm"\),\s*`([\s\S]*?)`,\s*\);/,
+    )?.[1];
+    assert.ok(shimTemplate, "preview npm shim template must remain testable");
+
+    const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-npm-shim-"));
+    try {
+      const marker = path.join(temporaryRoot, "real-npm-ran");
+      const fakeNpm = path.join(temporaryRoot, "fake-npm.mjs");
+      const shim = path.join(temporaryRoot, "npm.mjs");
+      fs.writeFileSync(
+        fakeNpm,
+        '#!/usr/bin/env node\nimport fs from "node:fs";\nfs.writeFileSync(process.env.KADY_TEST_NPM_MARKER, "ran\\n");\n',
+        { mode: 0o700 },
+      );
+      fs.writeFileSync(
+        shim,
+        shimTemplate.replaceAll(
+          "${JSON.stringify(realNpm)}",
+          JSON.stringify(fakeNpm),
+        ),
+        { mode: 0o700 },
+      );
+      const environment = previewEnvironment(
+        temporaryRoot,
+        path.join(temporaryRoot, "launch"),
+        temporaryRoot,
+        { backend: 18000, frontend: 13000, engine: 13091 },
+        { PATH: process.env.PATH },
+      );
+      const result = spawnSync(process.execPath, [shim, "install"], {
+        env: { ...environment, KADY_TEST_NPM_MARKER: marker },
+        encoding: "utf8",
+      });
+      assert.notEqual(result.status, 0);
+      assert.equal(fs.existsSync(marker), false);
+    } finally {
+      fs.rmSync(temporaryRoot, { recursive: true, force: true });
+    }
+  },
+);
 
 test("guards the vendored Bun build at its spawn boundary in preview mode", () => {
   const source = fs.readFileSync(

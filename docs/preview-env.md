@@ -63,6 +63,20 @@ readiness outside Next's watched project root. Owned preview teardown removes
 the marked projection. Dependencies must already be installed; the preview npm
 shim suppresses the launcher's update lookup and forces npm offline.
 
+The projection is an immutable source snapshot, not a live development mirror.
+Edits to web routes, public assets, middleware, instrumentation, package
+metadata, or configuration require `preview-down.mjs` followed by
+`preview-up.mjs`. Preview startup records a SHA-256 manifest for the copied
+source set and adds a preview-only `/api/preview-health` route. Readiness probes
+that route; later health probes return HTTP 503 and name the first drifted
+checkout file rather than silently serving stale evidence.
+
+Preview lifecycle mutations are serialized by an exclusive lock under
+`deploy/preview/`. A unique generation is stored in both the published state
+and the checkout-local projection marker. Concurrent up/down commands refuse
+while another lifecycle operation owns the lock, and teardown removes a
+projection only when its generation matches the state it locked and read.
+
 Backend env selection fails closed. With `KADY_PREVIEW=1`, `KADY_ENV_FILE`
 must be present, non-blank, absolute, and resolve to a regular file under the
 canonical `KADY_PREVIEW_LAUNCH_ROOT`; missing, relative, outside-root, and

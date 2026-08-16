@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -12,12 +13,16 @@ import {
   stopProcessGroups,
   waitForPreviewPortsFree,
 } from "./preview-processes.mjs";
-import { removePreviewStateFile } from "./preview-state.mjs";
+import {
+  acquirePreviewLifecycleLock,
+  removePreviewStateFile,
+} from "./preview-state.mjs";
 import { removePreviewWebRoot } from "./preview-environment.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = fs.realpathSync(path.resolve(scriptDirectory, ".."));
 const stateFile = path.join(repositoryRoot, "deploy", "preview", ".state.json");
+const lifecycleLockFile = path.join(repositoryRoot, "deploy", "preview", ".lifecycle.lock");
 const keepState = process.argv.includes("--keep-state");
 
 function fail(message) {
@@ -33,6 +38,8 @@ function readState() {
   );
   if (
     state.version !== 1 ||
+    typeof state.generation !== "string" ||
+    !state.generation ||
     state.repositoryRoot !== repositoryRoot ||
     !Number.isSafeInteger(state.rootPid) ||
     state.rootPid < 1 ||
@@ -86,6 +93,31 @@ if (process.platform === "win32") {
   fail("The preview lifecycle currently requires POSIX process-group semantics.");
 }
 
+let lifecycleLock;
+try {
+  lifecycleLock = acquirePreviewLifecycleLock(lifecycleLockFile, {
+    operation: "preview-down",
+    generation: randomUUID(),
+  });
+} catch (error) {
+  fail(error instanceof Error ? error.message : String(error));
+}
+function releaseLifecycleLock() {
+  if (!lifecycleLock) return;
+  const heldLock = lifecycleLock;
+  lifecycleLock = null;
+  heldLock.release();
+}
+process.once("exit", () => {
+  try {
+    releaseLifecycleLock();
+  } catch (error) {
+    console.error(
+      `Preview lifecycle lock release failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+});
+
 const state = readState();
 assertRootOwnership(state);
 let listenerGroups;
@@ -132,7 +164,7 @@ if (occupiedAfterShutdown.length > 0) {
 const remaining = printListenerProof(state);
 if (remaining !== 0) fail("Preview listeners remain after teardown.");
 
-if (removePreviewWebRoot(repositoryRoot)) {
+if (removePreviewWebRoot(repositoryRoot, state.generation)) {
   console.log(`Removed preview web projection: ${path.join(repositoryRoot, "web", ".preview")}`);
 }
 
@@ -146,3 +178,4 @@ if (!keepState) {
 } else {
   console.log(`Preserved preview state tree: ${state.stateRoot}`);
 }
+releaseLifecycleLock();

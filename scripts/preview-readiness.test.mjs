@@ -1,11 +1,30 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { waitForPreviewReadiness } from "./preview-readiness.mjs";
+import {
+  probePreviewService,
+  waitForPreviewReadiness,
+} from "./preview-readiness.mjs";
 
 function service(role, timeoutMs = 1_000) {
   return { role, label: role, url: `http://preview.invalid/${role}`, timeoutMs };
 }
+
+test("includes a bounded unhealthy response body in readiness evidence", async () => {
+  const result = await probePreviewService(
+    service("frontend"),
+    async () => ({
+      ok: false,
+      status: 503,
+      text: async () => JSON.stringify({
+        error: "Preview web source drift detected at /checkout/web/src/app/page.tsx",
+      }),
+    }),
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.detail, /HTTP 503/);
+  assert.match(result.detail, /web\/src\/app\/page\.tsx/);
+});
 
 test("ignores a transient launcher exit while service probes are still converging", async () => {
   const attempts = new Map();
