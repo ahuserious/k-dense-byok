@@ -143,7 +143,6 @@ jobs:
             --no-build-dist > preview-up.log 2>&1
           preview_exit=$?
           set -e
-          cat preview-up.log
           exit "$preview_exit"
 
       - name: Warm the main page
@@ -180,15 +179,6 @@ jobs:
           STABLY_PROJECT_ID: ${{ secrets.STABLY_PROJECT_ID }}
           INPUT_GREP: ${{ inputs.grep }}
         run: npx stably test --workers="$E2E_WORKERS" --grep "$INPUT_GREP" --suiteName "sds-outer-loop-ci-${GITHUB_RUN_NUMBER}" > stably-test.log 2>&1
-
-      - name: Print Stably Playwright log
-        if: always()
-        run: |
-          if [[ -f stably-test.log ]]; then
-            cat stably-test.log
-          else
-            echo "stably-test.log was not created."
-          fi
 
       - name: Stop hermetic preview
         if: always()
@@ -231,6 +221,8 @@ jobs:
         if: always()
         env:
           INPUT_GREP: ${{ inputs.grep }}
+          STABLY_API_KEY: ${{ secrets.STABLY_API_KEY }}
+          STABLY_PROJECT_ID: ${{ secrets.STABLY_PROJECT_ID }}
         run: node scripts/hosted-evidence-manifest.mjs
 
       - name: Write GitHub-runner result summary
@@ -251,14 +243,25 @@ jobs:
           BROWSER_INSTALL_METHOD: ${{ steps.browser-install.outputs.method }}
         run: |
           {
-            echo "- Stably run ID: $E2E_RUN_ID"
-            echo "- Stably run URL: $E2E_RUN_URL"
+            echo "- Stably run metadata: redacted hosted-evidence-manifest.json"
             echo "- Browser installer: ${BROWSER_INSTALL_METHOD:-not completed}"
             echo "- Execution host evidence: runner-fingerprint.json artifact"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload GitHub-runner evidence
+      - name: Scan hosted evidence artifacts
+        id: artifact-scan
         if: always()
+        env:
+          STABLY_API_KEY: ${{ secrets.STABLY_API_KEY }}
+          STABLY_PROJECT_ID: ${{ secrets.STABLY_PROJECT_ID }}
+        run: node scripts/hosted-evidence-scan.mjs
+
+      - name: Print scrubbed Stably Playwright log
+        if: always() && steps.artifact-scan.outcome == 'success'
+        run: test ! -f stably-test.scrubbed.log || cat stably-test.scrubbed.log
+
+      - name: Upload GitHub-runner evidence
+        if: always() && steps.artifact-scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: stably-github-runner-${{ github.run_id }}
@@ -271,8 +274,8 @@ jobs:
             stably-install.log
             playwright-install.log
             browser-install-method.txt
-            preview-up.log
-            stably-test.log
+            preview-up.scrubbed.log
+            stably-test.scrubbed.log
             runner-fingerprint.json
             hosted-evidence-manifest.json
 

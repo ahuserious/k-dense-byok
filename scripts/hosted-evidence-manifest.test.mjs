@@ -5,8 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { secretRepresentationsForValue } from "./hosted-evidence-secrets.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
+const repositoryRoot = path.resolve(scriptDirectory, "..");
 const scriptPath = path.join(scriptDirectory, "hosted-evidence-manifest.mjs");
 const manifestFileName = "hosted-evidence-manifest.json";
 const controlledEnvironmentNames = [
@@ -79,15 +81,15 @@ test("writes stable not-detected evidence when input files are missing", () => {
   });
 });
 
-test("grep mode records exact command, final log lines, and redacted environment", () => {
+test("grep mode parses a genuine multiline Playwright epilogue", () => {
   withTemporaryDirectory((directory) => {
     fs.writeFileSync(
       path.join(directory, "stably-test.log"),
       [
-        "E2E inventory observed for filtered run: 2 total = 2 executing-substantive + 0 thin; 0 fixme + 0 skip.",
-        "1 passed",
-        "E2E inventory observed for filtered run: 3 total = 3 executing-substantive + 0 thin; 0 fixme + 0 skip.",
-        "3 passed / 0 failed / 0 skipped (4.2s)",
+        "E2E inventory observed for filtered run: 249 total = 213 executing-substantive + 36 thin; 4 fixme + 0 skip.",
+        "  2 failed",
+        "  4 skipped",
+        "  243 passed (2.1m)",
       ].join("\n"),
     );
     fs.writeFileSync(
@@ -123,21 +125,21 @@ test("grep mode records exact command, final log lines, and redacted environment
     );
     assert.equal(
       manifest.inventoryLine,
-      "E2E inventory observed for filtered run: 3 total = 3 executing-substantive + 0 thin; 0 fixme + 0 skip.",
+      "E2E inventory observed for filtered run: 249 total = 213 executing-substantive + 36 thin; 4 fixme + 0 skip.",
     );
-    assert.equal(manifest.summaryLine, "3 passed / 0 failed / 0 skipped (4.2s)");
+    assert.equal(manifest.summaryLine, "  243 passed (2.1m)");
     assert.deepEqual(manifest.inventory, {
-      collected: 3,
-      substantive: 3,
-      thin: 0,
-      fixme: 0,
+      collected: 249,
+      substantive: 213,
+      thin: 36,
+      fixme: 4,
       skipped: 0,
     });
     assert.deepEqual(manifest.summary, {
-      passed: 3,
-      failed: 0,
-      skipped: 0,
-      duration: "4.2s",
+      passed: 243,
+      failed: 2,
+      skipped: 4,
+      duration: "2.1m",
     });
     assert.deepEqual(manifest.runnerFingerprint, {
       hostname: "runner-7",
@@ -155,28 +157,28 @@ test("grep mode records exact command, final log lines, and redacted environment
     assert.equal(manifest.stablyRunId, "stably-1");
     assert.equal(manifest.stablyRunUrl, "https://stably.ai/runs/stably-1");
     assert.doesNotMatch(manifestText, /must-not-leak/);
+    assert.equal(fs.existsSync(path.join(directory, "stably-test.log")), false);
+    assert.equal(
+      fs.existsSync(path.join(directory, "stably-test.scrubbed.log")),
+      true,
+    );
   });
 });
 
 test("scrubs every secret form from every retained input and stdout", () => {
   withTemporaryDirectory((directory) => {
     const secrets = {
-      STABLY_API_KEY: "manifest/api-key+sentinel?x=1",
-      STABLY_PROJECT_ID: "manifest/project+sentinel?x=2",
-      SERVICE_TOKEN: "manifest/token+sentinel?x=3",
-      DATABASE_PASSWORD: "manifest/password+sentinel?x=4",
-      SIGNING_SECRET: "manifest/secret+sentinel?x=5",
-      DEPLOY_CREDENTIAL: "manifest/credential+sentinel?x=6",
-      RELEASE_PAT: "manifest/pat+sentinel?x=7",
-      BASIC_AUTH: "manifest/auth+sentinel?x=8",
+      STABLY_API_KEY: "alpha\"omega\\ space ~!+%",
+      STABLY_PROJECT_ID: "alpha+beta%7E%21",
+      SERVICE_TOKEN: "xy",
+      DATABASE_PASSWORD: "xy-long-overlap",
+      SIGNING_SECRET: "manifest secret ~!+% sentinel",
+      DEPLOY_CREDENTIAL: "manifest\\credential\"sentinel",
+      RELEASE_PAT: "manifest+pat%sentinel",
+      BASIC_AUTH: "manifest auth sentinel",
     };
     const secretValues = Object.values(secrets);
-    const encodedValues = secretValues.flatMap((value) => [
-      value,
-      encodeURIComponent(value),
-      Buffer.from(value, "utf8").toString("base64"),
-      Buffer.from(value, "utf8").toString("base64url"),
-    ]);
+    const encodedValues = secretValues.flatMap(secretRepresentationsForValue);
 
     fs.writeFileSync(
       path.join(directory, "stably-test.log"),
@@ -184,6 +186,10 @@ test("scrubs every secret form from every retained input and stdout", () => {
         `prefix-${secrets.SIGNING_SECRET}-suffix E2E inventory verified: 249 total = 213 executing-substantive + 36 thin; 4 fixme + 0 skip.`,
         `249 passed / 0 failed / 0 skipped (2.1m) ${encodeURIComponent(secrets.DATABASE_PASSWORD)}`,
       ].join("\n"),
+    );
+    fs.writeFileSync(
+      path.join(directory, "preview-up.log"),
+      `preview-${secrets.STABLY_PROJECT_ID}-suffix\n`,
     );
     fs.writeFileSync(
       path.join(directory, "runner-fingerprint.json"),
@@ -219,6 +225,14 @@ test("scrubs every secret form from every retained input and stdout", () => {
     assert.equal(result.status, 0, result.stderr);
 
     const manifestText = fs.readFileSync(path.join(directory, manifestFileName), "utf8");
+    const stablyLogText = fs.readFileSync(
+      path.join(directory, "stably-test.scrubbed.log"),
+      "utf8",
+    );
+    const previewLogText = fs.readFileSync(
+      path.join(directory, "preview-up.scrubbed.log"),
+      "utf8",
+    );
     const manifest = JSON.parse(manifestText);
     assert.deepEqual(JSON.parse(result.stdout), manifest);
     assert.deepEqual(Object.keys(manifest.runnerFingerprint), [
@@ -257,9 +271,103 @@ test("scrubs every secret form from every retained input and stdout", () => {
         false,
         `stdout retained secret form: ${secretValue}`,
       );
+      assert.equal(
+        stablyLogText.includes(secretValue),
+        false,
+        `Stably log retained secret form: ${secretValue}`,
+      );
+      assert.equal(
+        previewLogText.includes(secretValue),
+        false,
+        `preview log retained secret form: ${secretValue}`,
+      );
     }
     for (const secretName of Object.keys(secrets)) {
       assert.match(manifestText, new RegExp(`\\[redacted:${secretName}\\]`));
     }
   });
+});
+
+test("workflow-shaped writer and manifest subprocess share the secret-bearing environment", () => {
+  withTemporaryDirectory((directory) => {
+    const secrets = {
+      STABLY_API_KEY: "workflow api key \"sentinel\"",
+      STABLY_PROJECT_ID: "workflow+project%sentinel",
+    };
+    const environment = { ...process.env, ...secrets };
+    for (const name of controlledEnvironmentNames) {
+      if (!(name in secrets)) delete environment[name];
+    }
+    Object.assign(environment, {
+      E2E_WORKERS: "2",
+      GITHUB_RUN_NUMBER: "99",
+      GITHUB_SHA: "workflow-sha",
+      GITHUB_RUN_ID: "workflow-run",
+      E2E_SUITE_OUTCOME: "success",
+    });
+    const writerProgram = `
+      import { spawnSync } from "node:child_process";
+      import fs from "node:fs";
+      fs.writeFileSync("stably-test.log", [
+        "E2E inventory verified: 1 total = 1 executing-substantive + 0 thin; 0 fixme + 0 skip.",
+        "1 passed (1s)",
+        process.env.STABLY_API_KEY,
+      ].join("\\n"));
+      fs.writeFileSync("preview-up.log", process.env.STABLY_PROJECT_ID);
+      const result = spawnSync(process.execPath, [${JSON.stringify(scriptPath)}], {
+        cwd: process.cwd(), env: process.env, encoding: "utf8",
+      });
+      process.stdout.write(result.stdout);
+      process.stderr.write(result.stderr);
+      process.exit(result.status ?? 1);
+    `;
+    const result = spawnSync(
+      process.execPath,
+      ["--input-type=module", "--eval", writerProgram],
+      { cwd: directory, env: environment, encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stderr);
+
+    const retainedFiles = [
+      manifestFileName,
+      "stably-test.scrubbed.log",
+      "preview-up.scrubbed.log",
+    ];
+    for (const fileName of retainedFiles) {
+      const retained = fs.readFileSync(path.join(directory, fileName), "utf8");
+      for (const secretValue of Object.values(secrets)) {
+        for (const representation of secretRepresentationsForValue(secretValue)) {
+          assert.equal(
+            retained.includes(representation),
+            false,
+            `${fileName} retained a workflow secret representation`,
+          );
+          assert.equal(
+            result.stdout.includes(representation),
+            false,
+            "manifest stdout retained a workflow secret representation",
+          );
+        }
+      }
+    }
+    assert.equal(fs.existsSync(path.join(directory, "stably-test.log")), false);
+    assert.equal(fs.existsSync(path.join(directory, "preview-up.log")), false);
+  });
+});
+
+test("workflow manifest step explicitly receives both Stably secrets", () => {
+  const workflow = fs.readFileSync(
+    path.join(repositoryRoot, ".github/workflows/stably-cloud.yml"),
+    "utf8",
+  );
+  const manifestStep = workflow.match(
+    /- name: Write hosted evidence manifest[\s\S]*?(?=\n      - name:)/,
+  )?.[0];
+  assert.ok(manifestStep, "hosted evidence manifest workflow step is missing");
+  assert.match(manifestStep, /STABLY_API_KEY: \$\{\{ secrets\.STABLY_API_KEY \}\}/);
+  assert.match(
+    manifestStep,
+    /STABLY_PROJECT_ID: \$\{\{ secrets\.STABLY_PROJECT_ID \}\}/,
+  );
+  assert.match(manifestStep, /run: node scripts\/hosted-evidence-manifest\.mjs/);
 });

@@ -3,8 +3,15 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  collectSecretRepresentations,
+  scrubText,
+} from "./hosted-evidence-secrets.mjs";
 
-const LOG_FILE_NAME = "stably-test.log";
+const RAW_LOG_FILE_NAME = "stably-test.log";
+const LOG_FILE_NAME = "stably-test.scrubbed.log";
+const RAW_PREVIEW_LOG_FILE_NAME = "preview-up.log";
+const PREVIEW_LOG_FILE_NAME = "preview-up.scrubbed.log";
 const RUNNER_FINGERPRINT_FILE_NAME = "runner-fingerprint.json";
 const MANIFEST_FILE_NAME = "hosted-evidence-manifest.json";
 const MAX_FINGERPRINT_FIELD_LENGTH = 512;
@@ -19,12 +26,6 @@ const RUNNER_FINGERPRINT_FIELDS = [
   "nodeVersion",
   "bunVersion",
 ];
-const SECRET_ENVIRONMENT_NAME_PATTERN =
-  /API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|(?:^|_)PAT(?:_|$)/i;
-const EXPLICIT_SECRET_ENVIRONMENT_NAMES = new Set([
-  "STABLY_API_KEY",
-  "STABLY_PROJECT_ID",
-]);
 
 function readTextOrEmpty(filePath) {
   try {
@@ -42,65 +43,6 @@ function lastMatchingLine(text, predicate) {
   return match;
 }
 
-function secretReplacements(environment) {
-  const replacements = [];
-  for (const [name, value] of Object.entries(environment)) {
-    if (
-      typeof value !== "string" ||
-      value === "" ||
-      (!SECRET_ENVIRONMENT_NAME_PATTERN.test(name) &&
-        !EXPLICIT_SECRET_ENVIRONMENT_NAMES.has(name))
-    ) {
-      continue;
-    }
-
-    const base64 = Buffer.from(value, "utf8").toString("base64");
-    const variants = new Set([
-      value,
-      encodeURIComponent(value),
-      base64,
-      base64.replace(/=+$/, ""),
-      base64.replace(/\+/g, "-").replace(/\//g, "_"),
-      base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""),
-    ]);
-    for (const variant of variants) {
-      if (variant !== "") {
-        replacements.push({ name, value: variant });
-      }
-    }
-  }
-  return replacements.sort((left, right) => right.value.length - left.value.length);
-}
-
-function scrubString(value, replacements) {
-  let scrubbed = value;
-  for (const replacement of replacements) {
-    scrubbed = scrubbed.split(replacement.value).join(`[redacted:${replacement.name}]`);
-  }
-  return scrubbed;
-}
-
-function scrubManifestValue(value, replacements) {
-  if (typeof value === "string") return scrubString(value, replacements);
-  if (Array.isArray(value)) {
-    return value.map((entry) => scrubManifestValue(entry, replacements));
-  }
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [
-        scrubString(key, replacements),
-        scrubManifestValue(entry, replacements),
-      ]),
-    );
-  }
-  return value;
-}
-
-function scrubSerializedJson(serialized, replacements) {
-  const parsed = JSON.parse(serialized);
-  return JSON.stringify(scrubManifestValue(parsed, replacements), null, 2);
-}
-
 function readRunnerFingerprint(filePath, replacements) {
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
@@ -111,7 +53,7 @@ function readRunnerFingerprint(filePath, replacements) {
     for (const field of RUNNER_FINGERPRINT_FIELDS) {
       const value = parsed[field];
       if (typeof value === "string") {
-        fingerprint[field] = scrubString(value, replacements).slice(
+        fingerprint[field] = scrubText(value, replacements).slice(
           0,
           MAX_FINGERPRINT_FIELD_LENGTH,
         );
@@ -137,19 +79,61 @@ function parseInventoryLine(line) {
   };
 }
 
-function parseSummaryLine(line) {
-  const passed = line.match(/(\d+)\s+passed/);
-  const failed = line.match(/(\d+)\s+failed/);
-  const skipped = line.match(/(\d+)\s+skipped/);
-  if (!passed && !failed && !skipped) return null;
-  const duration = line.match(/\((\d+(?:\.\d+)?(?:ms|s|m|h))\)/)?.[1] ?? null;
+function environmentCount(value) {
+  return typeof value === "string" && /^\d+$/.test(value) ? Number(value) : null;
+}
+
+function parseSummary(log, environment) {
+  let passed = null;
+  let failed = null;
+  let skipped = null;
+  let duration = null;
+  for (const line of log.split(/\r?\n/)) {
+    const passedMatch = line.match(/(\d+)\s+passed/);
+    const failedMatch = line.match(/(\d+)\s+failed/);
+    const skippedMatch = line.match(/(\d+)\s+(?:skipped|fixme)/);
+    const durationMatch = line.match(/\((\d+(?:\.\d+)?(?:ms|s|m|h))\)/);
+    if (passedMatch) passed = Number(passedMatch[1]);
+    if (failedMatch) failed = Number(failedMatch[1]);
+    if (skippedMatch) skipped = Number(skippedMatch[1]);
+    if (durationMatch) duration = durationMatch[1].slice(0, MAX_DURATION_LENGTH);
+  }
+  passed = environmentCount(environment.E2E_PASSED) ?? passed;
+  failed = environmentCount(environment.E2E_FAILED) ?? failed;
+  skipped = environmentCount(environment.E2E_SKIPPED) ?? skipped;
+  if (passed === null && failed === null && skipped === null) return null;
   return {
-    passed: passed ? Number(passed[1]) : 0,
-    failed: failed ? Number(failed[1]) : 0,
-    skipped: skipped ? Number(skipped[1]) : 0,
-    duration:
-      typeof duration === "string" ? duration.slice(0, MAX_DURATION_LENGTH) : null,
+    passed,
+    failed,
+    skipped,
+    duration,
   };
+}
+
+function writeScrubbedLog(workingDirectory, sourceName, destinationName, replacements) {
+  const sourcePath = path.join(workingDirectory, sourceName);
+  if (!fs.existsSync(sourcePath)) return;
+  const destinationPath = path.join(workingDirectory, destinationName);
+  const temporaryPath = `${destinationPath}.tmp-${process.pid}`;
+  const scrubbed = scrubText(fs.readFileSync(sourcePath, "utf8"), replacements);
+  fs.writeFileSync(temporaryPath, scrubbed);
+  fs.renameSync(temporaryPath, destinationPath);
+  fs.unlinkSync(sourcePath);
+}
+
+function writeScrubbedLogs(workingDirectory, replacements) {
+  writeScrubbedLog(
+    workingDirectory,
+    RAW_LOG_FILE_NAME,
+    LOG_FILE_NAME,
+    replacements,
+  );
+  writeScrubbedLog(
+    workingDirectory,
+    RAW_PREVIEW_LOG_FILE_NAME,
+    PREVIEW_LOG_FILE_NAME,
+    replacements,
+  );
 }
 
 function suiteCommand(environment) {
@@ -168,7 +152,7 @@ export function buildHostedEvidenceManifest({
   workingDirectory = process.cwd(),
   environment = process.env,
 } = {}) {
-  const replacements = secretReplacements(environment);
+  const replacements = collectSecretRepresentations(environment);
   const log = readTextOrEmpty(path.join(workingDirectory, LOG_FILE_NAME));
   const rawInventoryLine = lastMatchingLine(log, (line) =>
     line.includes("E2E inventory "),
@@ -176,7 +160,7 @@ export function buildHostedEvidenceManifest({
   const rawSummaryLine = lastMatchingLine(log, (line) =>
     /[0-9]+ (passed|failed|skipped)/.test(line),
   );
-  return scrubManifestValue({
+  return {
     command: suiteCommand(environment),
     environment: {
       CI: "1",
@@ -192,29 +176,29 @@ export function buildHostedEvidenceManifest({
       replacements,
     ),
     inventory: parseInventoryLine(rawInventoryLine),
-    summary: parseSummaryLine(rawSummaryLine),
-    inventoryLine: scrubString(rawInventoryLine, replacements),
-    summaryLine: scrubString(rawSummaryLine, replacements),
+    summary: parseSummary(log, environment),
+    inventoryLine: scrubText(rawInventoryLine, replacements),
+    summaryLine: scrubText(rawSummaryLine, replacements),
     outcome: environment.E2E_SUITE_OUTCOME || "not run",
     stablyRunId: environment.E2E_RUN_ID || "not detected",
     stablyRunUrl: environment.E2E_RUN_URL || "not detected",
-  }, replacements);
+  };
 }
 
 export function writeHostedEvidenceManifest(options = {}) {
   const workingDirectory = options.workingDirectory ?? process.cwd();
   const environment = options.environment ?? process.env;
+  const replacements = collectSecretRepresentations(environment);
+  writeScrubbedLogs(workingDirectory, replacements);
   const manifest = buildHostedEvidenceManifest({
     ...options,
     environment,
     workingDirectory,
   });
-  // Treat the serialized document as the final disclosure boundary so the file
-  // and stdout cannot diverge from the same complete-manifest scrub.
-  const serialized = `${scrubSerializedJson(
-    JSON.stringify(manifest),
-    secretReplacements(environment),
-  )}\n`;
+  // Scrub the final compact JSON bytes so JSON escaping cannot create a form
+  // that bypasses the same disclosure boundary used for the uploaded logs.
+  const serialized = scrubText(JSON.stringify(manifest), replacements);
+  JSON.parse(serialized);
   fs.writeFileSync(path.join(workingDirectory, MANIFEST_FILE_NAME), serialized);
   process.stdout.write(serialized);
   return JSON.parse(serialized);

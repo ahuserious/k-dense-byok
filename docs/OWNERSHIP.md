@@ -8,7 +8,7 @@ inventory path is owned exactly once.
 | Lane | Scope | Owned globs |
 | --- | --- | --- |
 | C1 | Vendored builder dist freshness and hosted build | `scripts/vendored-dist-*.mjs`; `package.json`; `.github/workflows/tests.yml`; `docs/preview-env.md` |
-| C3 | Hosted evidence manifest | `scripts/hosted-evidence-manifest*.mjs` |
+| C3 | Hosted evidence manifest and artifact scan | `scripts/hosted-evidence-*.mjs` |
 | D3 | Hosted-runner E2E workflow | `.github/workflows/stably-cloud.yml` |
 | S1 | Consolidation and typed-surface removal | `web/src/app/page.tsx`; `web/src/components/{workspace-navigation,persistent-workspace-surfaces,dag-builder-surface,dag-builder,dag-builder-canvas,dag-builder-inspector,dag-workflow-console}.{ts,tsx}`; `web/src/lib/{workspace-persistence,dag-workflow-builder,dag-workflows}.ts` |
 | S1b | Scientific Pipelines cross-engine registry | `web/src/components/dag-workflows-panel.tsx`; `web/src/components/dag-workflows-panel.test.tsx`; `web/src/lib/scientific-pipeline-registry.ts`; `web/src/lib/scientific-pipeline-registry.test.ts`; `server/test/pipeline-engine-client.test.ts`; `docs/lanes/S1b-INTEGRATION.md` |
@@ -27,7 +27,7 @@ inventory path is owned exactly once.
 
 | From | To | Path | Authorized scope |
 | --- | --- | --- | --- |
-| D3 | C3 | `.github/workflows/stably-cloud.yml` | Orchestrator-authorized Round 6 addition of the redacted hosted evidence manifest step and its artifact path. |
+| D3 | C3 | `.github/workflows/stably-cloud.yml` | Orchestrator-authorized hosted evidence manifest, scrubbed-log, final-scan, and gated-upload steps from Rounds 6-9. |
 
 Tests follow the lane owning their production basename. Repository rail scripts,
 guard tests, and `docs/lanes/R1.log` belong to R1 and are outside S1-S11 product

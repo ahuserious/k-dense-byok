@@ -7,7 +7,7 @@
       "docs/preview-env.md"
     ],
     "C3": [
-      "scripts/hosted-evidence-manifest*.mjs"
+      "scripts/hosted-evidence-*.mjs"
     ],
     "D3": [
       ".github/workflows/stably-cloud.yml"
@@ -187,7 +187,7 @@
       "from": "D3",
       "to": "C3",
       "path": ".github/workflows/stably-cloud.yml",
-      "scope": "Orchestrator-authorized Round 6 addition of the redacted hosted evidence manifest step and its artifact path."
+      "scope": "Orchestrator-authorized hosted evidence manifest, scrubbed-log, final-scan, and gated-upload steps from Rounds 6-9."
     }
   ]
 }
