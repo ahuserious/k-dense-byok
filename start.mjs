@@ -420,8 +420,7 @@ async function freePort(port, label) {
         fail(
           `\n  ${sym.err} A Kady backend is already running on port ${port} (PID ${pid}).\n` +
             "    Return to its original Kady terminal and stop it there. If that terminal\n" +
-            "    reports quarantined work, wait for acknowledgement; pressing Ctrl+C there\n" +
-            "    a second time explicitly chooses the unsafe force-exit path.",
+            "    reports quarantined work, wait for its shutdown acknowledgement before retrying.",
         );
       } else {
         log(`  Stopping a leftover Kady process on port ${port} (PID ${pid})...`);
@@ -441,6 +440,8 @@ async function freePort(port, label) {
 
 const children = [];
 let shuttingDown = false;
+let shutdownPromise = null;
+let shutdownExitCode = 0;
 let engineOwnershipMonitor = null;
 const shutdownController = new AbortController();
 
@@ -475,7 +476,16 @@ function waitUnlessShuttingDown(milliseconds) {
   });
 }
 
+function registerChild(child, role) {
+  // Node cannot dispatch a signal handler between spawn() returning and this
+  // synchronous registration, so shutdown always sees every created child.
+  child.kadyRole = role;
+  children.push(child);
+  return child;
+}
+
 function startService(label, dir, npmArgs, options = {}) {
+  if (shuttingDown) return null;
   log(`  ${sym.arrow} ${label}`);
   const cwd = path.join(repoRoot, dir);
   const directArgs = options.directBackend
@@ -505,12 +515,12 @@ function startService(label, dir, npmArgs, options = {}) {
       : // Own process group so Ctrl+C in the terminal reaches only the
         // launcher, which then tears the groups down in order.
         spawn("npm", npmArgs, { cwd, stdio: "inherit", detached: true });
-  child.kadyRole = options.directBackend
+  const role = options.directBackend
     ? "backend"
     : options.directFrontend
       ? "frontend"
       : "service";
-  children.push(child);
+  registerChild(child, role);
   // Fires for both exit-code and signal deaths, during boot and after.
   child.on("exit", () => {
     if (!shuttingDown) {
@@ -746,6 +756,7 @@ async function startWorkflowEngine() {
   // a Claude Code session; the launcher is not one.
   delete engineEnv.CLAUDECODE;
   const engineArgs = ["--filter", "@archon/server", "start"];
+  if (shuttingDown) return { available: false, spawned: false };
   const child = isWin
     ? // One command string through cmd.exe so taskkill /T reaps the tree
       // (same rationale as the npm spawn above). Quote bun: the fallback
@@ -765,8 +776,7 @@ async function startWorkflowEngine() {
         detached: true,
         env: engineEnv,
       });
-  child.kadyRole = "pipeline-engine";
-  children.push(child);
+  registerChild(child, "pipeline-engine");
   let childExited = false;
   const trackEarlyExit = () => {
     childExited = true;
@@ -792,6 +802,9 @@ async function startWorkflowEngine() {
   });
   child.removeListener("exit", trackEarlyExit);
   if (readiness.status !== "ready") {
+    if (readiness.status === "aborted" && shuttingDown) {
+      return { available: false, spawned: false };
+    }
     try {
       await stopUnreadyWorkflowEngine(child);
     } catch (error) {
@@ -823,27 +836,7 @@ async function startWorkflowEngine() {
   return { available: true, spawned: true, childPid: child.pid, ownerPids: readiness.listenerPids };
 }
 
-async function stopAll(code) {
-  if (shuttingDown) {
-    log(`\n  ${sym.warn} Second shutdown signal received — forcing unsafe process termination.`);
-    for (const child of children) {
-      if (ownedTreeGone(child)) continue;
-      if (isWin) {
-        capture("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
-        continue;
-      }
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch {
-        try {
-          child.kill("SIGKILL");
-        } catch {
-          /* already gone */
-        }
-      }
-    }
-    process.exit(code === 0 ? 1 : code);
-  }
+async function performShutdown() {
   shuttingDown = true;
   shutdownController.abort();
   if (engineOwnershipMonitor) {
@@ -887,7 +880,7 @@ async function stopAll(code) {
       const stopped = capture("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
       if (stopped === null) {
         console.error(`  ${sym.warn} Windows could not stop the frontend process tree.`);
-        console.error("    Press Ctrl+C again to retry forced cleanup.");
+        console.error("    Shutdown will remain pending until that exact process tree exits.");
       }
       continue;
     }
@@ -901,7 +894,7 @@ async function stopAll(code) {
       }
     }
   }
-  log("  Waiting for owned work to quiesce. Press Ctrl+C again only to force an unsafe exit.");
+  log("  Waiting for owned work to quiesce; repeated shutdown signals join this same teardown.");
   // There is intentionally no elapsed-time SIGKILL. The backend's app.close()
   // drains the detached workflow supervisor, whose provider ownership can
   // outlive a caller acknowledgement window.
@@ -909,11 +902,18 @@ async function stopAll(code) {
     await Promise.all(engineStops);
   } catch (error) {
     console.error(`  ${sym.err} ${error instanceof Error ? error.message : String(error)}`);
-    process.exit(code === 0 ? 1 : code);
+    shutdownExitCode ||= 1;
+    process.exit(shutdownExitCode);
   }
   const allExited = Promise.all(children.map(waitForOwnedTree));
   await allExited;
-  process.exit(code);
+  process.exit(shutdownExitCode);
+}
+
+function stopAll(code) {
+  if (code !== 0) shutdownExitCode = code;
+  shutdownPromise ??= performShutdown();
+  return shutdownPromise;
 }
 
 /** Wait until the service answers HTTP (any response counts). Child death is
@@ -1034,6 +1034,10 @@ log("");
 log("Starting services...");
 log("");
 const engineState = await startWorkflowEngine();
+if (shuttingDown) {
+  await shutdownPromise;
+  process.exit(shutdownExitCode);
+}
 if (!engineState.available) {
   process.env.KADY_PIPELINE_ENGINE_DISABLED = "1";
   log(`  ${sym.warn} Workflow engine disabled; pipeline routes will return 503.`);
@@ -1041,18 +1045,22 @@ if (!engineState.available) {
   process.env.KADY_PIPELINE_ENGINE_DISABLED = "0";
   monitorWorkflowEngineOwnership(engineState);
 }
-startService(
-  `Backend on port ${BACKEND_PORT} (Pi agent, TypeScript)`,
-  "server",
-  [],
-  { directBackend: true },
-);
-startService(
-  `Frontend on port ${FRONTEND_PORT} (Next.js UI)`,
-  "web",
-  [],
-  { directFrontend: true, serviceArgs: ["dev", "-p", String(FRONTEND_PORT)] },
-);
+if (!shuttingDown) {
+  startService(
+    `Backend on port ${BACKEND_PORT} (Pi agent, TypeScript)`,
+    "server",
+    [],
+    { directBackend: true },
+  );
+}
+if (!shuttingDown) {
+  startService(
+    `Frontend on port ${FRONTEND_PORT} (Next.js UI)`,
+    "web",
+    [],
+    { directFrontend: true, serviceArgs: ["dev", "-p", String(FRONTEND_PORT)] },
+  );
+}
 
 log("");
 log("Waiting for services to come up (the first run can take a minute)...");

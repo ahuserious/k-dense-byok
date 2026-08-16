@@ -8,14 +8,40 @@ import { fileURLToPath } from "node:url";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const inventoryDir = path.join(repoRoot, "docs", "inventory");
 const ownershipRelative = "docs/inventory/ownership.json";
+const laneWritersRelative = "docs/inventory/lane-writers.json";
 const ownershipPath = path.join(repoRoot, ownershipRelative);
 const policyControlledPaths = new Set([
   "docs/OWNERSHIP.md",
   ownershipRelative,
+  laneWritersRelative,
   "scripts/ownership-check.mjs",
 ]);
 
 function parseArguments(argv) {
+  if (argv[0] === "--resolve-writer") {
+    let actor = null;
+    let headRef = null;
+    let mapping = null;
+    for (let index = 1; index < argv.length; index += 1) {
+      const argument = argv[index];
+      if (!["--actor", "--head-ref", "--mapping"].includes(argument)) {
+        throw new Error(`unknown option: ${argument}`);
+      }
+      const name = argument.slice(2);
+      const current = name === "actor" ? actor : name === "head-ref" ? headRef : mapping;
+      if (current !== null) throw new Error(`${argument} may be specified only once`);
+      const value = argv[index + 1];
+      if (!value || value.startsWith("-")) throw new Error(`${argument} requires a value`);
+      if (name === "actor") actor = value;
+      else if (name === "head-ref") headRef = value;
+      else mapping = value;
+      index += 1;
+    }
+    if (actor === null || headRef === null || mapping === null) {
+      throw new Error("--resolve-writer requires --actor, --head-ref, and --mapping");
+    }
+    return { mode: "resolve-writer", actor, headRef, mapping };
+  }
   let writer = null;
   let base = null;
   let head = null;
@@ -48,7 +74,45 @@ function parseArguments(argv) {
   if (head !== null && !/^[0-9a-f]{7,64}$/i.test(head)) {
     throw new Error("--head must be an explicit hexadecimal commit id (symbolic revisions such as HEAD are rejected)");
   }
-  return { writer, base, head };
+  return { mode: "check", writer, base, head };
+}
+
+function resolveWriterFromBaseMapping(actor, headRef, mappingRelativePath) {
+  const mappingPath = path.resolve(repoRoot, mappingRelativePath);
+  if (mappingPath !== path.join(repoRoot, mappingRelativePath) ||
+      !mappingPath.startsWith(`${repoRoot}${path.sep}`)) {
+    throw new Error("--mapping must name a repository-relative file");
+  }
+  let mapping;
+  try {
+    mapping = JSON.parse(fs.readFileSync(mappingPath, "utf-8"));
+  } catch (error) {
+    throw new Error(
+      `trusted lane-writer mapping is absent or unreadable at ${mappingRelativePath}: ${error.message}`,
+    );
+  }
+  if (!mapping || typeof mapping !== "object" || Array.isArray(mapping)) {
+    throw new Error("trusted lane-writer mapping must be an object");
+  }
+  const normalizedMapping = new Map();
+  for (const [login, lanes] of Object.entries(mapping)) {
+    const normalizedLogin = login.toLowerCase();
+    if (!login || normalizedMapping.has(normalizedLogin) || !Array.isArray(lanes) ||
+        lanes.length === 0 || lanes.some((lane) => typeof lane !== "string" || !/^[A-Za-z][A-Za-z0-9]*$/.test(lane))) {
+      throw new Error(`trusted lane-writer mapping has an invalid entry for ${JSON.stringify(login)}`);
+    }
+    normalizedMapping.set(normalizedLogin, new Set(lanes.map((lane) => lane.toUpperCase())));
+  }
+  const branchMatch = /^lane\/([A-Za-z][A-Za-z0-9]*)-/.exec(headRef);
+  if (!branchMatch) throw new Error("PR branch must use lane/<id>-<description>");
+  const branchLane = branchMatch[1].toUpperCase();
+  const actorLanes = normalizedMapping.get(actor.toLowerCase());
+  if (!actorLanes?.has(branchLane)) {
+    throw new Error(
+      `PR actor ${actor} is not authorized for ${branchLane} by ${mappingRelativePath}`,
+    );
+  }
+  return branchLane;
 }
 
 function git(arguments_) {
@@ -170,6 +234,16 @@ try {
 } catch (error) {
   console.error(`ownership-check: FAIL (${error.message})`);
   process.exit(2);
+}
+
+if (options.mode === "resolve-writer") {
+  try {
+    console.log(resolveWriterFromBaseMapping(options.actor, options.headRef, options.mapping));
+    process.exit(0);
+  } catch (error) {
+    console.error(`ownership-check: FAIL (${error.message})`);
+    process.exit(2);
+  }
 }
 
 const candidateOwnership = JSON.parse(fs.readFileSync(ownershipPath, "utf8"));

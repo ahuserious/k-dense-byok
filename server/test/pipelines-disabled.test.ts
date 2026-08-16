@@ -1,8 +1,17 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   PipelineReconciliationWorker,
   queryEngineRunByAdmissionId,
 } from "../src/api/pipelines.ts";
+import { createProject, getProject } from "../src/projects.ts";
+
+beforeEach(() => {
+  fs.mkdirSync(process.env.KADY_PROJECTS_ROOT!, { recursive: true });
+  if (!getProject("default")) {
+    createProject({ name: "Default", projectId: "default", spendLimitUsd: 20 });
+  }
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();

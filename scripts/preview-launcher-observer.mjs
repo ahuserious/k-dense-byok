@@ -1,8 +1,8 @@
 const OBSERVER_HELPER_ANCHOR = "const sleep = (ms) => new Promise((r) => setTimeout(r, ms));";
-const SERVICE_EXIT_ANCHOR = `  children.push(child);
+const SERVICE_EXIT_ANCHOR = `  registerChild(child, role);
   // Fires for both exit-code and signal deaths, during boot and after.
   child.on("exit", () => {`;
-const ENGINE_SPAWN_ANCHOR = `  children.push(child);
+const ENGINE_SPAWN_ANCHOR = `  registerChild(child, "pipeline-engine");
   let childExited = false;
   const trackEarlyExit = () => {
     childExited = true;
@@ -58,7 +58,7 @@ export function instrumentPreviewLauncher(source) {
   instrumented = replaceExactlyOnce(
     instrumented,
     SERVICE_EXIT_ANCHOR,
-    `  children.push(child);
+    `  registerChild(child, role);
   recordPreviewServiceState(child.kadyRole, child.pid, "spawned");
   // Fires for both exit-code and signal deaths, during boot and after.
   child.on("exit", (exitCode, signal) => {
@@ -68,7 +68,7 @@ export function instrumentPreviewLauncher(source) {
   instrumented = replaceExactlyOnce(
     instrumented,
     ENGINE_SPAWN_ANCHOR,
-    `  children.push(child);
+    `  registerChild(child, "pipeline-engine");
   recordPreviewServiceState(child.kadyRole, child.pid, "spawned");
   let childExited = false;
   const trackEarlyExit = (exitCode, signal) => {

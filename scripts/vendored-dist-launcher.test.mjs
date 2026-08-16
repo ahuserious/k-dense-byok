@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -7,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { applyEnvFile } from "../env-file.mjs";
+import { createLaunchOverlay, previewEnvironment } from "./preview-environment.mjs";
 import {
   classifyWorkflowEngineBuildOutcome,
   classifyWorkflowEngineListener,
@@ -425,90 +426,113 @@ test(
       : "requires Unix process groups and local socket binding; orchestrator runs with KADY_SOCKET_TESTS=1",
   },
   async () => {
-    const environmentModuleUrl = new URL("./vendored-dist-environment.mjs", import.meta.url).href;
-    const harnessSource = `
-      import { spawn } from "node:child_process";
-      import { terminateOwnedProcessTree, waitForOwnedWorkflowEngine } from ${JSON.stringify(environmentModuleUrl)};
-      const engineSource = \`
-        import http from "node:http";
-        const server = http.createServer((_request, response) => response.end("not-ready"));
-        process.on("SIGTERM", () => {});
-        server.listen(0, "127.0.0.1", () => process.send({ port: server.address().port }));
-      \`;
-      const engine = spawn(process.execPath, ["--input-type=module", "-e", engineSource], {
-        detached: true,
-        stdio: ["ignore", "ignore", "ignore", "ipc"],
+    const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-launcher-signal-"));
+    const reservePort = async () => {
+      const server = net.createServer();
+      await new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", resolve);
       });
-      const port = await new Promise((resolve, reject) => {
-        engine.once("error", reject);
-        engine.once("message", (message) => resolve(message.port));
-      });
-      process.send({ type: "ready", enginePid: engine.pid, port });
-      const controller = new AbortController();
-      let stopping = null;
-      process.on("SIGTERM", () => {
-        controller.abort();
-        stopping ??= terminateOwnedProcessTree({
-          treeGone: () => {
-            try { process.kill(-engine.pid, 0); return false; }
-            catch (error) { return error?.code === "ESRCH"; }
-          },
-          terminate: () => process.kill(-engine.pid, "SIGTERM"),
-          forceTerminate: () => process.kill(-engine.pid, "SIGKILL"),
-          wait: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
-          description: \`test workflow engine tree rooted at PID \${engine.pid}\`,
-          gracefulWaitMs: 100,
-          forcedWaitMs: 2_000,
-        }).then(() => process.exit(0), (error) => {
-          console.error(error.message);
-          process.exit(1);
-        });
-      });
-      await waitForOwnedWorkflowEngine({
-        childPid: engine.pid,
-        childExited: () => engine.exitCode !== null || engine.signalCode !== null,
-        listenersOn: () => [engine.pid],
-        isOwnedByChild: () => true,
-        probeHealth: async () => false,
-        wait: (milliseconds) => new Promise((resolve) => {
-          const timer = setTimeout(resolve, milliseconds);
-          controller.signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
-        }),
-        timeoutMs: 30_000,
-        signal: controller.signal,
-      });
-      if (stopping) await stopping;
-    `;
-    const harness = spawn(process.execPath, ["--input-type=module", "-e", harnessSource], {
-      stdio: ["ignore", "ignore", "pipe", "ipc"],
+      const port = server.address().port;
+      await new Promise((resolve) => server.close(resolve));
+      return port;
+    };
+    const ports = {
+      backend: await reservePort(),
+      frontend: await reservePort(),
+      engine: await reservePort(),
+    };
+    const build = spawnSync("npm", ["run", "build:vendored-dist"], {
+      cwd: repositoryRoot,
+      env: { ...process.env, NODE_ENV: "production", PORT: String(ports.engine) },
+      encoding: "utf-8",
     });
+    assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
+
+    const fakeNpm = path.join(stateRoot, "fake-npm");
+    fs.writeFileSync(fakeNpm, `#!${process.execPath}\nprocess.exit(0);\n`, { mode: 0o700 });
+    const gitPath = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf-8" }).stdout.trim();
+    const { launchRoot, shimDirectory } = createLaunchOverlay(
+      repositoryRoot,
+      stateRoot,
+      fakeNpm,
+      gitPath,
+    );
+    // This exercises normal launcher dependency flow with a no-op npm, while
+    // retaining the overlay's byte-derived launcher instrumentation.
+    fs.copyFileSync(fakeNpm, path.join(shimDirectory, "npm"));
+    const bunVersion = spawnSync("bun", ["--version"], { encoding: "utf-8" }).stdout.trim();
+    const fakeBun = path.join(shimDirectory, "bun");
+    fs.writeFileSync(
+      fakeBun,
+      `#!${process.execPath}
+import http from "node:http";
+if (process.argv.includes("--version")) { console.log(${JSON.stringify(bunVersion)}); process.exit(0); }
+const server = http.createServer((_request, response) => { response.statusCode = 503; response.end("not ready"); });
+const stop = () => server.close(() => process.exit(0));
+process.on("SIGINT", stop); process.on("SIGTERM", stop); process.on("SIGHUP", stop);
+server.listen(Number(process.env.PORT), "127.0.0.1");
+`,
+      { mode: 0o700 },
+    );
+    const serviceStatePath = path.join(stateRoot, "services.json");
+    fs.writeFileSync(serviceStatePath, '{"version":1,"services":{}}\n');
+    const environment = previewEnvironment(stateRoot, launchRoot, shimDirectory, ports);
+    delete environment.KADY_PREVIEW;
+    environment.NODE_ENV = "production";
+    const launcher = spawn(
+      process.execPath,
+      [path.join(launchRoot, "start.mjs"), "--no-browser"],
+      {
+        cwd: launchRoot,
+        detached: true,
+        env: environment,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let output = "";
+    launcher.stdout.on("data", (chunk) => { output += chunk; });
+    launcher.stderr.on("data", (chunk) => { output += chunk; });
     let enginePid;
-    let port;
-    let stderr = "";
-    harness.stderr.on("data", (chunk) => { stderr += chunk; });
     try {
-      const ready = await new Promise((resolve, reject) => {
-        harness.once("error", reject);
-        harness.once("message", resolve);
-      });
-      enginePid = ready.enginePid;
-      port = ready.port;
-      harness.kill("SIGTERM");
-      const exitCode = await new Promise((resolve) => harness.once("exit", resolve));
-      assert.equal(exitCode, 0, stderr);
+      const deadline = Date.now() + 20_000;
+      let state;
+      while (Date.now() < deadline) {
+        state = JSON.parse(fs.readFileSync(serviceStatePath, "utf-8"));
+        if (state.services?.["pipeline-engine"]?.state === "spawned") break;
+        if (launcher.exitCode !== null) assert.fail(`launcher exited before engine readiness\n${output}`);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      enginePid = state?.services?.["pipeline-engine"]?.pid;
+      assert.ok(Number.isSafeInteger(enginePid), `engine spawn was not observed\n${output}`);
+      const launcherExit = new Promise((resolve) => launcher.once("exit", resolve));
+      launcher.kill("SIGTERM");
+      const exitCode = await Promise.race([
+        launcherExit,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("launcher shutdown timed out")), 10_000)),
+      ]);
+      assert.equal(exitCode, 0, output);
+      const finalState = JSON.parse(fs.readFileSync(serviceStatePath, "utf-8"));
+      assert.equal(finalState.services["pipeline-engine"].state, "exited", output);
+      assert.equal("backend" in finalState.services, false, output);
+      assert.equal("frontend" in finalState.services, false, output);
+      assert.doesNotMatch(output, /Backend on port|Frontend on port/);
       assert.throws(() => process.kill(-enginePid, 0), (error) => error?.code === "ESRCH");
       await assert.rejects(
         new Promise((resolve, reject) => {
-          const socket = net.connect(port, "127.0.0.1");
+          const socket = net.connect(ports.engine, "127.0.0.1");
           socket.once("connect", () => { socket.destroy(); resolve(); });
           socket.once("error", reject);
         }),
       );
     } finally {
-      if (harness.exitCode === null) harness.kill("SIGKILL");
+      if (launcher.exitCode === null) {
+        try { process.kill(-launcher.pid, "SIGKILL"); } catch { /* already gone */ }
+      }
       if (enginePid) {
         try { process.kill(-enginePid, "SIGKILL"); } catch { /* already gone */ }
       }
+      fs.rmSync(stateRoot, { recursive: true, force: true });
     }
   },
 );

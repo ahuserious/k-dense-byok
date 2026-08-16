@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -19,6 +19,12 @@ import {
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(scriptDirectory, "..");
+
+function preparedBuildLockPath(root) {
+  const lockPath = vendoredDistBuildLockPath(root);
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  return lockPath;
+}
 
 test("credential scrub catches auth, PAT, and key names without stripping path variables", () => {
   const environment = scrubSensitiveEnvironment({
@@ -314,7 +320,7 @@ test("preview npm shim allows only the launcher prep command", () => {
 
 test("failed build-lock record writes remove the partial lock", async () => {
   const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-write-failure-"));
-  const lockPath = vendoredDistBuildLockPath(repositoryRoot);
+  const lockPath = preparedBuildLockPath(repositoryRoot);
   const injectedError = new Error("injected lock write failure");
   try {
     const lockFileSystem = {
@@ -339,7 +345,7 @@ test("failed build-lock record writes remove the partial lock", async () => {
 
 test("malformed build locks are never reclaimed and time out with metadata", async () => {
   const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-malformed-"));
-  const lockPath = vendoredDistBuildLockPath(repositoryRoot);
+  const lockPath = preparedBuildLockPath(repositoryRoot);
   try {
     fs.writeFileSync(lockPath, "{partial");
     await assert.rejects(
@@ -355,7 +361,7 @@ test("malformed build locks are never reclaimed and time out with metadata", asy
 
 test("persistent malformed-lock contention reaches its deadline", async () => {
   const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-deadline-"));
-  const lockPath = vendoredDistBuildLockPath(repositoryRoot);
+  const lockPath = preparedBuildLockPath(repositoryRoot);
   const lockExistsError = Object.assign(new Error("injected contention"), { code: "EEXIST" });
   try {
     fs.writeFileSync(lockPath, "{partial");
@@ -381,7 +387,7 @@ test("persistent malformed-lock contention reaches its deadline", async () => {
 
 test("an old-heartbeat build lock remains active while its exact owner is live", async () => {
   const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-live-owner-"));
-  const lockPath = vendoredDistBuildLockPath(repositoryRoot);
+  const lockPath = preparedBuildLockPath(repositoryRoot);
   try {
     const lock = await acquireVendoredDistBuildLock(repositoryRoot);
     const old = new Date(Date.now() - 20 * 60 * 1000);
@@ -396,7 +402,7 @@ test("an old-heartbeat build lock remains active while its exact owner is live",
 
 test("build lock ownership is revalidated before mutations and promotion", async () => {
   const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-token-loss-"));
-  const lockPath = vendoredDistBuildLockPath(repositoryRoot);
+  const lockPath = preparedBuildLockPath(repositoryRoot);
   try {
     const lock = await acquireVendoredDistBuildLock(repositoryRoot);
     const replacement = JSON.parse(fs.readFileSync(lockPath, "utf-8"));
@@ -414,7 +420,7 @@ test("build lock ownership is revalidated before mutations and promotion", async
 
 test("two lock contenders serialize without deleting the first owner's record", async () => {
   const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-two-contenders-"));
-  const lockPath = vendoredDistBuildLockPath(repositoryRoot);
+  const lockPath = preparedBuildLockPath(repositoryRoot);
   try {
     const first = await acquireVendoredDistBuildLock(repositoryRoot);
     const firstContents = fs.readFileSync(lockPath, "utf-8");
@@ -429,6 +435,69 @@ test("two lock contenders serialize without deleting the first owner's record", 
   } finally {
     fs.rmSync(lockPath, { force: true });
     fs.rmSync(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("distinct TMPDIR processes rendezvous on one checkout-local build lock", async () => {
+  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-cross-process-"));
+  const firstTmp = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-tmp-a-"));
+  const secondTmp = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-tmp-b-"));
+  const moduleUrl = new URL("./vendored-dist-environment.mjs", import.meta.url).href;
+  const childSource = `
+    import { acquireVendoredDistBuildLock } from ${JSON.stringify(moduleUrl)};
+    const lock = await acquireVendoredDistBuildLock(process.argv[1], { waitMs: 2_000, pollMs: 10 });
+    process.send({ type: "acquired", lockPath: lock.lockPath });
+    process.on("message", (message) => {
+      if (message === "release") { lock.release(); process.exit(0); }
+    });
+  `;
+  const startContender = (temporaryDirectory) => spawn(
+    process.execPath,
+    ["--input-type=module", "-e", childSource, repositoryRoot],
+    {
+      env: { ...process.env, TMPDIR: temporaryDirectory },
+      stdio: ["ignore", "ignore", "inherit", "ipc"],
+    },
+  );
+  const waitForAcquired = (child) => new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("lock contender did not acquire in time")), 3_000);
+    child.once("error", reject);
+    child.on("message", (message) => {
+      if (message?.type !== "acquired") return;
+      clearTimeout(timeout);
+      resolve(message);
+    });
+  });
+
+  const first = startContender(firstTmp);
+  let second;
+  try {
+    const firstAcquired = await waitForAcquired(first);
+    second = startContender(secondTmp);
+    let secondReported = false;
+    second.on("message", (message) => {
+      if (message?.type === "acquired") secondReported = true;
+    });
+    const secondAcquiredPromise = waitForAcquired(second);
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    assert.equal(secondReported, false, "the second TMPDIR must wait on the first process's lock");
+    const firstExit = new Promise((resolve) => first.once("exit", resolve));
+    first.send("release");
+    await firstExit;
+    const secondAcquired = await secondAcquiredPromise;
+    assert.equal(secondAcquired.lockPath, firstAcquired.lockPath);
+    assert.equal(secondAcquired.lockPath, vendoredDistBuildLockPath(repositoryRoot));
+    assert.equal(secondAcquired.lockPath.startsWith(firstTmp), false);
+    assert.equal(secondAcquired.lockPath.startsWith(secondTmp), false);
+    const secondExit = new Promise((resolve) => second.once("exit", resolve));
+    second.send("release");
+    await secondExit;
+  } finally {
+    if (first.exitCode === null) first.kill("SIGKILL");
+    if (second?.exitCode === null) second.kill("SIGKILL");
+    fs.rmSync(repositoryRoot, { recursive: true, force: true });
+    fs.rmSync(firstTmp, { recursive: true, force: true });
+    fs.rmSync(secondTmp, { recursive: true, force: true });
   }
 });
 

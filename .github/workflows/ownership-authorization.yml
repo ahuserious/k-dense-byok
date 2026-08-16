@@ -30,10 +30,11 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_ACTOR: ${{ github.event.pull_request.user.login }}
         run: |
-          if [[ ! "$HEAD_REF" =~ ^lane/([A-Za-z][A-Za-z0-9]*)- ]]; then
-            echo "ownership-check: FAIL (PR branch must use lane/<id>-<description>)" >&2
-            exit 2
-          fi
-          writer="$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')"
+          writer="$(node scripts/ownership-check.mjs \
+            --resolve-writer \
+            --actor "$PR_ACTOR" \
+            --head-ref "$HEAD_REF" \
+            --mapping docs/inventory/lane-writers.json)"
           node scripts/ownership-check.mjs --writer "$writer" --base "$BASE_SHA" --head "$HEAD_SHA"

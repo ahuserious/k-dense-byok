@@ -1,8 +1,7 @@
 import path from "node:path";
 import fs from "node:fs";
-import os from "node:os";
 import { spawnSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 const sensitiveEnvironmentNamePattern =
   /(?:^|_)(?:API_KEY|AUTH[^_]*|CREDENTIALS?|DATABASE_URL|KEY|MYSQL_PWD|PASSWORD|PAT|PGPASSWORD|SECRET|TOKEN)(?:_|$)/i;
@@ -249,8 +248,18 @@ function processAlive(pid) {
 
 export function vendoredDistBuildLockPath(repositoryRoot) {
   const identity = fs.realpathSync(path.resolve(repositoryRoot));
-  const digest = createHash("sha256").update(identity).digest("hex").slice(0, 24);
-  return path.join(os.tmpdir(), `kady-vendored-dist-${digest}.lock`);
+  // Every preview has a different TMPDIR, so the rendezvous must live under
+  // the one ignored workspace all builders mutate. Dist promotion never
+  // replaces node_modules, and the dependency sentinel detects its deletion.
+  return path.join(
+    identity,
+    "server",
+    "vendor",
+    "pipeline-engine",
+    "node_modules",
+    ".vendored-dist-lock",
+    "build.lock",
+  );
 }
 
 function readBuildLock(lockPath) {
@@ -285,6 +294,7 @@ export async function acquireVendoredDistBuildLock(
   { waitMs = 120_000, pollMs = 200, lockFileSystem = fs } = {},
 ) {
   const lockPath = vendoredDistBuildLockPath(repositoryRoot);
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
   const token = randomUUID();
   const processStart = processStartIdentity(process.pid);
   if (!processStart) throw new Error(`could not determine start time for build-lock PID ${process.pid}`);

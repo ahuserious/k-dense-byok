@@ -70,6 +70,57 @@ test("ownership writer/base flags reject joined, unknown, duplicate, and option-
   }
 });
 
+test("fork branch-name spoofing cannot select a lane without base-mapped actor authority", () => {
+  const { checkout } = createGitFixture();
+  try {
+    const absent = runChecker(
+      checkout,
+      "--resolve-writer",
+      "--actor",
+      "trusted-maintainer",
+      "--head-ref",
+      "lane/C1-authorized",
+      "--mapping",
+      "docs/inventory/lane-writers.json",
+    );
+    assert.equal(absent.status, 2, `${absent.stdout}\n${absent.stderr}`);
+    assert.match(absent.stderr, /mapping is absent or unreadable/);
+
+    writeFixtureFile(
+      checkout,
+      "docs/inventory/lane-writers.json",
+      `${JSON.stringify({ "trusted-maintainer": ["C1"] }, null, 2)}\n`,
+    );
+    const spoofed = runChecker(
+      checkout,
+      "--resolve-writer",
+      "--actor",
+      "untrusted-fork-user",
+      "--head-ref",
+      "lane/C1-spoof",
+      "--mapping",
+      "docs/inventory/lane-writers.json",
+    );
+    assert.equal(spoofed.status, 2, `${spoofed.stdout}\n${spoofed.stderr}`);
+    assert.match(spoofed.stderr, /untrusted-fork-user is not authorized for C1/);
+
+    const authorized = runChecker(
+      checkout,
+      "--resolve-writer",
+      "--actor",
+      "trusted-maintainer",
+      "--head-ref",
+      "lane/C1-authorized",
+      "--mapping",
+      "docs/inventory/lane-writers.json",
+    );
+    assert.equal(authorized.status, 0, `${authorized.stdout}\n${authorized.stderr}`);
+    assert.equal(authorized.stdout.trim(), "C1");
+  } finally {
+    fs.rmSync(checkout, { recursive: true, force: true });
+  }
+});
+
 test("explicit head is inspected by the trusted base checker without executing head code", () => {
   const { checkout, base } = createGitFixture();
   try {
