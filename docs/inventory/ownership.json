@@ -39,7 +39,8 @@
       "scripts/ownership-check.mjs",
       "scripts/ownership-check.test.mjs",
       "server/test/pipelines-disabled.test.ts",
-      ".github/workflows/ownership-authorization.yml"
+      ".github/workflows/ownership-authorization.yml",
+      "server/test/pipelines.test.ts"
     ],
     "S1": [
       "web/src/app/page.tsx",
@@ -460,13 +461,6 @@
       "date": "2026-08-16",
       "path": ".github/workflows/stably-cloud.yml",
       "scope": "hosted evidence manifest step and artifact upload"
-    },
-    {
-      "from": "S4",
-      "to": "C1",
-      "date": "2026-08-16",
-      "path": "server/test/pipelines.test.ts",
-      "scope": "disabled crash-window recovery tests only"
     },
     {
       "from": "C1",
