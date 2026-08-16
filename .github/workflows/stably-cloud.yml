@@ -148,6 +148,7 @@ jobs:
             --engine-port 13091 > preview-up.log 2>&1
           preview_exit=$?
           set -e
+          cat preview-up.log
           exit "$preview_exit"
 
       - name: Warm the main page
