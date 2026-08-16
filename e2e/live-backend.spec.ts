@@ -34,6 +34,24 @@ interface WorkflowSummary {
   edgeCount: number;
 }
 
+/**
+ * The definition PUT returns an envelope, not a bare record: the store's
+ * compare-and-set outcome plus the definition it settled on
+ * (server/src/api/dag-workflows.ts:414-421).
+ */
+interface SavedWorkflowEnvelope {
+  outcome: "created" | "unchanged" | "updated";
+  definition: StoredWorkflow;
+}
+
+/** A PUT observed from inside the browser, including its conditional result. */
+interface ObservedDefinitionWrite {
+  status: number;
+  url: string;
+  etag: string | null;
+  body: unknown;
+}
+
 function uniqueWorkflow(testInfo: TestInfo): { id: string; name: string } {
   const nonce = `${Date.now().toString(36)}-${testInfo.workerIndex}-${randomUUID().slice(0, 8)}`;
   return { id: `c3-live-${nonce}`, name: `C3 Live ${nonce}` };
@@ -45,6 +63,8 @@ async function createTemplateWorkflow(
 ): Promise<{
   created: StoredWorkflow;
   firstPutStatus: number;
+  firstPutOutcome: SavedWorkflowEnvelope["outcome"];
+  firstPutETag: string | undefined;
   firstPutUrl: string;
   startedAt: number;
   finishedAt: number;
@@ -67,12 +87,38 @@ async function createTemplateWorkflow(
   await page.getByRole("button", { name: "Create and open" }).click();
   const firstPutResponse = await firstPutPromise;
   const finishedAt = Date.now();
-  const created = await firstPutResponse.json() as StoredWorkflow;
+  const envelope = await firstPutResponse.json() as SavedWorkflowEnvelope;
+  const created = envelope.definition;
   const observedProjectId = await firstPutResponse.request().headerValue("X-Project-Id");
+  const firstPutETag = firstPutResponse.headers().etag;
+  // The panel's create form declares its intent explicitly; the server refuses a
+  // definition write that carries no conditional header at all.
+  const observedCreatePrecondition = await firstPutResponse.request()
+    .headerValue("If-None-Match");
+  expect(
+    observedCreatePrecondition,
+    `Initial PUT carried If-None-Match=${String(observedCreatePrecondition)}; expected the create precondition \`*\`.`,
+  ).toBe("*");
+  expect(
+    await firstPutResponse.request().headerValue("If-Match"),
+    "A create must not also carry an If-Match update precondition.",
+  ).toBeNull();
   expect(
     firstPutResponse.status(),
-    `Initial PUT ${firstPutResponse.url()} returned ${firstPutResponse.status()} with ${JSON.stringify(created)}.`,
+    `Initial PUT ${firstPutResponse.url()} returned ${firstPutResponse.status()} with ${JSON.stringify(envelope)}.`,
   ).toBe(201);
+  expect(
+    envelope.outcome,
+    `Initial PUT ${firstPutResponse.url()} returned outcome=${String(envelope.outcome)} with ${JSON.stringify(envelope)}.`,
+  ).toBe("created");
+  expect(
+    firstPutETag,
+    `Initial PUT returned ETag=${String(firstPutETag)}; expected the created revision tag "1".`,
+  ).toBe('"1"');
+  expect(
+    created.revision,
+    `Initial PUT stored revision ${created.revision}; expected 1 for a create.`,
+  ).toBe(1);
   expect(
     new URL(firstPutResponse.url()).origin,
     `Initial PUT resolved to ${firstPutResponse.url()}; expected the configured backend origin.`,
@@ -88,6 +134,8 @@ async function createTemplateWorkflow(
   return {
     created,
     firstPutStatus: firstPutResponse.status(),
+    firstPutOutcome: envelope.outcome,
+    firstPutETag,
     firstPutUrl: firstPutResponse.url(),
     startedAt,
     finishedAt,
@@ -194,23 +242,56 @@ test("@live @live-alt creates a template workflow and renders API-exact details"
   );
 });
 
-test("@live @live-alt identical workflow PUT is a no-op: same 201 for revision 1, unchanged record", async ({
+test("@live @live-alt definition compare-and-set matrix: unchanged no-op, update, conflicting create, missing and malformed preconditions", async ({
   liveWorkspace,
 }, testInfo) => {
   const creation = await createTemplateWorkflow(liveWorkspace, testInfo);
-  const repeated = await liveWorkspace.page.evaluate(async ({ url, graph, projectId }) => {
-    const response = await fetch(url, {
-      method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Project-Id": projectId,
-      },
-      body: JSON.stringify(graph),
-    });
+  expect(creation.firstPutStatus).toBe(201);
+  expect(creation.firstPutOutcome).toBe("created");
+  expect(creation.firstPutETag).toBe('"1"');
+
+  // Every case below is deliberately non-mutating, so the independent GET that
+  // follows them proves the stored record survived the whole group untouched.
+  // Each refusal is also a browser console error, so it is declared up front;
+  // the fixture still fails on anything else the page reports.
+  for (const refusedStatus of [409, 428, 400, 400, 400, 400]) {
+    liveWorkspace.expectRefusedResourceStatus(refusedStatus);
+  }
+  const preconditions = await liveWorkspace.page.evaluate(async (
+    { url, graph, projectId },
+  ) => {
+    const put = async (conditional: Record<string, string>) => {
+      const response = await fetch(url, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Project-Id": projectId,
+          ...conditional,
+        },
+        body: JSON.stringify(graph),
+      });
+      const text = await response.text();
+      let body: unknown = text;
+      try {
+        body = JSON.parse(text) as unknown;
+      } catch {
+        // A non-JSON body is reported verbatim so the failure names what arrived.
+      }
+      return {
+        status: response.status,
+        url: response.url,
+        etag: response.headers.get("ETag"),
+        body,
+      };
+    };
     return {
-      status: response.status,
-      url: response.url,
-      body: await response.json() as StoredWorkflow,
+      identicalUpdate: await put({ "If-Match": '"1"' }),
+      repeatCreate: await put({ "If-None-Match": "*" }),
+      missingPrecondition: await put({}),
+      bothPreconditions: await put({ "If-None-Match": "*", "If-Match": '"1"' }),
+      malformedBareIfMatch: await put({ "If-Match": "1" }),
+      malformedWeakIfMatch: await put({ "If-Match": 'W/"1"' }),
+      malformedWildcardIfNoneMatch: await put({ "If-None-Match": '"1"' }),
     };
   }, {
     url: creation.firstPutUrl,
@@ -218,36 +299,78 @@ test("@live @live-alt identical workflow PUT is a no-op: same 201 for revision 1
     projectId: liveWorkspace.project.id,
   });
 
-  expect(creation.firstPutStatus).toBe(201);
-  // The route currently derives status from stored revision, so an unchanged
-  // revision-1 record remains 201. A 200 no-op status is server-owned backlog N-09.
+  const describeWrite = (label: string, observed: ObservedDefinitionWrite) =>
+    `${label} observed status=${observed.status}, ETag=${String(observed.etag)}, ` +
+    `body=${JSON.stringify(observed.body)}.`;
+  for (const [label, observed] of Object.entries(preconditions)) {
+    expect(
+      new URL(observed.url).origin,
+      `${label} PUT resolved to ${observed.url}; expected the configured backend origin.`,
+    ).toBe(e2eServiceOrigin("backend"));
+  }
+
+  // An identical body under the revision-1 update precondition is the no-op:
+  // 200 `unchanged`, the revision does not advance, and the record is byte-equal.
   expect(
-    repeated.status,
-    `Identical PUT observed status=${repeated.status}, revision=${repeated.body.revision}, ` +
-      `createdAt=${repeated.body.createdAt}, graphSha256=${repeated.body.graphSha256}.`,
-  ).toBe(201);
+    preconditions.identicalUpdate.status,
+    describeWrite("Identical update", preconditions.identicalUpdate),
+  ).toBe(200);
   expect(
-    new URL(repeated.url).origin,
-    `Repeated PUT resolved to ${repeated.url}; expected the configured backend origin.`,
-  ).toBe(e2eServiceOrigin("backend"));
-  expect(repeated.body).toMatchObject({
-    id: creation.created.id,
-    revision: creation.created.revision,
-    createdAt: creation.created.createdAt,
-    updatedAt: creation.created.updatedAt,
-    graphSha256: creation.created.graphSha256,
-  });
+    preconditions.identicalUpdate.etag,
+    describeWrite("Identical update", preconditions.identicalUpdate),
+  ).toBe('"1"');
+  const identical = preconditions.identicalUpdate.body as SavedWorkflowEnvelope;
   expect(
-    repeated.body,
-    `Identical PUT must return the unchanged stored record; first=${JSON.stringify(creation.created)}, ` +
-      `repeated=${JSON.stringify(repeated.body)}.`,
+    identical.outcome,
+    describeWrite("Identical update", preconditions.identicalUpdate),
+  ).toBe("unchanged");
+  expect(
+    identical.definition.revision,
+    describeWrite("Identical update", preconditions.identicalUpdate),
+  ).toBe(1);
+  expect(
+    identical.definition,
+    `Identical update must return the unchanged stored record; first=${JSON.stringify(creation.created)}, ` +
+      `repeated=${JSON.stringify(identical.definition)}.`,
   ).toEqual(creation.created);
+
+  // A create precondition against an existing definition conflicts, and the
+  // conflict names the revision the server compared against.
+  expect(
+    preconditions.repeatCreate.status,
+    describeWrite("Repeated create", preconditions.repeatCreate),
+  ).toBe(409);
+  expect(
+    preconditions.repeatCreate.etag,
+    describeWrite("Repeated create", preconditions.repeatCreate),
+  ).toBe('"1"');
+
+  // No conditional header at all is 428, with no ETag to mistake for a state.
+  expect(
+    preconditions.missingPrecondition.status,
+    describeWrite("Precondition-less PUT", preconditions.missingPrecondition),
+  ).toBe(428);
+  expect(
+    preconditions.missingPrecondition.etag,
+    describeWrite("Precondition-less PUT", preconditions.missingPrecondition),
+  ).toBeNull();
+
+  // Both intents at once, and every malformed entity-tag form, are 400.
+  for (const label of [
+    "bothPreconditions",
+    "malformedBareIfMatch",
+    "malformedWeakIfMatch",
+    "malformedWildcardIfNoneMatch",
+  ] as const) {
+    expect(preconditions[label].status, describeWrite(label, preconditions[label])).toBe(400);
+  }
 
   const persisted = await liveWorkspace.page.evaluate(async ({ url, projectId }) => {
     const response = await fetch(url, { headers: { "X-Project-Id": projectId } });
     return {
       status: response.status,
       url: response.url,
+      etag: response.headers.get("ETag"),
       body: await response.json() as StoredWorkflow,
     };
   }, {
@@ -259,10 +382,11 @@ test("@live @live-alt identical workflow PUT is a no-op: same 201 for revision 1
     new URL(persisted.url).origin,
     `Independent GET resolved to ${persisted.url}; expected the configured backend origin.`,
   ).toBe(e2eServiceOrigin("backend"));
+  expect(persisted.etag, `Independent GET returned ETag=${String(persisted.etag)}.`).toBe('"1"');
   expect(
     persisted.body,
-    `Independent GET after the repeated PUT must remain unchanged; first=${JSON.stringify(creation.created)}, ` +
-      `persisted=${JSON.stringify(persisted.body)}.`,
+    `Independent GET after the no-op and refused writes must remain unchanged; ` +
+      `first=${JSON.stringify(creation.created)}, persisted=${JSON.stringify(persisted.body)}.`,
   ).toEqual(creation.created);
   expect(persisted.body.graph.nodes.map(({ id, kind }) => ({ id, kind }))).toEqual(
     creation.created.graph.nodes.map(({ id, kind }) => ({ id, kind })),
@@ -270,6 +394,55 @@ test("@live @live-alt identical workflow PUT is a no-op: same 201 for revision 1
   expect(persisted.body.graph.edges.map(({ id, from, to }) => ({ id, from, to }))).toEqual(
     creation.created.graph.edges.map(({ id, from, to }) => ({ id, from, to })),
   );
+
+  // Only a changed body under the same revision-1 precondition advances the
+  // definition, which is what separates the no-op above from a real update.
+  const changedGraph = {
+    ...creation.created.graph,
+    name: `${creation.created.graph.name} revised`,
+  };
+  const updated = await liveWorkspace.page.evaluate(async ({ url, graph, projectId }) => {
+    const response = await fetch(url, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Project-Id": projectId,
+        "If-Match": '"1"',
+      },
+      body: JSON.stringify(graph),
+    });
+    return {
+      status: response.status,
+      url: response.url,
+      etag: response.headers.get("ETag"),
+      body: await response.json() as SavedWorkflowEnvelope,
+    };
+  }, {
+    url: creation.firstPutUrl,
+    graph: changedGraph,
+    projectId: liveWorkspace.project.id,
+  });
+  const describeUpdate = `Changed update observed status=${updated.status}, ` +
+    `ETag=${String(updated.etag)}, body=${JSON.stringify(updated.body)}.`;
+  expect(updated.status, describeUpdate).toBe(200);
+  expect(updated.etag, describeUpdate).toBe('"2"');
+  expect(
+    new URL(updated.url).origin,
+    `Changed update resolved to ${updated.url}; expected the configured backend origin.`,
+  ).toBe(e2eServiceOrigin("backend"));
+  expect(updated.body.outcome, describeUpdate).toBe("updated");
+  expect(updated.body.definition.revision, describeUpdate).toBe(2);
+  expect(updated.body.definition.graph.name, describeUpdate).toBe(changedGraph.name);
+  expect(
+    updated.body.definition.createdAt,
+    `An update must preserve createdAt; first=${creation.created.createdAt}, ` +
+      `updated=${updated.body.definition.createdAt}.`,
+  ).toBe(creation.created.createdAt);
+  expect(
+    updated.body.definition.graphSha256,
+    `A changed graph must change graphSha256; first=${creation.created.graphSha256}, ` +
+      `updated=${updated.body.definition.graphSha256}.`,
+  ).not.toBe(creation.created.graphSha256);
 });
 
 test("@live @live-alt rejects an invalid graph then validates the exact provider-free graph", async ({

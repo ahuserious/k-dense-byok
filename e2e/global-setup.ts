@@ -33,6 +33,31 @@ function shouldWarmService(
   return isLoopbackHostname(service.hostname) || service.hostname === app.hostname;
 }
 
+/**
+ * `/api/preview-health` is written into the frontend by the hermetic preview
+ * projection (scripts/preview-environment.mjs) and returns 200 only while that
+ * generation's source snapshot is bound and undrifted. It is not part of the
+ * committed web app: a hosted deployment, the public-URL overlay topology, and
+ * a plain `next dev` frontend all serve 404 there, so probing it
+ * unconditionally would fail setup for a baseURL that never had the route.
+ *
+ * The route lives at the app origin itself rather than at a separate service
+ * port, so `shouldWarmService` cannot decide it — its loopback/same-hostname
+ * test is trivially true for the app origin. The gate is therefore the same
+ * live-topology condition plus the one shape `e2eServiceOrigin` already treats
+ * as the local hermetic preview: a loopback app origin. Set
+ * `KADY_E2E_PREVIEW_HEALTH=0` for a loopback frontend that is not a preview
+ * projection, or `=1` to demand the probe for a preview served elsewhere.
+ */
+function shouldWarmPreviewHealth(config: FullConfig, appOrigin: string): boolean {
+  const configured = process.env.KADY_E2E_PREVIEW_HEALTH;
+  if (configured === "0") return false;
+  if (configured === "1") return true;
+  if (!isLoopbackHostname(new URL(appOrigin).hostname)) return false;
+  if (process.env.KADY_E2E_WARMUP_SERVICES === "1") return true;
+  return !configuredFilterExcludesLive(config);
+}
+
 async function waitForOk(
   context: APIRequestContext,
   url: string,
@@ -68,6 +93,9 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
       : []),
     ...(shouldWarmService(config, appOrigin, engineOrigin)
       ? [{ url: `${engineOrigin}/api/health`, label: "Pipeline engine health" }]
+      : []),
+    ...(shouldWarmPreviewHealth(config, appOrigin)
+      ? [{ url: `${appOrigin}/api/preview-health`, label: "Preview health" }]
       : []),
   ];
   const requestContext = await request.newContext({
