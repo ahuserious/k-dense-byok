@@ -68,10 +68,10 @@ function writeLastRun(directory, runId, timestamp) {
   );
 }
 
-function stablyEpilogue(suiteName, runId) {
+function stablyEpilogue(suiteName, runId, projectId = "attached-project-id") {
   return [
-    `Suite "${suiteName}" run complete!`,
-    `View results: https://app.stably.ai/project/test/playwright/history/${runId}`,
+    `✨ Suite "${suiteName}" run complete!`,
+    `   📊 View results: https://app.stably.ai/project/${encodeURIComponent(projectId)}/playwright/history/${runId}`,
   ];
 }
 
@@ -114,7 +114,7 @@ test("grep mode parses a genuine multiline Playwright epilogue", () => {
         "  2 failed",
         "  4 skipped",
         "  243 passed (2.1m)",
-        ...stablyEpilogue(suiteName, runId),
+        ...stablyEpilogue(suiteName, runId, "also-must-not-leak"),
       ].join("\n"),
     );
     fs.writeFileSync(
@@ -187,7 +187,7 @@ test("grep mode parses a genuine multiline Playwright epilogue", () => {
     assert.equal(manifest.stablyRunId, runId);
     assert.equal(
       manifest.stablyRunUrl,
-      `https://app.stably.ai/project/test/playwright/history/${runId}`,
+      `https://app.stably.ai/project/<REDACTED-PROJECT>/playwright/history/${runId}`,
     );
     assert.doesNotMatch(manifestText, /must-not-leak/);
     assert.equal(fs.existsSync(path.join(directory, "stably-test.log")), false);
@@ -221,7 +221,7 @@ test("scrubs every secret form from every retained input and stdout", () => {
       [
         `prefix-${secrets.SIGNING_SECRET}-suffix E2E inventory verified: 249 total = 213 executing-substantive + 36 thin; 4 fixme + 0 skip.`,
         `249 passed / 0 failed / 0 skipped (2.1m) ${encodeURIComponent(secrets.DATABASE_PASSWORD)}`,
-        ...stablyEpilogue(suiteName, runId),
+        ...stablyEpilogue(suiteName, runId, secrets.STABLY_PROJECT_ID),
       ].join("\n"),
     );
     writeLastRun(directory, runId, Date.now());
@@ -353,8 +353,8 @@ test("workflow-shaped writer and manifest subprocess share the secret-bearing en
         "E2E inventory verified: 1 total = 1 executing-substantive + 0 thin; 0 fixme + 0 skip.",
         "1 passed (1s)",
         process.env.STABLY_API_KEY,
-        'Suite "sds-outer-loop-ci-99" run complete!',
-        "View results: https://app.stably.ai/project/test/playwright/history/workflow-run-id",
+        '✨ Suite "sds-outer-loop-ci-99" run complete!',
+        "   📊 View results: https://app.stably.ai/project/" + encodeURIComponent(process.env.STABLY_PROJECT_ID) + "/playwright/history/workflow-run-id",
       ].join("\\n"));
       fs.writeFileSync("preview-up.log", process.env.STABLY_PROJECT_ID);
       fs.mkdirSync(".stably", { recursive: true });
@@ -487,12 +487,41 @@ test("attached reporter rejects stale records and mismatched suite evidence", as
 });
 
 test("attached reporter requires an exact terminal run URL segment", async (context) => {
+  const projectId = "attached-project-id";
   const cases = [
     [
       "run ID prefix collision",
-      "https://app.stably.ai/project/test/playwright/history/run-10",
+      `https://app.stably.ai/project/${projectId}/playwright/history/run-10`,
     ],
     ["unrelated Stably URL", "https://app.stably.ai/docs/getting-started"],
+    [
+      "wrong dashboard host",
+      `https://api.stably.ai/project/${projectId}/playwright/history/run-1`,
+    ],
+    [
+      "trailing slash",
+      `https://app.stably.ai/project/${projectId}/playwright/history/run-1/`,
+    ],
+    [
+      "query string",
+      `https://app.stably.ai/project/${projectId}/playwright/history/run-1?source=test`,
+    ],
+    [
+      "fragment",
+      `https://app.stably.ai/project/${projectId}/playwright/history/run-1#result`,
+    ],
+    [
+      "percent-encoded run id",
+      `https://app.stably.ai/project/${projectId}/playwright/history/run%2D1`,
+    ],
+    [
+      "encoded slash",
+      `https://app.stably.ai/project/${projectId}/playwright/history/run-1%2Fextra`,
+    ],
+    [
+      "encoded backslash",
+      `https://app.stably.ai/project/${projectId}/playwright/history/run-1%5Cextra`,
+    ],
   ];
   for (const [caseName, resultUrl] of cases) {
     await context.test(caseName, () => {
@@ -504,14 +533,14 @@ test("attached reporter requires an exact terminal run URL segment", async (cont
           path.join(directory, "stably-test.log"),
           [
             "1 passed (1s)",
-            `Suite "${suiteName}" run complete!`,
-            `View results: ${resultUrl}`,
+            `✨ Suite "${suiteName}" run complete!`,
+            `   📊 View results: ${resultUrl}`,
           ].join("\n"),
         );
         writeLastRun(directory, runId, Date.now());
         const result = runManifest(directory, {
           STABLY_API_KEY: "attached-api-key",
-          STABLY_PROJECT_ID: "attached-project-id",
+          STABLY_PROJECT_ID: projectId,
           E2E_RUN_STARTED_AT: String(runStartedAt),
           E2E_SUITE_NAME: suiteName,
         });
@@ -520,4 +549,30 @@ test("attached reporter requires an exact terminal run URL segment", async (cont
       });
     });
   }
+});
+
+test("attached reporter rejects a URL outside the exact reporter epilogue", () => {
+  withTemporaryDirectory((directory) => {
+    const runId = "run-1";
+    const suiteName = "sds-outer-loop-ci-exact-line";
+    const projectId = "attached-project-id";
+    const runStartedAt = Date.now() - 1_000;
+    fs.writeFileSync(
+      path.join(directory, "stably-test.log"),
+      [
+        `✨ Suite "${suiteName}" run complete!`,
+        "reporter omitted its result line",
+        `diagnostic: https://app.stably.ai/project/${projectId}/playwright/history/${runId}`,
+      ].join("\n"),
+    );
+    writeLastRun(directory, runId, Date.now());
+    const result = runManifest(directory, {
+      STABLY_API_KEY: "attached-api-key",
+      STABLY_PROJECT_ID: projectId,
+      E2E_RUN_STARTED_AT: String(runStartedAt),
+      E2E_SUITE_NAME: suiteName,
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /requires a matching run ID and URL/);
+  });
 });

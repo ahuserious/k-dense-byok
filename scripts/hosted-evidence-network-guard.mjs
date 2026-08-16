@@ -1,38 +1,59 @@
 import dns from "node:dns";
+import http from "node:http";
+import https from "node:https";
+import { syncBuiltinESMExports } from "node:module";
 import net from "node:net";
 import tls from "node:tls";
 
 function blockConnection(kind) {
+  const attemptKey = Symbol.for("hosted-evidence.network-attempts");
+  globalThis[attemptKey] = (globalThis[attemptKey] ?? 0) + 1;
+  process.stderr.write(`hosted-evidence network guard blocked ${kind}\n`);
   throw new Error(`hosted-evidence network guard blocked ${kind}`);
+}
+
+function guardMethods(target, prefix, names) {
+  for (const name of names) {
+    if (typeof target?.[name] !== "function") continue;
+    target[name] = function guardedNetworkMethod() {
+      return blockConnection(`${prefix}.${name}`);
+    };
+  }
 }
 
 net.Socket.prototype.connect = function guardedSocketConnect() {
   return blockConnection("net.Socket.connect");
 };
-net.connect = function guardedNetConnect() {
-  return blockConnection("net.connect");
+guardMethods(net, "net", ["connect", "createConnection"]);
+guardMethods(tls, "tls", ["connect"]);
+guardMethods(http, "http", ["request", "get"]);
+guardMethods(https, "https", ["request", "get"]);
+guardMethods(dns, "dns", ["lookup", "resolve", "resolve4", "resolve6"]);
+guardMethods(dns.promises, "dns.promises", [
+  "lookup",
+  "resolve",
+  "resolve4",
+  "resolve6",
+]);
+guardMethods(dns.Resolver?.prototype, "dns.Resolver", [
+  "resolve",
+  "resolve4",
+  "resolve6",
+]);
+guardMethods(dns.promises.Resolver?.prototype, "dns.promises.Resolver", [
+  "resolve",
+  "resolve4",
+  "resolve6",
+]);
+
+globalThis.fetch = function guardedFetch() {
+  return blockConnection("fetch");
 };
-net.createConnection = function guardedCreateConnection() {
-  return blockConnection("net.createConnection");
+globalThis.WebSocket = class GuardedWebSocket {
+  constructor() {
+    blockConnection("WebSocket");
+  }
 };
-tls.connect = function guardedTlsConnect() {
-  return blockConnection("tls.connect");
-};
-dns.lookup = function guardedDnsLookup() {
-  return blockConnection("dns.lookup");
-};
-dns.resolve = function guardedDnsResolve() {
-  return blockConnection("dns.resolve");
-};
-dns.resolve4 = function guardedDnsResolve4() {
-  return blockConnection("dns.resolve4");
-};
-dns.resolve6 = function guardedDnsResolve6() {
-  return blockConnection("dns.resolve6");
-};
-dns.promises.lookup = async function guardedPromiseLookup() {
-  return blockConnection("dns.promises.lookup");
-};
-dns.promises.resolve = async function guardedPromiseResolve() {
-  return blockConnection("dns.promises.resolve");
-};
+
+// Keep named ESM imports synchronized with the patched CommonJS built-ins.
+syncBuiltinESMExports();

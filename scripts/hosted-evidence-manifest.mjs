@@ -141,24 +141,53 @@ function stripAnsi(value) {
   return value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
-function stablyResultUrl(log, runId) {
-  const candidates = stripAnsi(log).match(/https:\/\/[^\s]+/g) ?? [];
-  for (const candidate of candidates.reverse()) {
-    const cleaned = candidate.replace(/[),.;]+$/, "");
+function escapeRegularExpression(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function stablyResultUrl(log, suiteName, runId, projectId) {
+  const lines = stripAnsi(log).split(/\r?\n/);
+  const suitePattern = new RegExp(
+    `^\\s*✨ Suite "${escapeRegularExpression(suiteName)}" run complete!\\s*$`,
+  );
+  for (let index = lines.length - 2; index >= 0; index -= 1) {
+    if (!suitePattern.test(lines[index])) continue;
+    const resultMatch = lines[index + 1].match(
+      /^\s*📊 View results: (https:\/\/\S+)\s*$/,
+    );
+    if (!resultMatch) return null;
+    const rawUrl = resultMatch[1];
+    if (rawUrl.includes("\\")) return null;
     try {
-      const url = new URL(cleaned);
+      const url = new URL(rawUrl);
       if (
-        url.protocol === "https:" &&
-        (url.hostname === "stably.ai" || url.hostname.endsWith(".stably.ai")) &&
-        decodeURIComponent(url.pathname)
-          .split("/")
-          .filter(Boolean)
-          .at(-1) === runId
+        url.origin !== "https://app.stably.ai" ||
+        url.search !== "" ||
+        url.hash !== "" ||
+        url.pathname.endsWith("/")
       ) {
-        return url.href;
+        return null;
       }
+      const rawSegments = url.pathname.split("/");
+      if (
+        rawSegments.some((segment) => /%2f|%5c/i.test(segment)) ||
+        rawSegments[5]?.includes("%") ||
+        rawSegments.length !== 6 ||
+        rawSegments[0] !== "" ||
+        rawSegments[1] !== "project" ||
+        rawSegments[2] !== encodeURIComponent(projectId) ||
+        rawSegments[3] !== "playwright" ||
+        rawSegments[4] !== "history" ||
+        rawSegments[5] !== runId
+      ) {
+        return null;
+      }
+      // Reporter 2.1.16 prints createdSuiteRun.url verbatim
+      // (dist/index-CdLJi9uc.cjs:9593-9594). Validate that raw value first,
+      // then retain a route-shaped value without the secret project segment.
+      return `https://app.stably.ai/project/<REDACTED-PROJECT>/playwright/history/${runId}`;
     } catch {
-      // Continue to the next reporter URL candidate.
+      return null;
     }
   }
   return null;
@@ -221,7 +250,12 @@ function readStablyRun(workingDirectory, environment, log) {
   if (!plainLog.includes(`Suite \"${suiteName}\" run complete!`)) {
     throw new Error("Attached Stably run does not match the expected suite name.");
   }
-  const url = stablyResultUrl(log, runId);
+  const url = stablyResultUrl(
+    log,
+    suiteName,
+    runId,
+    environment.STABLY_PROJECT_ID,
+  );
   if (url === null) {
     throw new Error("Attached Stably evidence requires a matching run ID and URL.");
   }
@@ -264,6 +298,7 @@ function suiteCommand(environment) {
 export function buildHostedEvidenceManifest({
   workingDirectory = process.cwd(),
   environment = process.env,
+  stablyEvidence,
 } = {}) {
   const replacements = collectSecretRepresentations(environment);
   const log = readTextOrEmpty(path.join(workingDirectory, LOG_FILE_NAME));
@@ -273,7 +308,8 @@ export function buildHostedEvidenceManifest({
   const rawSummaryLine = lastMatchingLine(log, (line) =>
     /[0-9]+ (passed|failed|skipped)/.test(line),
   );
-  const stably = readStablyRun(workingDirectory, environment, log);
+  const stably =
+    stablyEvidence ?? readStablyRun(workingDirectory, environment, log);
   return {
     command: suiteCommand(environment),
     environment: {
@@ -308,11 +344,14 @@ export function buildHostedEvidenceManifest({
 export function writeHostedEvidenceManifest(options = {}) {
   const workingDirectory = options.workingDirectory ?? process.cwd();
   const environment = options.environment ?? process.env;
+  const rawLog = readTextOrEmpty(path.join(workingDirectory, RAW_LOG_FILE_NAME));
+  const stablyEvidence = readStablyRun(workingDirectory, environment, rawLog);
   writeScrubbedLogs(workingDirectory, environment);
   const manifest = buildHostedEvidenceManifest({
     ...options,
     environment,
     workingDirectory,
+    stablyEvidence,
   });
   // Scrub the final compact JSON bytes so JSON escaping cannot create a form
   // that bypasses the same disclosure boundary used for the uploaded logs.

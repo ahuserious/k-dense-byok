@@ -59,10 +59,20 @@ Only `hosted-evidence-bundle.tar` is uploaded. Its manifest records structured p
 skipped/fixme counts plus the freshness-validated Stably run identifier and URL; raw logs are removed
 after scrubbing and never uploaded.
 
-The final artifact scan canonicalizes percent and JSON escapes to a fixed point before declaring text
-clean. Work is bounded to eight passes, 64 variants, and 512 MiB of cumulative decoder input per
-scanned value. Reaching any bound before a fixed point fails closed with an opaque
-`canonicalization budget exhausted` artifact reference; it is never treated as a clean scan.
+The final artifact scan checks literal secret bytes first, classifies archives by magic bytes, then
+canonicalizes archive entry names and each extracted entry independently. Non-archive text is
+canonicalized directly. Percent runs are decoded byte-wise into both lossy UTF-8 and binary views, so
+one malformed byte cannot conceal a valid adjacent credential; undecodable percent data fails closed.
+Canonicalization work is bounded per text value to eight passes, 64 variants, and 512 MiB of decoder
+input. Reaching any bound before a fixed point fails closed with an opaque artifact or nested-entry
+reference plus the configured and observed bounds; compressed archive bytes do not consume that text
+budget.
+
+Reporter `2.1.16` prints the server-returned `createdSuiteRun.url` directly (the pinned CJS dist at
+`index-CdLJi9uc.cjs:9593-9594`). Evidence accepts only the exact adjacent suite/result epilogue for
+`https://app.stably.ai/project/<project>/playwright/history/<run>`, without encoded run IDs, trailing
+slashes, queries, fragments, or encoded path separators. The raw URL is validated before scrubbing;
+the retained manifest replaces its project segment with `<REDACTED-PROJECT>`.
 
 ### What Job A proves
 

@@ -111,20 +111,68 @@ test("workflow and package pin the audited Stably versions", () => {
   assert.match(reporterSource, /this\.suiteName = e\?\.suiteName/);
 });
 
-test("network guard fails before an outbound socket attempt", () => {
-  const guardedProbe = spawnSync(
+test("network guard blocks every reporter-relevant outbound API", async (context) => {
+  const probes = [
+    ["websocket", 'new WebSocket("ws://127.0.0.1:9")'],
+    ["fetch", 'await fetch("http://127.0.0.1:9")'],
+    ["http", 'import { get } from "node:http"; get("http://127.0.0.1:9")'],
+    ["https", 'import { get } from "node:https"; get("https://127.0.0.1:9")'],
+    ["net", 'import { connect } from "node:net"; connect({ host: "127.0.0.1", port: 9 })'],
+    ["tls", 'import { connect } from "node:tls"; connect({ host: "127.0.0.1", port: 9 })'],
+    ["dns lookup", 'import { lookup } from "node:dns"; lookup("example.test", () => {})'],
+    ["dns resolve", 'import { resolve } from "node:dns"; resolve("example.test", () => {})'],
+    ["dns promises", 'import { lookup } from "node:dns/promises"; await lookup("example.test")'],
+    ["dns Resolver", 'import { Resolver } from "node:dns"; new Resolver().resolve("example.test", () => {})'],
+    ["dns promises Resolver", 'import { Resolver } from "node:dns/promises"; await new Resolver().resolve("example.test")'],
+  ];
+  for (const [probeName, program] of probes) {
+    await context.test(probeName, () => {
+      const guardedProbe = spawnSync(
+        process.execPath,
+        [
+          `--import=${networkGuardUrl}`,
+          "--input-type=module",
+          "--eval",
+          program,
+        ],
+        { encoding: "utf8" },
+      );
+      assert.notEqual(guardedProbe.status, 0);
+      assert.match(guardedProbe.stderr, /hosted-evidence network guard blocked/);
+    });
+  }
+});
+
+test("credential-present CJS reporter reaches the guard before any connection", () => {
+  const guardedReporter = spawnSync(
     process.execPath,
     [
       `--import=${networkGuardUrl}`,
       "--input-type=module",
       "--eval",
-      'import net from "node:net"; net.connect({ host: "127.0.0.1", port: 9 });',
+      [
+        'import { createRequire } from "node:module";',
+        "const require = createRequire(import.meta.url);",
+        'const Reporter = require("@stablyai/playwright-test/reporter");',
+        'new Reporter({ suiteName: "network-guard-probe" });',
+        'const attempts = globalThis[Symbol.for("hosted-evidence.network-attempts")] ?? 0;',
+        'if (attempts !== 1) throw new Error(`expected exactly one guarded reporter connection, observed ${attempts}`);',
+        "process.exit(0);",
+      ].join("\n"),
     ],
-    { encoding: "utf8" },
+    {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        STABLY_API_KEY: "guard-api-key-sentinel",
+        STABLY_PROJECT_ID: "guard-project-id-sentinel",
+      },
+    },
   );
-  assert.notEqual(guardedProbe.status, 0);
+  assert.equal(guardedReporter.status, 0, guardedReporter.stderr);
   assert.match(
-    guardedProbe.stderr,
-    /hosted-evidence network guard blocked net\.connect/,
+    guardedReporter.stderr,
+    /hosted-evidence network guard blocked/,
   );
 });

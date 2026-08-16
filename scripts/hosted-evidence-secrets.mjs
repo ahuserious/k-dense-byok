@@ -212,13 +212,34 @@ export function scrubText(value, representations) {
 
 function decodePercentRuns(value, plusAsSpace) {
   const source = plusAsSpace ? value.replace(/\+/g, "%20") : value;
-  return source.replace(/(?:%[0-9A-Fa-f]{2})+/g, (encoded) => {
-    try {
-      return decodeURIComponent(encoded);
-    } catch {
-      return encoded;
+  let malformed = false;
+  const runs = [...source.matchAll(/(?:%[0-9A-Fa-f]{2})+/g)];
+  if (runs.length === 0) return { values: [source], malformed };
+
+  const decodedViews = ["utf8", "latin1"].map((encoding) => {
+    let cursor = 0;
+    let decoded = "";
+    for (const run of runs) {
+      decoded += source.slice(cursor, run.index);
+      const bytes = Buffer.from(run[0].replaceAll("%", ""), "hex");
+      if (bytes.length === 0) {
+        malformed = true;
+        decoded += run[0];
+      } else {
+        if (encoding === "utf8") {
+          try {
+            new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+          } catch {
+            malformed = true;
+          }
+        }
+        decoded += bytes.toString(encoding);
+      }
+      cursor = run.index + run[0].length;
     }
+    return decoded + source.slice(cursor);
   });
+  return { values: [...new Set(decodedViews)], malformed };
 }
 
 function decodeJsonEscapes(value) {
@@ -247,39 +268,77 @@ function canonicalTextVariants(buffer) {
   let frontier = [initial];
   let workBytes = 0;
   const variants = [];
+  let malformedPercentEncoding = false;
   for (let pass = 0; pass < MAX_CANONICALIZATION_PASSES; pass += 1) {
     const next = [];
     for (const value of frontier) {
       const decoders = [
         (input) => decodePercentRuns(input, false),
         (input) => decodePercentRuns(input, true),
-        decodeJsonEscapes,
+        (input) => ({ values: [decodeJsonEscapes(input)], malformed: false }),
       ];
       for (const decode of decoders) {
         workBytes += Buffer.byteLength(value, "utf8");
         if (workBytes > MAX_CANONICALIZATION_WORK_BYTES) {
-          return { exhausted: true, variants };
+          return {
+            exhausted: true,
+            malformedPercentEncoding,
+            observedPasses: pass + 1,
+            observedVariants: seen.size,
+            variants,
+            workBytes,
+          };
         }
-        const candidate = decode(value);
-        if (candidate === value || seen.has(candidate)) continue;
-        if (seen.size >= MAX_CANONICAL_VARIANTS) {
-          return { exhausted: true, variants };
+        const decoded = decode(value);
+        malformedPercentEncoding ||= decoded.malformed;
+        for (const candidate of decoded.values) {
+          if (candidate === value || seen.has(candidate)) continue;
+          if (seen.size >= MAX_CANONICAL_VARIANTS) {
+            return {
+              exhausted: true,
+              malformedPercentEncoding,
+              observedPasses: pass + 1,
+              observedVariants: seen.size,
+              variants,
+              workBytes,
+            };
+          }
+          seen.add(candidate);
+          variants.push(candidate);
+          next.push(candidate);
         }
-        seen.add(candidate);
-        variants.push(candidate);
-        next.push(candidate);
       }
     }
-    if (next.length === 0) return { exhausted: false, variants };
+    if (next.length === 0) {
+      return {
+        exhausted: false,
+        malformedPercentEncoding,
+        observedPasses: pass + 1,
+        observedVariants: seen.size,
+        variants,
+        workBytes,
+      };
+    }
     frontier = next;
   }
-  return { exhausted: true, variants };
+  return {
+    exhausted: true,
+    malformedPercentEncoding,
+    observedPasses: MAX_CANONICALIZATION_PASSES,
+    observedVariants: seen.size,
+    variants,
+    workBytes,
+  };
 }
 
 function containsSecretBytes(buffer, byteRepresentations) {
   return byteRepresentations.some((representation) =>
     buffer.includes(representation.bytes),
   );
+}
+
+export function containsLiteralSecretRepresentation(buffer, byteRepresentations) {
+  return containsSecretBytes(buffer, byteRepresentations);
 }
 
 export function findSecretRepresentation(
@@ -298,8 +357,16 @@ export function findSecretRepresentation(
   }
   if (canonicalized.exhausted) {
     throw new Error(
-      `canonicalization budget exhausted for ${artifactReference}`,
+      `canonicalization budget exhausted for ${artifactReference}: ` +
+        `bounds=passes:${MAX_CANONICALIZATION_PASSES},variants:${MAX_CANONICAL_VARIANTS},` +
+        `bytes:${MAX_CANONICALIZATION_WORK_BYTES} ` +
+        `observed=passes:${canonicalized.observedPasses},` +
+        `variants:${canonicalized.observedVariants},bytes:${canonicalized.workBytes} ` +
+        `size=${buffer.length}`,
     );
+  }
+  if (canonicalized.malformedPercentEncoding) {
+    throw new Error(`malformed percent encoding in ${artifactReference}`);
   }
   return false;
 }

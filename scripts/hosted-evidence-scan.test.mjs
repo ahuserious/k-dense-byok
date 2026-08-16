@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { randomFillSync } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -64,6 +65,20 @@ function independentUtf16BigEndian(value) {
   return bigEndian;
 }
 
+function fullyPercentEncode(value, mode = "upper") {
+  let index = 0;
+  return [...Buffer.from(value, "utf8")]
+    .map((byte) => {
+      index += 1;
+      let hex = byte.toString(16).padStart(2, "0");
+      if (mode === "upper" || (mode === "mixed" && index % 2 === 1)) {
+        hex = hex.toUpperCase();
+      }
+      return `%${hex}`;
+    })
+    .join("");
+}
+
 test("detects independently encoded text and UTF-16 fixtures", () => {
   withTemporaryDirectory((directory) => {
     const secret = "alpha/Ω \"slash\\ space ~!+% ".repeat(5);
@@ -122,6 +137,29 @@ test("detects zip archives by magic bytes and recurses without a zip extension",
         artifactPaths: ["trace.data"],
       }),
     /artifact\[0\]#[a-f0-9]{12}/);
+  });
+});
+
+test("large benign trace-shaped zip is classified before text canonicalization", () => {
+  withTemporaryDirectory((directory) => {
+    const sourceDirectory = path.join(directory, "large-zip-source");
+    fs.mkdirSync(sourceDirectory);
+    const randomBytes = Buffer.alloc(8 * 1024 * 1024);
+    randomFillSync(randomBytes);
+    fs.writeFileSync(path.join(sourceDirectory, "trace.bin"), randomBytes);
+    const archivePath = path.join(directory, "trace.data");
+    const zipped = spawnSync("zip", ["-q", "-0", archivePath, "trace.bin"], {
+      cwd: sourceDirectory,
+      encoding: "utf8",
+    });
+    assert.equal(zipped.status, 0, zipped.stderr);
+    assert.doesNotThrow(() =>
+      scanHostedEvidenceArtifacts({
+        workingDirectory: directory,
+        environment: { STABLY_API_KEY: "large-benign-archive-secret-sentinel" },
+        artifactPaths: ["trace.data"],
+      }),
+    );
   });
 });
 
@@ -228,6 +266,46 @@ test("seal path rejects mixed literal and recursively encoded secrets", () => {
   }
 });
 
+test("seal path rejects malformed UTF-8 adjacent to percent-encoded credentials", () => {
+  const secret = "MostlyAlphaCredential123";
+  const encoded = fullyPercentEncode(secret, "mixed");
+  const encodedTriplets = encoded.match(/%[0-9A-Fa-f]{2}/g);
+  const midpoint = Math.floor(encodedTriplets.length / 2);
+  const fixtures = [
+    ["invalid byte before", `%ff${encoded}`],
+    ["invalid byte after", `${encoded}%fF`],
+    [
+      "invalid byte interleaved",
+      `${encodedTriplets.slice(0, midpoint).join("")}%Ff${encodedTriplets.slice(midpoint).join("")}`,
+    ],
+  ];
+  for (const [fixtureName, fixture] of fixtures) {
+    withTemporaryDirectory((directory) => {
+      writeRequiredPayloadArtifacts(directory);
+      fs.writeFileSync(
+        path.join(directory, "stably-test.scrubbed.log"),
+        fixture,
+      );
+      assert.throws(
+        () =>
+          sealHostedEvidenceBundle({
+            workingDirectory: directory,
+            environment: { STABLY_API_KEY: secret },
+          }),
+        (error) => {
+          assert.match(
+            error.message,
+            /(?:secret representation detected|malformed percent encoding) in artifact\[4\]#[a-f0-9]{12}/,
+          );
+          assert.equal(error.message.includes(secret), false);
+          return true;
+        },
+        fixtureName,
+      );
+    });
+  }
+});
+
 test("seal path accepts benign deep encoding after reaching a fixed point", () => {
   withTemporaryDirectory((directory) => {
     writeRequiredPayloadArtifacts(directory);
@@ -256,11 +334,37 @@ test("seal path fails closed when canonicalization cannot reach a fixed point", 
           workingDirectory: directory,
           environment: { STABLY_API_KEY: "alpha/beta gamma" },
         }),
-      /^Error: canonicalization budget exhausted for artifact\[4\]#[a-f0-9]{12}$/,
+      /^Error: canonicalization budget exhausted for artifact\[4\]#[a-f0-9]{12}: bounds=passes:8,variants:64,bytes:536870912 observed=passes:\d+,variants:\d+,bytes:\d+ size=\d+$/,
     );
     assert.equal(
       fs.existsSync(path.join(directory, HOSTED_EVIDENCE_BUNDLE_NAME)),
       false,
+    );
+  });
+});
+
+test("archive entry exhaustion reports bounds and an opaque nested reference", () => {
+  withTemporaryDirectory((directory) => {
+    const sourceDirectory = path.join(directory, "budget-source");
+    fs.mkdirSync(sourceDirectory);
+    fs.writeFileSync(
+      path.join(sourceDirectory, "deep.txt"),
+      percentEncodeLayers("benign evidence value", 9),
+    );
+    const archivePath = path.join(directory, "budget.data");
+    const zipped = spawnSync("zip", ["-q", archivePath, "deep.txt"], {
+      cwd: sourceDirectory,
+      encoding: "utf8",
+    });
+    assert.equal(zipped.status, 0, zipped.stderr);
+    assert.throws(
+      () =>
+        scanHostedEvidenceArtifacts({
+          workingDirectory: directory,
+          environment: { STABLY_API_KEY: "alpha/beta gamma" },
+          artifactPaths: ["budget.data"],
+        }),
+      /^Error: canonicalization budget exhausted for artifact\[0\]#[a-f0-9]{12}\/entry\[0\]#[a-f0-9]{12}: bounds=passes:8,variants:64,bytes:536870912 observed=passes:\d+,variants:\d+,bytes:\d+ size=\d+$/,
     );
   });
 });

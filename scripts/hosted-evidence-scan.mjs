@@ -8,6 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   collectSecretByteRepresentations,
+  containsLiteralSecretRepresentation,
   findSecretRepresentation,
   scrubAndVerifyText,
 } from "./hosted-evidence-secrets.mjs";
@@ -44,6 +45,11 @@ function artifactReference(index, artifactPath) {
   return `artifact[${index}]#${sha256Bytes(Buffer.from(artifactPath)).slice(0, 12)}`;
 }
 
+function nestedArtifactReference(parentReference, index, entryName) {
+  const nameHash = sha256Bytes(Buffer.from(entryName)).slice(0, 12);
+  return `${parentReference}/entry[${index}]#${nameHash}`;
+}
+
 function archiveKind(bytes) {
   if (
     bytes.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04])) ||
@@ -69,16 +75,26 @@ function archiveKind(bytes) {
   return null;
 }
 
+function isUtf8Text(bytes) {
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function validateArchiveEntries(entries, artifactRef, byteRepresentations) {
-  for (const entry of entries) {
+  for (const [index, entry] of entries.entries()) {
+    const entryReference = nestedArtifactReference(artifactRef, index, entry);
     if (
       findSecretRepresentation(
         Buffer.from(entry, "utf8"),
         byteRepresentations,
-        artifactRef,
+        entryReference,
       )
     ) {
-      throw new Error(`secret representation detected in ${artifactRef}`);
+      throw new Error(`secret representation detected in ${entryReference}`);
     }
     const normalized = entry.replace(/\\/g, "/");
     if (
@@ -86,7 +102,7 @@ function validateArchiveEntries(entries, artifactRef, byteRepresentations) {
       /^[A-Za-z]:\//.test(normalized) ||
       normalized.split("/").includes("..")
     ) {
-      throw new Error(`unsafe archive entry in ${artifactRef}`);
+      throw new Error(`unsafe archive entry in ${entryReference}`);
     }
   }
 }
@@ -123,24 +139,25 @@ function scanPath(filePath, artifactRef, byteRepresentations) {
     throw new Error(`uninspectable symlink in ${artifactRef}`);
   }
   if (stat.isDirectory()) {
-    for (const entry of fs.readdirSync(filePath).sort()) {
+    for (const [index, entry] of fs.readdirSync(filePath).sort().entries()) {
+      const entryReference = nestedArtifactReference(artifactRef, index, entry);
       if (
         findSecretRepresentation(
           Buffer.from(entry, "utf8"),
           byteRepresentations,
-          artifactRef,
+          entryReference,
         )
       ) {
-        throw new Error(`secret representation detected in ${artifactRef}`);
+        throw new Error(`secret representation detected in ${entryReference}`);
       }
-      scanPath(path.join(filePath, entry), artifactRef, byteRepresentations);
+      scanPath(path.join(filePath, entry), entryReference, byteRepresentations);
     }
     return;
   }
   if (!stat.isFile()) return;
 
   const bytes = fs.readFileSync(filePath);
-  if (findSecretRepresentation(bytes, byteRepresentations, artifactRef)) {
+  if (containsLiteralSecretRepresentation(bytes, byteRepresentations)) {
     throw new Error(`secret representation detected in ${artifactRef}`);
   }
   const kind = archiveKind(bytes);
@@ -149,6 +166,11 @@ function scanPath(filePath, artifactRef, byteRepresentations) {
   }
   if (kind === "zip" || kind === "tar") {
     extractArchive(filePath, kind, artifactRef, byteRepresentations);
+    return;
+  }
+  if (!isUtf8Text(bytes)) return;
+  if (findSecretRepresentation(bytes, byteRepresentations, artifactRef)) {
+    throw new Error(`secret representation detected in ${artifactRef}`);
   }
 }
 
