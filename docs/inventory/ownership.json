@@ -197,6 +197,9 @@
       "server/src/sandbox-fs.ts",
       "server/test/credential-env-isolation.test.ts",
       "server/test/env-isolation.test.ts"
+    ],
+    "R1": [
+      ".gitignore"
     ]
   },
   "handoffs": [
@@ -472,6 +475,20 @@
       "date": "2026-08-16",
       "path": ".gitignore",
       "scope": "checkout-local preview web projection ignore rule"
+    },
+    {
+      "from": "S11",
+      "to": "C1",
+      "date": "2026-08-16",
+      "path": "scripts/preview-launcher-observer.test.mjs",
+      "scope": "workflow-engine readiness and fatal-exit observer regression coverage"
+    },
+    {
+      "from": "S11",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-state.test.mjs",
+      "scope": "preview lifecycle lock recovery regression"
     }
   ]
 }

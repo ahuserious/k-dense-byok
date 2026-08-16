@@ -10,6 +10,7 @@ inventory path is owned exactly once.
 | C1 | Vendored builder dist freshness and launcher safety | `.github/workflows/tests.yml`; `docs/preview-env.md`; `package.json`; `.github/workflows/ownership-authorization.yml`; `scripts/{ownership-check,ownership-check.test,vendored-dist-*}.mjs`; `server/test/pipelines-disabled.test.ts`; `server/test/pipelines.test.ts` (unowned on the base; C1 owns it for the disabled crash-window recovery tests); reviewed handoffs from R1, S2, S4, S5, and S11 listed in the policy. |
 | C3 | Hosted and live E2E evidence | `playwright.{cloud,live-alt}.config.ts`; `scripts/hosted-evidence-*.mjs`; reviewed handoffs from C1, R1, and S11 listed in the policy. |
 | C5 | Preview credential and environment-root isolation | `config/token-ban.json`; `server/src/{env,environment-files,legacy-engine-data,path-containment,projects,sandbox-fs}.ts`; `server/src/api/credentials.ts`; `server/test/{credential-env-isolation,env-isolation}.test.ts`; reviewed handoffs from C1, R1, S4, and S11 listed in the policy. |
+| R1 | Orchestrator-held shared root files (policy files are handled separately as policy-controlled paths) | `.gitignore`; handed off to lanes for scoped edits (see handoffs). |
 | S1 | Consolidation and typed-surface removal | `web/src/app/page.tsx`; `web/src/components/{workspace-navigation,persistent-workspace-surfaces,dag-builder-surface,dag-builder,dag-builder-canvas,dag-builder-inspector,dag-workflow-console}.{ts,tsx}`; `web/src/lib/{workspace-persistence,dag-workflow-builder,dag-workflows}.ts` |
 | S1b | Scientific Pipelines cross-engine registry | `web/src/components/dag-workflows-panel.tsx`; `web/src/components/dag-workflows-panel.test.tsx`; `web/src/lib/scientific-pipeline-registry.ts`; `web/src/lib/scientific-pipeline-registry.test.ts`; `server/test/pipeline-engine-client.test.ts`; `docs/lanes/S1b-INTEGRATION.md` |
 | S2 | Vendor integration and naming sweep | `start.mjs`; `server/src/agent/pipeline-engine/**`; `server/src/agent/skills.ts`; `web/src/components/{pipelines-panel,pipeline-builder-panel,engine-iframe-panel}.tsx`; `web/src/lib/{engine-config,embed-config,pipelines}.ts`; vendor attribution files (`LICENSE`, `NOTICE*`, `VENDORED-FROM.md`) |
@@ -40,6 +41,7 @@ A handoff lets the recipient lane edit a path another lane owns, for the stated 
 | S11 | C1 | `scripts/preview-environment.test.mjs` | vendored-dist environment and lock regression coverage |
 | S11 | C1 | `scripts/preview-up.mjs` | prepareVendoredDist and prebuild-isolation ordering |
 | S11 | C1 | `scripts/preview-launcher-observer.mjs` | workflow-engine readiness and fatal-exit observer anchors |
+| S11 | C1 | `scripts/preview-launcher-observer.test.mjs` | workflow-engine readiness and fatal-exit observer regression coverage |
 | S2 | C1 | `start.mjs` | vendored-dist build, engine-port ownership, readiness, and disabled-state sections |
 | S2 | C1 | `server/src/agent/pipeline-engine/client.ts` | launcher-disabled fail-before-fetch guard |
 | S5 | C1 | `server/src/config.ts` | explicit pipeline-engine disabled configuration sentinel |
@@ -67,6 +69,7 @@ A handoff lets the recipient lane edit a path another lane owns, for the stated 
 | S11 | C5 | `scripts/preview-up.mjs` | server environment-root preview wiring |
 | S11 | C5 | `scripts/preview-down.mjs` | owned checkout-local preview web projection cleanup |
 | S11 | C5 | `scripts/preview-state.mjs` | exclusive preview lifecycle lock |
+| S11 | C5 | `scripts/preview-state.test.mjs` | preview lifecycle lock recovery regression |
 | S11 | C5 | `scripts/preview-readiness.mjs` | named preview source-drift health failure detail |
 | S11 | C5 | `scripts/preview-readiness.test.mjs` | named preview source-drift health regression |
 | S4 | C5 | `server/src/workflows/supervisor/credentials.ts` | credential persistence environment-root isolation |
