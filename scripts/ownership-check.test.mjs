@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -8,31 +10,98 @@ const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(scriptDirectory, "..");
 const checkerPath = path.join(scriptDirectory, "ownership-check.mjs");
 
-function run(...arguments_) {
-  return spawnSync(process.execPath, [checkerPath, ...arguments_], {
-    cwd: repositoryRoot,
+function runChecker(checkout, ...arguments_) {
+  return spawnSync(process.execPath, [path.join(checkout, "scripts", "ownership-check.mjs"), ...arguments_], {
+    cwd: checkout,
     encoding: "utf-8",
   });
 }
 
+function git(checkout, ...arguments_) {
+  const result = spawnSync("git", arguments_, { cwd: checkout, encoding: "utf-8" });
+  assert.equal(result.status, 0, `${arguments_.join(" ")}\n${result.stdout}\n${result.stderr}`);
+  return result.stdout.trim();
+}
+
+function writeFixtureFile(checkout, relativePath, contents) {
+  const filePath = path.join(checkout, relativePath);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, contents);
+}
+
+function createGitFixture() {
+  const checkout = fs.mkdtempSync(path.join(os.tmpdir(), "kady-ownership-fixture-"));
+  writeFixtureFile(checkout, "scripts/ownership-check.mjs", fs.readFileSync(checkerPath));
+  writeFixtureFile(checkout, "docs/inventory/files.json", "{\"files\":[]}\n");
+  writeFixtureFile(checkout, "docs/inventory/ownership.json", `${JSON.stringify({
+    lanes: {
+      C1: ["owned/**"],
+      S2: ["other/**"],
+      R1: ["policy/**"],
+    },
+    handoffs: [],
+  }, null, 2)}\n`);
+  writeFixtureFile(checkout, "other/source.txt", "source\n");
+  git(checkout, "init", "--quiet");
+  git(checkout, "config", "user.name", "Ownership Test");
+  git(checkout, "config", "user.email", "ownership@example.invalid");
+  git(checkout, "add", ".");
+  git(checkout, "commit", "--quiet", "-m", "fixture base");
+  return { checkout, base: git(checkout, "rev-parse", "HEAD") };
+}
+
 test("ownership writer/base flags reject joined, unknown, duplicate, and option-shaped values", () => {
   for (const arguments_ of [
-    ["--writer=C1", "--base", "cf0ab87"],
-    ["--writter", "C1", "--base", "cf0ab87"],
-    ["--writer", "C1", "--writer", "C1", "--base", "cf0ab87"],
+    ["--writer=C1", "--base", "abcdef0"],
+    ["--writter", "C1", "--base", "abcdef0"],
+    ["--writer", "C1", "--writer", "C1", "--base", "abcdef0"],
     ["--writer", "C1", "--base", "-s"],
     ["--writer", "C1", "--base", "HEAD"],
   ]) {
-    const result = run(...arguments_);
+    const result = spawnSync(process.execPath, [checkerPath, ...arguments_], {
+      cwd: repositoryRoot,
+      encoding: "utf-8",
+    });
     assert.equal(result.status, 2, `${arguments_.join(" ")}\n${result.stdout}\n${result.stderr}`);
     assert.match(result.stderr, /ownership-check: FAIL/);
   }
 });
 
-test("writer validation reads the trusted base and refuses candidate-only policy grants", () => {
-  const result = run("--writer", "C1", "--base", "6655abf");
-  assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
-  assert.match(result.stderr, /trusted base/);
-  assert.match(result.stderr, /docs\/inventory\/ownership\.json/);
-  assert.match(result.stderr, /scripts\/ownership-check\.mjs/);
+test("writer validation reads policy from the trusted fixture base", () => {
+  const { checkout, base } = createGitFixture();
+  try {
+    const candidatePolicy = JSON.parse(fs.readFileSync(path.join(checkout, "docs/inventory/ownership.json")));
+    candidatePolicy.handoffs.push({
+      from: "R1",
+      to: "C1",
+      path: "docs/inventory/ownership.json",
+      scope: "candidate-only grant",
+    });
+    writeFixtureFile(checkout, "docs/inventory/ownership.json", `${JSON.stringify(candidatePolicy, null, 2)}\n`);
+    git(checkout, "add", ".");
+    git(checkout, "commit", "--quiet", "-m", "candidate policy grant");
+
+    const result = runChecker(checkout, "--writer", "C1", "--base", base);
+    assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stderr, /trusted base/);
+    assert.match(result.stderr, /docs\/inventory\/ownership\.json/);
+  } finally {
+    fs.rmSync(checkout, { recursive: true, force: true });
+  }
+});
+
+test("cross-lane rename authorizes both source and destination", () => {
+  const { checkout, base } = createGitFixture();
+  try {
+    fs.mkdirSync(path.join(checkout, "owned"), { recursive: true });
+    git(checkout, "mv", "other/source.txt", "owned/destination.txt");
+    git(checkout, "commit", "--quiet", "-m", "cross-lane rename");
+
+    const result = runChecker(checkout, "--writer", "C1", "--base", base);
+    assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stderr, /other\/source\.txt/);
+    assert.doesNotMatch(result.stderr, /owned\/destination\.txt\n?$/);
+  } finally {
+    fs.rmSync(checkout, { recursive: true, force: true });
+  }
 });

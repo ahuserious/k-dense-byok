@@ -20,10 +20,12 @@ import { checkVendoredDist } from "./scripts/vendored-dist-check.mjs";
 import {
   classifyWorkflowEngineBuildOutcome,
   classifyWorkflowEngineListener,
+  missingPreviewLauncherDependencies,
   prepareLauncherDependencies,
   previewVendoredDistFingerprintEnvironment,
   scrubSensitiveEnvironment,
   vendoredDistBuildLockStatus,
+  workflowEngineConsumerEnvironment,
 } from "./scripts/vendored-dist-environment.mjs";
 
 const repoRoot = path.dirname(fileURLToPath(import.meta.url));
@@ -817,6 +819,12 @@ log(`  Pi agent ${sym.ok} (bundled with backend packages — updated on full sta
 log("");
 
 setupEnv();
+Object.assign(
+  process.env,
+  workflowEngineConsumerEnvironment(process.env, PIPELINE_ENGINE_PORT, {
+    overrideExisting: flags.enginePort !== null,
+  }),
+);
 await checkModelAccess();
 
 if (flags.check) {
@@ -829,12 +837,7 @@ if (flags.check) {
 try {
   const dependencyAction = prepareLauncherDependencies({
     environment: process.env,
-    serverDependenciesReady: fs.existsSync(
-      path.join(repoRoot, "server", "node_modules", "tsx", "dist", "cli.mjs"),
-    ),
-    webDependenciesReady: fs.existsSync(
-      path.join(repoRoot, "web", "node_modules", "next", "dist", "bin", "next"),
-    ),
+    missingPreviewDependencies: missingPreviewLauncherDependencies(repoRoot),
     install() {
       installBackendPackages();
       installPackages("web", "frontend");
@@ -864,10 +867,10 @@ log("Starting services...");
 log("");
 const engineState = await startWorkflowEngine();
 if (!engineState.available) {
-  // An explicit unreachable endpoint makes optional-engine degradation a 503;
-  // it never leaves the backend pointed at a foreign or ambiguous listener.
-  process.env.PIPELINE_ENGINE_BASE_URL = "http://127.0.0.1:0";
+  process.env.KADY_PIPELINE_ENGINE_DISABLED = "1";
   log(`  ${sym.warn} Workflow engine disabled; pipeline routes will return 503.`);
+} else {
+  process.env.KADY_PIPELINE_ENGINE_DISABLED = "0";
 }
 startService(
   `Backend on port ${BACKEND_PORT} (Pi agent, TypeScript)`,

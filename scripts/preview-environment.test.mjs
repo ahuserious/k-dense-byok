@@ -7,10 +7,13 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { createLaunchOverlay, previewEnvironment } from "./preview-environment.mjs";
 import {
+  acquireVendoredDistBuildLock,
+  missingPreviewLauncherDependencies,
   prepareLauncherDependencies,
   previewVendoredDistFingerprintEnvironment,
   previewVendoredDistEnvironment,
   scrubSensitiveEnvironment,
+  vendoredDistBuildLockPath,
 } from "./vendored-dist-environment.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -161,8 +164,7 @@ fs.writeFileSync(${JSON.stringify(invocationLog)}, "invoked\\n");
     };
     const action = prepareLauncherDependencies({
       environment: previewEnvironmentWithProduction,
-      serverDependenciesReady: true,
-      webDependenciesReady: true,
+      missingPreviewDependencies: [],
       install: () => invokeFakeNpm(previewEnvironmentWithProduction),
     });
     assert.equal(action, "reuse-preview");
@@ -170,8 +172,7 @@ fs.writeFileSync(${JSON.stringify(invocationLog)}, "invoked\\n");
     assert.throws(
       () => prepareLauncherDependencies({
         environment: previewEnvironmentWithProduction,
-        serverDependenciesReady: false,
-        webDependenciesReady: true,
+        missingPreviewDependencies: ["server/node_modules/tsx/dist/cli.mjs"],
         install: () => invokeFakeNpm(previewEnvironmentWithProduction),
       }),
       /Preview requires dependencies installed before launch/,
@@ -182,8 +183,7 @@ fs.writeFileSync(${JSON.stringify(invocationLog)}, "invoked\\n");
     assert.equal(
       prepareLauncherDependencies({
         environment: normalEnvironment,
-        serverDependenciesReady: false,
-        webDependenciesReady: false,
+        missingPreviewDependencies: ["ignored outside preview"],
         install: () => invokeFakeNpm(normalEnvironment),
       }),
       "installed",
@@ -191,6 +191,37 @@ fs.writeFileSync(${JSON.stringify(invocationLog)}, "invoked\\n");
     assert.equal(fs.readFileSync(invocationLog, "utf-8"), "invoked\n");
   } finally {
     fs.rmSync(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("production-pruned preview web tree fails before Next can repair TypeScript dependencies", () => {
+  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-pruned-web-"));
+  try {
+    for (const relativePath of [
+      "server/node_modules/tsx/dist/cli.mjs",
+      "web/node_modules/next/dist/bin/next",
+      "web/tsconfig.json",
+    ]) {
+      const filePath = path.join(repositoryRoot, relativePath);
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, "fixture\n");
+    }
+    const missing = missingPreviewLauncherDependencies(repositoryRoot);
+    assert.deepEqual(missing, [
+      "web/node_modules/typescript/lib/typescript.js",
+      "web/node_modules/@types/react/index.d.ts",
+      "web/node_modules/@types/node/index.d.ts",
+    ]);
+    assert.throws(
+      () => prepareLauncherDependencies({
+        environment: { KADY_PREVIEW: "1" },
+        missingPreviewDependencies: missing,
+        install: () => assert.fail("npm must not run"),
+      }),
+      /web\/node_modules\/typescript\/lib\/typescript\.js/,
+    );
+  } finally {
+    fs.rmSync(repositoryRoot, { recursive: true, force: true });
   }
 });
 
@@ -246,6 +277,103 @@ test("launch overlay resolves every copied start.mjs dependency without starting
     }
   } finally {
     fs.rmSync(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("preview npm shim allows only the launcher prep command", () => {
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-npm-shim-"));
+  try {
+    const invocationLog = path.join(stateRoot, "real-npm.json");
+    const realNpm = path.join(stateRoot, "real-npm");
+    fs.writeFileSync(
+      realNpm,
+      `#!${process.execPath}\nimport fs from "node:fs"; fs.writeFileSync(${JSON.stringify(invocationLog)}, JSON.stringify(process.argv.slice(2)));\n`,
+      { mode: 0o700 },
+    );
+    const { shimDirectory } = createLaunchOverlay(
+      repositoryRoot,
+      stateRoot,
+      realNpm,
+      process.execPath,
+    );
+    const npmShim = path.join(shimDirectory, "npm");
+    for (const command of ["install", "i", "add", "remove", "prune", "update", "ci", "dedupe", "link", "exec", "x", "rebuild"]) {
+      const blocked = spawnSync(npmShim, [command], { encoding: "utf-8" });
+      assert.equal(blocked.status, 125, command);
+      assert.match(blocked.stderr, /blocked npm command/);
+      assert.equal(fs.existsSync(invocationLog), false);
+    }
+    const allowed = spawnSync(npmShim, ["run", "prep", "--silent"], { encoding: "utf-8" });
+    assert.equal(allowed.status, 0, allowed.stderr);
+    assert.deepEqual(JSON.parse(fs.readFileSync(invocationLog, "utf-8")), ["run", "prep", "--silent"]);
+  } finally {
+    fs.rmSync(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("failed build-lock record writes remove the partial lock", async () => {
+  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-write-failure-"));
+  const lockPath = vendoredDistBuildLockPath(repositoryRoot);
+  const injectedError = new Error("injected lock write failure");
+  try {
+    const lockFileSystem = {
+      openSync: (...arguments_) => fs.openSync(...arguments_),
+      writeFileSync(descriptor) {
+        fs.writeFileSync(descriptor, "{\"schema\":");
+        throw injectedError;
+      },
+      closeSync: (...arguments_) => fs.closeSync(...arguments_),
+      rmSync: (...arguments_) => fs.rmSync(...arguments_),
+    };
+    await assert.rejects(
+      acquireVendoredDistBuildLock(repositoryRoot, { lockFileSystem }),
+      injectedError,
+    );
+    assert.equal(fs.existsSync(lockPath), false);
+  } finally {
+    fs.rmSync(lockPath, { force: true });
+    fs.rmSync(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("malformed build locks are reclaimed after a bounded backoff", async () => {
+  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-malformed-"));
+  const lockPath = vendoredDistBuildLockPath(repositoryRoot);
+  try {
+    fs.writeFileSync(lockPath, "{partial");
+    const lock = await acquireVendoredDistBuildLock(repositoryRoot, { waitMs: 250, pollMs: 5 });
+    assert.equal(fs.existsSync(lockPath), true);
+    lock.release();
+    assert.equal(fs.existsSync(lockPath), false);
+  } finally {
+    fs.rmSync(lockPath, { force: true });
+    fs.rmSync(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("persistent malformed-lock contention reaches its deadline", async () => {
+  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-deadline-"));
+  const lockPath = vendoredDistBuildLockPath(repositoryRoot);
+  const lockExistsError = Object.assign(new Error("injected contention"), { code: "EEXIST" });
+  try {
+    fs.writeFileSync(lockPath, "{partial");
+    const startedAt = Date.now();
+    await assert.rejects(
+      acquireVendoredDistBuildLock(repositoryRoot, {
+        waitMs: 30,
+        pollMs: 5,
+        lockFileSystem: {
+          openSync() {
+            throw lockExistsError;
+          },
+        },
+      }),
+      /timed out waiting for vendored dist build lock/,
+    );
+    assert.ok(Date.now() - startedAt < 500, "lock recovery must not spin past its deadline");
+  } finally {
+    fs.rmSync(lockPath, { force: true });
+    fs.rmSync(repositoryRoot, { recursive: true, force: true });
   }
 });
 

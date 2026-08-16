@@ -99,9 +99,10 @@ It also includes a minimal `scripts/` directory containing byte-exact copies of
 the three `vendored-dist-*.mjs` modules required by the launcher. Those modules
 validate and build against the checkout resolved through the `server/` symlink,
 so the overlay neither exposes `.git` nor substitutes `gitHead: "unknown"`.
-The preview npm shim suppresses the launcher's update lookup and forces npm
-offline; the vendored wrapper independently performs stamp-driven frozen Bun
-installs when required.
+The preview npm shim allows only the launcher's exact `npm run prep --silent`
+command and rejects every other npm invocation, including install, CI, prune,
+update, exec, and rebuild operations. The vendored wrapper independently
+performs stamp-driven frozen Bun installs when required.
 
 The effective environment includes:
 
@@ -127,9 +128,11 @@ answer successfully. It then prints those URLs, the spawned root PID, and the
 log location.
 
 Preview startup never runs `npm install`. It requires the already-installed
-backend `tsx` and frontend `next` entrypoints and fails clearly if either is
-missing. Normal `start.mjs` launches retain their existing install/update
-behaviour.
+backend `tsx` and frontend `next` entrypoints. When `web/tsconfig.json` exists,
+it also requires TypeScript plus the React and Node type packages that Next
+would otherwise try to repair automatically. Preview fails clearly before
+launch when any required package is missing. Normal `start.mjs` launches retain
+their existing install/update behaviour.
 
 ## Push block
 

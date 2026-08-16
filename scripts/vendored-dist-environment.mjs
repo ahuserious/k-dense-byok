@@ -62,26 +62,56 @@ export function previewVendoredDistFingerprintEnvironment(
   });
 }
 
+export function workflowEngineConsumerEnvironment(
+  environment,
+  enginePort,
+  { overrideExisting = false } = {},
+) {
+  const port = String(enginePort);
+  const localOrigin = `http://127.0.0.1:${port}`;
+  return {
+    ...environment,
+    KADY_PIPELINE_ENGINE_PORT: port,
+    PIPELINE_ENGINE_BASE_URL: overrideExisting
+      ? localOrigin
+      : environment.PIPELINE_ENGINE_BASE_URL ?? localOrigin,
+    NEXT_PUBLIC_PIPELINE_ENGINE_URL: overrideExisting
+      ? localOrigin
+      : environment.NEXT_PUBLIC_PIPELINE_ENGINE_URL ?? localOrigin,
+    KADY_PIPELINE_ENGINE_DISABLED: "0",
+  };
+}
+
 export function prepareLauncherDependencies({
   environment,
-  serverDependenciesReady,
-  webDependenciesReady,
+  missingPreviewDependencies = [],
   install,
 }) {
   if (environment.KADY_PREVIEW === "1") {
-    if (!serverDependenciesReady || !webDependenciesReady) {
-      const missing = [
-        !serverDependenciesReady ? "server/node_modules/tsx" : null,
-        !webDependenciesReady ? "web/node_modules/next" : null,
-      ].filter(Boolean);
+    if (missingPreviewDependencies.length > 0) {
       throw new Error(
-        `Preview requires dependencies installed before launch; missing ${missing.join(" and ")}.`,
+        `Preview requires dependencies installed before launch; missing ${missingPreviewDependencies.join(", ")}.`,
       );
     }
     return "reuse-preview";
   }
   install();
   return "installed";
+}
+
+export function missingPreviewLauncherDependencies(repositoryRoot) {
+  const requirements = [
+    "server/node_modules/tsx/dist/cli.mjs",
+    "web/node_modules/next/dist/bin/next",
+  ];
+  if (fs.existsSync(path.join(repositoryRoot, "web", "tsconfig.json"))) {
+    requirements.push(
+      "web/node_modules/typescript/lib/typescript.js",
+      "web/node_modules/@types/react/index.d.ts",
+      "web/node_modules/@types/node/index.d.ts",
+    );
+  }
+  return requirements.filter((relativePath) => !fs.existsSync(path.join(repositoryRoot, relativePath)));
 }
 
 function processStartIdentity(pid) {
@@ -126,6 +156,30 @@ function readBuildLock(lockPath) {
   }
 }
 
+function readBuildLockSnapshot(lockPath) {
+  try {
+    const stat = fs.statSync(lockPath);
+    return {
+      contents: fs.readFileSync(lockPath, "utf-8"),
+      device: stat.dev,
+      inode: stat.ino,
+      size: stat.size,
+      modifiedAtMs: stat.mtimeMs,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function sameBuildLockSnapshot(first, second) {
+  return first !== null && second !== null &&
+    first.contents === second.contents &&
+    first.device === second.device &&
+    first.inode === second.inode &&
+    first.size === second.size &&
+    first.modifiedAtMs === second.modifiedAtMs;
+}
+
 export function vendoredDistBuildLockStatus(repositoryRoot) {
   const lockPath = vendoredDistBuildLockPath(repositoryRoot);
   const lock = readBuildLock(lockPath);
@@ -146,7 +200,7 @@ export function vendoredDistBuildLockStatus(repositoryRoot) {
 
 export async function acquireVendoredDistBuildLock(
   repositoryRoot,
-  { waitMs = 120_000, pollMs = 200 } = {},
+  { waitMs = 120_000, pollMs = 200, lockFileSystem = fs } = {},
 ) {
   const lockPath = vendoredDistBuildLockPath(repositoryRoot);
   const token = randomUUID();
@@ -154,6 +208,9 @@ export async function acquireVendoredDistBuildLock(
   if (!processStart) throw new Error(`could not determine start time for build-lock PID ${process.pid}`);
   const deadline = Date.now() + waitMs;
   while (true) {
+    if (Date.now() >= deadline) {
+      throw new Error(`timed out waiting for vendored dist build lock: ${lockPath}`);
+    }
     const lock = {
       schema: 1,
       token,
@@ -163,9 +220,19 @@ export async function acquireVendoredDistBuildLock(
       heartbeatAt: new Date().toISOString(),
     };
     try {
-      const descriptor = fs.openSync(lockPath, "wx", 0o600);
-      fs.writeFileSync(descriptor, `${JSON.stringify(lock)}\n`);
-      fs.closeSync(descriptor);
+      const descriptor = lockFileSystem.openSync(lockPath, "wx", 0o600);
+      try {
+        lockFileSystem.writeFileSync(descriptor, `${JSON.stringify(lock)}\n`);
+        lockFileSystem.closeSync(descriptor);
+      } catch (error) {
+        try {
+          lockFileSystem.closeSync(descriptor);
+        } catch {
+          // The original write/close failure is the useful error.
+        }
+        lockFileSystem.rmSync(lockPath, { force: true });
+        throw error;
+      }
       const heartbeat = setInterval(() => {
         const current = readBuildLock(lockPath);
         if (current?.token !== token) return;
@@ -186,17 +253,24 @@ export async function acquireVendoredDistBuildLock(
     }
     const status = vendoredDistBuildLockStatus(repositoryRoot);
     if (!status.active) {
-      const observedToken = status.lock?.token ?? null;
-      if (readBuildLock(lockPath)?.token === observedToken) {
+      const observedSnapshot = readBuildLockSnapshot(lockPath);
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        throw new Error(`timed out waiting for vendored dist build lock: ${lockPath}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, remainingMs)));
+      const currentSnapshot = readBuildLockSnapshot(lockPath);
+      if (sameBuildLockSnapshot(observedSnapshot, currentSnapshot)) {
         console.warn(`vendored-dist-build: WARNING reclaiming inactive build lock: ${lockPath}`);
         fs.rmSync(lockPath, { force: true });
       }
       continue;
     }
-    if (Date.now() >= deadline) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
       throw new Error(`timed out waiting for active vendored dist build lock: ${lockPath}`);
     }
-    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, remainingMs)));
   }
 }
 

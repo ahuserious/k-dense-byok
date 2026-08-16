@@ -131,6 +131,25 @@ function collectFiles(value, found = new Set()) {
   return found;
 }
 
+function changedPathsFromNameStatus(output) {
+  const fields = output.split("\0");
+  if (fields.at(-1) === "") fields.pop();
+  const paths = [];
+  for (let index = 0; index < fields.length;) {
+    const status = fields[index++];
+    if (!/^[A-Z][0-9]*$/.test(status)) throw new Error(`unexpected git diff status: ${status}`);
+    const source = fields[index++];
+    if (!source) throw new Error(`git diff status ${status} has no path`);
+    paths.push(source);
+    if (status.startsWith("R") || status.startsWith("C")) {
+      const destination = fields[index++];
+      if (!destination) throw new Error(`git diff status ${status} has no destination path`);
+      paths.push(destination);
+    }
+  }
+  return paths;
+}
+
 let options;
 try {
   options = parseArguments(process.argv.slice(2));
@@ -166,11 +185,14 @@ if (options.writer !== null) {
     const trustedMatchers = laneMatchersFor(trustedOwnership);
     if (!trustedMatchers[options.writer]) throw new Error(`unknown writer lane in trusted base: ${options.writer}`);
     const trustedHandoffs = validatedHandoffs(trustedOwnership, trustedMatchers);
-    const diff = git(["diff", "--name-only", baseCommit, "--"]);
+    const diff = git(["diff", "--name-status", "-z", "--find-renames", baseCommit, "--"]);
     if (diff.status !== 0) throw new Error(diff.stderr.trim() || `git diff failed for ${baseCommit}`);
     const untracked = git(["ls-files", "--others", "--exclude-standard", "--"]);
     if (untracked.status !== 0) throw new Error(untracked.stderr.trim() || "git ls-files failed");
-    changedPaths = [...new Set(`${diff.stdout}\n${untracked.stdout}`.split("\n").filter(Boolean))].sort();
+    changedPaths = [...new Set([
+      ...changedPathsFromNameStatus(diff.stdout),
+      ...untracked.stdout.split("\n").filter(Boolean),
+    ])].sort();
     for (const file of changedPaths) {
       const directlyOwned = trustedMatchers[options.writer] && ownersFor(file, trustedMatchers).includes(options.writer);
       const handedOff = trustedHandoffs.some(

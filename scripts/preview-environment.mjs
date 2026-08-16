@@ -52,7 +52,11 @@ export function createLaunchOverlay(repositoryRoot, stateRoot, realNpm, realGit)
     `#!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 const args = process.argv.slice(2);
-if (args[0] === "view") process.exit(1);
+const allowed = args.length === 3 && args[0] === "run" && args[1] === "prep" && args[2] === "--silent";
+if (!allowed) {
+  console.error("[kady-preview] blocked npm command: " + args.join(" "));
+  process.exit(125);
+}
 const result = spawnSync(${JSON.stringify(realNpm)}, args, { stdio: "inherit", env: process.env });
 process.exit(result.status ?? 1);
 `,
