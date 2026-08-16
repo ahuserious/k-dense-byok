@@ -71,6 +71,10 @@ A handoff lets the recipient lane edit a path another lane owns, for the stated 
 | S11 | C5 | `scripts/preview-down.mjs` | owned checkout-local preview web projection cleanup |
 | S11 | C5 | `scripts/preview-state.mjs` | exclusive preview lifecycle lock |
 | S11 | C5 | `scripts/preview-state.test.mjs` | preview lifecycle lock recovery regression |
+| C1 | C5 | `scripts/preview-launcher-observer.mjs` | generation-bound service records, launcher start gate and process identity in the preview observer |
+| C1 | C5 | `scripts/preview-launcher-observer.test.mjs` | observer generation/identity regression |
+| S11 | C5 | `scripts/preview-processes.mjs` | identity-verified preview process ownership (no cwd-only signaling) |
+| S11 | C5 | `scripts/preview-processes.test.mjs` | preview process ownership regression |
 | S11 | C5 | `scripts/preview-readiness.mjs` | named preview source-drift health failure detail |
 | S11 | C5 | `scripts/preview-readiness.test.mjs` | named preview source-drift health regression |
 | S4 | C5 | `server/src/workflows/supervisor/credentials.ts` | credential persistence environment-root isolation |
