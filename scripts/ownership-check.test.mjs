@@ -57,6 +57,9 @@ test("ownership writer/base flags reject joined, unknown, duplicate, and option-
     ["--writer", "C1", "--writer", "C1", "--base", "abcdef0"],
     ["--writer", "C1", "--base", "-s"],
     ["--writer", "C1", "--base", "HEAD"],
+    ["--head", "abcdef0"],
+    ["--writer", "C1", "--base", "abcdef0", "--head=1234567"],
+    ["--writer", "C1", "--base", "abcdef0", "--head", "HEAD"],
   ]) {
     const result = spawnSync(process.execPath, [checkerPath, ...arguments_], {
       cwd: repositoryRoot,
@@ -64,6 +67,25 @@ test("ownership writer/base flags reject joined, unknown, duplicate, and option-
     });
     assert.equal(result.status, 2, `${arguments_.join(" ")}\n${result.stdout}\n${result.stderr}`);
     assert.match(result.stderr, /ownership-check: FAIL/);
+  }
+});
+
+test("explicit head is inspected by the trusted base checker without executing head code", () => {
+  const { checkout, base } = createGitFixture();
+  try {
+    writeFixtureFile(checkout, "other/head-change.txt", "unauthorized\n");
+    writeFixtureFile(checkout, "scripts/ownership-check.mjs", "process.exit(0);\n");
+    git(checkout, "add", ".");
+    git(checkout, "commit", "--quiet", "-m", "candidate attempts to bypass checker");
+    const head = git(checkout, "rev-parse", "HEAD");
+    git(checkout, "checkout", "--quiet", "--detach", base);
+
+    const result = runChecker(checkout, "--writer", "C1", "--base", base, "--head", head);
+    assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stderr, /other\/head-change\.txt/);
+    assert.match(result.stderr, /scripts\/ownership-check\.mjs/);
+  } finally {
+    fs.rmSync(checkout, { recursive: true, force: true });
   }
 });
 
@@ -85,6 +107,21 @@ test("writer validation reads policy from the trusted fixture base", () => {
     assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
     assert.match(result.stderr, /trusted base/);
     assert.match(result.stderr, /docs\/inventory\/ownership\.json/);
+  } finally {
+    fs.rmSync(checkout, { recursive: true, force: true });
+  }
+});
+
+test("worktree mode includes tracked but uncommitted changes", () => {
+  const { checkout, base } = createGitFixture();
+  try {
+    writeFixtureFile(checkout, "owned/committed.txt", "owned candidate change\n");
+    git(checkout, "add", ".");
+    git(checkout, "commit", "--quiet", "-m", "owned candidate change");
+    writeFixtureFile(checkout, "other/source.txt", "uncommitted cross-lane edit\n");
+    const result = runChecker(checkout, "--writer", "C1", "--base", base);
+    assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stderr, /other\/source\.txt/);
   } finally {
     fs.rmSync(checkout, { recursive: true, force: true });
   }

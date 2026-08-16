@@ -18,46 +18,60 @@ const policyControlledPaths = new Set([
 function parseArguments(argv) {
   let writer = null;
   let base = null;
+  let head = null;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
-    if (argument !== "--writer" && argument !== "--base") {
+    if (argument !== "--writer" && argument !== "--base" && argument !== "--head") {
       throw new Error(`unknown option: ${argument}`);
     }
     const name = argument.slice(2);
-    if ((name === "writer" ? writer : base) !== null) {
+    const current = name === "writer" ? writer : name === "base" ? base : head;
+    if (current !== null) {
       throw new Error(`${argument} may be specified only once`);
     }
     const value = argv[index + 1];
     if (!value || value.startsWith("-")) throw new Error(`${argument} requires a value`);
     if (name === "writer") writer = value;
-    else base = value;
+    else if (name === "base") base = value;
+    else head = value;
     index += 1;
   }
   if ((writer === null) !== (base === null)) {
     throw new Error("--writer and --base must be provided together");
   }
+  if (head !== null && writer === null) {
+    throw new Error("--head requires --writer and --base");
+  }
   if (base !== null && !/^[0-9a-f]{7,64}$/i.test(base)) {
     throw new Error("--base must be an explicit hexadecimal commit id (symbolic revisions such as HEAD are rejected)");
   }
-  return { writer, base };
+  if (head !== null && !/^[0-9a-f]{7,64}$/i.test(head)) {
+    throw new Error("--head must be an explicit hexadecimal commit id (symbolic revisions such as HEAD are rejected)");
+  }
+  return { writer, base, head };
 }
 
 function git(arguments_) {
   return spawnSync("git", arguments_, { cwd: repoRoot, encoding: "utf-8" });
 }
 
-function resolveBase(base) {
-  const resolved = git(["rev-parse", "--verify", "--end-of-options", `${base}^{commit}`]);
+function resolveCommit(revision, optionName) {
+  const resolved = git(["rev-parse", "--verify", "--end-of-options", `${revision}^{commit}`]);
   if (resolved.status !== 0 || !/^[0-9a-f]{40,64}$/i.test(resolved.stdout.trim())) {
-    throw new Error(resolved.stderr.trim() || `could not resolve base commit: ${base}`);
+    throw new Error(resolved.stderr.trim() || `could not resolve ${optionName} commit: ${revision}`);
   }
-  const head = git(["rev-parse", "--verify", "HEAD^{commit}"]);
-  if (head.status === 0 && head.stdout.trim() === resolved.stdout.trim()) {
+  return resolved.stdout.trim();
+}
+
+function resolveRange(base, head) {
+  const baseCommit = resolveCommit(base, "base");
+  const headCommit = head === null ? resolveCommit("HEAD", "candidate") : resolveCommit(head, "head");
+  if (headCommit === baseCommit) {
     throw new Error("--base must precede HEAD; the current candidate commit cannot be its own trusted policy base");
   }
-  const ancestor = git(["merge-base", "--is-ancestor", resolved.stdout.trim(), "HEAD"]);
+  const ancestor = git(["merge-base", "--is-ancestor", baseCommit, headCommit]);
   if (ancestor.status !== 0) throw new Error(`base is not an ancestor of HEAD: ${base}`);
-  return resolved.stdout.trim();
+  return { baseCommit, headCommit };
 }
 
 function readBaseOwnership(baseCommit) {
@@ -178,16 +192,21 @@ for (const file of [...inventoriedPaths].sort()) {
 const unauthorizedChanges = [];
 let changedPaths = [];
 let baseCommit = null;
+let headCommit = null;
 if (options.writer !== null) {
   try {
-    baseCommit = resolveBase(options.base);
+    ({ baseCommit, headCommit } = resolveRange(options.base, options.head));
     const trustedOwnership = readBaseOwnership(baseCommit);
     const trustedMatchers = laneMatchersFor(trustedOwnership);
     if (!trustedMatchers[options.writer]) throw new Error(`unknown writer lane in trusted base: ${options.writer}`);
     const trustedHandoffs = validatedHandoffs(trustedOwnership, trustedMatchers);
-    const diff = git(["diff", "--name-status", "-z", "--find-renames", baseCommit, "--"]);
+    const diff = options.head === null
+      ? git(["diff", "--name-status", "-z", "--find-renames", baseCommit, "--"])
+      : git(["diff", "--name-status", "-z", "--find-renames", baseCommit, headCommit, "--"]);
     if (diff.status !== 0) throw new Error(diff.stderr.trim() || `git diff failed for ${baseCommit}`);
-    const untracked = git(["ls-files", "--others", "--exclude-standard", "--"]);
+    const untracked = options.head === null
+      ? git(["ls-files", "--others", "--exclude-standard", "--"])
+      : { status: 0, stdout: "" };
     if (untracked.status !== 0) throw new Error(untracked.stderr.trim() || "git ls-files failed");
     changedPaths = [...new Set([
       ...changedPathsFromNameStatus(diff.stdout),

@@ -25,6 +25,7 @@ import {
   previewVendoredDistFingerprintEnvironment,
   resolveWorkflowEnginePort,
   scrubSensitiveEnvironment,
+  terminateOwnedProcessTree,
   vendoredDistBuildLockStatus,
   waitForOwnedWorkflowEngine,
   workflowEngineConsumerEnvironment,
@@ -441,6 +442,7 @@ async function freePort(port, label) {
 const children = [];
 let shuttingDown = false;
 let engineOwnershipMonitor = null;
+const shutdownController = new AbortController();
 
 /** True once the child has terminated — by exit code OR by signal (a
  *  signal-killed child keeps exitCode === null and sets signalCode). */
@@ -458,6 +460,19 @@ function ownedTreeGone(child) {
 
 async function waitForOwnedTree(child) {
   while (!ownedTreeGone(child)) await sleep(100);
+}
+
+function waitUnlessShuttingDown(milliseconds) {
+  if (shutdownController.signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(finish, milliseconds);
+    function finish() {
+      clearTimeout(timer);
+      shutdownController.signal.removeEventListener("abort", finish);
+      resolve();
+    }
+    shutdownController.signal.addEventListener("abort", finish, { once: true });
+  });
 }
 
 function startService(label, dir, npmArgs, options = {}) {
@@ -546,16 +561,28 @@ function ownedByWorkflowEngineChild(pid, childPid) {
 }
 
 async function stopUnreadyWorkflowEngine(child) {
-  if (gone(child)) return;
-  if (isWin) capture("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
-  else {
-    try {
-      process.kill(-child.pid, "SIGTERM");
-    } catch {
-      child.kill("SIGTERM");
+  const terminate = (signal) => {
+    if (isWin) {
+      capture("taskkill", ["/pid", String(child.pid), "/T", ...(signal === "SIGKILL" ? ["/F"] : [])]);
+      return;
     }
-  }
-  await Promise.race([waitForOwnedTree(child), sleep(5_000)]);
+    try {
+      process.kill(-child.pid, signal);
+    } catch {
+      try {
+        child.kill(signal);
+      } catch {
+        // The exact process tree disappeared between the ownership check and signal.
+      }
+    }
+  };
+  await terminateOwnedProcessTree({
+    treeGone: () => ownedTreeGone(child),
+    terminate: () => terminate("SIGTERM"),
+    forceTerminate: () => terminate("SIGKILL"),
+    wait: sleep,
+    description: `workflow engine process tree rooted at PID ${child.pid}`,
+  });
 }
 
 function monitorWorkflowEngineOwnership(engineState) {
@@ -753,18 +780,24 @@ async function startWorkflowEngine() {
     probeHealth: async () => {
       try {
         const response = await fetch(`http://127.0.0.1:${PIPELINE_ENGINE_PORT}/api/health`, {
-          signal: AbortSignal.timeout(2000),
+          signal: AbortSignal.any([AbortSignal.timeout(2000), shutdownController.signal]),
         });
         return response.ok;
       } catch {
         return false;
       }
     },
-    wait: sleep,
+    wait: waitUnlessShuttingDown,
+    signal: shutdownController.signal,
   });
   child.removeListener("exit", trackEarlyExit);
   if (readiness.status !== "ready") {
-    await stopUnreadyWorkflowEngine(child);
+    try {
+      await stopUnreadyWorkflowEngine(child);
+    } catch (error) {
+      fail(`  ${sym.err} ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (readiness.status === "aborted") return { available: false, spawned: false };
     const detail = readiness.status === "foreign-listener"
       ? `port ${PIPELINE_ENGINE_PORT} was claimed by ${processName(readiness.foreignPid)} (PID ${readiness.foreignPid})`
       : readiness.status === "child-exited"
@@ -812,13 +845,20 @@ async function stopAll(code) {
     process.exit(code === 0 ? 1 : code);
   }
   shuttingDown = true;
+  shutdownController.abort();
   if (engineOwnershipMonitor) {
     clearInterval(engineOwnershipMonitor);
     engineOwnershipMonitor = null;
   }
   log("\nShutting down...");
+  const engineStops = [];
   for (const child of children) {
     if (ownedTreeGone(child)) continue;
+    if (child.kadyRole === "pipeline-engine") {
+      // Calling the async terminator sends SIGTERM before its first await.
+      engineStops.push(stopUnreadyWorkflowEngine(child));
+      continue;
+    }
     if (child.kadyRole === "backend") {
       if (!child.connected) {
         console.error(`  ${sym.err} The backend IPC channel is unavailable.`);
@@ -865,6 +905,12 @@ async function stopAll(code) {
   // There is intentionally no elapsed-time SIGKILL. The backend's app.close()
   // drains the detached workflow supervisor, whose provider ownership can
   // outlive a caller acknowledgement window.
+  try {
+    await Promise.all(engineStops);
+  } catch (error) {
+    console.error(`  ${sym.err} ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(code === 0 ? 1 : code);
+  }
   const allExited = Promise.all(children.map(waitForOwnedTree));
   await allExited;
   process.exit(code);
@@ -898,6 +944,19 @@ function openBrowser(url) {
   }
 }
 
+function requestShutdown() {
+  shutdownController.abort();
+  void stopAll(0);
+}
+
+// Install shutdown handling before any detached service can be spawned. This
+// includes the workflow engine's readiness window, when no consumer exists yet.
+process.on("SIGINT", requestShutdown);
+process.on("SIGTERM", requestShutdown);
+// Terminal window closed / SSH session dropped: without this the launcher
+// dies on SIGHUP while the detached children survive as orphans.
+process.on("SIGHUP", requestShutdown);
+
 // ---- main --------------------------------------------------------------------
 
 log("============================================");
@@ -926,12 +985,14 @@ try {
 } catch (error) {
   fail(`  ${sym.err} ${error instanceof Error ? error.message : String(error)}`);
 }
-Object.assign(
-  process.env,
-  workflowEngineConsumerEnvironment(process.env, PIPELINE_ENGINE_PORT, {
-    overrideExisting: flags.enginePort !== null,
-  }),
-);
+try {
+  Object.assign(
+    process.env,
+    workflowEngineConsumerEnvironment(process.env, PIPELINE_ENGINE_PORT),
+  );
+} catch (error) {
+  fail(`  ${sym.err} ${error instanceof Error ? error.message : String(error)}`);
+}
 await checkModelAccess();
 
 if (flags.check) {
@@ -992,12 +1053,6 @@ startService(
   [],
   { directFrontend: true, serviceArgs: ["dev", "-p", String(FRONTEND_PORT)] },
 );
-
-process.on("SIGINT", () => stopAll(0));
-process.on("SIGTERM", () => stopAll(0));
-// Terminal window closed / SSH session dropped: without this the launcher
-// dies on SIGHUP while the detached children survive as orphans.
-process.on("SIGHUP", () => stopAll(0));
 
 log("");
 log("Waiting for services to come up (the first run can take a minute)...");

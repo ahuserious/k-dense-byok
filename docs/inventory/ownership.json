@@ -34,6 +34,7 @@
       "scripts/vendored-dist-*.mjs",
       "package.json",
       ".github/workflows/tests.yml",
+      ".github/workflows/ownership-authorization.yml",
       "docs/preview-env.md",
       "scripts/ownership-check.mjs",
       "scripts/ownership-check.test.mjs",

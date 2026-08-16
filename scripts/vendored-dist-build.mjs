@@ -72,15 +72,19 @@ function sameBuildContext(before, after) {
   );
 }
 
-function promoteStagingDirectory(stagingDirectory, distDirectory, token) {
+function promoteStagingDirectory(stagingDirectory, distDirectory, token, assertOwned) {
   const backupDirectory = `${distDirectory}.previous-${token}`;
   let movedExisting = false;
   try {
+    assertOwned("dist promotion start");
     if (fs.existsSync(distDirectory)) {
       fs.renameSync(distDirectory, backupDirectory);
       movedExisting = true;
+      assertOwned("dist promotion after backup rename");
     }
+    assertOwned("dist promotion before publish rename");
     fs.renameSync(stagingDirectory, distDirectory);
+    assertOwned("dist promotion after publish rename");
     return { backupDirectory, movedExisting };
   } catch (error) {
     if (!fs.existsSync(distDirectory) && movedExisting && fs.existsSync(backupDirectory)) {
@@ -124,10 +128,12 @@ try {
       env: buildEnvironment,
     });
     if (install.code !== 0) fail(`bun install exited ${install.code}${install.signal ? ` (${install.signal})` : ""}`, install.code);
+    buildLock.assertOwned("dependency installation completion");
     const installInputsAfter = expectedVendoredInstallStamp(options.root, buildEnvironment);
     if (installInputsBefore.sha256 !== installInputsAfter.sha256) {
       fail("dependency inputs changed while bun install was running; install stamp not written");
     }
+    buildLock.assertOwned("dependency stamp write");
     writeVendoredInstallStamp(options.root, buildEnvironment);
     installStatus = vendoredInstallStatus(options.root, buildEnvironment);
     console.log(`vendored-dist-build: dependency stamp written to ${installStatus.path} and node_modules/.bun-install-stamp`);
@@ -165,8 +171,12 @@ try {
       stagingDirectory,
     );
     validateVendoredDistOutputTree(options.root, stagingDirectory, manifest);
-    buildLock.assertOwned("dist promotion");
-    const promotion = promoteStagingDirectory(stagingDirectory, distDirectory, buildLock.token);
+    const promotion = promoteStagingDirectory(
+      stagingDirectory,
+      distDirectory,
+      buildLock.token,
+      (operation) => buildLock.assertOwned(operation),
+    );
     stagingDirectory = null;
 
     const afterBuild = checkVendoredDist(options.root, buildEnvironment);
@@ -182,6 +192,7 @@ try {
       }
       fail(`build completed but full manifest/output validation failed (${afterBuild.status}: ${afterBuild.message})`);
     }
+    buildLock.assertOwned("dist promotion cleanup");
     if (promotion.movedExisting) {
       fs.rmSync(promotion.backupDirectory, { recursive: true, force: true });
     }

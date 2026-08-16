@@ -7,7 +7,7 @@ inventory path is owned exactly once.
 
 | Lane | Scope | Owned globs |
 | --- | --- | --- |
-| C1 | Vendored builder dist freshness and launcher safety | `.github/workflows/tests.yml`; `docs/preview-env.md`; `package.json`; `scripts/{ownership-check,ownership-check.test,vendored-dist-*}.mjs`; `server/test/pipelines-disabled.test.ts`; reviewed handoffs from R1, S2, S4, S5, and S11 listed in the policy. |
+| C1 | Vendored builder dist freshness and launcher safety | `.github/workflows/{tests,ownership-authorization}.yml`; `docs/preview-env.md`; `package.json`; `scripts/{ownership-check,ownership-check.test,vendored-dist-*}.mjs`; `server/test/pipelines-disabled.test.ts`; reviewed handoffs from R1, S2, S4, S5, and S11 listed in the policy. |
 | C3 | Hosted and live E2E evidence | `playwright.{cloud,live-alt}.config.ts`; `scripts/hosted-evidence-manifest*.mjs`; reviewed handoffs from C1, R1, and S11 listed in the policy. |
 | C5 | Preview credential and environment-root isolation | `config/token-ban.json`; `server/src/{env,environment-files,legacy-engine-data,path-containment,projects,sandbox-fs}.ts`; `server/src/api/credentials.ts`; `server/test/{credential-env-isolation,env-isolation}.test.ts`; reviewed handoffs from C1, R1, S4, and S11 listed in the policy. |
 | S1 | Consolidation and typed-surface removal | `web/src/app/page.tsx`; `web/src/components/{workspace-navigation,persistent-workspace-surfaces,dag-builder-surface,dag-builder,dag-builder-canvas,dag-builder-inspector,dag-workflow-console}.{ts,tsx}`; `web/src/lib/{workspace-persistence,dag-workflow-builder,dag-workflows}.ts` |
@@ -30,6 +30,13 @@ ownership, except for the explicitly listed C1 vendored-dist gate files above.
 ## Reviewed handoffs (2026-08-16 policy commit)
 
 A handoff lets the recipient lane edit a path another lane owns, for the stated scope only. `node scripts/ownership-check.mjs --writer <lane> --base <policy-commit>` (lane C1's trusted-base checker) authorizes a lane's changed paths against this base.
+
+The required PR status is **Ownership authorization / trusted base changed-path
+authorization**. Its `pull_request_target` workflow checks out and executes only
+the base revision, fetches the candidate commit without checking it out, and
+passes that object via `--head`. A branch named `lane/<id>-<description>` selects
+the writer lane. The similarly named job in `tests.yml` executes candidate code
+and is convenience feedback only; it is not the trusted authorization gate.
 
 | From | To | Path | Scope |
 |---|---|---|---|

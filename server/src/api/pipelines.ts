@@ -664,9 +664,9 @@ export class PipelineReconciliationWorker {
 
   async runOnce(): Promise<void> {
     if (this.running) return;
-    if (this.options.engineDisabled ?? PIPELINE_ENGINE_DISABLED) return;
     this.running = true;
     try {
+      const engineDisabled = this.options.engineDisabled ?? PIPELINE_ENGINE_DISABLED;
       const projects = this.options.projects?.() ?? listProjects();
       for (const project of projects) {
         recoverPipelineAdmissionIntents(project.id);
@@ -688,6 +688,10 @@ export class PipelineReconciliationWorker {
                 usage: ZERO_PIPELINE_USAGE,
                 reason: "admission owner exited before write-ahead dispatch intent",
               });
+              continue;
+            }
+            if (engineDisabled) {
+              await this.renewIfNeeded(project.id, record.admissionId);
               continue;
             }
             let engineRunId = record.engineRunId;

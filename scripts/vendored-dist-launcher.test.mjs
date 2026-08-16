@@ -11,6 +11,7 @@ import {
   classifyWorkflowEngineBuildOutcome,
   classifyWorkflowEngineListener,
   resolveWorkflowEnginePort,
+  terminateOwnedProcessTree,
   waitForOwnedWorkflowEngine,
   workflowEngineConsumerEnvironment,
   workflowEnginePrerequisiteStatus,
@@ -77,29 +78,59 @@ test("workflow engine listener and build decision matrix", () => {
 });
 
 test("resolved engine port propagates to backend and browser consumer variables", () => {
-  const environment = workflowEngineConsumerEnvironment(
-    {
-      KADY_PIPELINE_ENGINE_PORT: "3091",
-      PIPELINE_ENGINE_BASE_URL: "http://127.0.0.1:3091",
-      NEXT_PUBLIC_PIPELINE_ENGINE_URL: "http://127.0.0.1:3091",
-    },
-    13191,
-    { overrideExisting: true },
-  );
+  const environment = workflowEngineConsumerEnvironment({ KADY_PIPELINE_ENGINE_PORT: "3091" }, 13191);
   assert.equal(environment.KADY_PIPELINE_ENGINE_PORT, "13191");
+  assert.equal(environment.KADY_ARCHON_PORT, "13191");
   assert.equal(environment.PIPELINE_ENGINE_BASE_URL, "http://127.0.0.1:13191");
   assert.equal(environment.NEXT_PUBLIC_PIPELINE_ENGINE_URL, "http://127.0.0.1:13191");
   assert.equal(environment.KADY_PIPELINE_ENGINE_DISABLED, "0");
 });
 
-test("resolved environment port fills missing consumers without replacing an explicit browser origin", () => {
-  const environment = workflowEngineConsumerEnvironment(
-    { NEXT_PUBLIC_PIPELINE_ENGINE_URL: "https://preview.example.test" },
-    13191,
+test("managed engine rejects conflicting explicit consumer origins", () => {
+  assert.throws(
+    () => workflowEngineConsumerEnvironment(
+      { NEXT_PUBLIC_PIPELINE_ENGINE_URL: "https://preview.example.test" },
+      13191,
+    ),
+    /conflicts with explicit NEXT_PUBLIC_PIPELINE_ENGINE_URL.*--external-engine mode is not implemented/,
   );
-  assert.equal(environment.KADY_PIPELINE_ENGINE_PORT, "13191");
-  assert.equal(environment.PIPELINE_ENGINE_BASE_URL, "http://127.0.0.1:13191");
-  assert.equal(environment.NEXT_PUBLIC_PIPELINE_ENGINE_URL, "https://preview.example.test");
+});
+
+test("workflow engine readiness aborts without waiting for its timeout", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const result = await waitForOwnedWorkflowEngine({
+    childPid: 101,
+    childExited: () => false,
+    listenersOn: () => [],
+    isOwnedByChild: () => false,
+    probeHealth: async () => false,
+    wait: async () => assert.fail("aborted readiness must not sleep"),
+    timeoutMs: 30_000,
+    signal: controller.signal,
+  });
+  assert.deepEqual(result, { status: "aborted" });
+});
+
+test("owned process-tree termination escalates and verifies disappearance", async () => {
+  let alive = true;
+  const signals = [];
+  let clock = 0;
+  await terminateOwnedProcessTree({
+    treeGone: () => !alive,
+    terminate: () => signals.push("TERM"),
+    forceTerminate: () => {
+      signals.push("KILL");
+      alive = false;
+    },
+    wait: async (milliseconds) => { clock += milliseconds; },
+    description: "test process tree",
+    gracefulWaitMs: 10,
+    forcedWaitMs: 10,
+    pollMs: 5,
+    now: () => clock,
+  });
+  assert.deepEqual(signals, ["TERM", "KILL"]);
 });
 
 test("engine port is resolved after modern or legacy values are loaded solely from .env", () => {
@@ -107,6 +138,8 @@ test("engine port is resolved after modern or legacy values are loaded solely fr
   const envPath = path.join(fixtureRoot, ".env");
   const previousModern = process.env.KADY_PIPELINE_ENGINE_PORT;
   const previousLegacy = process.env.KADY_ARCHON_PORT;
+  const previousBackendOrigin = process.env.PIPELINE_ENGINE_BASE_URL;
+  const previousBrowserOrigin = process.env.NEXT_PUBLIC_PIPELINE_ENGINE_URL;
   try {
     delete process.env.KADY_PIPELINE_ENGINE_PORT;
     delete process.env.KADY_ARCHON_PORT;
@@ -119,11 +152,26 @@ test("engine port is resolved after modern or legacy values are loaded solely fr
     assert.equal(applyEnvFile(envPath, { override: true }), true);
     assert.equal(resolveWorkflowEnginePort(process.env), 13192);
     assert.equal(resolveWorkflowEnginePort(process.env, 13193), 13193);
+
+    delete process.env.KADY_ARCHON_PORT;
+    fs.writeFileSync(
+      envPath,
+      "KADY_PIPELINE_ENGINE_PORT=13194\nPIPELINE_ENGINE_BASE_URL=https://external.example.test\n",
+    );
+    assert.equal(applyEnvFile(envPath, { override: true }), true);
+    assert.throws(
+      () => workflowEngineConsumerEnvironment(process.env, resolveWorkflowEnginePort(process.env)),
+      /conflicts with explicit PIPELINE_ENGINE_BASE_URL/,
+    );
   } finally {
     if (previousModern === undefined) delete process.env.KADY_PIPELINE_ENGINE_PORT;
     else process.env.KADY_PIPELINE_ENGINE_PORT = previousModern;
     if (previousLegacy === undefined) delete process.env.KADY_ARCHON_PORT;
     else process.env.KADY_ARCHON_PORT = previousLegacy;
+    if (previousBackendOrigin === undefined) delete process.env.PIPELINE_ENGINE_BASE_URL;
+    else process.env.PIPELINE_ENGINE_BASE_URL = previousBackendOrigin;
+    if (previousBrowserOrigin === undefined) delete process.env.NEXT_PUBLIC_PIPELINE_ENGINE_URL;
+    else process.env.NEXT_PUBLIC_PIPELINE_ENGINE_URL = previousBrowserOrigin;
     fs.rmSync(fixtureRoot, { recursive: true, force: true });
   }
 });
@@ -259,17 +307,17 @@ test(
       const alternatePort = reservation.address().port;
       await new Promise((resolve) => reservation.close(resolve));
 
-      const configured = workflowEngineConsumerEnvironment(
-        {
-          KADY_PIPELINE_ENGINE_PORT: String(foreignPort),
-          PIPELINE_ENGINE_BASE_URL: `http://127.0.0.1:${foreignPort}`,
-          NEXT_PUBLIC_PIPELINE_ENGINE_URL: `http://127.0.0.1:${foreignPort}`,
-        },
-        alternatePort,
-        { overrideExisting: true },
+      assert.throws(
+        () => workflowEngineConsumerEnvironment(
+          {
+            KADY_PIPELINE_ENGINE_PORT: String(foreignPort),
+            PIPELINE_ENGINE_BASE_URL: `http://127.0.0.1:${foreignPort}`,
+            NEXT_PUBLIC_PIPELINE_ENGINE_URL: `http://127.0.0.1:${foreignPort}`,
+          },
+          alternatePort,
+        ),
+        /conflicts with explicit/,
       );
-      assert.equal(configured.PIPELINE_ENGINE_BASE_URL, `http://127.0.0.1:${alternatePort}`);
-      assert.equal(configured.NEXT_PUBLIC_PIPELINE_ENGINE_URL, `http://127.0.0.1:${alternatePort}`);
 
       const launcher = await new Promise((resolve) => {
         const child = spawn(
@@ -292,7 +340,8 @@ test(
         child.stderr.on("data", (chunk) => { stderr += chunk; });
         child.on("exit", (code) => resolve({ code, stdout, stderr }));
       });
-      assert.equal(launcher.code, 0, `${launcher.stdout}\n${launcher.stderr}`);
+      assert.notEqual(launcher.code, 0, `${launcher.stdout}\n${launcher.stderr}`);
+      assert.match(launcher.stderr, /conflicts with explicit/);
       const requests = await new Promise((resolve) => {
         foreign.on("message", (message) => {
           if (message?.type === "count") resolve(message.requests);
@@ -364,6 +413,102 @@ test(
       assert.equal(requests, 0);
     } finally {
       await new Promise((resolve) => foreign.close(resolve));
+    }
+  },
+);
+
+test(
+  "signal during delayed engine readiness leaves no detached descendant or listener",
+  {
+    skip: process.env.KADY_SOCKET_TESTS === "1" && process.platform !== "win32"
+      ? false
+      : "requires Unix process groups and local socket binding; orchestrator runs with KADY_SOCKET_TESTS=1",
+  },
+  async () => {
+    const environmentModuleUrl = new URL("./vendored-dist-environment.mjs", import.meta.url).href;
+    const harnessSource = `
+      import { spawn } from "node:child_process";
+      import { terminateOwnedProcessTree, waitForOwnedWorkflowEngine } from ${JSON.stringify(environmentModuleUrl)};
+      const engineSource = \`
+        import http from "node:http";
+        const server = http.createServer((_request, response) => response.end("not-ready"));
+        process.on("SIGTERM", () => {});
+        server.listen(0, "127.0.0.1", () => process.send({ port: server.address().port }));
+      \`;
+      const engine = spawn(process.execPath, ["--input-type=module", "-e", engineSource], {
+        detached: true,
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
+      });
+      const port = await new Promise((resolve, reject) => {
+        engine.once("error", reject);
+        engine.once("message", (message) => resolve(message.port));
+      });
+      process.send({ type: "ready", enginePid: engine.pid, port });
+      const controller = new AbortController();
+      let stopping = null;
+      process.on("SIGTERM", () => {
+        controller.abort();
+        stopping ??= terminateOwnedProcessTree({
+          treeGone: () => {
+            try { process.kill(-engine.pid, 0); return false; }
+            catch (error) { return error?.code === "ESRCH"; }
+          },
+          terminate: () => process.kill(-engine.pid, "SIGTERM"),
+          forceTerminate: () => process.kill(-engine.pid, "SIGKILL"),
+          wait: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+          description: \`test workflow engine tree rooted at PID \${engine.pid}\`,
+          gracefulWaitMs: 100,
+          forcedWaitMs: 2_000,
+        }).then(() => process.exit(0), (error) => {
+          console.error(error.message);
+          process.exit(1);
+        });
+      });
+      await waitForOwnedWorkflowEngine({
+        childPid: engine.pid,
+        childExited: () => engine.exitCode !== null || engine.signalCode !== null,
+        listenersOn: () => [engine.pid],
+        isOwnedByChild: () => true,
+        probeHealth: async () => false,
+        wait: (milliseconds) => new Promise((resolve) => {
+          const timer = setTimeout(resolve, milliseconds);
+          controller.signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+        }),
+        timeoutMs: 30_000,
+        signal: controller.signal,
+      });
+      if (stopping) await stopping;
+    `;
+    const harness = spawn(process.execPath, ["--input-type=module", "-e", harnessSource], {
+      stdio: ["ignore", "ignore", "pipe", "ipc"],
+    });
+    let enginePid;
+    let port;
+    let stderr = "";
+    harness.stderr.on("data", (chunk) => { stderr += chunk; });
+    try {
+      const ready = await new Promise((resolve, reject) => {
+        harness.once("error", reject);
+        harness.once("message", resolve);
+      });
+      enginePid = ready.enginePid;
+      port = ready.port;
+      harness.kill("SIGTERM");
+      const exitCode = await new Promise((resolve) => harness.once("exit", resolve));
+      assert.equal(exitCode, 0, stderr);
+      assert.throws(() => process.kill(-enginePid, 0), (error) => error?.code === "ESRCH");
+      await assert.rejects(
+        new Promise((resolve, reject) => {
+          const socket = net.connect(port, "127.0.0.1");
+          socket.once("connect", () => { socket.destroy(); resolve(); });
+          socket.once("error", reject);
+        }),
+      );
+    } finally {
+      if (harness.exitCode === null) harness.kill("SIGKILL");
+      if (enginePid) {
+        try { process.kill(-enginePid, "SIGKILL"); } catch { /* already gone */ }
+      }
     }
   },
 );

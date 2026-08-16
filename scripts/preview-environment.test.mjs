@@ -337,15 +337,16 @@ test("failed build-lock record writes remove the partial lock", async () => {
   }
 });
 
-test("malformed build locks are reclaimed after a bounded backoff", async () => {
+test("malformed build locks are never reclaimed and time out with metadata", async () => {
   const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-malformed-"));
   const lockPath = vendoredDistBuildLockPath(repositoryRoot);
   try {
     fs.writeFileSync(lockPath, "{partial");
-    const lock = await acquireVendoredDistBuildLock(repositoryRoot, { waitMs: 250, pollMs: 5 });
-    assert.equal(fs.existsSync(lockPath), true);
-    lock.release();
-    assert.equal(fs.existsSync(lockPath), false);
+    await assert.rejects(
+      acquireVendoredDistBuildLock(repositoryRoot, { waitMs: 30, pollMs: 5 }),
+      new RegExp(`timed out waiting for vendored dist build lock: .*owner=unreadable-or-malformed`),
+    );
+    assert.equal(fs.readFileSync(lockPath, "utf-8"), "{partial");
   } finally {
     fs.rmSync(lockPath, { force: true });
     fs.rmSync(repositoryRoot, { recursive: true, force: true });
@@ -405,6 +406,26 @@ test("build lock ownership is revalidated before mutations and promotion", async
     assert.throws(() => lock.assertOwned("dist promotion"), /ownership was lost/);
     lock.release();
     assert.equal(fs.existsSync(lockPath), true, "the old owner must not remove its successor's lock");
+  } finally {
+    fs.rmSync(lockPath, { force: true });
+    fs.rmSync(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("two lock contenders serialize without deleting the first owner's record", async () => {
+  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-two-contenders-"));
+  const lockPath = vendoredDistBuildLockPath(repositoryRoot);
+  try {
+    const first = await acquireVendoredDistBuildLock(repositoryRoot);
+    const firstContents = fs.readFileSync(lockPath, "utf-8");
+    const secondPromise = acquireVendoredDistBuildLock(repositoryRoot, { waitMs: 500, pollMs: 5 });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(fs.readFileSync(lockPath, "utf-8"), firstContents);
+    first.release();
+    const second = await secondPromise;
+    assert.notEqual(second.token, first.token);
+    assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf-8")).token, second.token);
+    second.release();
   } finally {
     fs.rmSync(lockPath, { force: true });
     fs.rmSync(repositoryRoot, { recursive: true, force: true });

@@ -21,7 +21,7 @@ describe("disabled pipeline engine admission guards", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("does not inspect projects or admissions when reconciliation is disabled", async () => {
+  it("inspects local admissions but performs no engine traffic when reconciliation is disabled", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     const projects = vi.fn(() => [{ id: "default" }]);
@@ -38,8 +38,8 @@ describe("disabled pipeline engine admission guards", () => {
 
     await worker.runOnce();
 
-    expect(projects).not.toHaveBeenCalled();
-    expect(admissions).not.toHaveBeenCalled();
+    expect(projects).toHaveBeenCalledOnce();
+    expect(admissions).toHaveBeenCalledOnce();
     expect(queryAdmission).not.toHaveBeenCalled();
     expect(getRun).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();

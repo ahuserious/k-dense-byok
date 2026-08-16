@@ -31,7 +31,7 @@ jobs:
           KADY_SOCKET_TESTS: "1"
       - name: Check ownership inventory uniqueness
         run: node scripts/ownership-check.mjs
-      - name: Authorize pull-request changes for the writing lane
+      - name: Convenience changed-path check (candidate-controlled; not trusted)
         if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}

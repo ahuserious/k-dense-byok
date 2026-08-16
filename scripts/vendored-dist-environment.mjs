@@ -64,19 +64,34 @@ export function previewVendoredDistFingerprintEnvironment(
 export function workflowEngineConsumerEnvironment(
   environment,
   enginePort,
-  { overrideExisting = false } = {},
 ) {
   const port = String(enginePort);
   const localOrigin = `http://127.0.0.1:${port}`;
+  const managedValues = {
+    KADY_PIPELINE_ENGINE_PORT: port,
+    KADY_ARCHON_PORT: port,
+    PIPELINE_ENGINE_BASE_URL: localOrigin,
+    NEXT_PUBLIC_PIPELINE_ENGINE_URL: localOrigin,
+  };
+  const expectedOrigins = {
+    PIPELINE_ENGINE_BASE_URL: localOrigin,
+    NEXT_PUBLIC_PIPELINE_ENGINE_URL: localOrigin,
+    ARCHON_BASE_URL: localOrigin,
+    NEXT_PUBLIC_ARCHON_URL: localOrigin,
+  };
+  const conflicts = Object.entries(expectedOrigins).filter(
+    ([name, value]) => environment[name] !== undefined && String(environment[name]) !== value,
+  );
+  if (conflicts.length > 0) {
+    const names = conflicts.map(([name]) => name).join(", ");
+    throw new Error(
+      `managed workflow engine on ${localOrigin} conflicts with explicit ${names}; ` +
+        "remove the conflicting value (an --external-engine mode is not implemented)",
+    );
+  }
   return {
     ...environment,
-    KADY_PIPELINE_ENGINE_PORT: port,
-    PIPELINE_ENGINE_BASE_URL: overrideExisting
-      ? localOrigin
-      : environment.PIPELINE_ENGINE_BASE_URL ?? localOrigin,
-    NEXT_PUBLIC_PIPELINE_ENGINE_URL: overrideExisting
-      ? localOrigin
-      : environment.NEXT_PUBLIC_PIPELINE_ENGINE_URL ?? localOrigin,
+    ...managedValues,
     KADY_PIPELINE_ENGINE_DISABLED: "0",
   };
 }
@@ -106,14 +121,17 @@ export async function waitForOwnedWorkflowEngine({
   timeoutMs = 30_000,
   pollMs = 200,
   now = Date.now,
+  signal,
 }) {
   const deadline = now() + timeoutMs;
   while (now() < deadline) {
+    if (signal?.aborted) return { status: "aborted" };
     if (childExited()) return { status: "child-exited" };
     const listenerPids = listenersOn();
     const foreignPid = listenerPids.find((pid) => !isOwnedByChild(pid, childPid));
     if (foreignPid !== undefined) return { status: "foreign-listener", foreignPid };
     if (listenerPids.length > 0 && await probeHealth()) {
+      if (signal?.aborted) return { status: "aborted" };
       const verifiedPids = listenersOn();
       const takeoverPid = verifiedPids.find((pid) => !isOwnedByChild(pid, childPid));
       if (takeoverPid !== undefined) return { status: "foreign-listener", foreignPid: takeoverPid };
@@ -123,7 +141,35 @@ export async function waitForOwnedWorkflowEngine({
     }
     await wait(Math.min(pollMs, Math.max(0, deadline - now())));
   }
+  if (signal?.aborted) return { status: "aborted" };
   return { status: childExited() ? "child-exited" : "timeout" };
+}
+
+export async function terminateOwnedProcessTree({
+  treeGone,
+  terminate,
+  forceTerminate,
+  wait,
+  description,
+  gracefulWaitMs = 2_000,
+  forcedWaitMs = 5_000,
+  pollMs = 50,
+  now = Date.now,
+}) {
+  const waitUntilGone = async (timeoutMs) => {
+    const deadline = now() + timeoutMs;
+    while (!treeGone() && now() < deadline) {
+      await wait(Math.min(pollMs, Math.max(0, deadline - now())));
+    }
+    return treeGone();
+  };
+
+  if (treeGone()) return;
+  terminate();
+  if (await waitUntilGone(gracefulWaitMs)) return;
+  forceTerminate();
+  if (await waitUntilGone(forcedWaitMs)) return;
+  throw new Error(`could not verify disappearance of ${description}`);
 }
 
 export function workflowEngineRuntimeOwnership({
@@ -216,30 +262,6 @@ function readBuildLock(lockPath) {
   }
 }
 
-function readBuildLockSnapshot(lockPath) {
-  try {
-    const stat = fs.statSync(lockPath);
-    return {
-      contents: fs.readFileSync(lockPath, "utf-8"),
-      device: stat.dev,
-      inode: stat.ino,
-      size: stat.size,
-      modifiedAtMs: stat.mtimeMs,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function sameBuildLockSnapshot(first, second) {
-  return first !== null && second !== null &&
-    first.contents === second.contents &&
-    first.device === second.device &&
-    first.inode === second.inode &&
-    first.size === second.size &&
-    first.modifiedAtMs === second.modifiedAtMs;
-}
-
 export function vendoredDistBuildLockStatus(repositoryRoot) {
   const lockPath = vendoredDistBuildLockPath(repositoryRoot);
   const lock = readBuildLock(lockPath);
@@ -267,9 +289,21 @@ export async function acquireVendoredDistBuildLock(
   const processStart = processStartIdentity(process.pid);
   if (!processStart) throw new Error(`could not determine start time for build-lock PID ${process.pid}`);
   const deadline = Date.now() + waitMs;
+  const timeoutError = () => {
+    const owner = readBuildLock(lockPath);
+    const ownerMetadata = owner
+      ? JSON.stringify({
+          pid: owner.pid ?? null,
+          processStart: owner.processStart ?? null,
+          token: owner.token,
+          createdAt: owner.createdAt ?? null,
+        })
+      : "unreadable-or-malformed";
+    return new Error(`timed out waiting for vendored dist build lock: ${lockPath}; owner=${ownerMetadata}`);
+  };
   while (true) {
     if (Date.now() >= deadline) {
-      throw new Error(`timed out waiting for vendored dist build lock: ${lockPath}`);
+      throw timeoutError();
     }
     const lock = {
       schema: 1,
@@ -316,24 +350,9 @@ export async function acquireVendoredDistBuildLock(
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
     }
-    const status = vendoredDistBuildLockStatus(repositoryRoot);
-    if (!status.active) {
-      const observedSnapshot = readBuildLockSnapshot(lockPath);
-      const remainingMs = deadline - Date.now();
-      if (remainingMs <= 0) {
-        throw new Error(`timed out waiting for vendored dist build lock: ${lockPath}`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, remainingMs)));
-      const currentSnapshot = readBuildLockSnapshot(lockPath);
-      if (sameBuildLockSnapshot(observedSnapshot, currentSnapshot)) {
-        console.warn(`vendored-dist-build: WARNING reclaiming inactive build lock: ${lockPath}`);
-        fs.rmSync(lockPath, { force: true });
-      }
-      continue;
-    }
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) {
-      throw new Error(`timed out waiting for active vendored dist build lock: ${lockPath}`);
+      throw timeoutError();
     }
     await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, remainingMs)));
   }
