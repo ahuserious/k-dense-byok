@@ -307,3 +307,10 @@ otherwise treats as fixed.
 | codex CLI | `codex-cli 0.144.5`, logged in |
 | rung 1 openrouter-fusion | `bad-key` — dead, gates descend to codex |
 | rung 2 seat `sol` @ `xhigh` | probed as part of this goal; see `~/.claude/relentless-inception/gate_capability.json` |
+
+## Requirement traceability (added 2026-08-15)
+
+This file does not state the S11 exit criterion. The verbatim requirement, the drift that occurred, the
+honest status, and the owner's 2026-08-15 ruling are recorded in
+[`docs/adr/S11-requirement-traceability.md`](docs/adr/S11-requirement-traceability.md). The S10 library-scope
+ruling is in [`docs/adr/S10-library-scope.md`](docs/adr/S10-library-scope.md).
