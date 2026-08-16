@@ -94,6 +94,42 @@ export function preparePreviewEngineHome(stateRoot) {
   return engineHome;
 }
 
+export function preparePreviewWebRoot(repositoryRoot, launchRoot) {
+  const checkoutWebRoot = fs.realpathSync(path.join(repositoryRoot, "web"));
+  const projectedWebRoot = path.join(launchRoot, "web");
+  fs.mkdirSync(projectedWebRoot, { mode: 0o700 });
+
+  for (const entry of fs.readdirSync(checkoutWebRoot, { withFileTypes: true })) {
+    if (entry.name === ".next" || AUTOMATIC_ENV_FILE_NAMES.includes(entry.name)) {
+      continue;
+    }
+    fs.symlinkSync(
+      path.join(checkoutWebRoot, entry.name),
+      path.join(projectedWebRoot, entry.name),
+      entry.isDirectory() ? "dir" : "file",
+    );
+  }
+
+  const projectedNodeModules = path.join(projectedWebRoot, "node_modules");
+  let nodeModulesStat;
+  try {
+    nodeModulesStat = fs.lstatSync(projectedNodeModules);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      throw new Error(
+        `Preview web projection requires ${path.join(checkoutWebRoot, "node_modules")}.`,
+      );
+    }
+    throw error;
+  }
+  if (!nodeModulesStat.isSymbolicLink()) {
+    throw new Error(`Preview web node_modules must be linked: ${projectedNodeModules}`);
+  }
+
+  fs.mkdirSync(path.join(projectedWebRoot, ".next"), { mode: 0o700 });
+  return projectedWebRoot;
+}
+
 export function previewAutomaticEnvironmentFiles(repositoryRoot) {
   const webRoot = fs.realpathSync(path.join(repositoryRoot, "web"));
   const vendoredRoot = fs.realpathSync(

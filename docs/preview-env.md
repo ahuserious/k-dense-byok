@@ -39,10 +39,16 @@ project, Pi-agent, skills-cache, workflow-supervisor, and log paths. It creates
 a launch overlay with a blank `<launchRoot>/.env` and sets `KADY_ENV_FILE` to
 that absolute path. The preview backend loads only `<launchRoot>/.env`, and
 credential writes land there; the checkout's `.env` is never read or written
-in preview mode. The overlay symlinks the checked-out `server/` and `web/` trees
-and runs the checkout's exact `start.mjs` and `env-file.mjs` bytes. Dependencies
-must already be installed; the preview npm shim suppresses the launcher's
-update lookup and forces npm offline.
+in preview mode. The overlay symlinks the checked-out `server/` tree and runs
+the checkout's exact `start.mjs` and `env-file.mjs` bytes. Its `web/` project
+root is instead a physical preview directory: each safe checkout entry,
+including source directories and `node_modules`, is linked individually; every
+automatic env filename is omitted; and `.next` is a private directory under the
+preview state root. Next 16 has no supported switch that disables its forced
+development env-file reload, so this projection also keeps env files created or
+modified in the checkout after readiness outside Next's watched project root.
+Dependencies must already be installed; the preview npm shim suppresses the
+launcher's update lookup and forces npm offline.
 
 Backend env selection fails closed. With `KADY_PREVIEW=1`, `KADY_ENV_FILE`
 must be present, non-blank, absolute, and resolve to a regular file under the
@@ -61,7 +67,9 @@ Those checks use the canonical checkout paths for `web/`, the vendored
 workspace root, `packages/web`, and `packages/server`, plus the server package
 cwd's legacy data-directory env file. They run immediately before vendored
 preparation, Next startup, engine install/build, and engine startup, closing
-validation-to-start windows without patching vendored code.
+validation-to-start windows without patching vendored code. The standalone
+vendored build script repeats the same refusal in preview mode immediately
+before its Bun build spawn.
 
 Before its first child process, `preview-up` replaces its own environment with
 an explicit allowlist. It may retain ambient `PATH`, `TMPDIR`, `LANG`, `TERM`,

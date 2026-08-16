@@ -7,6 +7,7 @@ import {
   checkVendoredDist,
   printVendoredDistStatus,
 } from "./vendored-dist-check.mjs";
+import { assertPreviewAutomaticEnvironmentFilesAbsent } from "./preview-environment.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(scriptDirectory, "..");
@@ -49,6 +50,9 @@ if (options.ifStale && beforeBuild.ok) {
 
 if (options.ifStale) printVendoredDistStatus(beforeBuild);
 console.log(`vendored-dist-build: running \`bun run build:web\` in ${vendoredRoot}`);
+if (process.env.KADY_PREVIEW === "1") {
+  assertPreviewAutomaticEnvironmentFilesAbsent(repositoryRoot);
+}
 const build = spawnSync("bun", ["run", "build:web"], {
   cwd: vendoredRoot,
   env: process.env,
@@ -64,4 +68,3 @@ const afterBuild = checkVendoredDist(repositoryRoot);
 printVendoredDistStatus(afterBuild);
 if (!afterBuild.ok) fail("build completed but the vendored dist is still missing or stale");
 console.log("vendored-dist-build: PASS");
-

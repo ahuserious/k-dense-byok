@@ -10,6 +10,7 @@ import {
   assertPreviewAutomaticEnvironmentFilesAbsent,
   instrumentPreviewEnvironment,
   preparePreviewEngineHome,
+  preparePreviewWebRoot,
   previewAutomaticEnvironmentFiles,
   previewEnvironment,
   previewPrebuildEnvironment,
@@ -332,6 +333,73 @@ test("rejects every automatic web and engine env file by canonical path", () => 
   }
 });
 
+test("projects the web root without automatic env files or checkout build output", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-web-root-"));
+  try {
+    const repositoryRoot = path.join(temporaryRoot, "checkout");
+    const checkoutWebRoot = path.join(repositoryRoot, "web");
+    const launchRoot = path.join(temporaryRoot, "state", "launch");
+    const checkoutSourceRoot = path.join(checkoutWebRoot, "src");
+    const checkoutNodeModules = path.join(checkoutWebRoot, "node_modules");
+    fs.mkdirSync(checkoutSourceRoot, { recursive: true });
+    fs.mkdirSync(checkoutNodeModules, { recursive: true });
+    fs.mkdirSync(path.join(checkoutWebRoot, ".next"), { recursive: true });
+    fs.mkdirSync(launchRoot, { recursive: true });
+    fs.writeFileSync(path.join(checkoutSourceRoot, "page.tsx"), "export default 1;\n");
+    fs.writeFileSync(path.join(checkoutWebRoot, "package.json"), "{}\n");
+    fs.writeFileSync(path.join(checkoutWebRoot, ".next", "checkout.txt"), "stale\n");
+    for (const fileName of [
+      ".env",
+      ".env.local",
+      ".env.development",
+      ".env.development.local",
+      ".env.production",
+      ".env.production.local",
+      ".env.test",
+      ".env.test.local",
+    ]) {
+      fs.writeFileSync(path.join(checkoutWebRoot, fileName), "SENTINEL=initial\n");
+    }
+
+    const projectedWebRoot = preparePreviewWebRoot(repositoryRoot, launchRoot);
+    assert.equal(fs.lstatSync(projectedWebRoot).isDirectory(), true);
+    assert.equal(fs.lstatSync(projectedWebRoot).isSymbolicLink(), false);
+    assert.equal(fs.lstatSync(path.join(projectedWebRoot, "src")).isSymbolicLink(), true);
+    assert.equal(
+      fs.lstatSync(path.join(projectedWebRoot, "node_modules")).isSymbolicLink(),
+      true,
+    );
+    assert.equal(
+      fs.lstatSync(path.join(projectedWebRoot, "package.json")).isSymbolicLink(),
+      true,
+    );
+    assert.equal(fs.lstatSync(path.join(projectedWebRoot, ".next")).isDirectory(), true);
+    assert.equal(fs.lstatSync(path.join(projectedWebRoot, ".next")).isSymbolicLink(), false);
+    assert.deepEqual(fs.readdirSync(path.join(projectedWebRoot, ".next")), []);
+
+    fs.writeFileSync(path.join(checkoutSourceRoot, "page.tsx"), "export default 2;\n");
+    assert.equal(
+      fs.readFileSync(path.join(projectedWebRoot, "src", "page.tsx"), "utf8"),
+      "export default 2;\n",
+    );
+
+    for (const fileName of [
+      ".env",
+      ".env.local",
+      ".env.development",
+      ".env.development.local",
+    ]) {
+      const checkoutEnvironmentFile = path.join(checkoutWebRoot, fileName);
+      fs.writeFileSync(checkoutEnvironmentFile, "NEXT_PUBLIC_RAINDROP_URL=created\n");
+      assert.equal(fs.existsSync(path.join(projectedWebRoot, fileName)), false);
+      fs.writeFileSync(checkoutEnvironmentFile, "NEXT_PUBLIC_RAINDROP_URL=modified\n");
+      assert.equal(fs.existsSync(path.join(projectedWebRoot, fileName)), false);
+    }
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 test("instruments each automatic-env-loading launcher child before spawn", () => {
   const launcherSource = fs.readFileSync(
     new URL("../start.mjs", import.meta.url),
@@ -426,6 +494,9 @@ test("preview-up sanitizes its process before vendored preparation and boot", ()
   const launcherInstrumentation = source.indexOf(
     "instrumentPreviewEnvironment(instrumentPreviewLauncher(launcherSource))",
   );
+  const webProjection = source.indexOf(
+    "preparePreviewWebRoot(repositoryRoot, launchRoot);",
+  );
 
   assert.notEqual(isolationAssertion, -1);
   assert.notEqual(prebuildSpawn, -1);
@@ -438,9 +509,27 @@ test("preview-up sanitizes its process before vendored preparation and boot", ()
   assert.notEqual(environmentConstruction, -1);
   assert.equal(engineHomePreparation < environmentConstruction, true);
   assert.notEqual(launcherInstrumentation, -1);
+  assert.notEqual(webProjection, -1);
+  assert.equal(
+    source.includes(
+      'fs.symlinkSync(path.join(repositoryRoot, "web"), path.join(launchRoot, "web"), "dir")',
+    ),
+    false,
+  );
   assert.equal(
     source.includes("environment: previewPrebuildEnvironment(process.env)"),
     true,
+  );
+});
+
+test("guards the vendored Bun build at its spawn boundary in preview mode", () => {
+  const source = fs.readFileSync(
+    new URL("./vendored-dist-build.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /if \(process\.env\.KADY_PREVIEW === "1"\) \{\n  assertPreviewAutomaticEnvironmentFilesAbsent\(repositoryRoot\);\n\}\nconst build = spawnSync\("bun", \["run", "build:web"\]/,
   );
 });
 

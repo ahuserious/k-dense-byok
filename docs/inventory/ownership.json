@@ -416,6 +416,13 @@
       "scope": "server environment-root preview wiring"
     },
     {
+      "from": "C1",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/vendored-dist-build.mjs",
+      "scope": "preview automatic-env refusal immediately before the Bun web-build spawn"
+    },
+    {
       "from": "S4",
       "to": "C5",
       "date": "2026-08-16",

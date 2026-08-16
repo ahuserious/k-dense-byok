@@ -9,6 +9,7 @@ import {
   assertPreviewAutomaticEnvironmentFilesAbsent,
   instrumentPreviewEnvironment,
   preparePreviewEngineHome,
+  preparePreviewWebRoot,
   previewEngineHome,
   previewEnvironment,
   previewPrebuildEnvironment,
@@ -108,7 +109,7 @@ function createLaunchOverlay(stateRoot, realNpm, realGit) {
     mode: 0o600,
   });
   fs.symlinkSync(path.join(repositoryRoot, "server"), path.join(launchRoot, "server"), "dir");
-  fs.symlinkSync(path.join(repositoryRoot, "web"), path.join(launchRoot, "web"), "dir");
+  preparePreviewWebRoot(repositoryRoot, launchRoot);
 
   writeExecutable(
     path.join(shimDirectory, "npm"),
