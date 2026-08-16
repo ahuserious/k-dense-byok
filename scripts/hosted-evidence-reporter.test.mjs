@@ -10,6 +10,17 @@ const networkGuardUrl = pathToFileURL(
   path.join(import.meta.dirname, "hosted-evidence-network-guard.mjs"),
 ).href;
 
+function environmentWithInheritedNetworkGuard(additions = {}) {
+  return {
+    ...process.env,
+    ...additions,
+    NODE_OPTIONS: [
+      process.env.NODE_OPTIONS,
+      `--import=${networkGuardUrl}`,
+    ].filter(Boolean).join(" "),
+  };
+}
+
 test("direct CI Playwright config and create-suite metadata exclude credentials", async () => {
   const apiKey = "reporter-api-key-sentinel";
   const projectId = "reporter-project-id-sentinel";
@@ -50,13 +61,7 @@ test("direct CI Playwright config and create-suite metadata exclude credentials"
   // Execute the same direct Playwright entrypoint used by CI in list mode,
   // without credentials so the conditional Stably reporter is not attached.
   // The preload guard turns every outbound socket or DNS attempt into failure.
-  const childEnvironment = {
-    ...process.env,
-    NODE_OPTIONS: [
-      process.env.NODE_OPTIONS,
-      `--import=${networkGuardUrl}`,
-    ].filter(Boolean).join(" "),
-  };
+  const childEnvironment = environmentWithInheritedNetworkGuard();
   delete childEnvironment.STABLY_API_KEY;
   delete childEnvironment.STABLY_PROJECT_ID;
   delete childEnvironment.STABLY_INTERNAL_DISABLE_REPORTING;
@@ -143,18 +148,57 @@ test("network guard blocks every reporter-relevant outbound API", async (context
   }
 });
 
-test("credential-present CJS reporter reaches the guard before any connection", () => {
+test("NODE_OPTIONS network guard is inherited by spawned child fetch", () => {
+  const parentProgram = [
+    'import { spawnSync } from "node:child_process";',
+    "const child = spawnSync(process.execPath, [",
+    '  "--input-type=module",',
+    '  "--eval",',
+    '  "await fetch(\\\"https://api.stably.ai/guard-probe\\\")",',
+    "], { encoding: \"utf8\", env: process.env });",
+    "process.stderr.write(child.stderr);",
+    "if (child.status === 0) throw new Error(\"guarded child fetch unexpectedly succeeded\");",
+    "if (!child.stderr.includes(\"hosted-evidence network guard blocked fetch\")) {",
+    '  throw new Error("child did not inherit the fetch guard");',
+    "}",
+  ].join("\n");
+  const inheritedProbe = spawnSync(
+    process.execPath,
+    ["--input-type=module", "--eval", parentProgram],
+    {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+      env: environmentWithInheritedNetworkGuard(),
+    },
+  );
+  assert.equal(inheritedProbe.status, 0, inheritedProbe.stderr);
+  assert.match(
+    inheritedProbe.stderr,
+    /hosted-evidence network guard blocked fetch/,
+  );
+});
+
+test("credential reporter guards parent WebSocket and onBegin child fetch transports", () => {
   const guardedReporter = spawnSync(
     process.execPath,
     [
-      `--import=${networkGuardUrl}`,
       "--input-type=module",
       "--eval",
       [
         'import { createRequire } from "node:module";',
         "const require = createRequire(import.meta.url);",
         'const Reporter = require("@stablyai/playwright-test/reporter");',
-        'new Reporter({ suiteName: "network-guard-probe" });',
+        'const reporter = new Reporter({ suiteName: "network-guard-probe" });',
+        "const testCase = {",
+        '  id: "network-guard-test", title: "network guard",',
+        '  titlePath: () => ["network guard"],',
+        '  location: { file: "e2e/live-backend.spec.ts", line: 1, column: 1 },',
+        '  annotations: [], expectedStatus: "passed", retries: 0, tags: [],',
+        '  parent: { project: () => ({ name: "chromium", use: { defaultBrowserType: "chromium" } }) },',
+        "};",
+        "const suite = { allTests: () => [testCase] };",
+        "const config = { rootDir: process.cwd(), metadata: {}, workers: 1, reporter: [], projects: [] };",
+        "reporter.onBegin(config, suite);",
         'const attempts = globalThis[Symbol.for("hosted-evidence.network-attempts")] ?? 0;',
         'if (attempts !== 1) throw new Error(`expected exactly one guarded reporter connection, observed ${attempts}`);',
         "process.exit(0);",
@@ -163,16 +207,20 @@ test("credential-present CJS reporter reaches the guard before any connection", 
     {
       cwd: repositoryRoot,
       encoding: "utf8",
-      env: {
-        ...process.env,
+      env: environmentWithInheritedNetworkGuard({
         STABLY_API_KEY: "guard-api-key-sentinel",
         STABLY_PROJECT_ID: "guard-project-id-sentinel",
-      },
+        CI: "1",
+      }),
     },
   );
   assert.equal(guardedReporter.status, 0, guardedReporter.stderr);
   assert.match(
     guardedReporter.stderr,
-    /hosted-evidence network guard blocked/,
+    /hosted-evidence network guard blocked https\.request/,
+  );
+  assert.match(
+    guardedReporter.stderr,
+    /hosted-evidence network guard blocked fetch/,
   );
 });

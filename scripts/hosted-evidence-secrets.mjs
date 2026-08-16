@@ -8,64 +8,10 @@ const MAX_CANONICALIZATION_PASSES = 8;
 const MAX_CANONICAL_VARIANTS = 64;
 const MAX_CANONICALIZATION_WORK_BYTES = 512 * 1024 * 1024;
 
-function lowerPercentEscapes(value) {
-  return value.replace(/%[0-9A-F]{2}/g, (escape) => escape.toLowerCase());
-}
-
-function mixedPercentEscapes(value) {
-  let index = 0;
-  return value.replace(/%[0-9A-F]{2}/g, (escape) => {
-    index += 1;
-    return index % 2 === 0 ? escape.toLowerCase() : escape.toUpperCase();
-  });
-}
-
 function strictRfc3986(value) {
   return encodeURIComponent(value).replace(/[!'()*]/g, (character) =>
     `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
   );
-}
-
-function unicodeEscapes(value, uppercase) {
-  return [...value]
-    .map((character) => {
-      const codePoint = character.codePointAt(0);
-      if (codePoint <= 0xffff) {
-        const hex = codePoint.toString(16).padStart(4, "0");
-        return `\\u${uppercase ? hex.toUpperCase() : hex.toLowerCase()}`;
-      }
-      const adjusted = codePoint - 0x10000;
-      const high = 0xd800 + (adjusted >> 10);
-      const low = 0xdc00 + (adjusted & 0x3ff);
-      const encoded = [high, low]
-        .map((unit) => unit.toString(16).padStart(4, "0"))
-        .join("\\u");
-      return `\\u${uppercase ? encoded.toUpperCase() : encoded.toLowerCase()}`;
-    })
-    .join("");
-}
-
-function wrapBase64(value, width, newline) {
-  if (value.length <= width) return value;
-  const lines = [];
-  for (let index = 0; index < value.length; index += width) {
-    lines.push(value.slice(index, index + width));
-  }
-  return lines.join(newline);
-}
-
-function base64Forms(value) {
-  const bytes = Buffer.from(value, "utf8");
-  const base64 = bytes.toString("base64");
-  const base64url = bytes.toString("base64url");
-  return [
-    base64,
-    base64.replace(/=+$/, ""),
-    base64url,
-    wrapBase64(base64, 76, "\r\n"),
-    wrapBase64(base64, 76, "\n"),
-    wrapBase64(base64, 64, "\r\n"),
-  ];
 }
 
 export function secretRepresentationsForValue(value) {
@@ -78,33 +24,19 @@ export function secretRepresentationsForValue(value) {
   const formEncoded = new URLSearchParams([["value", value]])
     .toString()
     .slice("value=".length);
-  const encodedValues = new Set([
+  const bytes = Buffer.from(value, "utf8");
+  const representations = new Set([
+    value,
     jsonEscaped,
     jsonSlashEscaped,
-    unicodeEscapes(value, false),
-    unicodeEscapes(value, true),
     urlEncoded,
-    lowerPercentEscapes(urlEncoded),
-    mixedPercentEscapes(urlEncoded),
     strictEncoded,
-    lowerPercentEscapes(strictEncoded),
-    mixedPercentEscapes(strictEncoded),
     plusForSpaceEncoded,
-    lowerPercentEscapes(plusForSpaceEncoded),
-    mixedPercentEscapes(plusForSpaceEncoded),
     strictPlusForSpaceEncoded,
-    lowerPercentEscapes(strictPlusForSpaceEncoded),
-    mixedPercentEscapes(strictPlusForSpaceEncoded),
     formEncoded,
-    lowerPercentEscapes(formEncoded),
-    mixedPercentEscapes(formEncoded),
+    bytes.toString("base64"),
+    bytes.toString("base64url"),
   ]);
-  const representations = new Set([value, ...base64Forms(value), ...encodedValues]);
-  for (const encodedValue of encodedValues) {
-    for (const encodedBase64 of base64Forms(encodedValue)) {
-      representations.add(encodedBase64);
-    }
-  }
   representations.delete("");
   return [...representations];
 }
@@ -210,36 +142,121 @@ export function scrubText(value, representations) {
   return value.replace(pattern, (match) => byValue.get(match));
 }
 
-function decodePercentRuns(value, plusAsSpace) {
-  const source = plusAsSpace ? value.replace(/\+/g, "%20") : value;
-  let malformed = false;
-  const runs = [...source.matchAll(/(?:%[0-9A-Fa-f]{2})+/g)];
-  if (runs.length === 0) return { values: [source], malformed };
+const ASCII_WHITESPACE_PATTERN = /[\t\n\v\f\r ]/g;
+const COMPLETE_PERCENT_RUN_PATTERN = /(?:%[0-9A-Fa-f]{2})+/g;
 
-  const decodedViews = ["utf8", "latin1"].map((encoding) => {
+function utf16BigEndianToString(buffer) {
+  const swapped = Buffer.alloc(buffer.length);
+  for (let index = 0; index < buffer.length; index += 2) {
+    swapped[index] = buffer[index + 1];
+    swapped[index + 1] = buffer[index];
+  }
+  return swapped.toString("utf16le");
+}
+
+function plausibleUtf16Views(buffer) {
+  if (buffer.length < 4 || buffer.length % 2 !== 0) return [];
+  if (buffer[0] === 0xff && buffer[1] === 0xfe) {
+    return [buffer.subarray(2).toString("utf16le")];
+  }
+  if (buffer[0] === 0xfe && buffer[1] === 0xff) {
+    return [utf16BigEndianToString(buffer.subarray(2))];
+  }
+  const pairCount = buffer.length / 2;
+  let evenZeroes = 0;
+  let oddZeroes = 0;
+  for (let index = 0; index < buffer.length; index += 2) {
+    if (buffer[index] === 0) evenZeroes += 1;
+    if (buffer[index + 1] === 0) oddZeroes += 1;
+  }
+  const views = [];
+  if (oddZeroes / pairCount >= 0.3 && oddZeroes > evenZeroes * 2) {
+    views.push(buffer.toString("utf16le"));
+  }
+  if (evenZeroes / pairCount >= 0.3 && evenZeroes > oddZeroes * 2) {
+    views.push(utf16BigEndianToString(buffer));
+  }
+  return views;
+}
+
+function byteTextViews(buffer) {
+  const lossyUtf8 = buffer.toString("utf8");
+  return [...new Set([
+    lossyUtf8,
+    lossyUtf8.replaceAll("\uFFFD", ""),
+    buffer.toString("latin1"),
+    ...plausibleUtf16Views(buffer),
+  ])];
+}
+
+function invalidPercentFragmentEnd(value, percentIndex) {
+  let end = percentIndex + 1;
+  while (
+    end < value.length &&
+    end < percentIndex + 3 &&
+    value[end] !== "%" &&
+    !/[\t\n\v\f\r ]/.test(value[end])
+  ) {
+    end += 1;
+  }
+  return end;
+}
+
+function hasMalformedPercentAdjacency(value) {
+  const validRuns = [...value.matchAll(COMPLETE_PERCENT_RUN_PATTERN)].map(
+    (match) => ({ start: match.index, end: match.index + match[0].length }),
+  );
+  if (validRuns.length === 0) return false;
+  for (let index = value.indexOf("%"); index !== -1; index = value.indexOf("%", index + 1)) {
+    if (validRuns.some((run) => index >= run.start && index < run.end)) continue;
+    const fragmentEnd = invalidPercentFragmentEnd(value, index);
+    if (
+      validRuns.some((run) => run.end === index || run.start === fragmentEnd)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function decodePercentRuns(value, plusAsSpace) {
+  const malformedSyntax = hasMalformedPercentAdjacency(value);
+  const source = plusAsSpace ? value.replace(/\+/g, "%20") : value;
+  const runs = [...source.matchAll(COMPLETE_PERCENT_RUN_PATTERN)];
+  if (runs.length === 0) {
+    return { values: [source], malformed: malformedSyntax };
+  }
+
+  let malformedBytes = false;
+  const outputViews = ["utf8", "utf8-ignore-invalid", "latin1"].map((encoding) => {
     let cursor = 0;
     let decoded = "";
     for (const run of runs) {
       decoded += source.slice(cursor, run.index);
       const bytes = Buffer.from(run[0].replaceAll("%", ""), "hex");
-      if (bytes.length === 0) {
-        malformed = true;
-        decoded += run[0];
-      } else {
-        if (encoding === "utf8") {
-          try {
-            new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-          } catch {
-            malformed = true;
-          }
-        }
-        decoded += bytes.toString(encoding);
+      try {
+        new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch {
+        malformedBytes = true;
       }
+      if (encoding === "latin1") decoded += bytes.toString("latin1");
+      else if (encoding === "utf8-ignore-invalid") {
+        decoded += bytes.toString("utf8").replaceAll("\uFFFD", "");
+      } else decoded += bytes.toString("utf8");
       cursor = run.index + run[0].length;
     }
     return decoded + source.slice(cursor);
   });
-  return { values: [...new Set(decodedViews)], malformed };
+
+  const trimmed = source.replace(/^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g, "");
+  if (/^(?:%[0-9A-Fa-f]{2})+$/.test(trimmed)) {
+    const bytes = Buffer.from(trimmed.replaceAll("%", ""), "hex");
+    outputViews.push(...byteTextViews(bytes));
+  }
+  return {
+    values: [...new Set(outputViews)],
+    malformed: malformedSyntax || malformedBytes,
+  };
 }
 
 function decodeJsonEscapes(value) {
@@ -262,21 +279,100 @@ function decodeJsonEscapes(value) {
   );
 }
 
+function decodeBase64Token(token) {
+  const normalized = token.replace(ASCII_WHITESPACE_PATTERN, "");
+  if (
+    normalized.length < 8 ||
+    !/^[A-Za-z0-9+/_-]+={0,2}$/.test(normalized) ||
+    normalized.length % 4 === 1
+  ) {
+    return [];
+  }
+  const decoded = Buffer.from(normalized, "base64");
+  if (decoded.length === 0) return [];
+  const roundTrip = decoded.toString("base64").replace(/=+$/, "");
+  const comparable = normalized
+    .replace(/-/g, "+")
+    .replace(/_/g, "/")
+    .replace(/=+$/, "");
+  if (roundTrip !== comparable) return [];
+  return [
+    normalized,
+    ...byteTextViews(decoded).filter(isMostlyInspectableText),
+  ];
+}
+
+function decodeBase64Candidates(value) {
+  const candidates = new Set();
+  const trimmed = value.replace(/^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g, "");
+  if (/^[A-Za-z0-9+/_=\-\t\n\v\f\r ]+$/.test(trimmed)) {
+    candidates.add(trimmed);
+  }
+  const whitespaceBase64Patterns = [
+    /[A-Za-z0-9+/_-]{4}[\t\n\v\f\r ]+[A-Za-z0-9+/_-]{2,4}={0,2}/g,
+    /(?:[A-Za-z0-9+/_-]{4}[\t\n\v\f\r ]+){2,}[A-Za-z0-9+/_-]{2,4}={0,2}/g,
+    /[A-Za-z0-9+/_-]{8,}={0,2}[\t\n\v\f\r ]+[A-Za-z0-9+/_-]{4,}={0,2}/g,
+  ];
+  for (const pattern of whitespaceBase64Patterns) {
+    for (const match of value.matchAll(pattern)) candidates.add(match[0]);
+  }
+  return {
+    malformed: false,
+    values: [...candidates].flatMap(decodeBase64Token),
+  };
+}
+
+function isMostlyInspectableText(value) {
+  if (value.length === 0) return true;
+  const sampleLimit = 64 * 1024;
+  const samples = value.length <= sampleLimit * 2
+    ? [value]
+    : [value.slice(0, sampleLimit), value.slice(-sampleLimit)];
+  let inspected = 0;
+  let printable = 0;
+  for (const sample of samples) {
+    for (let index = 0; index < sample.length; index += 1) {
+      const codeUnit = sample.charCodeAt(index);
+      inspected += 1;
+      if (
+        codeUnit === 0x09 ||
+        codeUnit === 0x0a ||
+        codeUnit === 0x0d ||
+        (codeUnit >= 0x20 && codeUnit <= 0x7e) ||
+        (codeUnit >= 0xa0 && codeUnit !== 0xfffd)
+      ) {
+        printable += 1;
+      }
+    }
+  }
+  return printable / inspected >= 0.9;
+}
+
 function canonicalTextVariants(buffer) {
-  const initial = buffer.toString("utf8");
-  const seen = new Set([initial]);
-  let frontier = [initial];
+  const initial = byteTextViews(buffer);
+  const seen = new Set(initial);
+  let frontier = initial;
   let workBytes = 0;
-  const variants = [];
+  const variants = [...initial];
   let malformedPercentEncoding = false;
   for (let pass = 0; pass < MAX_CANONICALIZATION_PASSES; pass += 1) {
     const next = [];
     for (const value of frontier) {
-      const decoders = [
-        (input) => decodePercentRuns(input, false),
-        (input) => decodePercentRuns(input, true),
-        (input) => ({ values: [decodeJsonEscapes(input)], malformed: false }),
-      ];
+      const decoders = [];
+      const inspectableText = isMostlyInspectableText(value);
+      if (inspectableText && value.includes("%")) {
+        decoders.push((input) => decodePercentRuns(input, false));
+      }
+      if (inspectableText && value.includes("+")) {
+        decoders.push((input) => decodePercentRuns(input, true));
+      }
+      if (inspectableText && /\\(?:u[0-9A-Fa-f]{4}|["\\/bfnrt])/.test(value)) {
+        decoders.push((input) => ({
+          values: [decodeJsonEscapes(input)],
+          malformed: false,
+        }));
+      }
+      if (inspectableText) decoders.push(decodeBase64Candidates);
       for (const decode of decoders) {
         workBytes += Buffer.byteLength(value, "utf8");
         if (workBytes > MAX_CANONICALIZATION_WORK_BYTES) {

@@ -522,6 +522,30 @@ test("attached reporter requires an exact terminal run URL segment", async (cont
       "encoded backslash",
       `https://app.stably.ai/project/${projectId}/playwright/history/run-1%5Cextra`,
     ],
+    [
+      "encoded dot traversal",
+      `https://app.stably.ai/project/${projectId}/playwright/%2e%2e/playwright/history/run-1`,
+    ],
+    [
+      "extra scheme slash",
+      `https:///app.stably.ai/project/${projectId}/playwright/history/run-1`,
+    ],
+    [
+      "userinfo",
+      `https://user@app.stably.ai/project/${projectId}/playwright/history/run-1`,
+    ],
+    [
+      "explicit default port",
+      `https://app.stably.ai:443/project/${projectId}/playwright/history/run-1`,
+    ],
+    [
+      "empty query delimiter",
+      `https://app.stably.ai/project/${projectId}/playwright/history/run-1?`,
+    ],
+    [
+      "empty fragment delimiter",
+      `https://app.stably.ai/project/${projectId}/playwright/history/run-1#`,
+    ],
   ];
   for (const [caseName, resultUrl] of cases) {
     await context.test(caseName, () => {
@@ -574,5 +598,83 @@ test("attached reporter rejects a URL outside the exact reporter epilogue", () =
     });
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /requires a matching run ID and URL/);
+    assert.equal(fs.existsSync(path.join(directory, "stably-test.log")), false);
+  });
+});
+
+test("oversized raw log fails before reading and is always removed", () => {
+  withTemporaryDirectory((directory) => {
+    const rawLogPath = path.join(directory, "stably-test.log");
+    fs.writeFileSync(rawLogPath, "secret-bearing-prefix");
+    fs.truncateSync(rawLogPath, 32 * 1024 * 1024 + 1);
+    const result = runManifest(directory, {
+      STABLY_API_KEY: "attached-api-key",
+      STABLY_PROJECT_ID: "attached-project-id",
+      E2E_RUN_STARTED_AT: String(Date.now() - 1_000),
+      E2E_SUITE_NAME: "oversized-suite",
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(
+      result.stderr,
+      /raw evidence log exceeds 33554432-byte validation limit/,
+    );
+    assert.equal(fs.existsSync(rawLogPath), false);
+    assert.equal(fs.existsSync(path.join(directory, manifestFileName)), false);
+  });
+});
+
+test("stream scrubbing redacts a secret split across a chunk boundary", () => {
+  withTemporaryDirectory((directory) => {
+    const secret = "chunk-boundary-service-token";
+    const prefixLength = 64 * 1024 - Math.floor(secret.length / 2);
+    const prefix = "x:".repeat(Math.ceil(prefixLength / 2)).slice(0, prefixLength);
+    fs.writeFileSync(
+      path.join(directory, "stably-test.log"),
+      `${prefix}${secret}\n1 passed (1s)`,
+    );
+    const result = runManifest(directory, {
+      SERVICE_TOKEN: secret,
+      E2E_WORKERS: "2",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const scrubbed = fs.readFileSync(
+      path.join(directory, "stably-test.scrubbed.log"),
+      "utf8",
+    );
+    assert.equal(scrubbed.includes(secret), false);
+    assert.match(scrubbed, /<REDACTED#\d+>/);
+    assert.equal(fs.existsSync(path.join(directory, "stably-test.log")), false);
+  });
+});
+
+test("mid-validation failure removes both secret-bearing raw logs", () => {
+  withTemporaryDirectory((directory) => {
+    const suiteName = "sds-outer-loop-ci-cleanup";
+    const runId = "cleanup-run";
+    const runStartedAt = Date.now() - 1_000;
+    fs.writeFileSync(
+      path.join(directory, "stably-test.log"),
+      [
+        "secret-bearing-suite-log",
+        `✨ Suite "${suiteName}" run complete!`,
+        `   📊 View results: https://app.stably.ai:443/project/attached-project-id/playwright/history/${runId}`,
+      ].join("\n"),
+    );
+    fs.writeFileSync(
+      path.join(directory, "preview-up.log"),
+      "secret-bearing-preview-log",
+    );
+    writeLastRun(directory, runId, Date.now());
+    const result = runManifest(directory, {
+      STABLY_API_KEY: "attached-api-key",
+      STABLY_PROJECT_ID: "attached-project-id",
+      E2E_RUN_STARTED_AT: String(runStartedAt),
+      E2E_SUITE_NAME: suiteName,
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /requires a matching run ID and URL/);
+    assert.equal(fs.existsSync(path.join(directory, "stably-test.log")), false);
+    assert.equal(fs.existsSync(path.join(directory, "preview-up.log")), false);
+    assert.equal(fs.existsSync(path.join(directory, manifestFileName)), false);
   });
 });

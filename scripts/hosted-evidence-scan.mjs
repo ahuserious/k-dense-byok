@@ -75,15 +75,6 @@ function archiveKind(bytes) {
   return null;
 }
 
-function isUtf8Text(bytes) {
-  try {
-    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function validateArchiveEntries(entries, artifactRef, byteRepresentations) {
   for (const [index, entry] of entries.entries()) {
     const entryReference = nestedArtifactReference(artifactRef, index, entry);
@@ -168,7 +159,6 @@ function scanPath(filePath, artifactRef, byteRepresentations) {
     extractArchive(filePath, kind, artifactRef, byteRepresentations);
     return;
   }
-  if (!isUtf8Text(bytes)) return;
   if (findSecretRepresentation(bytes, byteRepresentations, artifactRef)) {
     throw new Error(`secret representation detected in ${artifactRef}`);
   }

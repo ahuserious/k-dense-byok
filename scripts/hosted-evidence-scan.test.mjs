@@ -11,6 +11,7 @@ import {
   scanHostedEvidenceArtifacts,
   sealHostedEvidenceBundle,
 } from "./hosted-evidence-scan.mjs";
+import { scrubAndVerifyText } from "./hosted-evidence-secrets.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 
@@ -79,6 +80,17 @@ function fullyPercentEncode(value, mode = "upper") {
     .join("");
 }
 
+function base64WithAsciiWhitespace(value) {
+  const separators = [" ", "\t", "\n", "\r", "\v", "\f"];
+  return Buffer.from(value, "utf8")
+    .toString("base64")
+    .match(/.{1,4}/g)
+    .map((group, index) =>
+      index === 0 ? group : separators[(index - 1) % separators.length] + group,
+    )
+    .join("");
+}
+
 test("detects independently encoded text and UTF-16 fixtures", () => {
   withTemporaryDirectory((directory) => {
     const secret = "alpha/Ω \"slash\\ space ~!+% ".repeat(5);
@@ -115,6 +127,148 @@ test("detects independently encoded text and UTF-16 fixtures", () => {
         fixtureName,
       );
     }
+  });
+});
+
+test("composed base64 whitespace, percent, and UTF-16 fail scrub and seal", () => {
+  const secret = "ComposedCredentialAlpha123";
+  const percentEncoded = fullyPercentEncode(secret, "mixed");
+  const composed = base64WithAsciiWhitespace(percentEncoded);
+  assert.equal(Buffer.from(composed, "base64").toString("utf8"), percentEncoded);
+  const encodings = [
+    ["UTF-16LE", Buffer.from(composed, "utf16le")],
+    ["UTF-16BE", independentUtf16BigEndian(composed)],
+  ];
+  for (const [encodingName, encodedBytes] of encodings) {
+    assert.throws(
+      () =>
+        scrubAndVerifyText(encodedBytes.toString("latin1"), {
+          STABLY_API_KEY: secret,
+        }),
+      /secret representation remained after scrubbing/,
+      `${encodingName} scrub path`,
+    );
+    withTemporaryDirectory((directory) => {
+      writeRequiredPayloadArtifacts(directory);
+      fs.writeFileSync(
+        path.join(directory, "stably-test.scrubbed.log"),
+        encodedBytes,
+      );
+      assert.throws(
+        () =>
+          sealHostedEvidenceBundle({
+            workingDirectory: directory,
+            environment: { STABLY_API_KEY: secret },
+          }),
+        /secret representation detected in artifact\[4\]#[a-f0-9]{12}/,
+        `${encodingName} seal path`,
+      );
+    });
+  }
+});
+
+test("malformed percent syntax is rejected only when adjacent to a complete run", () => {
+  const environment = { STABLY_API_KEY: "unrelated-secret-value" };
+  for (const benign of ["progress 100% complete", "%", "%A", "%GG"]) {
+    assert.equal(scrubAndVerifyText(benign, environment), benign);
+  }
+  for (const malformed of ["%41%", "%41%A", "%41%GG", "%%41", "%A%41", "%GG%41"]) {
+    assert.throws(
+      () => scrubAndVerifyText(malformed, environment),
+      /malformed percent encoding in scrubbed text/,
+      malformed,
+    );
+  }
+});
+
+test("real invalid bytes cannot conceal percent-encoded credentials", () => {
+  const secret = "InvalidByteCredentialAlpha123";
+  const encoded = Buffer.from(fullyPercentEncode(secret, "mixed"), "ascii");
+  const midpoint = Math.floor(encoded.length / 6) * 3;
+  const fixtures = [
+    ["prefix", Buffer.concat([Buffer.from([0xff]), encoded])],
+    ["suffix", Buffer.concat([encoded, Buffer.from([0xff])])],
+    [
+      "interleaved",
+      Buffer.concat([
+        encoded.subarray(0, midpoint),
+        Buffer.from([0xff]),
+        encoded.subarray(midpoint),
+      ]),
+    ],
+  ];
+  for (const [fixtureName, fixture] of fixtures) {
+    withTemporaryDirectory((directory) => {
+      fs.writeFileSync(path.join(directory, "invalid.data"), fixture);
+      assert.throws(
+        () =>
+          scanHostedEvidenceArtifacts({
+            workingDirectory: directory,
+            environment: { STABLY_API_KEY: secret },
+            artifactPaths: ["invalid.data"],
+          }),
+        /secret representation detected in artifact\[0\]#[a-f0-9]{12}/,
+        `${fixtureName} scan path`,
+      );
+    });
+    withTemporaryDirectory((directory) => {
+      writeRequiredPayloadArtifacts(directory);
+      fs.writeFileSync(
+        path.join(directory, "stably-test.scrubbed.log"),
+        fixture,
+      );
+      assert.throws(
+        () =>
+          sealHostedEvidenceBundle({
+            workingDirectory: directory,
+            environment: { STABLY_API_KEY: secret },
+          }),
+        /secret representation detected in artifact\[4\]#[a-f0-9]{12}/,
+        `${fixtureName} seal path`,
+      );
+    });
+  }
+});
+
+test("real invalid bytes are rejected inside nested archives on scan and seal", () => {
+  const secret = "NestedInvalidByteCredential123";
+  const nestedBytes = Buffer.concat([
+    Buffer.from(fullyPercentEncode(secret, "upper"), "ascii"),
+    Buffer.from([0xff]),
+  ]);
+  withTemporaryDirectory((directory) => {
+    const sourceDirectory = path.join(directory, "nested-source");
+    fs.mkdirSync(sourceDirectory);
+    fs.writeFileSync(path.join(sourceDirectory, "nested.data"), nestedBytes);
+    const archivePath = path.join(directory, "nested.zip");
+    const zipped = spawnSync("zip", ["-q", archivePath, "nested.data"], {
+      cwd: sourceDirectory,
+      encoding: "utf8",
+    });
+    assert.equal(zipped.status, 0, zipped.stderr);
+    assert.throws(
+      () =>
+        scanHostedEvidenceArtifacts({
+          workingDirectory: directory,
+          environment: { STABLY_API_KEY: secret },
+          artifactPaths: ["nested.zip"],
+        }),
+      /secret representation detected in artifact\[0\]#[a-f0-9]{12}\/entry\[0\]#[a-f0-9]{12}/,
+    );
+
+    writeRequiredPayloadArtifacts(directory);
+    fs.copyFileSync(
+      archivePath,
+      path.join(directory, "stably-test.scrubbed.log"),
+    );
+    assert.throws(
+      () =>
+        sealHostedEvidenceBundle({
+          workingDirectory: directory,
+          environment: { STABLY_API_KEY: secret },
+        }),
+      /secret representation detected in artifact\[4\]#[a-f0-9]{12}\/entry\[0\]#[a-f0-9]{12}/,
+    );
   });
 });
 

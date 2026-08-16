@@ -2,6 +2,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import {
   collectSecretRepresentations,
@@ -21,6 +22,14 @@ const STABLY_LAST_RUN_FILE_NAMES = [
 ];
 const STABLY_CLI_VERSION = "4.12.28";
 const STABLY_REPORTER_VERSION = "2.1.16";
+const MAX_RAW_LOG_BYTES = 32 * 1024 * 1024;
+const RAW_EPILOGUE_SUFFIX_BYTES = 64 * 1024;
+const SCRUB_STREAM_CHUNK_BYTES = 64 * 1024;
+const STABLY_DASHBOARD_CONTRACT = Object.freeze({
+  origin: "https://app.stably.ai",
+  projectPrefix: "/project/",
+  runHistorySegment: "/playwright/history/",
+});
 const MAX_FINGERPRINT_FIELD_LENGTH = 512;
 const MAX_DURATION_LENGTH = 64;
 const RUNNER_FINGERPRINT_FIELDS = [
@@ -117,15 +126,101 @@ function parseSummary(log, environment) {
   };
 }
 
+function assertRawLogWithinLimit(sourcePath) {
+  const stat = fs.statSync(sourcePath);
+  if (stat.size > MAX_RAW_LOG_BYTES) {
+    throw new Error(
+      `raw evidence log exceeds ${MAX_RAW_LOG_BYTES}-byte validation limit`,
+    );
+  }
+  return stat.size;
+}
+
+function readBoundedLogSuffix(filePath) {
+  if (!fs.existsSync(filePath)) return "";
+  const size = assertRawLogWithinLimit(filePath);
+  const suffixLength = Math.min(size, RAW_EPILOGUE_SUFFIX_BYTES);
+  const buffer = Buffer.alloc(suffixLength);
+  const descriptor = fs.openSync(filePath, "r");
+  try {
+    const bytesRead = fs.readSync(
+      descriptor,
+      buffer,
+      0,
+      suffixLength,
+      size - suffixLength,
+    );
+    if (bytesRead !== suffixLength) {
+      throw new Error("raw evidence log changed during bounded validation");
+    }
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  return buffer.toString("utf8");
+}
+
 function writeScrubbedLog(workingDirectory, sourceName, destinationName, environment) {
   const sourcePath = path.join(workingDirectory, sourceName);
   if (!fs.existsSync(sourcePath)) return;
+  assertRawLogWithinLimit(sourcePath);
   const destinationPath = path.join(workingDirectory, destinationName);
   const temporaryPath = `${destinationPath}.tmp-${process.pid}`;
-  const scrubbed = scrubAndVerifyText(fs.readFileSync(sourcePath, "utf8"), environment);
-  fs.writeFileSync(temporaryPath, scrubbed);
-  fs.renameSync(temporaryPath, destinationPath);
-  fs.unlinkSync(sourcePath);
+  const replacements = collectSecretRepresentations(environment);
+  const overlapLength = Math.max(
+    0,
+    ...replacements.map(({ value }) => value.length - 1),
+  );
+  const decoder = new StringDecoder("utf8");
+  const inputDescriptor = fs.openSync(sourcePath, "r");
+  const outputDescriptor = fs.openSync(temporaryPath, "w", 0o600);
+  const buffer = Buffer.alloc(SCRUB_STREAM_CHUNK_BYTES);
+  let carry = "";
+  let completed = false;
+  let totalBytesRead = 0;
+  try {
+    for (;;) {
+      const bytesRead = fs.readSync(inputDescriptor, buffer, 0, buffer.length);
+      if (bytesRead === 0) break;
+      totalBytesRead += bytesRead;
+      if (totalBytesRead > MAX_RAW_LOG_BYTES) {
+        throw new Error("raw evidence log grew beyond its validation limit");
+      }
+      const text = carry + decoder.write(buffer.subarray(0, bytesRead));
+      const retainedLength = Math.min(overlapLength, text.length);
+      const stableLength = text.length - retainedLength;
+      if (stableLength > 0) {
+        fs.writeSync(
+          outputDescriptor,
+          scrubText(text.slice(0, stableLength), replacements),
+        );
+      }
+      carry = text.slice(stableLength);
+    }
+    carry += decoder.end();
+    fs.writeSync(outputDescriptor, scrubText(carry, replacements));
+    fs.closeSync(outputDescriptor);
+    if (fs.statSync(temporaryPath).size > MAX_RAW_LOG_BYTES) {
+      throw new Error("scrubbed evidence log exceeds its validation limit");
+    }
+    const verified = scrubAndVerifyText(
+      fs.readFileSync(temporaryPath, "utf8"),
+      environment,
+    );
+    fs.writeFileSync(temporaryPath, verified, { mode: 0o600 });
+    fs.renameSync(temporaryPath, destinationPath);
+    fs.unlinkSync(sourcePath);
+    completed = true;
+  } finally {
+    fs.closeSync(inputDescriptor);
+    if (!completed) {
+      try {
+        fs.closeSync(outputDescriptor);
+      } catch {
+        // It was already closed before final verification.
+      }
+      fs.rmSync(temporaryPath, { force: true });
+    }
+  }
 }
 
 function reporterAttached(environment) {
@@ -157,34 +252,26 @@ function stablyResultUrl(log, suiteName, runId, projectId) {
     );
     if (!resultMatch) return null;
     const rawUrl = resultMatch[1];
-    if (rawUrl.includes("\\")) return null;
+    const expectedUrl =
+      STABLY_DASHBOARD_CONTRACT.origin +
+      STABLY_DASHBOARD_CONTRACT.projectPrefix +
+      encodeURIComponent(projectId) +
+      STABLY_DASHBOARD_CONTRACT.runHistorySegment +
+      runId;
+    if (
+      rawUrl !== expectedUrl ||
+      rawUrl.includes("\\") ||
+      /%2f|%5c/i.test(rawUrl)
+    ) {
+      return null;
+    }
     try {
       const url = new URL(rawUrl);
-      if (
-        url.origin !== "https://app.stably.ai" ||
-        url.search !== "" ||
-        url.hash !== "" ||
-        url.pathname.endsWith("/")
-      ) {
-        return null;
-      }
-      const rawSegments = url.pathname.split("/");
-      if (
-        rawSegments.some((segment) => /%2f|%5c/i.test(segment)) ||
-        rawSegments[5]?.includes("%") ||
-        rawSegments.length !== 6 ||
-        rawSegments[0] !== "" ||
-        rawSegments[1] !== "project" ||
-        rawSegments[2] !== encodeURIComponent(projectId) ||
-        rawSegments[3] !== "playwright" ||
-        rawSegments[4] !== "history" ||
-        rawSegments[5] !== runId
-      ) {
-        return null;
-      }
+      if (url.href !== expectedUrl) return null;
       // Reporter 2.1.16 prints createdSuiteRun.url verbatim
       // (dist/index-CdLJi9uc.cjs:9593-9594). Validate that raw value first,
       // then retain a route-shaped value without the secret project segment.
+      // STABLY_DASHBOARD_CONTRACT is checked in so server route drift is visible.
       return `https://app.stably.ai/project/<REDACTED-PROJECT>/playwright/history/${runId}`;
     } catch {
       return null;
@@ -285,6 +372,13 @@ function writeScrubbedLogs(workingDirectory, environment) {
   );
 }
 
+function removeRawLogs(workingDirectory) {
+  fs.rmSync(path.join(workingDirectory, RAW_LOG_FILE_NAME), { force: true });
+  fs.rmSync(path.join(workingDirectory, RAW_PREVIEW_LOG_FILE_NAME), {
+    force: true,
+  });
+}
+
 function suiteCommand(environment) {
   const workers = environment.E2E_WORKERS ?? "";
   const grep = environment.INPUT_GREP ?? "";
@@ -344,22 +438,32 @@ export function buildHostedEvidenceManifest({
 export function writeHostedEvidenceManifest(options = {}) {
   const workingDirectory = options.workingDirectory ?? process.cwd();
   const environment = options.environment ?? process.env;
-  const rawLog = readTextOrEmpty(path.join(workingDirectory, RAW_LOG_FILE_NAME));
-  const stablyEvidence = readStablyRun(workingDirectory, environment, rawLog);
-  writeScrubbedLogs(workingDirectory, environment);
-  const manifest = buildHostedEvidenceManifest({
-    ...options,
-    environment,
-    workingDirectory,
-    stablyEvidence,
-  });
-  // Scrub the final compact JSON bytes so JSON escaping cannot create a form
-  // that bypasses the same disclosure boundary used for the uploaded logs.
-  const serialized = scrubAndVerifyText(JSON.stringify(manifest), environment);
-  JSON.parse(serialized);
-  fs.writeFileSync(path.join(workingDirectory, MANIFEST_FILE_NAME), serialized);
-  process.stdout.write(serialized);
-  return JSON.parse(serialized);
+  try {
+    const rawLog = readBoundedLogSuffix(
+      path.join(workingDirectory, RAW_LOG_FILE_NAME),
+    );
+    const stablyEvidence = readStablyRun(
+      workingDirectory,
+      environment,
+      rawLog,
+    );
+    writeScrubbedLogs(workingDirectory, environment);
+    const manifest = buildHostedEvidenceManifest({
+      ...options,
+      environment,
+      workingDirectory,
+      stablyEvidence,
+    });
+    // Scrub the final compact JSON bytes so JSON escaping cannot create a form
+    // that bypasses the same disclosure boundary used for the uploaded logs.
+    const serialized = scrubAndVerifyText(JSON.stringify(manifest), environment);
+    JSON.parse(serialized);
+    fs.writeFileSync(path.join(workingDirectory, MANIFEST_FILE_NAME), serialized);
+    process.stdout.write(serialized);
+    return JSON.parse(serialized);
+  } finally {
+    removeRawLogs(workingDirectory);
+  }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

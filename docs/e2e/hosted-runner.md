@@ -60,19 +60,31 @@ skipped/fixme counts plus the freshness-validated Stably run identifier and URL;
 after scrubbing and never uploaded.
 
 The final artifact scan checks literal secret bytes first, classifies archives by magic bytes, then
-canonicalizes archive entry names and each extracted entry independently. Non-archive text is
-canonicalized directly. Percent runs are decoded byte-wise into both lossy UTF-8 and binary views, so
-one malformed byte cannot conceal a valid adjacent credential; undecodable percent data fails closed.
-Canonicalization work is bounded per text value to eight passes, 64 variants, and 512 MiB of decoder
-input. Reaching any bound before a fixed point fails closed with an opaque artifact or nested-entry
-reference plus the configured and observed bounds; compressed archive bytes do not consume that text
-budget.
+canonicalizes archive entry names and every extracted entry independently. Every non-archive byte
+stream is inspected through latin1, lossy UTF-8, invalid-byte-stripped UTF-8, and plausible UTF-16LE/BE
+views. Percent, JSON-escape, and whitespace-normalized base64 decoding feed their outputs back into the
+same fixed-point queue, so composed encodings are covered. A percent fragment is malformed when an
+incomplete `%`, `%H`, or `%GG` fragment directly touches a complete `%HH` run; ordinary standalone text
+such as `100%`, `%A`, or `%GG` remains valid. Invalid percent bytes and uninspectable inputs fail closed.
+Canonicalization work is bounded per value to eight passes, 64 variants, and 512 MiB of decoder input.
+Reaching any bound before a fixed point fails closed with an opaque artifact or nested-entry reference
+plus configured and observed bounds; compressed archive bytes do not consume that text budget.
 
 Reporter `2.1.16` prints the server-returned `createdSuiteRun.url` directly (the pinned CJS dist at
-`index-CdLJi9uc.cjs:9593-9594`). Evidence accepts only the exact adjacent suite/result epilogue for
-`https://app.stably.ai/project/<project>/playwright/history/<run>`, without encoded run IDs, trailing
-slashes, queries, fragments, or encoded path separators. The raw URL is validated before scrubbing;
-the retained manifest replaces its project segment with `<REDACTED-PROJECT>`.
+`index-CdLJi9uc.cjs:9593-9594`). This evidence tool documents its checked-in Stably dashboard contract
+as `https://app.stably.ai/project/<project>/playwright/history/<run>`, anchored by the host and project
+URL described in the [Stably reporter guide](https://docs.stably.ai/stably/stably-test-reporter). Evidence requires that
+exact raw string before URL parsing, so normalization, userinfo, explicit ports, encoded separators,
+trailing slashes, queries, and fragments fail closed. The retained manifest replaces its project
+segment with `<REDACTED-PROJECT>`; changing the dashboard contract requires a reviewed source change,
+not an environment override.
+
+The raw suite log is capped at 32 MiB before any read, and only its final 64 KiB is retained in memory
+for reporter-epilogue validation. Scrubbing uses 64 KiB chunks with overlap, then verifies the capped
+scrubbed result. A `finally` cleanup removes raw suite and preview logs after every success or failure.
+Reporter isolation tests audit WebSocket, `fetch`, HTTP, HTTPS, `net`, TLS, and DNS transports. The guard
+is installed through inherited `NODE_OPTIONS`, and the pinned reporter is exercised through `onBegin`
+so its `create-suite.mjs` child transport is covered too.
 
 ### What Job A proves
 
