@@ -1,40 +1,9 @@
 {
-  "handoffs": [
-    {
-      "from": "S2",
-      "to": "C1",
-      "date": "2026-08-15",
-      "path": "start.mjs",
-      "scope": "vendored-dist build section"
-    },
-    {
-      "from": "S11",
-      "to": "C1",
-      "date": "2026-08-15",
-      "path": "scripts/preview-up.mjs",
-      "scope": "prepareVendoredDist and prebuild-isolation ordering"
-    },
-    {
-      "from": "S11",
-      "to": "C1",
-      "date": "2026-08-15",
-      "path": "scripts/preview-environment.mjs",
-      "scope": "preview isolation and vendored-dist prebuild environment"
-    },
-    {
-      "from": "S11",
-      "to": "C1",
-      "date": "2026-08-15",
-      "path": "scripts/preview-environment.test.mjs",
-      "scope": "preview isolation and vendored-dist prebuild environment tests"
-    }
-  ],
   "lanes": {
     "C1": [
       "scripts/vendored-dist-*.mjs",
       "package.json",
       ".github/workflows/tests.yml",
-      ".github/workflows/ownership-authorization.yml",
       "docs/preview-env.md",
       "scripts/ownership-check.mjs",
       "scripts/ownership-check.test.mjs",

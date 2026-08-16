@@ -28,19 +28,6 @@ Tests follow the lane owning their production basename. Repository rail scripts,
 guard tests, and `docs/lanes/R1.log` belong to R1 and are outside S1-S11 product
 ownership, except for the explicitly listed C1 vendored-dist gate files above.
 
-## Trusted pull-request authorization
-
-The required PR status is **Ownership authorization / trusted base changed-path
-authorization**. Its `pull_request_target` workflow checks out and executes only
-the base revision, fetches the candidate commit without checking it out, and
-passes that object via `--head`. The base must contain the maintainer-controlled
-`docs/inventory/lane-writers.json` mapping, shaped as `{ "github-login":
-["C1"] }`; an absent, unreadable, empty, or malformed actor entry fails closed.
-The PR author's mapped lanes and the `lane/<id>-<description>` branch prefix must
-agree. A fork author therefore cannot claim a privileged lane merely by naming
-their branch after it. The similarly named job in `tests.yml` executes candidate
-code and remains convenience feedback only, not the trusted gate.
-
 ## Reviewed handoffs (2026-08-16 policy commit)
 
 A handoff lets the recipient lane edit a path another lane owns, for the stated scope only. `node scripts/ownership-check.mjs --writer <lane> --base <policy-commit>` (lane C1's trusted-base checker) authorizes a lane's changed paths against this base.
