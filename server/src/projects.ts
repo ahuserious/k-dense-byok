@@ -24,6 +24,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { DEFAULT_PROJECT_ID, PROJECTS_ROOT } from "./config.ts";
+import { LEGACY_ENGINE_DATA_DIRECTORY } from "./legacy-engine-data.ts";
 import { isWithin } from "./sandbox-fs.ts";
 import { currentProjectId } from "./scope.ts";
 import { seedSandboxFiles } from "./sandbox-seed.ts";
@@ -337,7 +338,8 @@ function privacySafeProjectSnapshotPaths(sandbox: string): string[] {
   const permittedPaths: string[] = [];
   const visit = (absoluteDirectory: string, relativeDirectory: string): void => {
     for (const entry of fs.readdirSync(absoluteDirectory, { withFileTypes: true })) {
-      const isAllowedEngineDataRoot = relativeDirectory === "" && entry.name === ".archon";
+      const isAllowedEngineDataRoot =
+        relativeDirectory === "" && entry.name === LEGACY_ENGINE_DATA_DIRECTORY;
       if (
         BASELINE_EXCLUDED_DIRECTORIES.has(entry.name) ||
         isBaselineCredentialName(entry.name) ||

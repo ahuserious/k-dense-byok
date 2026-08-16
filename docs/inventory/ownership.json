@@ -7,7 +7,9 @@
       "docs/preview-env.md",
       "scripts/ownership-check.mjs",
       "scripts/ownership-check.test.mjs",
-      "server/test/pipelines-disabled.test.ts"
+      "server/test/pipelines-disabled.test.ts",
+      ".github/workflows/ownership-authorization.yml",
+      "server/test/pipelines.test.ts"
     ],
     "S1": [
       "web/src/app/page.tsx",
@@ -195,6 +197,19 @@
       "server/src/sandbox-fs.ts",
       "server/test/credential-env-isolation.test.ts",
       "server/test/env-isolation.test.ts"
+    ],
+    "R1": [
+      ".gitignore"
+    ],
+    "C4": [
+      "docs/inventory/c4-cas.json",
+      "server/test/workflow-store.test.ts",
+      "server/test/dag-workflows-api.test.ts",
+      "web/src/lib/dag-workflows.test.ts",
+      "server/test/chat-turn-runs-adapter.test.ts",
+      "server/test/raindrop-context.test.ts",
+      "server/test/steer-abort.test.ts",
+      "server/test/workflow-controller.test.ts"
     ]
   },
   "handoffs": [
@@ -245,14 +260,14 @@
       "to": "C1",
       "date": "2026-08-16",
       "path": "scripts/preview-launcher-observer.mjs",
-      "scope": "workflow-engine readiness and fatal-exit observer anchors"
+      "scope": "workflow-engine readiness and fatal-exit observer anchors; workflow-supervisor role recording (pid + identity reported by the backend)"
     },
     {
       "from": "S2",
       "to": "C1",
-      "date": "2026-08-15",
+      "date": "2026-08-16",
       "path": "start.mjs",
-      "scope": "vendored-dist build, engine-port ownership, readiness, and disabled-state sections"
+      "scope": "vendored-dist build, engine-port ownership, readiness, and disabled-state sections; forced-shutdown ownership of the backend's detached workflow supervisor (second explicit signal) and process-group retirement"
     },
     {
       "from": "S2",
@@ -428,6 +443,153 @@
       "date": "2026-08-16",
       "path": ".github/workflows/stably-cloud.yml",
       "scope": "hosted evidence manifest step and artifact upload"
+    },
+    {
+      "from": "C1",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/vendored-dist-build.mjs",
+      "scope": "single guarded call of the preview env-candidate refusal helper immediately before the Bun spawn"
+    },
+    {
+      "from": "S11",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-state.mjs",
+      "scope": "exclusive preview lifecycle lock"
+    },
+    {
+      "from": "S11",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-readiness.mjs",
+      "scope": "named preview source-drift health failure detail"
+    },
+    {
+      "from": "S11",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-readiness.test.mjs",
+      "scope": "named preview source-drift health regression"
+    },
+    {
+      "from": "S11",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-down.mjs",
+      "scope": "owned checkout-local preview web projection cleanup"
+    },
+    {
+      "from": "R1",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": ".gitignore",
+      "scope": "checkout-local preview web projection ignore rule"
+    },
+    {
+      "from": "S11",
+      "to": "C1",
+      "date": "2026-08-16",
+      "path": "scripts/preview-launcher-observer.test.mjs",
+      "scope": "workflow-engine readiness and fatal-exit observer regression coverage; workflow-supervisor role recording"
+    },
+    {
+      "from": "S11",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-state.test.mjs",
+      "scope": "preview lifecycle lock recovery regression"
+    },
+    {
+      "from": "S7",
+      "to": "C1",
+      "date": "2026-08-16",
+      "path": "server/src/index.ts",
+      "scope": "kady-supervisor IPC message (supervisor pid reported to the launcher parent) \u2014 no other change"
+    },
+    {
+      "from": "C1",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-launcher-observer.mjs",
+      "scope": "generation-bound service records, launcher start gate and process identity in the preview observer"
+    },
+    {
+      "from": "C1",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-launcher-observer.test.mjs",
+      "scope": "observer generation/identity regression"
+    },
+    {
+      "from": "S11",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-processes.mjs",
+      "scope": "identity-verified preview process ownership (no cwd-only signaling)"
+    },
+    {
+      "from": "S11",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-processes.test.mjs",
+      "scope": "preview process ownership regression"
+    },
+    {
+      "from": "S5",
+      "to": "C1",
+      "date": "2026-08-16",
+      "path": "server/src/workflows/supervisor/client.ts",
+      "scope": "onOwnership callback invoked immediately when a supervisor process is acquired (spawned or inherited) \u2014 no other change"
+    },
+    {
+      "from": "S5",
+      "to": "C4",
+      "date": "2026-08-16",
+      "path": "server/src/workflows/store.ts",
+      "scope": "definition CAS outcome core (create/update/upsert intent evaluated inside the mutation lock before hash equality)"
+    },
+    {
+      "from": "S4",
+      "to": "C4",
+      "date": "2026-08-16",
+      "path": "server/src/api/dag-workflows.ts",
+      "scope": "PUT /dag-workflows CAS status/ETag matrix (201 only for created; 409 on stale-identical and absent+If-Match:\"0\")"
+    },
+    {
+      "from": "S1",
+      "to": "C4",
+      "date": "2026-08-16",
+      "path": "web/src/lib/dag-workflows.ts",
+      "scope": "client sends the chosen precondition header and consumes the outcome shape"
+    },
+    {
+      "from": "S1b",
+      "to": "C4",
+      "date": "2026-08-16",
+      "path": "web/src/components/dag-workflows-panel.tsx",
+      "scope": "panel consumes the CAS outcome shape"
+    },
+    {
+      "from": "S1b",
+      "to": "C4",
+      "date": "2026-08-16",
+      "path": "web/src/components/dag-workflows-panel.test.tsx",
+      "scope": "panel CAS outcome regression"
+    },
+    {
+      "from": "S10",
+      "to": "C4",
+      "date": "2026-08-16",
+      "path": "server/test/dag-workflow-templates.test.ts",
+      "scope": "template setup through the compatibility facade"
+    },
+    {
+      "from": "S11",
+      "to": "C4",
+      "date": "2026-08-16",
+      "path": "e2e/fixtures.ts",
+      "scope": "browser mock sends the chosen header and returns the new CAS shape"
     }
   ]
 }

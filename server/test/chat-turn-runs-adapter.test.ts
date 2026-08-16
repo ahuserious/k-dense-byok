@@ -468,7 +468,7 @@ describe("chat-turn runs-index adapter", () => {
       const saved = await app.inject({
         method: "PUT",
         url: "/dag-workflows/indexed-workflow",
-        headers: { "x-project-id": DEFAULT_PROJECT_ID },
+        headers: { "x-project-id": DEFAULT_PROJECT_ID, "if-none-match": "*" },
         payload: storedGraph(),
       });
       expect(saved.statusCode).toBe(201);
@@ -525,7 +525,7 @@ describe("chat-turn runs-index adapter", () => {
       const saved = await app.inject({
         method: "PUT",
         url: "/dag-workflows/indexed-workflow",
-        headers: { "x-project-id": DEFAULT_PROJECT_ID },
+        headers: { "x-project-id": DEFAULT_PROJECT_ID, "if-none-match": "*" },
         payload: storedGraph(),
       });
       expect(saved.statusCode).toBe(201);
@@ -594,7 +594,7 @@ describe("chat-turn runs-index adapter", () => {
       const saved = await app.inject({
         method: "PUT",
         url: "/dag-workflows/indexed-workflow",
-        headers: { "x-project-id": DEFAULT_PROJECT_ID },
+        headers: { "x-project-id": DEFAULT_PROJECT_ID, "if-none-match": "*" },
         payload: storedGraph(),
       });
       expect(saved.statusCode).toBe(201);

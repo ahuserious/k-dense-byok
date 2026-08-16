@@ -64,6 +64,7 @@
   "WorkflowBehaviorRegistryError",
   "WorkflowDagNodeError",
   "WorkflowDagRunnerError",
+  "WorkflowDefinitionConflictError",
   "WorkflowEdgeSchema",
   "WorkflowGraphDocumentSchema",
   "WorkflowLimitsSchema",

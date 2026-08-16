@@ -756,10 +756,38 @@ async function installApiMocks(page: Page, state: MockApiState) {
     const definitionId = matchingTypedWorkflowId(path);
     if (definitionId && method === "PUT") {
       const graph = JSON.parse(request.postData() ?? "{}") as ReturnType<typeof graphDocument>;
+      // The mock enforces the same strict definition precondition as the real
+      // route so a client that stops sending it fails here instead of passing
+      // against a permissive fixture. This is not real-backend proof; the live
+      // tier owns that.
+      const conditionalHeaders = request.headers();
+      if (conditionalHeaders["if-none-match"] !== "*") {
+        return routeJson(
+          route,
+          {
+            code: "CONDITIONAL_HEADER_REQUIRED",
+            detail: "A workflow definition create requires If-None-Match: *.",
+          },
+          428,
+        );
+      }
+      if (conditionalHeaders["if-match"] !== undefined) {
+        return routeJson(
+          route,
+          {
+            code: "INVALID_CONDITIONAL_HEADER",
+            detail: "If-Match and If-None-Match are mutually exclusive.",
+          },
+          400,
+        );
+      }
       return routeJson(
         route,
-        storedDefinition(definitionId, graph.name, graph),
-        200,
+        {
+          outcome: "created",
+          definition: storedDefinition(definitionId, graph.name, graph),
+        },
+        201,
         { ETag: '"1"' },
       );
     }

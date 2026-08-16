@@ -760,6 +760,34 @@ describe("Tier A S4 idempotent dispatch and durable reconciliation", () => {
     });
   });
 
+  it("recovers a pre-dispatch crash while disabled without engine traffic", async () => {
+    const projectId = "crash-intent-disabled";
+    createProject({ name: projectId, projectId, spendLimitUsd: 20 });
+    const admissionId = "kadypipe_41111111111111111111111111111111";
+    await persistCrashWindowInChild(projectId, admissionId, "intent");
+    const fetchMock = vi.fn();
+    const queryAdmission = vi.fn(async (): Promise<AdmissionQueryResult> => ({ status: "unknown" }));
+    const getRun = vi.fn(async () => ({}));
+    vi.stubGlobal("fetch", fetchMock);
+    const worker = new PipelineReconciliationWorker({
+      engineDisabled: true,
+      projects: () => [{ id: projectId }],
+      queryAdmission,
+      getRun,
+    });
+    await worker.runOnce();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(queryAdmission).not.toHaveBeenCalled();
+    expect(getRun).not.toHaveBeenCalled();
+    expect(recoverPipelineAdmission(projectId, admissionId)).toMatchObject({
+      record: { status: "settled" },
+      admission: {
+        handle: { record: { status: "failed", settlement: { chargedCostUsd: 0, usageComplete: true } } },
+      },
+    });
+    vi.unstubAllGlobals();
+  });
+
   it("recovers a child crash after write-ahead dispatch by querying and settling", async () => {
     const projectId = "crash-dispatch";
     createProject({ name: projectId, projectId, spendLimitUsd: 20 });
@@ -805,6 +833,34 @@ describe("Tier A S4 idempotent dispatch and durable reconciliation", () => {
         handle: { record: { status: "completed", settlement: { chargedCostUsd: 0.4 } } },
       },
     });
+  });
+
+  it("completes a settlement crash while disabled without engine traffic", async () => {
+    const projectId = "crash-settling-disabled";
+    createProject({ name: projectId, projectId, spendLimitUsd: 20 });
+    const admissionId = "kadypipe_43333333333333333333333333333333";
+    await persistCrashWindowInChild(projectId, admissionId, "settling");
+    const fetchMock = vi.fn();
+    const queryAdmission = vi.fn(async (): Promise<AdmissionQueryResult> => ({ status: "unknown" }));
+    const getRun = vi.fn(async () => ({}));
+    vi.stubGlobal("fetch", fetchMock);
+    const worker = new PipelineReconciliationWorker({
+      engineDisabled: true,
+      projects: () => [{ id: projectId }],
+      queryAdmission,
+      getRun,
+    });
+    await worker.runOnce();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(queryAdmission).not.toHaveBeenCalled();
+    expect(getRun).not.toHaveBeenCalled();
+    expect(recoverPipelineAdmission(projectId, admissionId)).toMatchObject({
+      record: { status: "settled", engineRunId: "run-child-settling" },
+      admission: {
+        handle: { record: { status: "completed", settlement: { chargedCostUsd: 0.4 } } },
+      },
+    });
+    vi.unstubAllGlobals();
   });
 
   it("rejects a route-level workflow with no settings or legacy budget before dispatch", async () => {

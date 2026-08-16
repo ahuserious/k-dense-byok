@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { previewPidStartIdentity } from "./preview-state.mjs";
 
 function commandOutput(command, args) {
   const result = spawnSync(command, args, { encoding: "utf-8" });
@@ -79,7 +80,7 @@ export async function waitForPreviewPortsFree(
   return occupied;
 }
 
-function processGroupId(pid) {
+export function processGroupId(pid) {
   const psOutput = commandOutput("ps", ["-o", "pgid=", "-p", String(pid)]);
   if (/^\d+$/.test(psOutput)) return Number(psOutput);
 
@@ -93,36 +94,341 @@ function processGroupId(pid) {
   throw new Error(`Could not resolve process group for listener PID ${pid}.`);
 }
 
+function validRecordedProcess(record, generation) {
+  return record &&
+    Number.isSafeInteger(record.pid) && record.pid > 1 &&
+    Number.isSafeInteger(record.pgid) && record.pgid > 1 &&
+    record.generation === generation &&
+    record.identity &&
+    typeof record.identity.method === "string" &&
+    typeof record.identity.value === "string";
+}
+
+export function recordedPreviewProcessGroup(
+  record,
+  generation,
+  expectedDirectory,
+  {
+    resolveIdentity = previewPidStartIdentity,
+    isAlive = processAlive,
+    workingDirectory = processWorkingDirectory,
+    resolveProcessGroup = processGroupId,
+  } = {},
+) {
+  if (!validRecordedProcess(record, generation)) {
+    throw new Error(`Preview process record is invalid for generation ${generation}.`);
+  }
+  if (!isAlive(record.pid)) return null;
+  const currentIdentity = resolveIdentity(record.pid);
+  if (
+    !currentIdentity ||
+    currentIdentity.method !== record.identity.method ||
+    currentIdentity.value !== record.identity.value
+  ) {
+    throw new Error(
+      `Preview process PID ${record.pid} identity no longer matches generation ${generation}; refusing to signal it.`,
+    );
+  }
+  const currentGroup = resolveProcessGroup(record.pid);
+  if (currentGroup !== record.pgid) {
+    throw new Error(
+      `Preview process PID ${record.pid} group changed from ${record.pgid} to ${currentGroup}; refusing to signal it.`,
+    );
+  }
+  const currentDirectory = workingDirectory(record.pid);
+  if (
+    currentDirectory !== expectedDirectory &&
+    !currentDirectory.startsWith(`${expectedDirectory}${path.sep}`)
+  ) {
+    throw new Error(
+      `Preview process PID ${record.pid} has unexpected cwd ${currentDirectory || "<unknown>"}; refusing to signal it.`,
+    );
+  }
+  return { groupId: record.pgid, listeners: [], record };
+}
+
+export function collectRecordedPreviewProcessGroups(
+  repositoryRoot,
+  lifecycleState,
+  serviceStates,
+  options = {},
+) {
+  const groups = new Map();
+  const rootGroup = recordedPreviewProcessGroup(
+    lifecycleState.rootProcess,
+    lifecycleState.generation,
+    lifecycleState.launchRoot,
+    options,
+  );
+  if (rootGroup) groups.set(rootGroup.groupId, rootGroup);
+
+  for (const [role, record] of Object.entries(serviceStates)) {
+    const expectedDirectory = expectedWorkingDirectory(repositoryRoot, record.role ?? role);
+    const group = recordedPreviewProcessGroup(
+      record,
+      lifecycleState.generation,
+      expectedDirectory,
+      options,
+    );
+    if (group) groups.set(group.groupId, group);
+  }
+  return [...groups.values()];
+}
+
+const PORT_SERVICE_ROLES = {
+  backend: "backend",
+  frontend: "frontend",
+  engine: "pipeline-engine",
+};
+
+export function assertPreviewServiceListenersOwned(
+  ports,
+  serviceStates,
+  generation,
+  {
+    inspectPort = listenersOnPort,
+    resolveProcessGroup = processGroupId,
+  } = {},
+) {
+  for (const [portRole, port] of Object.entries(ports)) {
+    const serviceRole = PORT_SERVICE_ROLES[portRole];
+    const record = serviceStates[serviceRole];
+    if (!validRecordedProcess(record, generation)) {
+      throw new Error(
+        `Preview readiness lacks a valid ${serviceRole ?? portRole} process record for generation ${generation}.`,
+      );
+    }
+    const listenerPids = inspectPort(port);
+    if (listenerPids.length === 0) {
+      throw new Error(`Preview port ${port} has no listener for generation ${generation}.`);
+    }
+    for (const listenerPid of listenerPids) {
+      if (listenerPid === record.pid) continue;
+      const listenerGroup = resolveProcessGroup(listenerPid);
+      if (listenerGroup !== record.pgid) {
+        throw new Error(
+          `Preview port ${port} held by pid ${listenerPid} not owned by generation ${generation}.`,
+        );
+      }
+    }
+  }
+}
+
+function matchingLiveRecord(record, generation, { isAlive, resolveIdentity }) {
+  if (!validRecordedProcess(record, generation) || !isAlive(record.pid)) return false;
+  const identity = resolveIdentity(record.pid);
+  if (!identity) return false;
+  return identity.method === record.identity.method && identity.value === record.identity.value;
+}
+
+export function assertPreviewGenerationQuiesced(
+  records,
+  generation,
+  ports,
+  {
+    isAlive = processAlive,
+    resolveIdentity = previewPidStartIdentity,
+    inspectPort = listenersOnPort,
+  } = {},
+) {
+  const survivingPids = records
+    .filter((record) => matchingLiveRecord(record, generation, { isAlive, resolveIdentity }))
+    .map((record) => record.pid);
+  if (survivingPids.length > 0) {
+    throw new Error(
+      `Preview generation ${generation} process records survived teardown: ${[...new Set(survivingPids)].join(", ")}.`,
+    );
+  }
+  const occupied = occupiedPreviewPorts(ports, inspectPort);
+  if (occupied.length > 0) {
+    throw new Error(
+      `Preview generation ${generation} ports still have listeners: ${occupied
+        .map(({ role, port, listeners }) => `${role} :${port} (${listeners.join(", ")})`)
+        .join("; ")}.`,
+    );
+  }
+}
+
+function numericPids(output) {
+  return [...new Set(String(output).trim().split(/\s+/).filter(Boolean).map(Number))]
+    .filter((pid) => Number.isSafeInteger(pid) && pid > 1);
+}
+
+function regexEscape(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function processesReferencingPreviewStateRoot(
+  stateRoot,
+  { runCommand = spawnSync } = {},
+) {
+  const argumentResult = runCommand("pgrep", ["-f", regexEscape(stateRoot)], {
+    encoding: "utf-8",
+  });
+  if (argumentResult.status !== 0 && argumentResult.status !== 1) {
+    throw new Error(
+      `pgrep could not inspect preview state root ${stateRoot}: ` +
+        `${argumentResult.stderr?.trim() || `exit ${argumentResult.status}`}`,
+    );
+  }
+  const cwdResult = runCommand("lsof", ["-nP", "-a", "-d", "cwd", "+D", stateRoot, "-t"], {
+    encoding: "utf-8",
+  });
+  if (cwdResult.status !== 0 && cwdResult.status !== 1) {
+    throw new Error(
+      `lsof could not inspect cwd references under preview state root ${stateRoot}: ` +
+        `${cwdResult.stderr?.trim() || `exit ${cwdResult.status}`}`,
+    );
+  }
+  return [...new Set([
+    ...numericPids(argumentResult.stdout),
+    ...numericPids(cwdResult.stdout),
+  ])];
+}
+
+export function assertForcedPreviewLockRecoverySafe(
+  { ports, stateRoots },
+  {
+    inspectPort = listenersOnPort,
+    inspectStateRoot = processesReferencingPreviewStateRoot,
+  } = {},
+) {
+  const occupied = occupiedPreviewPorts(ports, inspectPort);
+  if (occupied.length > 0) {
+    throw new Error(
+      `Forced preview lock recovery refuses listeners: ${occupied
+        .map(({ role, port, listeners }) => `${role} :${port} (${listeners.join(", ")})`)
+        .join("; ")}.`,
+    );
+  }
+  for (const stateRoot of stateRoots) {
+    const pids = inspectStateRoot(stateRoot);
+    if (pids.length > 0) {
+      throw new Error(
+        `Forced preview lock recovery refuses process PID(s) ${pids.join(", ")} referencing exact state root ${stateRoot}.`,
+      );
+    }
+  }
+}
+
+function mergeGenerationRecords(recordMap, serviceStates, generation) {
+  for (const [role, record] of Object.entries(serviceStates)) {
+    if (!validRecordedProcess(record, generation)) {
+      throw new Error(
+        `Preview generation ${generation} service record ${role} is present but invalid; refusing teardown.`,
+      );
+    }
+    const identityKey = `${record.identity.method}:${record.identity.value}`;
+    recordMap.set(`${record.role ?? role}:${record.pid}:${identityKey}`, {
+      ...record,
+      role: record.role ?? role,
+    });
+  }
+}
+
+export async function quiescePreviewGeneration(
+  repositoryRoot,
+  lifecycleState,
+  {
+    readServiceSnapshot,
+    stopGroups = stopProcessGroups,
+    inspectPort = listenersOnPort,
+    now = Date.now,
+    pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    timeoutMs = 30_000,
+    pollIntervalMs = 50,
+    processOptions = {},
+  },
+) {
+  const recordMap = new Map();
+  const rootRecord = lifecycleState.rootProcess;
+  const rootGroup = recordedPreviewProcessGroup(
+    rootRecord,
+    lifecycleState.generation,
+    lifecycleState.launchRoot,
+    processOptions,
+  );
+  if (rootGroup) await stopGroups([rootGroup], timeoutMs);
+  recordMap.set(`launcher:${rootRecord.pid}`, rootRecord);
+
+  const deadline = now() + timeoutMs;
+  let previousSignature = null;
+  let identicalReads = 0;
+  while (now() <= deadline) {
+    const snapshot = readServiceSnapshot();
+    if (snapshot.status && snapshot.status !== "valid") {
+      throw new Error(
+        `Preview generation ${lifecycleState.generation} service state is ${snapshot.status}; refusing teardown without a complete process record.`,
+      );
+    }
+    mergeGenerationRecords(recordMap, snapshot.services, lifecycleState.generation);
+    if (snapshot.signature === previousSignature) identicalReads += 1;
+    else identicalReads = 1;
+    previousSignature = snapshot.signature;
+
+    const mergedServices = Object.fromEntries(
+      [...recordMap.entries()].filter(([key]) => !key.startsWith("launcher:")),
+    );
+    const liveGroups = collectRecordedPreviewProcessGroups(
+      repositoryRoot,
+      lifecycleState,
+      mergedServices,
+      processOptions,
+    );
+    await stopGroups(liveGroups);
+
+    if (identicalReads >= 2) {
+      const records = [...recordMap.values()];
+      assertPreviewGenerationQuiesced(
+        records,
+        lifecycleState.generation,
+        lifecycleState.ports,
+        {
+          isAlive: processOptions.isAlive ?? processAlive,
+          resolveIdentity: processOptions.resolveIdentity ?? previewPidStartIdentity,
+          inspectPort,
+        },
+      );
+      return records;
+    }
+    await pause(pollIntervalMs);
+  }
+  throw new Error(
+    `Preview generation ${lifecycleState.generation} service records did not settle before teardown timeout.`,
+  );
+}
+
+export function assertNoForeignPreviewListeners(
+  ports,
+  ownedGroups,
+  {
+    inspectPort = listenersOnPort,
+    resolveProcessGroup = processGroupId,
+  } = {},
+) {
+  const ownedGroupIds = new Set(ownedGroups.map(({ groupId }) => groupId));
+  for (const [role, port] of Object.entries(ports)) {
+    for (const pid of inspectPort(port)) {
+      const groupId = resolveProcessGroup(pid);
+      if (!ownedGroupIds.has(groupId)) {
+        throw new Error(
+          `Port ${port} ${role} listener PID ${pid} belongs to foreign process group ${groupId}; refusing to signal it.`,
+        );
+      }
+    }
+  }
+}
+
 function expectedWorkingDirectory(repositoryRoot, role) {
   if (role === "backend") return fs.realpathSync(path.join(repositoryRoot, "server"));
   if (role === "frontend") return fs.realpathSync(path.join(repositoryRoot, "web"));
-  return fs.realpathSync(path.join(repositoryRoot, "server", "vendor", "pipeline-engine"));
-}
-
-export function collectPreviewListenerGroups(repositoryRoot, ports) {
-  const groups = new Map();
-  for (const [role, port] of Object.entries(ports)) {
-    const expectedDirectory = expectedWorkingDirectory(repositoryRoot, role);
-    for (const pid of listenersOnPort(port)) {
-      const workingDirectory = processWorkingDirectory(pid);
-      if (
-        workingDirectory !== expectedDirectory &&
-        !workingDirectory.startsWith(`${expectedDirectory}${path.sep}`)
-      ) {
-        throw new Error(
-          `Port ${port} listener PID ${pid} has unexpected cwd ${workingDirectory || "<unknown>"}; refusing to signal it.`,
-        );
-      }
-      const groupId = processGroupId(pid);
-      if (groupId <= 1) {
-        throw new Error(`Listener PID ${pid} resolved to unsafe process group ${groupId}.`);
-      }
-      const group = groups.get(groupId) ?? { groupId, listeners: [] };
-      group.listeners.push({ pid, port, role });
-      groups.set(groupId, group);
-    }
+  // The workflow supervisor is spawned detached by the backend with the server
+  // root as its cwd, and the launcher observer records it as its own group
+  // leader. Teardown must therefore reap it like the other recorded services.
+  if (role === "workflow-supervisor") {
+    return fs.realpathSync(path.join(repositoryRoot, "server"));
   }
-  return [...groups.values()];
+  return fs.realpathSync(path.join(repositoryRoot, "server", "vendor", "pipeline-engine"));
 }
 
 export async function waitForProcessGroups(groups, timeoutMs) {

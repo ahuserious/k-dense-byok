@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PROJECTS_ROOT } from "../src/config.ts";
 import {
+  WorkflowDefinitionConflictError,
   WorkflowRunController,
   WorkflowStore,
   type ModelRequest,
@@ -76,7 +77,9 @@ function graph(): WorkflowGraphDocument {
 }
 
 function createRun(store: WorkflowStore, requestId: string) {
-  store.saveDefinition(PROJECT_ID, graph().id, graph());
+  // Repeated setup: the same graph is saved once per run in a single test, so
+  // this helper needs the trusted upsert intent rather than create.
+  store.saveDefinitionWithIntent(PROJECT_ID, graph().id, graph(), { kind: "upsert" });
   return store.createRun(PROJECT_ID, {
     workflowId: graph().id,
     requestId,
@@ -127,6 +130,44 @@ afterAll(() => {
 });
 
 describe("workflow run controller", () => {
+  it("repeats identical trusted upsert setup without restoring a stale-identical CAS bypass", () => {
+    const store = new WorkflowStore();
+    const document = graph();
+
+    const first = store.saveDefinitionWithIntent(PROJECT_ID, document.id, document, {
+      kind: "upsert",
+    });
+    expect(first.outcome).toBe("created");
+    expect(first.definition.revision).toBe(1);
+
+    // The second identical setup save — exactly what createRun() performs once
+    // per run — is a no-op, not a new revision and not a conflict.
+    const repeated = store.saveDefinitionWithIntent(PROJECT_ID, document.id, document, {
+      kind: "upsert",
+    });
+    expect(repeated.outcome).toBe("unchanged");
+    expect(repeated.definition).toEqual(first.definition);
+
+    const changed = structuredClone(document);
+    changed.name = "Changed controller graph";
+    let caught: unknown = null;
+    try {
+      store.saveDefinitionWithIntent(PROJECT_ID, document.id, changed, { kind: "upsert" });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(WorkflowDefinitionConflictError);
+    expect((caught as WorkflowDefinitionConflictError).currentRevision).toBe(1);
+    expect(store.readDefinition(PROJECT_ID, document.id)!.revision).toBe(1);
+
+    const updated = store.saveDefinitionWithIntent(PROJECT_ID, document.id, changed, {
+      kind: "upsert",
+      expectedRevision: 1,
+    });
+    expect(updated.outcome).toBe("updated");
+    expect(updated.definition.revision).toBe(2);
+  });
+
   it("starts a queued durable run and returns an idempotent existing record", async () => {
     const store = new WorkflowStore();
     const manifest = createRun(store, "controller-success");

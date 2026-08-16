@@ -11,7 +11,10 @@
  * `unknown`/loose records on purpose so a minor engine version change doesn't
  * break the proxy.
  */
-import { PIPELINE_ENGINE_BASE_URL } from "../../config.ts";
+import {
+  PIPELINE_ENGINE_BASE_URL,
+  PIPELINE_ENGINE_DISABLED,
+} from "../../config.ts";
 
 export const PIPELINE_ENGINE_LIST_TIMEOUT_MS = 5_000;
 
@@ -27,6 +30,9 @@ async function pipelineEngineFetch(
   init?: RequestInit,
   lifecycle?: PipelineEngineRequestLifecycle,
 ): Promise<unknown> {
+  if (PIPELINE_ENGINE_DISABLED) {
+    throw new PipelineEngineUnavailableError("Pipeline engine is disabled by the launcher.");
+  }
   const controller = lifecycle ? new AbortController() : undefined;
   let abortCause: "external" | "timeout" | undefined;
   const abortRequest = (cause: "external" | "timeout"): void => {

@@ -1,0 +1,21 @@
+{
+  "lane": "C4",
+  "purpose": "S4 design \u00a7Mandatory prerequisite lane C4: correct definition CAS \u2014 retained as historical checked scope after C4 returns its paths",
+  "files": [
+    "docs/inventory/c4-cas.json",
+    "server/src/workflows/store.ts",
+    "server/test/workflow-store.test.ts",
+    "server/src/api/dag-workflows.ts",
+    "server/test/dag-workflows-api.test.ts",
+    "web/src/lib/dag-workflows.ts",
+    "web/src/lib/dag-workflows.test.ts",
+    "web/src/components/dag-workflows-panel.tsx",
+    "web/src/components/dag-workflows-panel.test.tsx",
+    "server/test/dag-workflow-templates.test.ts",
+    "server/test/chat-turn-runs-adapter.test.ts",
+    "server/test/raindrop-context.test.ts",
+    "server/test/steer-abort.test.ts",
+    "server/test/workflow-controller.test.ts",
+    "e2e/fixtures.ts"
+  ]
+}
