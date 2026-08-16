@@ -7,6 +7,7 @@ inventory path is owned exactly once.
 
 | Lane | Scope | Owned globs |
 | --- | --- | --- |
+| C1 | Vendored builder dist freshness and hosted build | `scripts/vendored-dist-*.mjs`; `package.json`; `.github/workflows/tests.yml`; `docs/preview-env.md` |
 | S1 | Consolidation and typed-surface removal | `web/src/app/page.tsx`; `web/src/components/{workspace-navigation,persistent-workspace-surfaces,dag-builder-surface,dag-builder,dag-builder-canvas,dag-builder-inspector,dag-workflow-console}.{ts,tsx}`; `web/src/lib/{workspace-persistence,dag-workflow-builder,dag-workflows}.ts` |
 | S1b | Scientific Pipelines cross-engine registry | `web/src/components/dag-workflows-panel.tsx`; `web/src/components/dag-workflows-panel.test.tsx`; `web/src/lib/scientific-pipeline-registry.ts`; `web/src/lib/scientific-pipeline-registry.test.ts`; `server/test/pipeline-engine-client.test.ts`; `docs/lanes/S1b-INTEGRATION.md` |
 | S2 | Vendor integration and naming sweep | `start.mjs`; `server/src/agent/pipeline-engine/**`; `server/src/agent/skills.ts`; `web/src/components/{pipelines-panel,pipeline-builder-panel,engine-iframe-panel}.tsx`; `web/src/lib/{engine-config,embed-config,pipelines}.ts`; vendor attribution files (`LICENSE`, `NOTICE*`, `VENDORED-FROM.md`) |
@@ -22,4 +23,4 @@ inventory path is owned exactly once.
 
 Tests follow the lane owning their production basename. Repository rail scripts,
 guard tests, and `docs/lanes/R1.log` belong to R1 and are outside S1-S11 product
-ownership.
+ownership, except for the explicitly listed C1 vendored-dist gate files above.

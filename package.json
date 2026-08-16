@@ -3,7 +3,9 @@
   "private": true,
   "scripts": {
     "start": "node start.mjs",
-    "check": "node start.mjs --check"
+    "check": "node start.mjs --check",
+    "check:vendored-dist": "node scripts/vendored-dist-check.mjs",
+    "build:vendored-dist": "node scripts/vendored-dist-build.mjs --force"
   },
   "engines": {
     "node": ">=22"

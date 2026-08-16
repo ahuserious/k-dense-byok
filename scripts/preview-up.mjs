@@ -51,6 +51,30 @@ function writeExecutable(targetPath, content) {
   fs.writeFileSync(targetPath, content, { mode: 0o700 });
 }
 
+function prepareVendoredDist({ skipBuild }) {
+  const scriptName = skipBuild ? "vendored-dist-check.mjs" : "vendored-dist-build.mjs";
+  const arguments_ = [path.join(scriptDirectory, scriptName)];
+  if (!skipBuild) arguments_.push("--if-stale");
+
+  if (skipBuild) {
+    console.log("Vendored dist build disabled; verifying the existing bundle.");
+  } else {
+    console.log("Preparing the vendored Pipeline Engine web bundle.");
+  }
+  const result = spawnSync(process.execPath, arguments_, {
+    cwd: repositoryRoot,
+    env: process.env,
+    stdio: "inherit",
+  });
+  if (result.error) fail(`Could not run ${scriptName}: ${result.error.message}`);
+  if (result.status !== 0) {
+    fail(
+      `Vendored Pipeline Engine web dist preparation failed (exit ${result.status ?? "unknown"}). ` +
+        "Run `node scripts/vendored-dist-build.mjs --force` or omit --no-build-dist.",
+    );
+  }
+}
+
 function createLaunchOverlay(stateRoot, realNpm, realGit) {
   const launchRoot = path.join(stateRoot, "launch");
   const isolatedHome = path.join(stateRoot, "home");
@@ -170,6 +194,8 @@ if (process.platform === "win32") {
 if (fs.existsSync(stateFile)) {
   fail(`Preview state already exists at ${stateFile}; run scripts/preview-down.mjs first.`);
 }
+
+prepareVendoredDist({ skipBuild: process.argv.includes("--no-build-dist") });
 
 const ports = {
   backend: portOption("--backend-port", Number(process.env.KADY_PORT || 18000)),
