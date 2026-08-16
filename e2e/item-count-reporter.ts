@@ -6,11 +6,12 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   ["builder.spec.ts", 60],
   ["chat.spec.ts", 28],
   ["console-raindrop.spec.ts", 33],
+  ["live-backend.spec.ts", 3],
   ["scientific-pipelines.spec.ts", 54],
   ["studio.spec.ts", 34],
   ["workspace.spec.ts", 37],
 ]);
-const EXPECTED_SUBSTANTIVE_ITEMS = 210;
+const EXPECTED_SUBSTANTIVE_ITEMS = 213;
 const EXPECTED_THIN_ITEMS = 36;
 const EXPECTED_FIXME_ITEMS = 4;
 const EXPECTED_SKIP_ITEMS = 0;
