@@ -186,6 +186,14 @@ function writeRequiredPayloadArtifacts(directory) {
   );
 }
 
+function percentEncodeLayers(value, layers) {
+  let encoded = value;
+  for (let layer = 0; layer < layers; layer += 1) {
+    encoded = encodeURIComponent(encoded);
+  }
+  return encoded;
+}
+
 test("seal path rejects mixed literal and recursively encoded secrets", () => {
   const secret = "alpha/beta gamma";
   const partialJsonEscape = String.raw`alpha\/\u0062eta gamma`;
@@ -193,6 +201,8 @@ test("seal path rejects mixed literal and recursively encoded secrets", () => {
     ["encodeURI", encodeURI(secret)],
     ["partial JSON escape", partialJsonEscape],
     ["percent-encoded partial JSON escape", encodeURIComponent(partialJsonEscape)],
+    ["four-stage mixed escape", percentEncodeLayers(partialJsonEscape, 3)],
+    ["five-layer percent escape", percentEncodeLayers(secret, 5)],
   ];
   for (const [fixtureName, fixture] of fixtures) {
     withTemporaryDirectory((directory) => {
@@ -216,6 +226,43 @@ test("seal path rejects mixed literal and recursively encoded secrets", () => {
       );
     });
   }
+});
+
+test("seal path accepts benign deep encoding after reaching a fixed point", () => {
+  withTemporaryDirectory((directory) => {
+    writeRequiredPayloadArtifacts(directory);
+    fs.writeFileSync(
+      path.join(directory, "stably-test.scrubbed.log"),
+      percentEncodeLayers("benign evidence value", 5),
+    );
+    const result = sealHostedEvidenceBundle({
+      workingDirectory: directory,
+      environment: { STABLY_API_KEY: "alpha/beta gamma" },
+    });
+    assert.match(result.bundleSha256, /^[a-f0-9]{64}$/);
+  });
+});
+
+test("seal path fails closed when canonicalization cannot reach a fixed point", () => {
+  withTemporaryDirectory((directory) => {
+    writeRequiredPayloadArtifacts(directory);
+    fs.writeFileSync(
+      path.join(directory, "stably-test.scrubbed.log"),
+      percentEncodeLayers("benign evidence value", 9),
+    );
+    assert.throws(
+      () =>
+        sealHostedEvidenceBundle({
+          workingDirectory: directory,
+          environment: { STABLY_API_KEY: "alpha/beta gamma" },
+        }),
+      /^Error: canonicalization budget exhausted for artifact\[4\]#[a-f0-9]{12}$/,
+    );
+    assert.equal(
+      fs.existsSync(path.join(directory, HOSTED_EVIDENCE_BUNDLE_NAME)),
+      false,
+    );
+  });
 });
 
 test("seals, scans, hashes, and records one upload bundle", () => {

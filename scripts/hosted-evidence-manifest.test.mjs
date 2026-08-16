@@ -485,3 +485,39 @@ test("attached reporter rejects stale records and mismatched suite evidence", as
     });
   });
 });
+
+test("attached reporter requires an exact terminal run URL segment", async (context) => {
+  const cases = [
+    [
+      "run ID prefix collision",
+      "https://app.stably.ai/project/test/playwright/history/run-10",
+    ],
+    ["unrelated Stably URL", "https://app.stably.ai/docs/getting-started"],
+  ];
+  for (const [caseName, resultUrl] of cases) {
+    await context.test(caseName, () => {
+      withTemporaryDirectory((directory) => {
+        const runId = "run-1";
+        const suiteName = "sds-outer-loop-ci-exact-url";
+        const runStartedAt = Date.now() - 1_000;
+        fs.writeFileSync(
+          path.join(directory, "stably-test.log"),
+          [
+            "1 passed (1s)",
+            `Suite "${suiteName}" run complete!`,
+            `View results: ${resultUrl}`,
+          ].join("\n"),
+        );
+        writeLastRun(directory, runId, Date.now());
+        const result = runManifest(directory, {
+          STABLY_API_KEY: "attached-api-key",
+          STABLY_PROJECT_ID: "attached-project-id",
+          E2E_RUN_STARTED_AT: String(runStartedAt),
+          E2E_SUITE_NAME: suiteName,
+        });
+        assert.notEqual(result.status, 0);
+        assert.match(result.stderr, /requires a matching run ID and URL/);
+      });
+    });
+  }
+});

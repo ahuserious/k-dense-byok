@@ -59,6 +59,11 @@ Only `hosted-evidence-bundle.tar` is uploaded. Its manifest records structured p
 skipped/fixme counts plus the freshness-validated Stably run identifier and URL; raw logs are removed
 after scrubbing and never uploaded.
 
+The final artifact scan canonicalizes percent and JSON escapes to a fixed point before declaring text
+clean. Work is bounded to eight passes, 64 variants, and 512 MiB of cumulative decoder input per
+scanned value. Reaching any bound before a fixed point fails closed with an opaque
+`canonicalization budget exhausted` artifact reference; it is never treated as a clean scan.
+
 ### What Job A proves
 
 A green run proves that the checked-out revision's Playwright suite executed against the hermetic app

@@ -71,7 +71,13 @@ function archiveKind(bytes) {
 
 function validateArchiveEntries(entries, artifactRef, byteRepresentations) {
   for (const entry of entries) {
-    if (findSecretRepresentation(Buffer.from(entry, "utf8"), byteRepresentations)) {
+    if (
+      findSecretRepresentation(
+        Buffer.from(entry, "utf8"),
+        byteRepresentations,
+        artifactRef,
+      )
+    ) {
       throw new Error(`secret representation detected in ${artifactRef}`);
     }
     const normalized = entry.replace(/\\/g, "/");
@@ -118,7 +124,13 @@ function scanPath(filePath, artifactRef, byteRepresentations) {
   }
   if (stat.isDirectory()) {
     for (const entry of fs.readdirSync(filePath).sort()) {
-      if (findSecretRepresentation(Buffer.from(entry, "utf8"), byteRepresentations)) {
+      if (
+        findSecretRepresentation(
+          Buffer.from(entry, "utf8"),
+          byteRepresentations,
+          artifactRef,
+        )
+      ) {
         throw new Error(`secret representation detected in ${artifactRef}`);
       }
       scanPath(path.join(filePath, entry), artifactRef, byteRepresentations);
@@ -128,7 +140,7 @@ function scanPath(filePath, artifactRef, byteRepresentations) {
   if (!stat.isFile()) return;
 
   const bytes = fs.readFileSync(filePath);
-  if (findSecretRepresentation(bytes, byteRepresentations)) {
+  if (findSecretRepresentation(bytes, byteRepresentations, artifactRef)) {
     throw new Error(`secret representation detected in ${artifactRef}`);
   }
   const kind = archiveKind(bytes);

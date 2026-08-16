@@ -4,8 +4,9 @@ const EXPLICIT_SECRET_ENVIRONMENT_NAMES = new Set([
   "STABLY_API_KEY",
   "STABLY_PROJECT_ID",
 ]);
-const MAX_CANONICALIZATION_PASSES = 3;
-const MAX_CANONICAL_VARIANTS = 32;
+const MAX_CANONICALIZATION_PASSES = 8;
+const MAX_CANONICAL_VARIANTS = 64;
+const MAX_CANONICALIZATION_WORK_BYTES = 512 * 1024 * 1024;
 
 function lowerPercentEscapes(value) {
   return value.replace(/%[0-9A-F]{2}/g, (escape) => escape.toLowerCase());
@@ -244,29 +245,35 @@ function canonicalTextVariants(buffer) {
   const initial = buffer.toString("utf8");
   const seen = new Set([initial]);
   let frontier = [initial];
-  for (
-    let pass = 0;
-    pass < MAX_CANONICALIZATION_PASSES && frontier.length > 0;
-    pass += 1
-  ) {
+  let workBytes = 0;
+  const variants = [];
+  for (let pass = 0; pass < MAX_CANONICALIZATION_PASSES; pass += 1) {
     const next = [];
     for (const value of frontier) {
-      for (const candidate of [
-        decodePercentRuns(value, false),
-        decodePercentRuns(value, true),
-        decodeJsonEscapes(value),
-      ]) {
-        if (candidate === value || seen.has(candidate)) continue;
-        seen.add(candidate);
-        next.push(candidate);
-        if (seen.size >= MAX_CANONICAL_VARIANTS) {
-          return [...seen].slice(1);
+      const decoders = [
+        (input) => decodePercentRuns(input, false),
+        (input) => decodePercentRuns(input, true),
+        decodeJsonEscapes,
+      ];
+      for (const decode of decoders) {
+        workBytes += Buffer.byteLength(value, "utf8");
+        if (workBytes > MAX_CANONICALIZATION_WORK_BYTES) {
+          return { exhausted: true, variants };
         }
+        const candidate = decode(value);
+        if (candidate === value || seen.has(candidate)) continue;
+        if (seen.size >= MAX_CANONICAL_VARIANTS) {
+          return { exhausted: true, variants };
+        }
+        seen.add(candidate);
+        variants.push(candidate);
+        next.push(candidate);
       }
     }
+    if (next.length === 0) return { exhausted: false, variants };
     frontier = next;
   }
-  return [...seen].slice(1);
+  return { exhausted: true, variants };
 }
 
 function containsSecretBytes(buffer, byteRepresentations) {
@@ -275,14 +282,24 @@ function containsSecretBytes(buffer, byteRepresentations) {
   );
 }
 
-export function findSecretRepresentation(buffer, byteRepresentations) {
+export function findSecretRepresentation(
+  buffer,
+  byteRepresentations,
+  artifactReference = "content",
+) {
   if (containsSecretBytes(buffer, byteRepresentations)) return true;
-  for (const canonicalText of canonicalTextVariants(buffer)) {
+  const canonicalized = canonicalTextVariants(buffer);
+  for (const canonicalText of canonicalized.variants) {
     if (
       containsSecretBytes(Buffer.from(canonicalText, "utf8"), byteRepresentations)
     ) {
       return true;
     }
+  }
+  if (canonicalized.exhausted) {
+    throw new Error(
+      `canonicalization budget exhausted for ${artifactReference}`,
+    );
   }
   return false;
 }
@@ -291,7 +308,13 @@ export function scrubAndVerifyText(value, environment = process.env) {
   const textRepresentations = collectSecretRepresentations(environment);
   const byteRepresentations = collectSecretByteRepresentations(environment);
   const scrubbed = scrubText(value, textRepresentations);
-  if (findSecretRepresentation(Buffer.from(scrubbed, "utf8"), byteRepresentations)) {
+  if (
+    findSecretRepresentation(
+      Buffer.from(scrubbed, "utf8"),
+      byteRepresentations,
+      "scrubbed text",
+    )
+  ) {
     throw new Error("secret representation remained after scrubbing");
   }
   return scrubbed;

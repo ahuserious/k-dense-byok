@@ -6,6 +6,9 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
+const networkGuardUrl = pathToFileURL(
+  path.join(import.meta.dirname, "hosted-evidence-network-guard.mjs"),
+).href;
 
 test("direct CI Playwright config and create-suite metadata exclude credentials", async () => {
   const apiKey = "reporter-api-key-sentinel";
@@ -44,15 +47,26 @@ test("direct CI Playwright config and create-suite metadata exclude credentials"
   assert.deepEqual(fullConfig.reporter.at(-1)?.[1], { suiteName });
   assert.equal(serializedRequestBody.includes(suiteName), true);
 
-  // Execute the same direct Playwright entrypoint used by CI in list mode.
-  // Reporting is disabled only to keep this config contract socket-free.
+  // Execute the same direct Playwright entrypoint used by CI in list mode,
+  // without credentials so the conditional Stably reporter is not attached.
+  // The preload guard turns every outbound socket or DNS attempt into failure.
+  const childEnvironment = {
+    ...process.env,
+    NODE_OPTIONS: [
+      process.env.NODE_OPTIONS,
+      `--import=${networkGuardUrl}`,
+    ].filter(Boolean).join(" "),
+  };
+  delete childEnvironment.STABLY_API_KEY;
+  delete childEnvironment.STABLY_PROJECT_ID;
+  delete childEnvironment.STABLY_INTERNAL_DISABLE_REPORTING;
   const ciInvocation = spawnSync(
     "npx",
     ["playwright", "test", "--list", "--grep", "@live", "--trace", "on"],
     {
       cwd: repositoryRoot,
       encoding: "utf8",
-      env: { ...process.env, STABLY_INTERNAL_DISABLE_REPORTING: "1" },
+      env: childEnvironment,
     },
   );
   assert.equal(ciInvocation.status, 0, ciInvocation.stderr);
@@ -95,4 +109,22 @@ test("workflow and package pin the audited Stably versions", () => {
     /e\?\.projectId \?\? process\.env\.STABLY_PROJECT_ID/,
   );
   assert.match(reporterSource, /this\.suiteName = e\?\.suiteName/);
+});
+
+test("network guard fails before an outbound socket attempt", () => {
+  const guardedProbe = spawnSync(
+    process.execPath,
+    [
+      `--import=${networkGuardUrl}`,
+      "--input-type=module",
+      "--eval",
+      'import net from "node:net"; net.connect({ host: "127.0.0.1", port: 9 });',
+    ],
+    { encoding: "utf8" },
+  );
+  assert.notEqual(guardedProbe.status, 0);
+  assert.match(
+    guardedProbe.stderr,
+    /hosted-evidence network guard blocked net\.connect/,
+  );
 });

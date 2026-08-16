@@ -150,7 +150,10 @@ function stablyResultUrl(log, runId) {
       if (
         url.protocol === "https:" &&
         (url.hostname === "stably.ai" || url.hostname.endsWith(".stably.ai")) &&
-        decodeURIComponent(url.pathname).includes(runId)
+        decodeURIComponent(url.pathname)
+          .split("/")
+          .filter(Boolean)
+          .at(-1) === runId
       ) {
         return url.href;
       }
