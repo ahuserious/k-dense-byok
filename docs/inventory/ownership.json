@@ -437,6 +437,34 @@
       "date": "2026-08-16",
       "path": "scripts/vendored-dist-build.mjs",
       "scope": "single guarded call of the preview env-candidate refusal helper immediately before the Bun spawn"
+    },
+    {
+      "from": "S11",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-state.mjs",
+      "scope": "exclusive preview lifecycle lock"
+    },
+    {
+      "from": "S11",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-readiness.mjs",
+      "scope": "named preview source-drift health failure detail"
+    },
+    {
+      "from": "S11",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-readiness.test.mjs",
+      "scope": "named preview source-drift health regression"
+    },
+    {
+      "from": "S11",
+      "to": "C5",
+      "date": "2026-08-16",
+      "path": "scripts/preview-down.mjs",
+      "scope": "owned checkout-local preview web projection cleanup"
     }
   ]
 }
