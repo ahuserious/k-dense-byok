@@ -472,6 +472,13 @@
       "date": "2026-08-16",
       "path": ".gitignore",
       "scope": "checkout-local preview web projection ignore rule"
+    },
+    {
+      "from": "S11",
+      "to": "C1",
+      "date": "2026-08-16",
+      "path": "scripts/preview-launcher-observer.test.mjs",
+      "scope": "workflow-engine readiness and fatal-exit observer regression coverage"
     }
   ]
 }

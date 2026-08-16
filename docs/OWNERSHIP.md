@@ -40,6 +40,7 @@ A handoff lets the recipient lane edit a path another lane owns, for the stated 
 | S11 | C1 | `scripts/preview-environment.test.mjs` | vendored-dist environment and lock regression coverage |
 | S11 | C1 | `scripts/preview-up.mjs` | prepareVendoredDist and prebuild-isolation ordering |
 | S11 | C1 | `scripts/preview-launcher-observer.mjs` | workflow-engine readiness and fatal-exit observer anchors |
+| S11 | C1 | `scripts/preview-launcher-observer.test.mjs` | workflow-engine readiness and fatal-exit observer regression coverage |
 | S2 | C1 | `start.mjs` | vendored-dist build, engine-port ownership, readiness, and disabled-state sections |
 | S2 | C1 | `server/src/agent/pipeline-engine/client.ts` | launcher-disabled fail-before-fetch guard |
 | S5 | C1 | `server/src/config.ts` | explicit pipeline-engine disabled configuration sentinel |
