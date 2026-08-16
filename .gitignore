@@ -73,3 +73,4 @@ CLAUDE.md
 /test-results/
 /.stably/test-results/
 /playwright-report/
+.stably-playwright-wrapper.config.*
