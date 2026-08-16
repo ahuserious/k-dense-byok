@@ -4,13 +4,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { LEGACY_ENGINE_DATA_DIRECTORY } from "../server/src/legacy-engine-data.ts";
 import {
   allowlistedPreviewEnvironment,
-  assertPreviewEngineEnvironmentFilesAbsent,
+  assertPreviewAutomaticEnvironmentFilesAbsent,
   instrumentPreviewEnvironment,
   preparePreviewEngineHome,
-  previewEngineEnvironmentFiles,
+  previewAutomaticEnvironmentFiles,
   previewEnvironment,
+  previewPrebuildEnvironment,
 } from "./preview-environment.mjs";
 import { instrumentPreviewLauncher } from "./preview-launcher-observer.mjs";
 
@@ -177,7 +179,6 @@ test("builds preview child environments from an explicit ambient allowlist", () 
     "LANG",
     "TERM",
     "CI",
-    "NODE_ENV",
     "NEXT_PUBLIC_ADK_API_URL",
     "NEXT_PUBLIC_PIPELINE_ENGINE_URL",
     "KADY_PREVIEW",
@@ -199,6 +200,7 @@ test("builds preview child environments from an explicit ambient allowlist", () 
     "OPENROUTER_API_KEY",
     "KADY_UNSAFE_AMBIENT_VALUE",
     "HOME",
+    "NODE_ENV",
   ]) {
     assert.equal(name in allowlisted, false, `${name} should be dropped`);
   }
@@ -217,6 +219,7 @@ test("builds preview child environments from an explicit ambient allowlist", () 
   assert.equal(preview.KADY_PORT, "18000");
   assert.equal(preview.KADY_FRONTEND_PORT, "13000");
   assert.equal(preview.KADY_PIPELINE_ENGINE_PORT, "13091");
+  assert.equal("NODE_ENV" in preview, false);
   for (const name of [
     engineDockerVariable,
     "WORKSPACE_PATH",
@@ -233,18 +236,57 @@ test("builds preview child environments from an explicit ambient allowlist", () 
   ]) {
     assert.equal(name in preview, false, `${name} should be absent from preview`);
   }
+
+  const prebuildEnvironment = previewPrebuildEnvironment(allowlisted);
+  assert.equal(prebuildEnvironment.NODE_ENV, "production");
+  assert.equal("NODE_ENV" in allowlisted, false);
 });
 
-test("isolates engine env discovery and rejects every engine-owned env file", () => {
+test("sets production mode only on the prebuild child", () => {
+  const ambientEnvironment = { PATH: "/usr/bin", NODE_ENV: "development" };
+  const previewParentEnvironment = allowlistedPreviewEnvironment(ambientEnvironment, {
+    KADY_PREVIEW: "1",
+  });
+  const prebuildEnvironment = previewPrebuildEnvironment(previewParentEnvironment);
+  const serviceEnvironment = previewEnvironment(
+    "/tmp/kady-preview-test",
+    "/tmp/kady-preview-test/launch",
+    "/tmp/kady-preview-test/launch/bin",
+    { backend: 18000, frontend: 13000, engine: 13091 },
+    ambientEnvironment,
+  );
+
+  assert.equal("NODE_ENV" in previewParentEnvironment, false);
+  assert.equal(prebuildEnvironment.NODE_ENV, "production");
+  assert.equal("NODE_ENV" in serviceEnvironment, false);
+});
+
+test("rejects every automatic web and engine env file by canonical path", () => {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-engine-env-"));
   try {
     const stateRoot = path.join(temporaryRoot, "state");
     const launchRoot = path.join(stateRoot, "launch");
     const repositoryRoot = path.join(temporaryRoot, "checkout");
     const ambientEngineHome = path.join(temporaryRoot, "ambient-engine-home");
-    const forbiddenEnvironmentFiles = previewEngineEnvironmentFiles(repositoryRoot);
+    const webRoot = path.join(repositoryRoot, "web");
+    const vendoredRoot = path.join(
+      repositoryRoot,
+      "server",
+      "vendor",
+      "pipeline-engine",
+    );
+    const engineWebDirectory = path.join(vendoredRoot, "packages", "web");
+    const enginePackageDirectory = path.join(vendoredRoot, "packages", "server");
     fs.mkdirSync(launchRoot, { recursive: true });
     fs.mkdirSync(ambientEngineHome, { recursive: true });
+    for (const directory of [webRoot, engineWebDirectory, enginePackageDirectory]) {
+      fs.mkdirSync(directory, { recursive: true });
+    }
+    const canonicalWebRoot = fs.realpathSync(webRoot);
+    const canonicalVendoredRoot = fs.realpathSync(vendoredRoot);
+    const canonicalEngineWebDirectory = fs.realpathSync(engineWebDirectory);
+    const canonicalEnginePackageDirectory = fs.realpathSync(enginePackageDirectory);
+    const forbiddenEnvironmentFiles = previewAutomaticEnvironmentFiles(repositoryRoot);
     fs.writeFileSync(
       path.join(ambientEngineHome, ".env"),
       "OPENROUTER_API_KEY=sentinel\n",
@@ -263,24 +305,34 @@ test("isolates engine env discovery and rejects every engine-owned env file", ()
     assert.equal(preparePreviewEngineHome(stateRoot), isolatedEngineHome);
     assert.deepEqual(fs.readdirSync(isolatedEngineHome), []);
 
-    assert.equal(forbiddenEnvironmentFiles.length, 11);
+    assert.equal(forbiddenEnvironmentFiles.length, 33);
+    for (const namedSentinel of [
+      path.join(canonicalWebRoot, ".env.local"),
+      path.join(canonicalVendoredRoot, ".env.production.local"),
+      path.join(canonicalEngineWebDirectory, ".env.production.local"),
+      path.join(canonicalEnginePackageDirectory, LEGACY_ENGINE_DATA_DIRECTORY, ".env"),
+    ]) {
+      assert.equal(forbiddenEnvironmentFiles.includes(namedSentinel), true);
+    }
     for (const forbiddenEnvironmentFile of forbiddenEnvironmentFiles) {
       fs.mkdirSync(path.dirname(forbiddenEnvironmentFile), { recursive: true });
       fs.writeFileSync(forbiddenEnvironmentFile, "OPENROUTER_API_KEY=sentinel\n");
       assert.throws(
-        () => assertPreviewEngineEnvironmentFilesAbsent(repositoryRoot),
+        () => assertPreviewAutomaticEnvironmentFilesAbsent(repositoryRoot),
         (error) =>
           error instanceof Error && error.message.includes(forbiddenEnvironmentFile),
       );
       fs.unlinkSync(forbiddenEnvironmentFile);
     }
-    assert.doesNotThrow(() => assertPreviewEngineEnvironmentFilesAbsent(repositoryRoot));
+    assert.doesNotThrow(() =>
+      assertPreviewAutomaticEnvironmentFilesAbsent(repositoryRoot),
+    );
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
 });
 
-test("instruments the actual engine launcher immediately before spawn", () => {
+test("instruments each automatic-env-loading launcher child before spawn", () => {
   const launcherSource = fs.readFileSync(
     new URL("../start.mjs", import.meta.url),
     "utf8",
@@ -288,8 +340,12 @@ test("instruments the actual engine launcher immediately before spawn", () => {
   const instrumentedSource = instrumentPreviewEnvironment(
     instrumentPreviewLauncher(launcherSource),
   );
-  const guardPosition = instrumentedSource.indexOf(
-    '  if (process.env.KADY_PREVIEW === "1") {',
+  const serviceSpawnPosition = instrumentedSource.indexOf("  const child = directArgs");
+  const engineInstallPosition = instrumentedSource.indexOf(
+    '    if (run(bun, ["install"], { cwd: PIPELINE_ENGINE_DIR }) !== 0) {',
+  );
+  const engineBuildPosition = instrumentedSource.indexOf(
+    '    if (run(bun, ["run", "build:web"], { cwd: PIPELINE_ENGINE_DIR }) !== 0) {',
   );
   const engineArgumentsPosition = instrumentedSource.indexOf(
     '  const engineArgs = ["--filter", "@archon/server", "start"];',
@@ -298,10 +354,23 @@ test("instruments the actual engine launcher immediately before spawn", () => {
     "      spawn(bun, engineArgs, {",
   );
 
-  assert.notEqual(guardPosition, -1);
+  for (const childPosition of [
+    serviceSpawnPosition,
+    engineInstallPosition,
+    engineBuildPosition,
+    engineArgumentsPosition,
+  ]) {
+    assert.notEqual(childPosition, -1);
+    const guardPosition = instrumentedSource.lastIndexOf(
+      "assertPreviewAutomaticEnvironmentFilesAbsent(",
+      childPosition - 1,
+    );
+    assert.notEqual(guardPosition, -1);
+    assert.equal(guardPosition < childPosition, true);
+    assert.equal(childPosition - guardPosition < 650, true);
+  }
   assert.notEqual(engineArgumentsPosition, -1);
   assert.notEqual(engineSpawnPosition, -1);
-  assert.equal(guardPosition < engineArgumentsPosition, true);
   assert.equal(engineArgumentsPosition < engineSpawnPosition, true);
   assert.equal(
     instrumentedSource.includes(
@@ -322,24 +391,30 @@ test("instruments the actual engine launcher immediately before spawn", () => {
     ".env",
     ".env.local",
     ".env.development",
+    ".env.development.local",
     ".env.production",
+    ".env.production.local",
     ".env.test",
+    ".env.test.local",
   ]) {
     assert.equal(instrumentedSource.includes(JSON.stringify(fileName)), true);
   }
   assert.throws(
     () => instrumentPreviewEnvironment("const noEngineSpawn = true;"),
-    /expected one engine spawn anchor/,
+    /expected one helper anchor/,
   );
 });
 
 test("preview-up sanitizes its process before vendored preparation and boot", () => {
   const source = fs.readFileSync(new URL("./preview-up.mjs", import.meta.url), "utf8");
   const isolationAssertion = source.indexOf(
-    "\nassertPreviewEngineEnvironmentFilesAbsent(repositoryRoot);\n",
+    "\n  assertPreviewAutomaticEnvironmentFilesAbsent(repositoryRoot);\n",
+  );
+  const prebuildSpawn = source.indexOf(
+    "\n  const result = spawnSync(process.execPath, arguments_, {\n",
   );
   const vendoredPreparation = source.indexOf(
-    "\nprepareVendoredDist({ skipBuild: process.argv.includes(\"--no-build-dist\") });\n",
+    "\nprepareVendoredDist({\n",
   );
   const processSanitization = source.indexOf("\nreplaceProcessEnvironment(\n");
   const engineHomePreparation = source.indexOf(
@@ -353,6 +428,8 @@ test("preview-up sanitizes its process before vendored preparation and boot", ()
   );
 
   assert.notEqual(isolationAssertion, -1);
+  assert.notEqual(prebuildSpawn, -1);
+  assert.equal(isolationAssertion < prebuildSpawn, true);
   assert.notEqual(vendoredPreparation, -1);
   assert.notEqual(processSanitization, -1);
   assert.equal(processSanitization < vendoredPreparation, true);
@@ -361,6 +438,10 @@ test("preview-up sanitizes its process before vendored preparation and boot", ()
   assert.notEqual(environmentConstruction, -1);
   assert.equal(engineHomePreparation < environmentConstruction, true);
   assert.notEqual(launcherInstrumentation, -1);
+  assert.equal(
+    source.includes("environment: previewPrebuildEnvironment(process.env)"),
+    true,
+  );
 });
 
 test("scrubs credentials when a browser-facing backend origin is present", () => {

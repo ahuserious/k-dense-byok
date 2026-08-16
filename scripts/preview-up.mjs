@@ -6,11 +6,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   allowlistedPreviewEnvironment,
-  assertPreviewEngineEnvironmentFilesAbsent,
+  assertPreviewAutomaticEnvironmentFilesAbsent,
   instrumentPreviewEnvironment,
   preparePreviewEngineHome,
   previewEngineHome,
   previewEnvironment,
+  previewPrebuildEnvironment,
 } from "./preview-environment.mjs";
 import { instrumentPreviewLauncher } from "./preview-launcher-observer.mjs";
 import {
@@ -63,7 +64,7 @@ function writeExecutable(targetPath, content) {
   fs.writeFileSync(targetPath, content, { mode: 0o700 });
 }
 
-function prepareVendoredDist({ skipBuild }) {
+function prepareVendoredDist({ skipBuild, environment }) {
   const scriptName = skipBuild ? "vendored-dist-check.mjs" : "vendored-dist-build.mjs";
   const arguments_ = [path.join(scriptDirectory, scriptName)];
   if (!skipBuild) arguments_.push("--if-stale");
@@ -73,9 +74,10 @@ function prepareVendoredDist({ skipBuild }) {
   } else {
     console.log("Preparing the vendored Pipeline Engine web bundle.");
   }
+  assertPreviewAutomaticEnvironmentFilesAbsent(repositoryRoot);
   const result = spawnSync(process.execPath, arguments_, {
     cwd: repositoryRoot,
-    env: process.env,
+    env: environment,
     stdio: "inherit",
   });
   if (result.error) fail(`Could not run ${scriptName}: ${result.error.message}`);
@@ -236,8 +238,10 @@ replaceProcessEnvironment(
     KADY_PREVIEW: "1",
   }),
 );
-assertPreviewEngineEnvironmentFilesAbsent(repositoryRoot);
-prepareVendoredDist({ skipBuild: process.argv.includes("--no-build-dist") });
+prepareVendoredDist({
+  skipBuild: process.argv.includes("--no-build-dist"),
+  environment: previewPrebuildEnvironment(process.env),
+});
 
 const ports = {
   backend: portOption("--backend-port", Number(ambientEnvironment.KADY_PORT || 18000)),

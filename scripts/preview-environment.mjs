@@ -11,13 +11,23 @@ const ALLOWED_AMBIENT_VARIABLES = [
   "NEXT_PUBLIC_ADK_API_URL",
   "NEXT_PUBLIC_PIPELINE_ENGINE_URL",
 ];
-const BUN_AUTO_ENV_FILE_NAMES = [
+const AUTOMATIC_ENV_FILE_NAMES = [
   ".env",
   ".env.local",
   ".env.development",
+  ".env.development.local",
   ".env.production",
+  ".env.production.local",
   ".env.test",
+  ".env.test.local",
 ];
+const LAUNCHER_HELPER_ANCHOR =
+  "const sleep = (ms) => new Promise((r) => setTimeout(r, ms));";
+const SERVICE_SPAWN_ANCHOR = "  const child = directArgs";
+const ENGINE_INSTALL_ANCHOR =
+  '    if (run(bun, ["install"], { cwd: PIPELINE_ENGINE_DIR }) !== 0) {';
+const ENGINE_BUILD_ANCHOR =
+  '    if (run(bun, ["run", "build:web"], { cwd: PIPELINE_ENGINE_DIR }) !== 0) {';
 const ENGINE_ARGUMENTS_ANCHOR =
   '  const engineArgs = ["--filter", "@archon/server", "start"];';
 
@@ -64,10 +74,11 @@ export function allowlistedPreviewEnvironment(
       environment[name] = ambientEnvironment[name];
     }
   }
-  if (ambientEnvironment.NODE_ENV !== undefined) {
-    environment.NODE_ENV = ambientEnvironment.NODE_ENV;
-  }
   return { ...environment, ...explicitPreviewVariables };
+}
+
+export function previewPrebuildEnvironment(previewParentEnvironment) {
+  return { ...previewParentEnvironment, NODE_ENV: "production" };
 }
 
 export function preparePreviewEngineHome(stateRoot) {
@@ -83,30 +94,31 @@ export function preparePreviewEngineHome(stateRoot) {
   return engineHome;
 }
 
-export function previewEngineEnvironmentFiles(repositoryRoot) {
-  const vendoredRoot = path.join(
-    repositoryRoot,
-    "server",
-    "vendor",
-    "pipeline-engine",
+export function previewAutomaticEnvironmentFiles(repositoryRoot) {
+  const webRoot = fs.realpathSync(path.join(repositoryRoot, "web"));
+  const vendoredRoot = fs.realpathSync(
+    path.join(repositoryRoot, "server", "vendor", "pipeline-engine"),
   );
+  const engineWebDirectory = fs.realpathSync(path.join(vendoredRoot, "packages", "web"));
   // `bun --filter @archon/server start` runs the package script from here,
   // so this is the cwd used by the engine's repository env loader.
-  const enginePackageDirectory = path.join(vendoredRoot, "packages", "server");
+  const enginePackageDirectory = fs.realpathSync(
+    path.join(vendoredRoot, "packages", "server"),
+  );
   return [
-    ...BUN_AUTO_ENV_FILE_NAMES.flatMap((fileName) => [
-      path.join(vendoredRoot, fileName),
-      path.join(enginePackageDirectory, fileName),
-    ]),
+    ...[webRoot, vendoredRoot, engineWebDirectory, enginePackageDirectory].flatMap(
+      (directory) =>
+        AUTOMATIC_ENV_FILE_NAMES.map((fileName) => path.join(directory, fileName)),
+    ),
     path.join(enginePackageDirectory, LEGACY_ENGINE_DATA_DIRECTORY, ".env"),
   ];
 }
 
-export function assertPreviewEngineEnvironmentFilesAbsent(repositoryRoot) {
-  for (const file of previewEngineEnvironmentFiles(repositoryRoot)) {
+export function assertPreviewAutomaticEnvironmentFilesAbsent(repositoryRoot) {
+  for (const file of previewAutomaticEnvironmentFiles(repositoryRoot)) {
     try {
       fs.lstatSync(file);
-      throw new Error(`Preview engine isolation refuses environment file ${file}.`);
+      throw new Error(`Preview environment isolation refuses environment file ${file}.`);
     } catch (error) {
       if (error?.code === "ENOENT") continue;
       throw error;
@@ -114,42 +126,102 @@ export function assertPreviewEngineEnvironmentFilesAbsent(repositoryRoot) {
   }
 }
 
-export function instrumentPreviewEnvironment(launcherSource) {
-  const firstAnchor = launcherSource.indexOf(ENGINE_ARGUMENTS_ANCHOR);
-  if (
-    firstAnchor === -1 ||
-    launcherSource.indexOf(ENGINE_ARGUMENTS_ANCHOR, firstAnchor + 1) !== -1
-  ) {
+function replaceLauncherAnchor(source, anchor, replacement, label) {
+  const firstAnchor = source.indexOf(anchor);
+  if (firstAnchor === -1 || source.indexOf(anchor, firstAnchor + anchor.length) !== -1) {
     throw new Error(
-      "Preview engine isolation instrumentation expected one engine spawn anchor in start.mjs.",
+      `Preview environment instrumentation expected one ${label} anchor in start.mjs.`,
     );
   }
+  return source.replace(anchor, replacement);
+}
 
-  const autoEnvFileNames = JSON.stringify(BUN_AUTO_ENV_FILE_NAMES);
+export function instrumentPreviewEnvironment(launcherSource) {
+  const automaticEnvFileNames = JSON.stringify(AUTOMATIC_ENV_FILE_NAMES);
   const legacyDataDirectory = JSON.stringify(LEGACY_ENGINE_DATA_DIRECTORY);
-  const guard = `  if (process.env.KADY_PREVIEW === "1") {
-    const previewEnginePackageDirectory = path.join(PIPELINE_ENGINE_DIR, "packages", "server");
-    const previewEngineEnvironmentFiles = [
-      ...${autoEnvFileNames}.flatMap((fileName) => [
-        path.join(PIPELINE_ENGINE_DIR, fileName),
-        path.join(previewEnginePackageDirectory, fileName),
-      ]),
-      path.join(previewEnginePackageDirectory, ${legacyDataDirectory}, ".env"),
-    ];
-    for (const previewEngineEnvironmentFile of previewEngineEnvironmentFiles) {
-      try {
-        fs.lstatSync(previewEngineEnvironmentFile);
-      } catch (error) {
-        if (error?.code === "ENOENT") continue;
-        throw error;
-      }
-      throw new Error(
-        \`Preview engine isolation refuses environment file \${previewEngineEnvironmentFile}.\`,
-      );
-    }
+  const helper = `
+const previewAutomaticEnvironmentFileNames = ${automaticEnvFileNames};
+function assertPreviewAutomaticEnvironmentFilesAbsent(
+  directories,
+  legacyEnginePackageDirectory = null,
+) {
+  if (process.env.KADY_PREVIEW !== "1") return;
+  const canonicalDirectories = directories.map((directory) => fs.realpathSync(directory));
+  const previewAutomaticEnvironmentFiles = canonicalDirectories.flatMap((directory) =>
+    previewAutomaticEnvironmentFileNames.map((fileName) => path.join(directory, fileName)),
+  );
+  if (legacyEnginePackageDirectory) {
+    previewAutomaticEnvironmentFiles.push(
+      path.join(
+        fs.realpathSync(legacyEnginePackageDirectory),
+        ${legacyDataDirectory},
+        ".env",
+      ),
+    );
   }
+  for (const previewAutomaticEnvironmentFile of previewAutomaticEnvironmentFiles) {
+    try {
+      fs.lstatSync(previewAutomaticEnvironmentFile);
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+    throw new Error(
+      \`Preview environment isolation refuses environment file \${previewAutomaticEnvironmentFile}.\`,
+    );
+  }
+}`;
+  const engineGuard = `    assertPreviewAutomaticEnvironmentFilesAbsent(
+      [
+        PIPELINE_ENGINE_DIR,
+        path.join(PIPELINE_ENGINE_DIR, "packages", "web"),
+        path.join(PIPELINE_ENGINE_DIR, "packages", "server"),
+      ],
+      path.join(PIPELINE_ENGINE_DIR, "packages", "server"),
+    );
 `;
-  return launcherSource.replace(ENGINE_ARGUMENTS_ANCHOR, guard + ENGINE_ARGUMENTS_ANCHOR);
+
+  let instrumented = replaceLauncherAnchor(
+    launcherSource,
+    LAUNCHER_HELPER_ANCHOR,
+    `${LAUNCHER_HELPER_ANCHOR}${helper}`,
+    "helper",
+  );
+  instrumented = replaceLauncherAnchor(
+    instrumented,
+    SERVICE_SPAWN_ANCHOR,
+    `  if (dir === "web") {
+    assertPreviewAutomaticEnvironmentFilesAbsent([cwd]);
+  }
+${SERVICE_SPAWN_ANCHOR}`,
+    "service spawn",
+  );
+  instrumented = replaceLauncherAnchor(
+    instrumented,
+    ENGINE_INSTALL_ANCHOR,
+    `${engineGuard}${ENGINE_INSTALL_ANCHOR}`,
+    "engine install",
+  );
+  instrumented = replaceLauncherAnchor(
+    instrumented,
+    ENGINE_BUILD_ANCHOR,
+    `${engineGuard}${ENGINE_BUILD_ANCHOR}`,
+    "engine build",
+  );
+  return replaceLauncherAnchor(
+    instrumented,
+    ENGINE_ARGUMENTS_ANCHOR,
+    `  assertPreviewAutomaticEnvironmentFilesAbsent(
+    [
+      PIPELINE_ENGINE_DIR,
+      path.join(PIPELINE_ENGINE_DIR, "packages", "web"),
+      path.join(PIPELINE_ENGINE_DIR, "packages", "server"),
+    ],
+    path.join(PIPELINE_ENGINE_DIR, "packages", "server"),
+  );
+${ENGINE_ARGUMENTS_ANCHOR}`,
+    "engine spawn",
+  );
 }
 
 export function previewEnvironment(

@@ -17,9 +17,11 @@ Before opening any sockets, `preview-up` runs
 `node scripts/vendored-dist-build.mjs --if-stale`. The build script invokes
 `bun run build:web` from `server/vendor/pipeline-engine/`, which is the
 vendored Bun workspace owning `bun.lock` and filters the build to the web
-package. It then re-runs the fail-closed freshness check. This produces the
-ignored `packages/web/dist/` required by the workflow-engine server in a fresh
-clone without committing generated assets.
+package. That prebuild child alone receives `NODE_ENV=production`; ambient
+`NODE_ENV` is discarded and no service child inherits it. The build script then
+re-runs the fail-closed freshness check. This produces the ignored
+`packages/web/dist/` required by the workflow-engine server in a fresh clone
+without committing generated assets.
 
 Use `--no-build-dist` only when a caller has already built the bundle. The
 option skips compilation, not validation: `preview-up` still exits before boot
@@ -53,22 +55,25 @@ The workflow engine receives `ARCHON_HOME=<stateRoot>/pipeline-engine-home`, a
 new empty directory created by `preview-up`; an ambient `ARCHON_HOME` is never
 preserved. The filtered Bun package runs with
 `server/vendor/pipeline-engine/packages/server` as its actual cwd. Preview boot
-therefore refuses every Bun automatic env candidate (`.env`, `.env.local`,
-`.env.development`, `.env.production`, and `.env.test`) at both the vendored
-workspace root and that package directory, plus the package cwd's legacy
-data-directory env file. The check runs once before vendored preparation and is
-injected again immediately before the engine spawn, closing the
-validation-to-start window without patching vendored code.
+therefore refuses every automatic env candidate: `.env`, `.env.local`, and the
+development, production, and test variants both with and without `.local`.
+Those checks use the canonical checkout paths for `web/`, the vendored
+workspace root, `packages/web`, and `packages/server`, plus the server package
+cwd's legacy data-directory env file. They run immediately before vendored
+preparation, Next startup, engine install/build, and engine startup, closing
+validation-to-start windows without patching vendored code.
 
 Before its first child process, `preview-up` replaces its own environment with
 an explicit allowlist. It may retain ambient `PATH`, `TMPDIR`, `LANG`, `TERM`,
-`CI`, `NODE_ENV` (only when already set), and the two validated browser-facing
-origin overrides. It then adds only the preview's isolated `HOME`, engine home,
-ports, state paths, loopback service URLs, and safety controls. All other
-ambient values are dropped, including Docker/workspace selectors, database and
-cloud-tracing configuration, proxy variables, the host SSH agent socket, and
-the host Pi-agent directory. The sanitized environment is used by vendored
-preparation, the supervisor, and every service descendant.
+`CI`, and the two validated browser-facing origin overrides. It does not retain
+ambient `NODE_ENV`; each service runtime establishes its own mode. It then adds
+only the preview's isolated `HOME`, engine home, ports, state paths, loopback
+service URLs, and safety controls. All other ambient values are dropped,
+including Docker/workspace selectors, database and cloud-tracing configuration,
+proxy variables, the host SSH agent socket, and the host Pi-agent directory.
+The sanitized environment is used by the supervisor and every service
+descendant; the prebuild gets the same base plus its build-only production
+mode.
 
 The effective environment includes:
 
