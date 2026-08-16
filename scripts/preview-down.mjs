@@ -15,9 +15,15 @@ import {
 } from "./preview-processes.mjs";
 import {
   acquirePreviewLifecycleLock,
+  previewTeardownRecord,
+  readPreviewStateCandidate,
   removePreviewStateFile,
 } from "./preview-state.mjs";
-import { removePreviewWebRoot } from "./preview-environment.mjs";
+import {
+  previewWebProjectionMarkerPath,
+  readPreviewWebProjectionMarker,
+  removePreviewWebRoot,
+} from "./preview-environment.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = fs.realpathSync(path.resolve(scriptDirectory, ".."));
@@ -30,9 +36,7 @@ function fail(message) {
   process.exit(1);
 }
 
-function readState() {
-  if (!fs.existsSync(stateFile)) fail(`No preview state found at ${stateFile}.`);
-  const state = JSON.parse(fs.readFileSync(stateFile, "utf-8"));
+function validateLifecycleRecord(state, source, { requireRootPid }) {
   const allowedTemporaryRoots = [os.tmpdir(), "/tmp"].map((candidate) =>
     fs.realpathSync(candidate),
   );
@@ -41,25 +45,76 @@ function readState() {
     typeof state.generation !== "string" ||
     !state.generation ||
     state.repositoryRoot !== repositoryRoot ||
-    !Number.isSafeInteger(state.rootPid) ||
-    state.rootPid < 1 ||
+    (requireRootPid && (!Number.isSafeInteger(state.rootPid) || state.rootPid < 1)) ||
+    (state.rootPid !== null && state.rootPid !== undefined &&
+      (!Number.isSafeInteger(state.rootPid) || state.rootPid < 1)) ||
     typeof state.stateRoot !== "string" ||
     typeof state.launchRoot !== "string" ||
+    !state.ports ||
+    Object.values(state.ports).some(
+      (port) => !Number.isSafeInteger(port) || port < 1024 || port > 65535,
+    ) ||
     !path.resolve(state.launchRoot).startsWith(`${path.resolve(state.stateRoot)}${path.sep}`)
   ) {
-    fail("Preview state failed ownership validation; refusing teardown.");
+    fail(`${source} failed ownership validation; refusing teardown.`);
   }
-  const resolvedStateRoot = fs.realpathSync(state.stateRoot);
+  const resolvedStateRoot = fs.existsSync(state.stateRoot)
+    ? fs.realpathSync(state.stateRoot)
+    : path.resolve(state.stateRoot);
   if (
     !path.basename(resolvedStateRoot).startsWith("kady-preview-") ||
-    !allowedTemporaryRoots.includes(path.dirname(resolvedStateRoot))
+    !allowedTemporaryRoots.includes(fs.realpathSync(path.dirname(resolvedStateRoot)))
   ) {
-    fail("Preview state root is not an owned temporary directory; refusing teardown.");
+    fail(`${source} root is not an owned temporary directory; refusing teardown.`);
   }
   return state;
 }
 
+function peekLifecycleGeneration() {
+  const candidate = readPreviewStateCandidate(stateFile);
+  if (candidate.status === "valid" && typeof candidate.state?.generation === "string") {
+    return candidate.state.generation;
+  }
+  try {
+    return readPreviewWebProjectionMarker(repositoryRoot)?.generation ?? randomUUID();
+  } catch {
+    return randomUUID();
+  }
+}
+
+function readStateOrProjectionRecovery() {
+  let marker;
+  try {
+    marker = readPreviewWebProjectionMarker(repositoryRoot);
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
+  let selected;
+  try {
+    selected = previewTeardownRecord(stateFile, marker);
+  } catch (error) {
+    fail(
+      `${error instanceof Error ? error.message : String(error)} ` +
+        "If preview processes remain, stop only the processes you can independently prove belong to this checkout, then remove the malformed state file.",
+    );
+  }
+  if (selected.recoveredFromMarker) {
+    console.warn(
+      `Preview state is ${selected.stateStatus}; recovering teardown from projection generation ${selected.state.generation}.`,
+    );
+  }
+  return {
+    state: validateLifecycleRecord(
+      selected.state,
+      selected.recoveredFromMarker ? "Preview projection marker" : "Preview state",
+      { requireRootPid: !selected.recoveredFromMarker },
+    ),
+    recoveredFromMarker: selected.recoveredFromMarker,
+  };
+}
+
 function assertRootOwnership(state) {
+  if (!state.rootPid) return;
   if (!processAlive(state.rootPid)) return;
   const workingDirectory = processWorkingDirectory(state.rootPid);
   if (workingDirectory !== state.launchRoot) {
@@ -97,7 +152,8 @@ let lifecycleLock;
 try {
   lifecycleLock = acquirePreviewLifecycleLock(lifecycleLockFile, {
     operation: "preview-down",
-    generation: randomUUID(),
+    generation: peekLifecycleGeneration(),
+    generationFiles: [stateFile, previewWebProjectionMarkerPath(repositoryRoot)],
   });
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));
@@ -118,16 +174,19 @@ process.once("exit", () => {
   }
 });
 
-const state = readState();
+const { state, recoveredFromMarker } = readStateOrProjectionRecovery();
 assertRootOwnership(state);
 let listenerGroups;
 try {
   listenerGroups = collectPreviewListenerGroups(repositoryRoot, state.ports);
 } catch (error) {
-  fail(error instanceof Error ? error.message : String(error));
+  fail(
+    `${error instanceof Error ? error.message : String(error)} ` +
+      "Stop the unrelated listener or restore a matching lifecycle state, then rerun preview-down.",
+  );
 }
 
-if (processGroupAlive(state.rootPid)) {
+if (state.rootPid && processGroupAlive(state.rootPid)) {
   process.kill(-state.rootPid, "SIGTERM");
   if (!(await waitFor(() => processGroupAlive(state.rootPid), 90_000))) {
     console.warn("Graceful shutdown did not finish; sending the launcher's second force signal.");
@@ -177,5 +236,8 @@ if (!keepState) {
   console.log(`Removed preview state tree: ${state.stateRoot}`);
 } else {
   console.log(`Preserved preview state tree: ${state.stateRoot}`);
+}
+if (recoveredFromMarker) {
+  console.log(`Recovered teardown from projection marker generation ${state.generation}.`);
 }
 releaseLifecycleLock();

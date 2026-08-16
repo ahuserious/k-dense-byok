@@ -46,13 +46,16 @@ root is instead the gitignored physical directory
 entry except `.next`, `.preview`, `node_modules`, package-manager lockfiles, and
 the automatic env filenames. This includes the physical `src/app` route tree,
 `public`, package metadata, and Next, TypeScript, PostCSS, Tailwind, and other
-root configuration files; the copy uses `fs.cpSync` without dereferencing
-source symlinks. Lockfiles stay at the checkout ancestor so Turbopack does not
+root configuration files. In-checkout source symlinks are dereferenced into
+physical snapshot bytes; an outside-pointing link or directory cycle stops
+startup, and a post-copy walk requires the projected source set to contain no
+symlinks. Lockfiles stay at the checkout ancestor so Turbopack does not
 infer the projection itself as its filesystem root. The projection also copies
 `server/package.json` into its sibling `server/` directory because the copied
 Next config reads that version source through `../server/package.json`. Startup
-prints the measured copy time. `node_modules` alone remains linked within the
-checkout, and `.next` is a private real directory inside the projection. The
+prints the measured copy time. `node_modules` alone remains linked to its
+canonical path within the checkout and is not traversed by the snapshot walk;
+`.next` is a private real directory inside the projection. The
 temporary launch overlay links its `web/` entry to this checkout-local project.
 Consequently Turbopack discovers physical App Router files while every retained
 symlink resolves under its inferred checkout filesystem root; preview creation
@@ -76,6 +79,23 @@ Preview lifecycle mutations are serialized by an exclusive lock under
 and the checkout-local projection marker. Concurrent up/down commands refuse
 while another lifecycle operation owns the lock, and teardown removes a
 projection only when its generation matches the state it locked and read.
+
+## Recovery
+
+Lifecycle state is fsynced to a same-directory temporary file and published by
+atomic rename. The exclusive lock records its PID, cross-platform process start
+identity, generation, and creation time. If that PID is dead, or the PID has
+been reused with a different start identity, the next command recovers the
+stale lock only when every readable state/projection generation agrees; a live
+owner remains busy. Recovery is logged with the stale PID and recorded start
+identity.
+
+`preview-down` tolerates missing or malformed state when the owned projection
+marker remains valid. It uses the marker's generation and launch metadata to
+remove only that projection, and signals a launcher or listener only after its
+working directory proves it belongs to this checkout. An unproven listener is
+never signalled: teardown refuses with the affected port and asks the operator
+to stop the unrelated listener or restore matching state before retrying.
 
 Backend env selection fails closed. With `KADY_PREVIEW=1`, `KADY_ENV_FILE`
 must be present, non-blank, absolute, and resolve to a regular file under the

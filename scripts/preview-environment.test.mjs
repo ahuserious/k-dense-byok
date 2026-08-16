@@ -15,6 +15,7 @@ import {
   previewAutomaticEnvironmentFiles,
   previewEnvironment,
   previewPrebuildEnvironment,
+  previewWebSourceManifest,
   previewWebRoot,
   removePreviewWebRoot,
 } from "./preview-environment.mjs";
@@ -425,6 +426,10 @@ test("projects the web root without automatic env files or checkout build output
       fs.realpathSync(path.join(projectedWebRoot, "node_modules")),
       fs.realpathSync(checkoutNodeModules),
     );
+    assert.equal(
+      fs.readlinkSync(path.join(projectedWebRoot, "node_modules")),
+      fs.realpathSync(checkoutNodeModules),
+    );
     assert.equal(fs.existsSync(path.join(projectedWebRoot, ".preview")), false);
     assert.equal(fs.existsSync(path.join(projectedWebRoot, "package-lock.json")), false);
     assert.equal(
@@ -521,17 +526,119 @@ test("rejects a copied nested symlink that escapes the checkout", () => {
     fs.writeFileSync(outsideFile, "sentinel\n");
     fs.symlinkSync(outsideFile, path.join(checkoutPublicRoot, "outside.txt"), "file");
 
-    const projectedOutsideLink = path.join(
-      previewWebRoot(repositoryRoot),
-      "public",
-      "outside.txt",
-    );
+    const checkoutOutsideLink = path.join(checkoutPublicRoot, "outside.txt");
     assert.throws(
       () => preparePreviewWebRoot(repositoryRoot, launchRoot, "nested-link-generation"),
       (error) =>
-        error instanceof Error && error.message.includes(projectedOutsideLink),
+        error instanceof Error && error.message.includes(checkoutOutsideLink),
     );
     assert.equal(fs.existsSync(previewWebRoot(repositoryRoot)), false);
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("dereferences an in-checkout source link and tracks its resolved bytes", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-web-deref-"));
+  const generation = "dereferenced-link-generation";
+  try {
+    const repositoryRoot = path.join(temporaryRoot, "checkout");
+    const checkoutWebRoot = path.join(repositoryRoot, "web");
+    const checkoutPublicRoot = path.join(checkoutWebRoot, "public");
+    const sharedRoot = path.join(repositoryRoot, "shared-assets");
+    const launchRoot = path.join(temporaryRoot, "state", "launch");
+    const linkedTarget = path.join(sharedRoot, "linked.txt");
+    const checkoutLink = path.join(checkoutPublicRoot, "linked.txt");
+    fs.mkdirSync(path.join(checkoutWebRoot, "src", "app"), { recursive: true });
+    fs.mkdirSync(path.join(checkoutWebRoot, "node_modules"), { recursive: true });
+    fs.mkdirSync(path.join(repositoryRoot, "server"), { recursive: true });
+    fs.mkdirSync(checkoutPublicRoot, { recursive: true });
+    fs.mkdirSync(sharedRoot, { recursive: true });
+    fs.mkdirSync(launchRoot, { recursive: true });
+    fs.writeFileSync(path.join(checkoutWebRoot, "src", "app", "page.tsx"), "page\n");
+    fs.writeFileSync(path.join(checkoutWebRoot, "package.json"), "{}\n");
+    fs.writeFileSync(path.join(repositoryRoot, "server", "package.json"), "{}\n");
+    fs.writeFileSync(linkedTarget, "frozen-one\n");
+    fs.symlinkSync(linkedTarget, checkoutLink, "file");
+
+    const sourceManifest = previewWebSourceManifest(repositoryRoot);
+    const linkedManifestEntry = sourceManifest.entries.find(
+      (entry) => entry.path === "web/public/linked.txt",
+    );
+    assert.equal(linkedManifestEntry?.type, "file");
+    const projectedWebRoot = preparePreviewWebRoot(
+      repositoryRoot,
+      launchRoot,
+      generation,
+    );
+    const projectedLink = path.join(projectedWebRoot, "public", "linked.txt");
+    assert.equal(fs.lstatSync(projectedLink).isSymbolicLink(), false);
+    assert.equal(fs.readFileSync(projectedLink, "utf8"), "frozen-one\n");
+
+    fs.writeFileSync(linkedTarget, "changed-target\n");
+    assert.throws(
+      () => assertPreviewWebProjectionCurrent(repositoryRoot, generation),
+      (error) => error instanceof Error && error.message.includes(checkoutLink),
+    );
+    assert.equal(fs.readFileSync(projectedLink, "utf8"), "frozen-one\n");
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("refuses a symlinked checkout parent for the generated health route", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-health-link-"));
+  try {
+    const repositoryRoot = path.join(temporaryRoot, "checkout");
+    const checkoutWebRoot = path.join(repositoryRoot, "web");
+    const realApiRoot = path.join(repositoryRoot, "shared-api");
+    const checkoutAppRoot = path.join(checkoutWebRoot, "src", "app");
+    const checkoutApiRoot = path.join(checkoutAppRoot, "api");
+    const launchRoot = path.join(temporaryRoot, "state", "launch");
+    fs.mkdirSync(checkoutAppRoot, { recursive: true });
+    fs.mkdirSync(path.join(checkoutWebRoot, "node_modules"), { recursive: true });
+    fs.mkdirSync(path.join(repositoryRoot, "server"), { recursive: true });
+    fs.mkdirSync(realApiRoot, { recursive: true });
+    fs.mkdirSync(launchRoot, { recursive: true });
+    fs.writeFileSync(path.join(checkoutAppRoot, "page.tsx"), "page\n");
+    fs.writeFileSync(path.join(checkoutWebRoot, "package.json"), "{}\n");
+    fs.writeFileSync(path.join(repositoryRoot, "server", "package.json"), "{}\n");
+    fs.symlinkSync(realApiRoot, checkoutApiRoot, "dir");
+
+    assert.throws(
+      () => preparePreviewWebRoot(repositoryRoot, launchRoot, "health-link-generation"),
+      (error) => error instanceof Error && error.message.includes(checkoutApiRoot),
+    );
+    assert.equal(fs.existsSync(previewWebRoot(repositoryRoot)), false);
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("refuses an in-checkout symlink directory cycle", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-web-cycle-"));
+  try {
+    const repositoryRoot = path.join(temporaryRoot, "checkout");
+    const checkoutWebRoot = path.join(repositoryRoot, "web");
+    const checkoutPublicRoot = path.join(checkoutWebRoot, "public");
+    const launchRoot = path.join(temporaryRoot, "state", "launch");
+    fs.mkdirSync(path.join(checkoutWebRoot, "src", "app"), { recursive: true });
+    fs.mkdirSync(path.join(checkoutWebRoot, "node_modules"), { recursive: true });
+    fs.mkdirSync(path.join(repositoryRoot, "server"), { recursive: true });
+    fs.mkdirSync(checkoutPublicRoot, { recursive: true });
+    fs.mkdirSync(launchRoot, { recursive: true });
+    fs.writeFileSync(path.join(checkoutWebRoot, "src", "app", "page.tsx"), "page\n");
+    fs.writeFileSync(path.join(checkoutWebRoot, "package.json"), "{}\n");
+    fs.writeFileSync(path.join(repositoryRoot, "server", "package.json"), "{}\n");
+    const cycleLink = path.join(checkoutPublicRoot, "loop");
+    fs.symlinkSync(checkoutPublicRoot, cycleLink, "dir");
+
+    assert.throws(
+      () => preparePreviewWebRoot(repositoryRoot, launchRoot, "cycle-generation"),
+      (error) => error instanceof Error &&
+        error.message.includes("symlink directory cycle") &&
+        error.message.includes(cycleLink),
+    );
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
@@ -541,16 +648,20 @@ test("serializes concurrent preview-up lifecycle owners at an atomic barrier", (
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-up-"));
   try {
     const lockFile = path.join(temporaryRoot, ".lifecycle.lock");
+    const starts = new Map([[101, "start-101"], [102, "start-102"]]);
+    const resolvePidStartIdentity = (pid) => starts.get(pid) ?? null;
     const firstUp = acquirePreviewLifecycleLock(lockFile, {
       operation: "preview-up",
       generation: "up-one",
       pid: 101,
+      resolvePidStartIdentity,
     });
     assert.throws(
       () => acquirePreviewLifecycleLock(lockFile, {
         operation: "preview-up",
         generation: "up-two",
         pid: 102,
+        resolvePidStartIdentity,
       }),
       /Preview lifecycle is busy: preview-up PID 101/,
     );
@@ -559,6 +670,7 @@ test("serializes concurrent preview-up lifecycle owners at an atomic barrier", (
       operation: "preview-up",
       generation: "up-two",
       pid: 102,
+      resolvePidStartIdentity,
     });
     secondUp.release();
   } finally {
@@ -570,14 +682,21 @@ test("holds teardown's lifecycle barrier against another down and a newer up", (
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-preview-lock-down-"));
   try {
     const lockFile = path.join(temporaryRoot, ".lifecycle.lock");
+    const starts = new Map([
+      [201, "start-201"],
+      [202, "start-202"],
+      [203, "start-203"],
+    ]);
+    const resolvePidStartIdentity = (pid) => starts.get(pid) ?? null;
     const down = acquirePreviewLifecycleLock(lockFile, {
       operation: "preview-down",
       generation: "down-one",
       pid: 201,
+      resolvePidStartIdentity,
     });
     for (const contender of [
-      { operation: "preview-down", generation: "down-two", pid: 202 },
-      { operation: "preview-up", generation: "up-new", pid: 203 },
+      { operation: "preview-down", generation: "down-two", pid: 202, resolvePidStartIdentity },
+      { operation: "preview-up", generation: "up-new", pid: 203, resolvePidStartIdentity },
     ]) {
       assert.throws(
         () => acquirePreviewLifecycleLock(lockFile, contender),
@@ -589,6 +708,7 @@ test("holds teardown's lifecycle barrier against another down and a newer up", (
       operation: "preview-up",
       generation: "up-new",
       pid: 203,
+      resolvePidStartIdentity,
     });
     nextUp.release();
   } finally {
@@ -726,14 +846,16 @@ test("preview-up sanitizes its process before vendored preparation and boot", ()
   );
   const upLock = source.indexOf("acquirePreviewLifecycleLock(lifecycleLockFile");
   const stateCheck = source.indexOf("if (fs.existsSync(stateFile))");
-  const statePublication = source.indexOf("fs.writeFileSync(stateFile");
+  const statePublication = source.indexOf("publishPreviewStateFile(stateFile");
   const upLockRelease = source.indexOf("releaseLifecycleLock();", statePublication);
   assert.equal(upLock < stateCheck, true);
   assert.equal(statePublication < upLockRelease, true);
   const downLock = previewDownSource.indexOf(
     "acquirePreviewLifecycleLock(lifecycleLockFile",
   );
-  const downStateRead = previewDownSource.indexOf("const state = readState();");
+  const downStateRead = previewDownSource.indexOf(
+    "const { state, recoveredFromMarker } = readStateOrProjectionRecovery();",
+  );
   assert.equal(downLock < downStateRead, true);
   assert.equal(
     source.includes('url: `http://127.0.0.1:${ports.frontend}/api/preview-health`'),

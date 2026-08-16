@@ -14,7 +14,9 @@ import {
   previewEngineHome,
   previewEnvironment,
   previewPrebuildEnvironment,
+  previewWebProjectionMarkerPath,
   removePreviewWebRoot,
+  updatePreviewWebProjectionMarker,
 } from "./preview-environment.mjs";
 import { instrumentPreviewLauncher } from "./preview-launcher-observer.mjs";
 import {
@@ -23,7 +25,10 @@ import {
   waitForPreviewPortsFree,
 } from "./preview-processes.mjs";
 import { waitForPreviewReadiness } from "./preview-readiness.mjs";
-import { acquirePreviewLifecycleLock } from "./preview-state.mjs";
+import {
+  acquirePreviewLifecycleLock,
+  publishPreviewStateFile,
+} from "./preview-state.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = fs.realpathSync(path.resolve(scriptDirectory, ".."));
@@ -94,7 +99,7 @@ function prepareVendoredDist({ skipBuild, environment }) {
   }
 }
 
-function createLaunchOverlay(stateRoot, realNpm, realGit, generation) {
+function createLaunchOverlay(stateRoot, realNpm, realGit, generation, ports) {
   const launchRoot = path.join(stateRoot, "launch");
   const isolatedHome = path.join(stateRoot, "home");
   // start.mjs prepends ~/.local/bin after its dependency checks. Put the
@@ -137,7 +142,7 @@ const result = spawnSync(${JSON.stringify(realGit)}, args, { stdio: "inherit", e
 process.exit(result.status ?? 1);
 `,
   );
-  preparePreviewWebRoot(repositoryRoot, launchRoot, generation);
+  preparePreviewWebRoot(repositoryRoot, launchRoot, generation, { stateRoot, ports });
   return { launchRoot, shimDirectory };
 }
 
@@ -216,6 +221,7 @@ try {
   lifecycleLock = acquirePreviewLifecycleLock(lifecycleLockFile, {
     operation: "preview-up",
     generation: previewGeneration,
+    generationFiles: [stateFile, previewWebProjectionMarkerPath(repositoryRoot)],
   });
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));
@@ -320,6 +326,7 @@ const { launchRoot, shimDirectory } = createLaunchOverlay(
   realNpm,
   realGit,
   previewGeneration,
+  ports,
 );
 projectionPrepared = true;
 const environment = previewEnvironment(
@@ -350,6 +357,9 @@ try {
   if (!Number.isSafeInteger(rootProcess.pid) || rootProcess.pid < 1) {
     throw new Error("Preview launcher did not report a valid root PID.");
   }
+  updatePreviewWebProjectionMarker(repositoryRoot, previewGeneration, {
+    rootPid: rootProcess.pid,
+  });
 
   const state = {
     version: 1,
@@ -366,7 +376,7 @@ try {
     logPath,
     startedAt: new Date().toISOString(),
   };
-  fs.writeFileSync(stateFile, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+  publishPreviewStateFile(stateFile, state);
   statePublished = true;
   releaseLifecycleLock();
 

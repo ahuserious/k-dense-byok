@@ -29,7 +29,7 @@ const PACKAGE_MANAGER_LOCK_FILE_NAMES = [
   "pnpm-lock.yaml",
   "yarn.lock",
 ];
-const PREVIEW_WEB_PROJECTION_MARKER_VERSION = 2;
+const PREVIEW_WEB_PROJECTION_MARKER_VERSION = 3;
 const LAUNCHER_HELPER_ANCHOR =
   "const sleep = (ms) => new Promise((r) => setTimeout(r, ms));";
 const SERVICE_SPAWN_ANCHOR = "  const child = directArgs";
@@ -118,16 +118,32 @@ export function previewWebSourceManifest(repositoryRoot) {
   const checkoutWebRoot = fs.realpathSync(path.join(canonicalRepositoryRoot, "web"));
   const entries = [];
 
-  function visit(absolutePath, manifestPath) {
-    const stat = fs.lstatSync(absolutePath);
-    if (stat.isSymbolicLink()) {
-      entries.push({ path: manifestPath, type: "symlink", target: fs.readlinkSync(absolutePath) });
-      return;
+  function visit(absolutePath, manifestPath, ancestorDirectories = new Set()) {
+    const sourceStat = fs.lstatSync(absolutePath);
+    let contentPath = absolutePath;
+    let stat = sourceStat;
+    if (sourceStat.isSymbolicLink()) {
+      contentPath = fs.realpathSync(absolutePath);
+      if (
+        contentPath !== canonicalRepositoryRoot &&
+        !contentPath.startsWith(`${canonicalRepositoryRoot}${path.sep}`)
+      ) {
+        throw new Error(
+          `Preview web projection refuses symlink outside the checkout: ${absolutePath}.`,
+        );
+      }
+      stat = fs.statSync(contentPath);
     }
     if (stat.isDirectory()) {
+      const canonicalDirectory = fs.realpathSync(contentPath);
+      if (ancestorDirectories.has(canonicalDirectory)) {
+        throw new Error(`Preview web projection refuses symlink directory cycle at ${absolutePath}.`);
+      }
+      const childAncestors = new Set(ancestorDirectories);
+      childAncestors.add(canonicalDirectory);
       entries.push({ path: manifestPath, type: "directory" });
-      for (const name of fs.readdirSync(absolutePath).sort()) {
-        visit(path.join(absolutePath, name), `${manifestPath}/${name}`);
+      for (const name of fs.readdirSync(contentPath).sort()) {
+        visit(path.join(contentPath, name), `${manifestPath}/${name}`, childAncestors);
       }
       return;
     }
@@ -135,7 +151,7 @@ export function previewWebSourceManifest(repositoryRoot) {
       entries.push({
         path: manifestPath,
         type: "file",
-        digest: createHash("sha256").update(fs.readFileSync(absolutePath)).digest("hex"),
+        digest: createHash("sha256").update(fs.readFileSync(contentPath)).digest("hex"),
       });
       return;
     }
@@ -193,11 +209,15 @@ export function assertPreviewWebProjectionCurrent(repositoryRoot, generation) {
   return true;
 }
 
-export function assertPreviewProjectionSymlinksContained(
+export function assertPreviewProjectionHasNoSourceSymlinks(
   repositoryRoot,
   projectedWebRoot = previewWebRoot(repositoryRoot),
 ) {
   const canonicalRepositoryRoot = fs.realpathSync(repositoryRoot);
+  const projectedNodeModules = path.join(projectedWebRoot, "node_modules");
+  const canonicalNodeModules = fs.realpathSync(
+    path.join(canonicalRepositoryRoot, "web", "node_modules"),
+  );
 
   function visit(directory) {
     for (const name of fs.readdirSync(directory)) {
@@ -205,14 +225,16 @@ export function assertPreviewProjectionSymlinksContained(
       const stat = fs.lstatSync(candidate);
       if (stat.isSymbolicLink()) {
         const canonicalTarget = fs.realpathSync(candidate);
-        if (
-          canonicalTarget !== canonicalRepositoryRoot &&
-          !canonicalTarget.startsWith(`${canonicalRepositoryRoot}${path.sep}`)
-        ) {
+        if (candidate === projectedNodeModules && canonicalTarget === canonicalNodeModules) {
+          continue;
+        }
+        if (canonicalTarget !== canonicalRepositoryRoot &&
+            !canonicalTarget.startsWith(`${canonicalRepositoryRoot}${path.sep}`)) {
           throw new Error(
             `Preview web projection refuses symlink outside the checkout: ${candidate}.`,
           );
         }
+        throw new Error(`Preview web projection source must not contain symlink ${candidate}.`);
       } else if (stat.isDirectory()) {
         visit(candidate);
       }
@@ -222,9 +244,128 @@ export function assertPreviewProjectionSymlinksContained(
   visit(projectedWebRoot);
 }
 
+function assertPreviewHealthRouteParentsReal(webRoot, label) {
+  for (const relativePath of ["src", path.join("src", "app"), path.join("src", "app", "api")]) {
+    const candidate = path.join(webRoot, relativePath);
+    let stat;
+    try {
+      stat = fs.lstatSync(candidate);
+    } catch (error) {
+      if (error?.code === "ENOENT" && relativePath.endsWith(`${path.sep}api`)) continue;
+      throw error;
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(`Preview web health route requires a real ${label} directory: ${candidate}.`);
+    }
+  }
+}
+
+function copyPreviewSource(
+  sourcePath,
+  destinationPath,
+  canonicalRepositoryRoot,
+  ancestorDirectories = new Set(),
+) {
+  const sourceStat = fs.lstatSync(sourcePath);
+  let contentPath = sourcePath;
+  let stat = sourceStat;
+  if (sourceStat.isSymbolicLink()) {
+    contentPath = fs.realpathSync(sourcePath);
+    if (
+      contentPath !== canonicalRepositoryRoot &&
+      !contentPath.startsWith(`${canonicalRepositoryRoot}${path.sep}`)
+    ) {
+      throw new Error(
+        `Preview web projection refuses symlink outside the checkout: ${sourcePath}.`,
+      );
+    }
+    stat = fs.statSync(contentPath);
+  }
+  if (stat.isDirectory()) {
+    const canonicalDirectory = fs.realpathSync(contentPath);
+    if (ancestorDirectories.has(canonicalDirectory)) {
+      throw new Error(`Preview web projection refuses symlink directory cycle at ${sourcePath}.`);
+    }
+    const childAncestors = new Set(ancestorDirectories);
+    childAncestors.add(canonicalDirectory);
+    fs.mkdirSync(destinationPath, { recursive: true, mode: stat.mode });
+    for (const name of fs.readdirSync(contentPath)) {
+      copyPreviewSource(
+        path.join(contentPath, name),
+        path.join(destinationPath, name),
+        canonicalRepositoryRoot,
+        childAncestors,
+      );
+    }
+    return;
+  }
+  if (stat.isFile()) {
+    fs.cpSync(contentPath, destinationPath, {
+      dereference: true,
+      preserveTimestamps: true,
+    });
+    fs.chmodSync(destinationPath, stat.mode);
+    return;
+  }
+  throw new Error(`Preview web projection refuses unsupported source entry ${sourcePath}.`);
+}
+
 export function previewWebRoot(repositoryRoot) {
   const checkoutWebRoot = fs.realpathSync(path.join(repositoryRoot, "web"));
   return path.join(checkoutWebRoot, ".preview", "launch", "web");
+}
+
+export function previewWebProjectionMarkerPath(repositoryRoot) {
+  return path.join(path.dirname(previewWebRoot(repositoryRoot)), ".kady-preview-owned");
+}
+
+export function readPreviewWebProjectionMarker(repositoryRoot) {
+  const markerPath = previewWebProjectionMarkerPath(repositoryRoot);
+  let markerStat;
+  try {
+    markerStat = fs.lstatSync(markerPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  let marker;
+  try {
+    marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+  } catch (error) {
+    throw new Error(`Preview web projection marker is malformed: ${markerPath}.`, {
+      cause: error,
+    });
+  }
+  if (
+    markerStat.isSymbolicLink() ||
+    !markerStat.isFile() ||
+    marker?.version !== PREVIEW_WEB_PROJECTION_MARKER_VERSION ||
+    typeof marker.generation !== "string" ||
+    !marker.generation
+  ) {
+    throw new Error(`Preview web projection marker failed validation: ${markerPath}.`);
+  }
+  return marker;
+}
+
+export function updatePreviewWebProjectionMarker(repositoryRoot, generation, updates) {
+  const markerPath = previewWebProjectionMarkerPath(repositoryRoot);
+  const marker = readPreviewWebProjectionMarker(repositoryRoot);
+  if (marker?.generation !== generation) {
+    throw new Error(`Preview web projection marker generation mismatch at ${markerPath}.`);
+  }
+  const temporaryMarkerPath = `${markerPath}.${process.pid}.${generation}.tmp`;
+  try {
+    fs.writeFileSync(
+      temporaryMarkerPath,
+      `${JSON.stringify({ ...marker, ...updates }, null, 2)}\n`,
+      { mode: 0o600, flag: "wx" },
+    );
+    fs.renameSync(temporaryMarkerPath, markerPath);
+  } catch (error) {
+    fs.rmSync(temporaryMarkerPath, { force: true });
+    throw error;
+  }
 }
 
 function previewWebHealthRouteSource(repositoryRoot, manifestPath, generation) {
@@ -299,7 +440,7 @@ export function removePreviewWebRoot(repositoryRoot, generation) {
     );
   }
 
-  const markerPath = path.join(projectionLaunchRoot, ".kady-preview-owned");
+  const markerPath = previewWebProjectionMarkerPath(repositoryRoot);
   let markerStat;
   try {
     markerStat = fs.lstatSync(markerPath);
@@ -311,12 +452,10 @@ export function removePreviewWebRoot(repositoryRoot, generation) {
     }
     throw error;
   }
-  let marker;
+  let marker = null;
   try {
-    marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
-  } catch {
-    marker = null;
-  }
+    marker = readPreviewWebProjectionMarker(repositoryRoot);
+  } catch {}
   if (
     markerStat.isSymbolicLink() ||
     !markerStat.isFile() ||
@@ -337,7 +476,12 @@ export function removePreviewWebRoot(repositoryRoot, generation) {
   return true;
 }
 
-export function preparePreviewWebRoot(repositoryRoot, launchRoot, generation) {
+export function preparePreviewWebRoot(
+  repositoryRoot,
+  launchRoot,
+  generation,
+  { stateRoot, ports } = {},
+) {
   if (!generation) throw new Error("Preview web projection requires a generation.");
   const canonicalRepositoryRoot = fs.realpathSync(repositoryRoot);
   const checkoutWebRoot = fs.realpathSync(path.join(canonicalRepositoryRoot, "web"));
@@ -356,12 +500,18 @@ export function preparePreviewWebRoot(repositoryRoot, launchRoot, generation) {
         "refusing to replace another lifecycle generation.",
     );
   }
+  assertPreviewHealthRouteParentsReal(checkoutWebRoot, "checkout");
   fs.mkdirSync(projectedWebRoot, { recursive: true, mode: 0o700 });
   fs.writeFileSync(
     path.join(projectionLaunchRoot, ".kady-preview-owned"),
     `${JSON.stringify({
       version: PREVIEW_WEB_PROJECTION_MARKER_VERSION,
       generation,
+      repositoryRoot: canonicalRepositoryRoot,
+      stateRoot,
+      launchRoot,
+      ports,
+      rootPid: null,
     }, null, 2)}\n`,
     { mode: 0o600 },
   );
@@ -389,18 +539,18 @@ export function preparePreviewWebRoot(repositoryRoot, launchRoot, generation) {
           `Preview web projection refuses symlink target outside the checkout: ${checkoutEntry}.`,
         );
       }
-      fs.cpSync(
+      copyPreviewSource(
         checkoutEntry,
         path.join(projectedWebRoot, entry.name),
-        { recursive: true, dereference: false },
+        canonicalRepositoryRoot,
       );
     }
     const projectedServerRoot = path.join(projectionLaunchRoot, "server");
     fs.mkdirSync(projectedServerRoot, { mode: 0o700 });
-    fs.cpSync(
+    copyPreviewSource(
       path.join(canonicalRepositoryRoot, "server", "package.json"),
       path.join(projectedServerRoot, "package.json"),
-      { dereference: false },
+      canonicalRepositoryRoot,
     );
     const copyElapsedMilliseconds =
       Number(process.hrtime.bigint() - copyStartedAt) / 1_000_000;
@@ -422,9 +572,9 @@ export function preparePreviewWebRoot(repositoryRoot, launchRoot, generation) {
       );
     }
     const projectedNodeModules = path.join(projectedWebRoot, "node_modules");
-    fs.symlinkSync(checkoutNodeModules, projectedNodeModules, "dir");
+    fs.symlinkSync(canonicalNodeModules, projectedNodeModules, "dir");
 
-    assertPreviewProjectionSymlinksContained(canonicalRepositoryRoot, projectedWebRoot);
+    assertPreviewProjectionHasNoSourceSymlinks(canonicalRepositoryRoot, projectedWebRoot);
     const currentSourceManifest = previewWebSourceManifest(canonicalRepositoryRoot);
     const copyDriftPath = firstPreviewWebSourceDrift(sourceManifest, currentSourceManifest);
     if (copyDriftPath) {
@@ -451,6 +601,7 @@ export function preparePreviewWebRoot(repositoryRoot, launchRoot, generation) {
         `Preview web projection health route conflicts with ${healthRouteDirectory}.`,
       );
     }
+    assertPreviewHealthRouteParentsReal(projectedWebRoot, "projected");
     fs.mkdirSync(healthRouteDirectory, { recursive: true });
     fs.writeFileSync(
       path.join(healthRouteDirectory, "route.ts"),
