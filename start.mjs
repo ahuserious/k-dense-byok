@@ -441,6 +441,8 @@ async function freePort(port, label) {
 const children = [];
 let shuttingDown = false;
 let shutdownPromise = null;
+let forceShutdownPromise = null;
+let explicitShutdownSignalCount = 0;
 let shutdownExitCode = 0;
 let engineOwnershipMonitor = null;
 const shutdownController = new AbortController();
@@ -894,7 +896,7 @@ async function performShutdown() {
       }
     }
   }
-  log("  Waiting for owned work to quiesce; repeated shutdown signals join this same teardown.");
+  log("  Waiting for owned work to quiesce; send a second shutdown signal to force all owned process trees.");
   // There is intentionally no elapsed-time SIGKILL. The backend's app.close()
   // drains the detached workflow supervisor, whose provider ownership can
   // outlive a caller acknowledgement window.
@@ -914,6 +916,42 @@ function stopAll(code) {
   if (code !== 0) shutdownExitCode = code;
   shutdownPromise ??= performShutdown();
   return shutdownPromise;
+}
+
+const forcedSignalExitCodes = {
+  SIGHUP: 129,
+  SIGINT: 130,
+  SIGTERM: 143,
+};
+
+async function performForcedShutdown(signal) {
+  shuttingDown = true;
+  shutdownController.abort();
+  shutdownExitCode = forcedSignalExitCodes[signal] ?? 1;
+  const liveChildren = children.filter((child) => !ownedTreeGone(child));
+  for (const child of liveChildren) {
+    if (isWin) {
+      capture("taskkill", ["/pid", String(child.pid), "/T", "/F"]);
+      continue;
+    }
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+  log(`Forcing shutdown: ${liveChildren.length} owned process trees killed`);
+  await Promise.all(children.map(waitForOwnedTree));
+  process.exit(shutdownExitCode);
+}
+
+function forceShutdown(signal) {
+  forceShutdownPromise ??= performForcedShutdown(signal);
+  return forceShutdownPromise;
 }
 
 /** Wait until the service answers HTTP (any response counts). Child death is
@@ -944,18 +982,23 @@ function openBrowser(url) {
   }
 }
 
-function requestShutdown() {
+function requestShutdown(signal) {
+  explicitShutdownSignalCount += 1;
   shutdownController.abort();
-  void stopAll(0);
+  if (explicitShutdownSignalCount === 1) {
+    void stopAll(0);
+    return;
+  }
+  void forceShutdown(signal);
 }
 
 // Install shutdown handling before any detached service can be spawned. This
 // includes the workflow engine's readiness window, when no consumer exists yet.
-process.on("SIGINT", requestShutdown);
-process.on("SIGTERM", requestShutdown);
+process.on("SIGINT", () => requestShutdown("SIGINT"));
+process.on("SIGTERM", () => requestShutdown("SIGTERM"));
 // Terminal window closed / SSH session dropped: without this the launcher
 // dies on SIGHUP while the detached children survive as orphans.
-process.on("SIGHUP", requestShutdown);
+process.on("SIGHUP", () => requestShutdown("SIGHUP"));
 
 // ---- main --------------------------------------------------------------------
 

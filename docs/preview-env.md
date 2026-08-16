@@ -72,6 +72,26 @@ npm run build:vendored-dist
 node scripts/vendored-dist-build.mjs --if-stale
 ```
 
+### Build lock and recovery
+
+All normal launches and previews rendezvous on the checkout-local lock at
+`server/vendor/pipeline-engine/node_modules/.vendored-dist-lock/build.lock`.
+Its record contains the owner PID, that PID's process-start identity, a random
+owner token, and a heartbeat. A missed or old heartbeat is never enough to
+reclaim a lock while the same PID and start identity are still alive. A later
+builder automatically recovers the lock only when the PID is dead or the PID
+now has a different start identity, and logs the recovered owner.
+
+If the bounded wait expires, the error prints the holder PID, start identity,
+absolute lock path, and recovery command. First verify that the PID is absent
+or its start identity differs (`ps -o pid=,lstart= -p <pid>` on macOS/Linux;
+inspect `CreationDate` with `Get-CimInstance Win32_Process` on Windows). Only
+then, from the repository root, remove the abandoned record with:
+
+```bash
+node -e "require('node:fs').rmSync(process.argv[1], { force: true })" -- "server/vendor/pipeline-engine/node_modules/.vendored-dist-lock/build.lock"
+```
+
 The primary `start.mjs` launcher delegates dependency synchronization and the
 freshness-aware `--if-stale` build to that locked wrapper. Preview mode is
 check-only: the isolated prebuild is the sole builder, and the launcher fails

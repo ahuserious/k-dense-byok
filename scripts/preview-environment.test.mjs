@@ -350,9 +350,66 @@ test("malformed build locks are never reclaimed and time out with metadata", asy
     fs.writeFileSync(lockPath, "{partial");
     await assert.rejects(
       acquireVendoredDistBuildLock(repositoryRoot, { waitMs: 30, pollMs: 5 }),
-      new RegExp(`timed out waiting for vendored dist build lock: .*owner=unreadable-or-malformed`),
+      /timed out waiting for vendored dist build lock held by pid unknown, start identity "unknown".*owner=unreadable-or-malformed.*node -e/,
     );
     assert.equal(fs.readFileSync(lockPath, "utf-8"), "{partial");
+  } finally {
+    fs.rmSync(lockPath, { force: true });
+    fs.rmSync(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("dead vendored-dist build-lock owner is recovered", async () => {
+  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-dead-owner-"));
+  const lockPath = preparedBuildLockPath(repositoryRoot);
+  const recoveryMessages = [];
+  try {
+    fs.writeFileSync(lockPath, `${JSON.stringify({
+      schema: 1,
+      token: "dead-owner-token",
+      pid: 424242,
+      pidStartIdentity: "dead-owner-start",
+      heartbeat: "2026-08-16T00:00:00.000Z",
+    })}\n`);
+    const lock = await acquireVendoredDistBuildLock(repositoryRoot, {
+      processStartIdentityForPid: (pid) => pid === process.pid ? "contender-start" : null,
+      isProcessAlive: (pid) => pid === process.pid,
+      logRecovery: (message) => recoveryMessages.push(message),
+    });
+    assert.deepEqual(recoveryMessages, [
+      "recovered stale vendored-dist build lock (pid 424242, started dead-owner-start)",
+    ]);
+    assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf-8")).token, lock.token);
+    lock.release();
+  } finally {
+    fs.rmSync(lockPath, { force: true });
+    fs.rmSync(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("reused PID with a different start identity is recovered", async () => {
+  const repositoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-lock-pid-reuse-"));
+  const lockPath = preparedBuildLockPath(repositoryRoot);
+  const recoveryMessages = [];
+  try {
+    fs.writeFileSync(lockPath, `${JSON.stringify({
+      schema: 1,
+      token: "reused-pid-token",
+      pid: 434343,
+      pidStartIdentity: "previous-process-start",
+      heartbeat: new Date().toISOString(),
+    })}\n`);
+    const lock = await acquireVendoredDistBuildLock(repositoryRoot, {
+      processStartIdentityForPid: (pid) => pid === process.pid
+        ? "contender-start"
+        : "replacement-process-start",
+      isProcessAlive: () => true,
+      logRecovery: (message) => recoveryMessages.push(message),
+    });
+    assert.deepEqual(recoveryMessages, [
+      "recovered stale vendored-dist build lock (pid 434343, started previous-process-start)",
+    ]);
+    lock.release();
   } finally {
     fs.rmSync(lockPath, { force: true });
     fs.rmSync(repositoryRoot, { recursive: true, force: true });
@@ -390,9 +447,21 @@ test("an old-heartbeat build lock remains active while its exact owner is live",
   const lockPath = preparedBuildLockPath(repositoryRoot);
   try {
     const lock = await acquireVendoredDistBuildLock(repositoryRoot);
-    const old = new Date(Date.now() - 20 * 60 * 1000);
-    fs.utimesSync(lockPath, old, old);
+    const ownerRecord = JSON.parse(fs.readFileSync(lockPath, "utf-8"));
+    ownerRecord.heartbeat = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    fs.writeFileSync(lockPath, `${JSON.stringify(ownerRecord)}\n`);
     assert.equal(vendoredDistBuildLockStatus(repositoryRoot).active, true);
+    await assert.rejects(
+      acquireVendoredDistBuildLock(repositoryRoot, { waitMs: 30, pollMs: 5 }),
+      (error) => {
+        assert.match(error.message, new RegExp(`held by pid ${process.pid}`));
+        assert.match(error.message, /start identity/);
+        assert.match(error.message, new RegExp(lockPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+        assert.match(error.message, /after verifying.*node -e/);
+        return true;
+      },
+    );
+    assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf-8")).token, lock.token);
     lock.release();
   } finally {
     fs.rmSync(lockPath, { force: true });

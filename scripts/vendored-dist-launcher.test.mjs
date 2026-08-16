@@ -23,6 +23,83 @@ const ownedPids = new Set([101, 102]);
 const fakeListenerOwner = (pid) => ownedPids.has(pid);
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
+async function reserveLocalPort() {
+  const server = net.createServer();
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const port = server.address().port;
+  await new Promise((resolve) => server.close(resolve));
+  return port;
+}
+
+function recordedServicePids(serviceStatePath) {
+  try {
+    const state = JSON.parse(fs.readFileSync(serviceStatePath, "utf-8"));
+    return Object.values(state.services ?? {})
+      .map((service) => service?.pid)
+      .filter((pid) => Number.isSafeInteger(pid));
+  } catch {
+    return [];
+  }
+}
+
+async function reapProcessGroups(pids) {
+  for (const pid of new Set(pids)) {
+    try { process.kill(-pid, "SIGKILL"); } catch { /* already gone */ }
+    try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+  }
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const livePid = [...new Set(pids)].find((pid) => {
+      try { process.kill(-pid, 0); return true; } catch { return false; }
+    });
+    if (livePid === undefined) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+async function waitForChildExit(child, timeoutMs = 2_000) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  await Promise.race([
+    new Promise((resolve) => child.once("exit", resolve)),
+    new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+  ]);
+}
+
+async function assertLocalPortClosed(port, message) {
+  if (!Number.isSafeInteger(port)) return;
+  const closed = await new Promise((resolve) => {
+    const socket = net.connect(port, "127.0.0.1");
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(value);
+    };
+    socket.setTimeout(1_000, () => finish(false));
+    socket.once("connect", () => finish(false));
+    socket.once("error", () => finish(true));
+  });
+  assert.equal(closed, true, message);
+}
+
+async function waitForLocalPortOpen(port, description, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const open = await new Promise((resolve) => {
+      const socket = net.connect(port, "127.0.0.1");
+      socket.once("connect", () => { socket.destroy(); resolve(true); });
+      socket.once("error", () => resolve(false));
+    });
+    if (open) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.fail(`${description} did not open port ${port}`);
+}
+
 test("workflow engine listener and build decision matrix", () => {
   const listenerCases = [
     {
@@ -427,45 +504,43 @@ test(
   },
   async () => {
     const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-launcher-signal-"));
-    const reservePort = async () => {
-      const server = net.createServer();
-      await new Promise((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(0, "127.0.0.1", resolve);
+    let ports;
+    let launcher;
+    let serviceStatePath;
+    let enginePid;
+    try {
+      ports = {
+        backend: await reserveLocalPort(),
+        frontend: await reserveLocalPort(),
+        engine: await reserveLocalPort(),
+      };
+      // Integration-only setup: readiness needs a real manifest whose build
+      // environment names this reserved engine port. The entire test is gated
+      // by KADY_SOCKET_TESTS=1, and the real staged build is inside cleanup.
+      const build = spawnSync("npm", ["run", "build:vendored-dist"], {
+        cwd: repositoryRoot,
+        env: { ...process.env, NODE_ENV: "production", PORT: String(ports.engine) },
+        encoding: "utf-8",
       });
-      const port = server.address().port;
-      await new Promise((resolve) => server.close(resolve));
-      return port;
-    };
-    const ports = {
-      backend: await reservePort(),
-      frontend: await reservePort(),
-      engine: await reservePort(),
-    };
-    const build = spawnSync("npm", ["run", "build:vendored-dist"], {
-      cwd: repositoryRoot,
-      env: { ...process.env, NODE_ENV: "production", PORT: String(ports.engine) },
-      encoding: "utf-8",
-    });
-    assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
+      assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
 
-    const fakeNpm = path.join(stateRoot, "fake-npm");
-    fs.writeFileSync(fakeNpm, `#!${process.execPath}\nprocess.exit(0);\n`, { mode: 0o700 });
-    const gitPath = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf-8" }).stdout.trim();
-    const { launchRoot, shimDirectory } = createLaunchOverlay(
-      repositoryRoot,
-      stateRoot,
-      fakeNpm,
-      gitPath,
-    );
-    // This exercises normal launcher dependency flow with a no-op npm, while
-    // retaining the overlay's byte-derived launcher instrumentation.
-    fs.copyFileSync(fakeNpm, path.join(shimDirectory, "npm"));
-    const bunVersion = spawnSync("bun", ["--version"], { encoding: "utf-8" }).stdout.trim();
-    const fakeBun = path.join(shimDirectory, "bun");
-    fs.writeFileSync(
-      fakeBun,
-      `#!${process.execPath}
+      const fakeNpm = path.join(stateRoot, "fake-npm");
+      fs.writeFileSync(fakeNpm, `#!${process.execPath}\nprocess.exit(0);\n`, { mode: 0o700 });
+      const gitPath = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf-8" }).stdout.trim();
+      const { launchRoot, shimDirectory } = createLaunchOverlay(
+        repositoryRoot,
+        stateRoot,
+        fakeNpm,
+        gitPath,
+      );
+      // This exercises normal launcher dependency flow with a no-op npm, while
+      // retaining the overlay's byte-derived launcher instrumentation.
+      fs.copyFileSync(fakeNpm, path.join(shimDirectory, "npm"));
+      const bunVersion = spawnSync("bun", ["--version"], { encoding: "utf-8" }).stdout.trim();
+      const fakeBun = path.join(shimDirectory, "bun");
+      fs.writeFileSync(
+        fakeBun,
+        `#!${process.execPath}
 import http from "node:http";
 if (process.argv.includes("--version")) { console.log(${JSON.stringify(bunVersion)}); process.exit(0); }
 const server = http.createServer((_request, response) => { response.statusCode = 503; response.end("not ready"); });
@@ -473,28 +548,26 @@ const stop = () => server.close(() => process.exit(0));
 process.on("SIGINT", stop); process.on("SIGTERM", stop); process.on("SIGHUP", stop);
 server.listen(Number(process.env.PORT), "127.0.0.1");
 `,
-      { mode: 0o700 },
-    );
-    const serviceStatePath = path.join(stateRoot, "services.json");
-    fs.writeFileSync(serviceStatePath, '{"version":1,"services":{}}\n');
-    const environment = previewEnvironment(stateRoot, launchRoot, shimDirectory, ports);
-    delete environment.KADY_PREVIEW;
-    environment.NODE_ENV = "production";
-    const launcher = spawn(
-      process.execPath,
-      [path.join(launchRoot, "start.mjs"), "--no-browser"],
-      {
-        cwd: launchRoot,
-        detached: true,
-        env: environment,
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-    let output = "";
-    launcher.stdout.on("data", (chunk) => { output += chunk; });
-    launcher.stderr.on("data", (chunk) => { output += chunk; });
-    let enginePid;
-    try {
+        { mode: 0o700 },
+      );
+      serviceStatePath = path.join(stateRoot, "services.json");
+      fs.writeFileSync(serviceStatePath, '{"version":1,"services":{}}\n');
+      const environment = previewEnvironment(stateRoot, launchRoot, shimDirectory, ports);
+      delete environment.KADY_PREVIEW;
+      environment.NODE_ENV = "production";
+      launcher = spawn(
+        process.execPath,
+        [path.join(launchRoot, "start.mjs"), "--no-browser"],
+        {
+          cwd: launchRoot,
+          detached: true,
+          env: environment,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      let output = "";
+      launcher.stdout.on("data", (chunk) => { output += chunk; });
+      launcher.stderr.on("data", (chunk) => { output += chunk; });
       const deadline = Date.now() + 20_000;
       let state;
       while (Date.now() < deadline) {
@@ -518,20 +591,156 @@ server.listen(Number(process.env.PORT), "127.0.0.1");
       assert.equal("frontend" in finalState.services, false, output);
       assert.doesNotMatch(output, /Backend on port|Frontend on port/);
       assert.throws(() => process.kill(-enginePid, 0), (error) => error?.code === "ESRCH");
-      await assert.rejects(
-        new Promise((resolve, reject) => {
-          const socket = net.connect(ports.engine, "127.0.0.1");
-          socket.once("connect", () => { socket.destroy(); resolve(); });
-          socket.once("error", reject);
-        }),
-      );
+      await assertLocalPortClosed(ports.engine, "workflow engine port remained open after shutdown");
     } finally {
-      if (launcher.exitCode === null) {
+      if (launcher?.exitCode === null) {
         try { process.kill(-launcher.pid, "SIGKILL"); } catch { /* already gone */ }
       }
-      if (enginePid) {
-        try { process.kill(-enginePid, "SIGKILL"); } catch { /* already gone */ }
+      await waitForChildExit(launcher);
+      await reapProcessGroups([
+        ...recordedServicePids(serviceStatePath),
+        ...(Number.isSafeInteger(enginePid) ? [enginePid] : []),
+      ]);
+      await assertLocalPortClosed(ports?.engine, "workflow engine port leaked during test cleanup");
+      fs.rmSync(stateRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "second launcher signal force-reaps an IPC-stuck backend process group",
+  {
+    skip: process.env.KADY_SOCKET_TESTS === "1" && process.platform !== "win32"
+      ? false
+      : "requires Unix process groups and local socket binding; orchestrator runs with KADY_SOCKET_TESTS=1",
+  },
+  async () => {
+    const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "kady-launcher-force-"));
+    const serviceStatePath = path.join(stateRoot, "services.json");
+    const shutdownReceiptPath = path.join(stateRoot, "backend-received-shutdown");
+    let launcher;
+    let ports;
+    try {
+      ports = {
+        backend: await reserveLocalPort(),
+        frontend: await reserveLocalPort(),
+        engine: await reserveLocalPort(),
+      };
+      const fakeNpm = path.join(stateRoot, "fake-npm");
+      const fakeGit = path.join(stateRoot, "fake-git");
+      fs.writeFileSync(fakeNpm, `#!${process.execPath}\nprocess.exit(0);\n`, { mode: 0o700 });
+      fs.writeFileSync(fakeGit, `#!${process.execPath}\nconsole.log("git version 2.0.0");\n`, { mode: 0o700 });
+      const { launchRoot, shimDirectory } = createLaunchOverlay(
+        repositoryRoot,
+        stateRoot,
+        fakeNpm,
+        fakeGit,
+      );
+      fs.writeFileSync(
+        path.join(shimDirectory, "bun"),
+        `#!${process.execPath}\nif (process.argv.includes("--version")) console.log("1.2.0");\n`,
+        { mode: 0o700 },
+      );
+
+      const fakeServerRoot = path.join(stateRoot, "fake-server");
+      const fakeWebRoot = path.join(stateRoot, "fake-web");
+      const fakeBackend = path.join(fakeServerRoot, "node_modules", "tsx", "dist", "cli.mjs");
+      const fakeFrontend = path.join(fakeWebRoot, "node_modules", "next", "dist", "bin", "next");
+      fs.mkdirSync(path.dirname(fakeBackend), { recursive: true });
+      fs.mkdirSync(path.dirname(fakeFrontend), { recursive: true });
+      fs.writeFileSync(
+        fakeBackend,
+        `import fs from "node:fs";
+import http from "node:http";
+const server = http.createServer((_request, response) => response.end("backend"));
+process.on("message", (message) => {
+  if (message?.type === "kady-shutdown") {
+    fs.writeFileSync(${JSON.stringify(shutdownReceiptPath)}, "received\\n");
+    process.send?.({ type: "fake-shutdown-received" });
+  }
+});
+server.listen(Number(process.env.KADY_PORT), "127.0.0.1");
+`,
+      );
+      fs.writeFileSync(
+        fakeFrontend,
+        `import http from "node:http";
+const portIndex = process.argv.indexOf("-p");
+const server = http.createServer((_request, response) => response.end("frontend"));
+const stop = () => server.close(() => process.exit(0));
+process.on("SIGTERM", stop); process.on("SIGINT", stop); process.on("SIGHUP", stop);
+server.listen(Number(process.argv[portIndex + 1]), "127.0.0.1");
+`,
+      );
+      fs.rmSync(path.join(launchRoot, "server"), { force: true });
+      fs.rmSync(path.join(launchRoot, "web"), { force: true });
+      fs.symlinkSync(fakeServerRoot, path.join(launchRoot, "server"), "dir");
+      fs.symlinkSync(fakeWebRoot, path.join(launchRoot, "web"), "dir");
+      fs.writeFileSync(serviceStatePath, '{"version":1,"services":{}}\n');
+
+      const environment = previewEnvironment(stateRoot, launchRoot, shimDirectory, ports, {
+        PATH: process.env.PATH,
+        OLLAMA_BASE_URL: "http://127.0.0.1:9",
+      });
+      launcher = spawn(
+        process.execPath,
+        [path.join(launchRoot, "start.mjs"), "--no-browser"],
+        {
+          cwd: launchRoot,
+          detached: true,
+          env: environment,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      let output = "";
+      launcher.stdout.on("data", (chunk) => { output += chunk; });
+      launcher.stderr.on("data", (chunk) => { output += chunk; });
+
+      const startupDeadline = Date.now() + 10_000;
+      let state;
+      while (Date.now() < startupDeadline) {
+        state = JSON.parse(fs.readFileSync(serviceStatePath, "utf-8"));
+        if (state.services?.backend?.state === "spawned" && state.services?.frontend?.state === "spawned") break;
+        if (launcher.exitCode !== null) assert.fail(`launcher exited before fake services started\n${output}`);
+        await new Promise((resolve) => setTimeout(resolve, 25));
       }
+      const backendPid = state?.services?.backend?.pid;
+      const frontendPid = state?.services?.frontend?.pid;
+      assert.ok(Number.isSafeInteger(backendPid), output);
+      assert.ok(Number.isSafeInteger(frontendPid), output);
+      await waitForLocalPortOpen(ports.backend, "fake backend");
+      await waitForLocalPortOpen(ports.frontend, "fake frontend");
+
+      launcher.kill("SIGTERM");
+      const gracefulDeadline = Date.now() + 2_000;
+      while (!fs.existsSync(shutdownReceiptPath) && Date.now() < gracefulDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assert.equal(fs.existsSync(shutdownReceiptPath), true, output);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(launcher.exitCode, null, "first signal must keep waiting for the stuck backend");
+      assert.match(output, /Waiting for owned work to quiesce/);
+
+      const launcherExit = new Promise((resolve) => launcher.once("exit", resolve));
+      launcher.kill("SIGTERM");
+      const exitCode = await Promise.race([
+        launcherExit,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("forced launcher shutdown timed out")), 5_000)),
+      ]);
+      assert.equal(exitCode, 143, output);
+      assert.match(output, /Forcing shutdown: \d+ owned process trees killed/);
+      assert.throws(() => process.kill(-backendPid, 0), (error) => error?.code === "ESRCH");
+      assert.throws(() => process.kill(-frontendPid, 0), (error) => error?.code === "ESRCH");
+      await assertLocalPortClosed(ports.backend, "backend listener survived forced shutdown");
+      await assertLocalPortClosed(ports.frontend, "frontend listener survived forced shutdown");
+    } finally {
+      if (launcher?.exitCode === null) {
+        try { process.kill(-launcher.pid, "SIGKILL"); } catch { /* already gone */ }
+      }
+      await waitForChildExit(launcher);
+      await reapProcessGroups(recordedServicePids(serviceStatePath));
+      await assertLocalPortClosed(ports?.backend, "backend listener leaked during test cleanup");
+      await assertLocalPortClosed(ports?.frontend, "frontend listener leaked during test cleanup");
       fs.rmSync(stateRoot, { recursive: true, force: true });
     }
   },

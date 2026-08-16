@@ -271,45 +271,86 @@ function readBuildLock(lockPath) {
   }
 }
 
+function recordedPidStartIdentity(lock) {
+  if (typeof lock?.pidStartIdentity === "string" && lock.pidStartIdentity) {
+    return lock.pidStartIdentity;
+  }
+  // Locks written before schema 1 named this field processStart. Treat a live
+  // legacy holder conservatively instead of reclaiming it during an upgrade.
+  return typeof lock?.processStart === "string" && lock.processStart
+    ? lock.processStart
+    : null;
+}
+
+function buildLockOwnerStatus(
+  lock,
+  {
+    processStartIdentityForPid = processStartIdentity,
+    isProcessAlive = processAlive,
+  } = {},
+) {
+  const pidStartIdentity = recordedPidStartIdentity(lock);
+  if (!Number.isSafeInteger(lock?.pid) || lock.pid < 1 || !pidStartIdentity) {
+    return { active: true, recoverable: false, reason: "unverifiable-owner" };
+  }
+  if (!isProcessAlive(lock.pid)) {
+    return { active: false, recoverable: true, reason: "dead-owner" };
+  }
+  const currentStartIdentity = processStartIdentityForPid(lock.pid);
+  if (currentStartIdentity !== null && currentStartIdentity !== pidStartIdentity) {
+    return { active: false, recoverable: true, reason: "pid-reused" };
+  }
+  // A live PID whose identity cannot be queried remains authoritative. A stale
+  // heartbeat alone is never evidence that it is safe to create a second writer.
+  return { active: true, recoverable: false, reason: "live-owner" };
+}
+
 export function vendoredDistBuildLockStatus(repositoryRoot) {
   const lockPath = vendoredDistBuildLockPath(repositoryRoot);
   const lock = readBuildLock(lockPath);
   if (!lock) return { active: false, lockPath, lock: null };
-  const currentStart = processStartIdentity(lock.pid);
   if (!fs.existsSync(lockPath)) {
     return { active: false, lockPath, lock: null };
   }
-  const startIdentityMatches = currentStart === null
-    ? processAlive(lock.pid) && String(lock.processStart).startsWith("node-start-seconds:")
-    : currentStart === lock.processStart;
-  // An exact PID/start-identity match is authoritative even if the owner was
-  // paused long enough to miss heartbeats. Reclaiming it would create two
-  // writers when that process resumes.
-  const active = startIdentityMatches;
-  return { active, lockPath, lock };
+  return { ...buildLockOwnerStatus(lock), lockPath, lock };
 }
 
 export async function acquireVendoredDistBuildLock(
   repositoryRoot,
-  { waitMs = 120_000, pollMs = 200, lockFileSystem = fs } = {},
+  {
+    waitMs = 120_000,
+    pollMs = 200,
+    lockFileSystem = fs,
+    processStartIdentityForPid = processStartIdentity,
+    isProcessAlive = processAlive,
+    logRecovery = console.warn,
+  } = {},
 ) {
   const lockPath = vendoredDistBuildLockPath(repositoryRoot);
   fs.mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
   const token = randomUUID();
-  const processStart = processStartIdentity(process.pid);
-  if (!processStart) throw new Error(`could not determine start time for build-lock PID ${process.pid}`);
+  const pidStartIdentity = processStartIdentityForPid(process.pid);
+  if (!pidStartIdentity) throw new Error(`could not determine start time for build-lock PID ${process.pid}`);
   const deadline = Date.now() + waitMs;
   const timeoutError = () => {
     const owner = readBuildLock(lockPath);
+    const ownerPid = owner?.pid ?? "unknown";
+    const ownerStartIdentity = recordedPidStartIdentity(owner) ?? "unknown";
     const ownerMetadata = owner
       ? JSON.stringify({
-          pid: owner.pid ?? null,
-          processStart: owner.processStart ?? null,
+          pid: ownerPid,
+          pidStartIdentity: ownerStartIdentity,
           token: owner.token,
-          createdAt: owner.createdAt ?? null,
+          heartbeat: owner.heartbeat ?? owner.heartbeatAt ?? null,
         })
       : "unreadable-or-malformed";
-    return new Error(`timed out waiting for vendored dist build lock: ${lockPath}; owner=${ownerMetadata}`);
+    const recoveryCommand =
+      `node -e "require('node:fs').rmSync(process.argv[1], { force: true })" -- ${JSON.stringify(lockPath)}`;
+    return new Error(
+      `timed out waiting for vendored dist build lock held by pid ${ownerPid}, ` +
+        `start identity ${JSON.stringify(ownerStartIdentity)}: ${lockPath}; owner=${ownerMetadata}; ` +
+        `after verifying that holder is no longer the recorded process, run: ${recoveryCommand}`,
+    );
   };
   while (true) {
     if (Date.now() >= deadline) {
@@ -319,9 +360,9 @@ export async function acquireVendoredDistBuildLock(
       schema: 1,
       token,
       pid: process.pid,
-      processStart,
+      pidStartIdentity,
       createdAt: new Date().toISOString(),
-      heartbeatAt: new Date().toISOString(),
+      heartbeat: new Date().toISOString(),
     };
     try {
       const descriptor = lockFileSystem.openSync(lockPath, "wx", 0o600);
@@ -340,8 +381,15 @@ export async function acquireVendoredDistBuildLock(
       const heartbeat = setInterval(() => {
         const current = readBuildLock(lockPath);
         if (current?.token !== token) return;
-        const now = new Date();
-        fs.utimesSync(lockPath, now, now);
+        lock.heartbeat = new Date().toISOString();
+        const temporaryPath = `${lockPath}.${token}.heartbeat`;
+        try {
+          fs.writeFileSync(temporaryPath, `${JSON.stringify(lock)}\n`, { mode: 0o600 });
+          if (readBuildLock(lockPath)?.token === token) fs.renameSync(temporaryPath, lockPath);
+          else fs.rmSync(temporaryPath, { force: true });
+        } catch {
+          fs.rmSync(temporaryPath, { force: true });
+        }
       }, 1000);
       heartbeat.unref();
       return {
@@ -359,6 +407,21 @@ export async function acquireVendoredDistBuildLock(
       };
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
+    }
+    const existingLock = readBuildLock(lockPath);
+    if (existingLock) {
+      const ownerStatus = buildLockOwnerStatus(existingLock, {
+        processStartIdentityForPid,
+        isProcessAlive,
+      });
+      if (ownerStatus.recoverable && readBuildLock(lockPath)?.token === existingLock.token) {
+        fs.rmSync(lockPath, { force: true });
+        logRecovery(
+          `recovered stale vendored-dist build lock (pid ${existingLock.pid}, ` +
+            `started ${recordedPidStartIdentity(existingLock)})`,
+        );
+        continue;
+      }
     }
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) {
