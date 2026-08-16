@@ -61,18 +61,15 @@ Only `hosted-evidence-bundle.tar` is uploaded. Its manifest records structured p
 skipped/fixme counts plus the freshness-validated Stably run identifier and URL; raw logs are removed
 after scrubbing and never uploaded.
 
-The final artifact scan checks literal secret bytes first, classifies archives by magic bytes, then
-canonicalizes archive entry names and every extracted entry independently. Every non-archive byte
-stream is inspected through latin1, lossy UTF-8, invalid-byte-stripped UTF-8, and plausible UTF-16LE/BE
-views. Percent, JSON-escape, and whitespace-normalized base64 decoding feed their outputs back into the
-same fixed-point queue, so composed encodings are covered. A percent fragment is malformed when an
-incomplete `%`, `%H`, or `%GG` fragment directly touches a complete `%HH` run; ordinary standalone text
-such as `100%`, `%A`, or `%GG` remains valid. Invalid percent bytes and uninspectable inputs fail closed.
-Canonicalization is bounded per transformation chain to eight decoding levels and 256 MiB of decoder
-input. Unrelated tokens do not share a variant-count limit; a generous 2 GiB byte-work ceiling is the
-only file-global bound. Reaching a depth, chain-work, or global-work bound before a fixed point fails
-closed with an opaque artifact or nested-entry reference plus configured and observed bounds.
-Compressed archive bytes do not consume that text budget; each extracted entry is charged separately.
+The final artifact scan is one linear pass over each payload file while the upload tar is assembled.
+Each file is classified by magic bytes, hashed once, and searched with a fixed set of views. ZIP, TAR,
+and GZIP members are recursed (depth ≤ 4; 8 GiB total decompressed bytes, else the artifact is
+rejected). Members whose magic identifies zstd, xz, 7z, rar, or bz2 fail closed. Brotli and raw
+DEFLATE have no magic and are undetectable: they are searched on
+the latin1 view and otherwise left untouched. The payload tar and the outer bundle tar are not
+re-scanned; the seal is the recorded per-file SHA-256 digests plus the hash of the assembled payload
+tar. Malformed percent syntax, invalid UTF-8, and unknown binary content emit a WARN line and stay
+fail-open.
 
 Reporter `2.1.16` prints the server-returned `createdSuiteRun.url` directly (the pinned CJS dist at
 `index-CdLJi9uc.cjs:9593-9594`). This evidence tool documents its checked-in Stably dashboard contract
@@ -94,18 +91,39 @@ so its `create-suite.mjs` child transport is covered too.
 
 ### Threat model
 
-This evidence tooling protects against accidental inclusion of this workflow's own credential values
-in artifacts it produces. The scanner covers literal values, percent and JSON escapes, Base64 and
-Base64URL spans (including embedded and arbitrarily whitespace-spaced forms), UTF-16LE/BE text, composed
-forms reached by the bounded fixed-point decoders, and entries in recursively inspected TAR and ZIP
-archives. Every non-archive input is inspected as raw bytes plus lossy UTF-8, latin1, and both UTF-16
-byte orders at both alignments. A BOM with an unmatched trailing byte, an unsupported compressed format,
-or any other genuinely uninspectable content fails closed.
+Purpose: our own credential values (`STABLY_API_KEY`, `STABLY_PROJECT_ID`, and any other value listed
+in the secrets set) must not appear in uploaded evidence produced by our tooling. This is accidental
+inclusion, not adversarial obfuscation.
 
-Deliberate adversarial obfuscation beyond that fixed-point closure, encrypted content, and content
-compressed with an unavailable key are out of scope. They are not silently accepted: an unsupported or
-uninspectable artifact is rejected, and exhausting a decoder chain or byte-work bound rejects the
-artifact rather than treating it as clean.
+Views searched, per file (recursing into ZIP, TAR, and GZIP members only; depth ≤ 4; total
+decompressed bytes bounded at 8 GiB, else reject):
+
+1. raw bytes (latin1 view);
+2. percent-decoded view — tolerant: any `%HH` run is decoded byte-wise; malformed or incomplete
+   percent syntax is left as-is and never rejects a file;
+3. JSON-unescaped view (`\uXXXX`, `\/`, `\"`, and the other JSON string escapes);
+4. Base64 / Base64URL spans: any run of the base64 alphabet plus `=` where ASCII whitespace,
+   including CR/LF, is removed first (a run continues across line breaks and spaces until a
+   structural non-base64, non-whitespace byte), minimum 16 characters, decoded once, and the decoded
+   bytes are searched with views (1)–(3);
+5. composition depth exactly 2 (for example `base64(percent(x))` and `percent(base64(x))`). There is
+   no fixed-point loop, no UTF-16 scanning (traces and logs are UTF-8; UTF-16 is documented out of
+   scope), no longer chains, and no per-file variant caps.
+
+Compressed members whose magic bytes are recognised but not supported for inspection are rejected,
+naming the member: zstd, xz, 7z, rar, and bz2. Brotli and raw DEFLATE have no magic and are
+undetectable; they are out of scope and are not treated as a silent acceptance of a recognised
+framing. Unreadable members and the decompressed-bytes bound fail closed.
+
+Fail closed only on: a credential match, an unsupported-compression member with recognisable magic,
+the decompressed-bytes bound, or an unreadable member. Fail open (with a WARN line) on: malformed
+percent syntax, invalid UTF-8, and unknown binary content — these are searched on the latin1 view and
+left otherwise untouched.
+
+Performance: one streaming pass over the final upload payload while it is assembled (scan each file
+once, record its SHA-256, write the tar). The seal is those recorded digests plus one hash of the
+payload tar. There is no re-scan of the payload tar and no third scan of the bundle tar. The scan is
+linear in bytes.
 
 ### What Job A proves
 

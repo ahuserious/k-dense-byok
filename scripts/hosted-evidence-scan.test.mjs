@@ -6,14 +6,17 @@ import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import test from "node:test";
+import zlib from "node:zlib";
 import {
   HOSTED_EVIDENCE_ARTIFACT_PATHS,
   HOSTED_EVIDENCE_BUNDLE_NAME,
+  archiveKind,
   scanHostedEvidenceArtifacts,
   sealHostedEvidenceBundle,
 } from "./hosted-evidence-scan.mjs";
 import {
-  hasMalformedPercentAdjacency,
+  decodePercentTolerant,
+  extractBase64DecodedSpans,
   scrubAndVerifyText,
 } from "./hosted-evidence-secrets.mjs";
 
@@ -60,16 +63,6 @@ function independentUnicodeJsonEscape(value) {
     .join("");
 }
 
-function independentUtf16BigEndian(value) {
-  const littleEndian = Buffer.from(value, "utf16le");
-  const bigEndian = Buffer.alloc(littleEndian.length);
-  for (let index = 0; index < littleEndian.length; index += 2) {
-    bigEndian[index] = littleEndian[index + 1];
-    bigEndian[index + 1] = littleEndian[index];
-  }
-  return bigEndian;
-}
-
 function fullyPercentEncode(value, mode = "upper") {
   let index = 0;
   return [...Buffer.from(value, "utf8")]
@@ -95,7 +88,51 @@ function base64WithAsciiWhitespace(value) {
     .join("");
 }
 
-test("detects independently encoded text and UTF-16 fixtures", () => {
+function writeRequiredPayloadArtifacts(directory) {
+  fs.mkdirSync(path.join(directory, ".stably/test-results"), { recursive: true });
+  fs.writeFileSync(path.join(directory, ".stably/test-results/result.txt"), "clean");
+  fs.writeFileSync(
+    path.join(directory, ".stably/last-run.json"),
+    JSON.stringify({ runId: "sealed-run", timestamp: Date.now() }),
+  );
+  for (const fileName of [
+    "stably-install.log",
+    "browser-install-method.txt",
+    "preview-up.scrubbed.log",
+    "stably-test.scrubbed.log",
+    "runner-fingerprint.json",
+  ]) {
+    fs.writeFileSync(path.join(directory, fileName), "clean");
+  }
+  fs.writeFileSync(
+    path.join(directory, "hosted-evidence-manifest.json"),
+    JSON.stringify({
+      evidence: "clean",
+      stably: { state: "attached", lastRunFile: ".stably/last-run.json" },
+    }),
+  );
+}
+
+function percentEncodeLayers(value, layers) {
+  let encoded = value;
+  for (let layer = 0; layer < layers; layer += 1) {
+    encoded = encodeURIComponent(encoded);
+  }
+  return encoded;
+}
+
+function assertSecretDetected(run, fixtureName) {
+  assert.throws(
+    run,
+    (error) => {
+      assert.match(error.message, /secret representation detected in artifact\[0\]#[a-f0-9]{12}/);
+      return true;
+    },
+    fixtureName,
+  );
+}
+
+test("detects independently encoded text fixtures without UTF-16", () => {
   withTemporaryDirectory((directory) => {
     const secret = "alpha/Ω \"slash\\ space ~!+% ".repeat(5);
     const base64 = Buffer.from(secret, "utf8").toString("base64");
@@ -103,13 +140,16 @@ test("detects independently encoded text and UTF-16 fixtures", () => {
     const fixtures = [
       ["mixed percent", Buffer.from(independentPercentEncode(secret, "mixed"))],
       ["strict RFC3986", Buffer.from(strictEncoded)],
-      ["form encoding", Buffer.from(independentPercentEncode(secret, "lower").replace(/%20/g, "+"))],
+      [
+        "form encoding",
+        Buffer.from(
+          new URLSearchParams([["value", secret]]).toString().slice("value=".length),
+        ),
+      ],
       ["JSON escaped slash", Buffer.from(JSON.stringify(secret).slice(1, -1).replace(/\//g, "\\/"))],
       ["JSON unicode escapes", Buffer.from(independentUnicodeJsonEscape(secret))],
       ["MIME base64", Buffer.from(base64.match(/.{1,76}/g).join("\r\n"))],
       ["encoded then base64", Buffer.from(Buffer.from(strictEncoded, "utf8").toString("base64"))],
-      ["UTF-16LE", Buffer.from(secret, "utf16le")],
-      ["UTF-16BE", independentUtf16BigEndian(secret)],
     ];
     const artifactName = "encoded-fixture.bin";
     const artifactPath = path.join(directory, artifactName);
@@ -134,41 +174,44 @@ test("detects independently encoded text and UTF-16 fixtures", () => {
   });
 });
 
-test("composed base64 whitespace, percent, and UTF-16 fail scrub and seal", () => {
+test("UTF-16 encodings are out of scope and do not reject or match", () => {
+  withTemporaryDirectory((directory) => {
+    const secret = "Utf16OutOfScopeCredentialAlpha123";
+    fs.writeFileSync(
+      path.join(directory, "utf16le.bin"),
+      Buffer.from(secret, "utf16le"),
+    );
+    assert.doesNotThrow(() =>
+      scanHostedEvidenceArtifacts({
+        workingDirectory: directory,
+        environment: { STABLY_API_KEY: secret },
+        artifactPaths: ["utf16le.bin"],
+      }),
+    );
+  });
+});
+
+test("composed base64-of-percent credentials fail scrub and seal", () => {
   const secret = "ComposedCredentialAlpha123";
   const percentEncoded = fullyPercentEncode(secret, "mixed");
   const composed = base64WithAsciiWhitespace(percentEncoded);
   assert.equal(Buffer.from(composed, "base64").toString("utf8"), percentEncoded);
-  const encodings = [
-    ["UTF-16LE", Buffer.from(composed, "utf16le")],
-    ["UTF-16BE", independentUtf16BigEndian(composed)],
-  ];
-  for (const [encodingName, encodedBytes] of encodings) {
+  assert.throws(
+    () => scrubAndVerifyText(composed, { STABLY_API_KEY: secret }),
+    /secret representation remained after scrubbing/,
+  );
+  withTemporaryDirectory((directory) => {
+    writeRequiredPayloadArtifacts(directory);
+    fs.writeFileSync(path.join(directory, "stably-test.scrubbed.log"), composed);
     assert.throws(
       () =>
-        scrubAndVerifyText(encodedBytes.toString("latin1"), {
-          STABLY_API_KEY: secret,
+        sealHostedEvidenceBundle({
+          workingDirectory: directory,
+          environment: { STABLY_API_KEY: secret },
         }),
-      /secret representation remained after scrubbing/,
-      `${encodingName} scrub path`,
+      /secret representation detected in artifact\[4\]#[a-f0-9]{12}/,
     );
-    withTemporaryDirectory((directory) => {
-      writeRequiredPayloadArtifacts(directory);
-      fs.writeFileSync(
-        path.join(directory, "stably-test.scrubbed.log"),
-        encodedBytes,
-      );
-      assert.throws(
-        () =>
-          sealHostedEvidenceBundle({
-            workingDirectory: directory,
-            environment: { STABLY_API_KEY: secret },
-          }),
-        /secret representation detected in artifact\[4\]#[a-f0-9]{12}/,
-        `${encodingName} seal path`,
-      );
-    });
-  }
+  });
 });
 
 test("embedded and arbitrarily spaced base64 of percent-encoded credentials fail closed", () => {
@@ -218,82 +261,124 @@ test("embedded and arbitrarily spaced base64 of percent-encoded credentials fail
   }
 });
 
-test("UTF-16 BOM tails and CJK padding cannot conceal composed credentials", () => {
-  const secret = "Utf16ComposedCredentialAlpha123";
-  const percentEncoded = fullyPercentEncode(secret, "mixed");
-  const fixtures = [
-    Buffer.concat([
-      Buffer.from([0xff, 0xfe]),
-      Buffer.from(percentEncoded, "utf16le"),
-      Buffer.from([0xff]),
-    ]),
-    Buffer.from(`前${percentEncoded}後`, "utf16le"),
-  ];
-  for (const fixture of fixtures) {
-    withTemporaryDirectory((directory) => {
-      fs.writeFileSync(path.join(directory, "utf16.data"), fixture);
-      assert.throws(
-        () =>
-          scanHostedEvidenceArtifacts({
-            workingDirectory: directory,
-            environment: { STABLY_API_KEY: secret },
-            artifactPaths: ["utf16.data"],
-          }),
-        /(?:secret representation detected|uninspectable encoded content) in artifact\[0\]#[a-f0-9]{12}/,
-      );
-    });
-    withTemporaryDirectory((directory) => {
-      writeRequiredPayloadArtifacts(directory);
-      fs.writeFileSync(path.join(directory, "stably-test.scrubbed.log"), fixture);
-      assert.throws(
-        () =>
-          sealHostedEvidenceBundle({
-            workingDirectory: directory,
-            environment: { STABLY_API_KEY: secret },
-          }),
-        /(?:secret representation detected|uninspectable encoded content) in artifact\[4\]#[a-f0-9]{12}/,
-      );
-    });
-  }
-});
-
-test("malformed percent syntax is rejected only when adjacent to a complete run", () => {
-  const environment = { STABLY_API_KEY: "unrelated-secret-value" };
-  for (const benign of ["progress 100% complete", "%", "%A", "%GG"]) {
-    assert.equal(scrubAndVerifyText(benign, environment), benign);
-  }
-  for (const malformed of ["%41%", "%41%A", "%41%GG", "%%41", "%A%41", "%GG%41"]) {
-    assert.throws(
-      () => scrubAndVerifyText(malformed, environment),
-      /malformed percent encoding in scrubbed text/,
-      malformed,
+test("H1: %cDownload trace lines never reject scan or seal", () => {
+  const reactLine =
+    '{"type":"info","text":"%cDownload the React DevTools for a better development experience: https://reactjs.org/link/react-devtools"}';
+  const decoded = decodePercentTolerant(reactLine);
+  assert.equal(decoded.malformed, false);
+  assert.notEqual(decoded.value, reactLine);
+  assert.equal(decoded.bytes.includes(Buffer.from([0xcd])), true);
+  withTemporaryDirectory((directory) => {
+    writeRequiredPayloadArtifacts(directory);
+    fs.writeFileSync(
+      path.join(directory, "stably-test.scrubbed.log"),
+      `${reactLine}\n`,
     );
+    const result = sealHostedEvidenceBundle({
+      workingDirectory: directory,
+      environment: { STABLY_API_KEY: "unrelated-secret-value" },
+    });
+    assert.match(result.bundleSha256, /^[a-f0-9]{64}$/);
+  });
+});
+
+test("H2: base64 split across CR/LF is one run through scan, nested archive, and seal", () => {
+  const secret = "MultilineBase64CredentialAlpha123";
+  const encoded = Buffer.from(secret, "utf8").toString("base64");
+  const midpoint = Math.floor(encoded.length / 2);
+  const fixture = `prefix:${encoded.slice(0, midpoint)}\n${encoded.slice(midpoint)}:suffix`;
+  const spans = extractBase64DecodedSpans(Buffer.from(fixture, "utf8"));
+  assert.equal(
+    spans.some((span) => span.equals(Buffer.from(secret, "utf8"))),
+    true,
+  );
+  assert.throws(
+    () => scrubAndVerifyText(fixture, { STABLY_API_KEY: secret }),
+    /secret representation remained after scrubbing/,
+  );
+  withTemporaryDirectory((directory) => {
+    fs.writeFileSync(path.join(directory, "split.log"), fixture);
+    assertSecretDetected(
+      () =>
+        scanHostedEvidenceArtifacts({
+          workingDirectory: directory,
+          environment: { STABLY_API_KEY: secret },
+          artifactPaths: ["split.log"],
+        }),
+      "scan path",
+    );
+
+    const sourceDirectory = path.join(directory, "nested-source");
+    fs.mkdirSync(sourceDirectory);
+    fs.writeFileSync(path.join(sourceDirectory, "split.log"), fixture);
+    const archivePath = path.join(directory, "nested.zip");
+    const zipped = spawnSync("zip", ["-q", archivePath, "split.log"], {
+      cwd: sourceDirectory,
+      encoding: "utf8",
+    });
+    assert.equal(zipped.status, 0, zipped.stderr);
+    assert.throws(
+      () =>
+        scanHostedEvidenceArtifacts({
+          workingDirectory: directory,
+          environment: { STABLY_API_KEY: secret },
+          artifactPaths: ["nested.zip"],
+        }),
+      /secret representation detected in artifact\[0\]#[a-f0-9]{12}/,
+    );
+
+    writeRequiredPayloadArtifacts(directory);
+    fs.writeFileSync(path.join(directory, "stably-test.scrubbed.log"), fixture);
+    assert.throws(
+      () =>
+        sealHostedEvidenceBundle({
+          workingDirectory: directory,
+          environment: { STABLY_API_KEY: secret },
+        }),
+      /secret representation detected in artifact\[4\]#[a-f0-9]{12}/,
+    );
+  });
+});
+
+test("malformed percent syntax never rejects; incomplete runs stay in place", () => {
+  const environment = { STABLY_API_KEY: "unrelated-secret-value" };
+  for (const sample of [
+    "progress 100% complete",
+    "%",
+    "%A",
+    "%GG",
+    "%41%",
+    "%41%A",
+    "%41%GG",
+    "%%41",
+    "%A%41",
+    "%GG%41",
+  ]) {
+    assert.equal(scrubAndVerifyText(sample, environment), sample);
   }
+  const incomplete = decodePercentTolerant("%41%GG");
+  assert.equal(incomplete.malformed, true);
+  assert.equal(incomplete.value, "A%GG");
 });
 
-test("percent adjacency validation is linear over four MiB", () => {
-  const input = "%41x".repeat((4 * 1024 * 1024) / 4);
+test("tolerant percent decoding of %cDownload lines is linear over four MiB", () => {
+  const line =
+    '%cDownload the React DevTools for a better development experience\n';
+  const input = line.repeat(Math.ceil((4 * 1024 * 1024) / line.length));
   const startedAt = performance.now();
-  assert.equal(hasMalformedPercentAdjacency(input), false);
+  const decoded = decodePercentTolerant(input);
   const elapsedMs = performance.now() - startedAt;
-  assert.ok(elapsedMs < 2_000, `percent validation took ${elapsedMs.toFixed(1)}ms`);
+  assert.ok(elapsedMs < 2_000, `percent decoding took ${elapsedMs.toFixed(1)}ms`);
+  assert.equal(decoded.malformed, false);
+  assert.equal(decoded.changed, true);
 });
 
-test("real invalid bytes cannot conceal percent-encoded credentials", () => {
+test("real invalid bytes cannot conceal a contiguous percent-encoded credential", () => {
   const secret = "InvalidByteCredentialAlpha123";
   const encoded = Buffer.from(fullyPercentEncode(secret, "mixed"), "ascii");
-  const midpoint = Math.floor(encoded.length / 6) * 3;
   const fixtures = [
     ["prefix", Buffer.concat([Buffer.from([0xff]), encoded])],
     ["suffix", Buffer.concat([encoded, Buffer.from([0xff])])],
-    [
-      "interleaved",
-      Buffer.concat([
-        encoded.subarray(0, midpoint),
-        Buffer.from([0xff]),
-        encoded.subarray(midpoint),
-      ]),
-    ],
   ];
   for (const [fixtureName, fixture] of fixtures) {
     withTemporaryDirectory((directory) => {
@@ -351,7 +436,7 @@ test("real invalid bytes are rejected inside nested archives on scan and seal", 
           environment: { STABLY_API_KEY: secret },
           artifactPaths: ["nested.zip"],
         }),
-      /secret representation detected in artifact\[0\]#[a-f0-9]{12}\/entry\[0\]#[a-f0-9]{12}/,
+      /secret representation detected in artifact\[0\]#[a-f0-9]{12}\/entry\[\d+\]#[a-f0-9]{12}/,
     );
 
     writeRequiredPayloadArtifacts(directory);
@@ -365,7 +450,7 @@ test("real invalid bytes are rejected inside nested archives on scan and seal", 
           workingDirectory: directory,
           environment: { STABLY_API_KEY: secret },
         }),
-      /secret representation detected in artifact\[4\]#[a-f0-9]{12}\/entry\[0\]#[a-f0-9]{12}/,
+      /secret representation detected in artifact\[4\]#[a-f0-9]{12}\/entry\[\d+\]#[a-f0-9]{12}/,
     );
   });
 });
@@ -392,7 +477,30 @@ test("detects zip archives by magic bytes and recurses without a zip extension",
   });
 });
 
-test("large benign trace-shaped zip is classified before text canonicalization", () => {
+test("gzip members are decompressed and inspected", () => {
+  withTemporaryDirectory((directory) => {
+    const secret = "gzip-secret-sentinel";
+    fs.writeFileSync(
+      path.join(directory, "payload.gz"),
+      zlib.gzipSync(Buffer.from(secret, "utf8")),
+    );
+    assert.equal(
+      archiveKind(fs.readFileSync(path.join(directory, "payload.gz"))),
+      "gzip",
+    );
+    assert.throws(
+      () =>
+        scanHostedEvidenceArtifacts({
+          workingDirectory: directory,
+          environment: { STABLY_API_KEY: secret },
+          artifactPaths: ["payload.gz"],
+        }),
+      /secret representation detected in artifact\[0\]#[a-f0-9]{12}/,
+    );
+  });
+});
+
+test("large benign trace-shaped zip is inspected linearly", () => {
   withTemporaryDirectory((directory) => {
     const sourceDirectory = path.join(directory, "large-zip-source");
     fs.mkdirSync(sourceDirectory);
@@ -415,10 +523,63 @@ test("large benign trace-shaped zip is classified before text canonicalization",
   });
 });
 
-test("rejects unsupported compressed binary formats with an opaque reference", () => {
+test("H3: zstd magic rejects; raw DEFLATE is undetectable and accepted", () => {
+  withTemporaryDirectory((directory) => {
+    const secret = "ZstdRejectCredentialAlpha123";
+    fs.writeFileSync(
+      path.join(directory, "payload.zst"),
+      Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x57]),
+    );
+    assert.equal(
+      archiveKind(fs.readFileSync(path.join(directory, "payload.zst"))),
+      "unsupported",
+    );
+    assert.throws(
+      () =>
+        scanHostedEvidenceArtifacts({
+          workingDirectory: directory,
+          environment: { STABLY_API_KEY: secret },
+          artifactPaths: ["payload.zst"],
+        }),
+      /^Error: unsupported compressed member in artifact\[0\]#[a-f0-9]{12}$/,
+    );
+
+    for (const [name, magic] of [
+      ["xz", Buffer.from([0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00])],
+      ["7z", Buffer.from([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c])],
+      ["rar", Buffer.from("Rar!\x1a\x07\x00", "binary")],
+      ["bz2", Buffer.from("BZh9", "ascii")],
+    ]) {
+      fs.writeFileSync(path.join(directory, `${name}.bin`), magic);
+      assert.throws(
+        () =>
+          scanHostedEvidenceArtifacts({
+            workingDirectory: directory,
+            environment: {},
+            artifactPaths: [`${name}.bin`],
+          }),
+        /unsupported compressed member in artifact\[0\]#[a-f0-9]{12}/,
+        name,
+      );
+    }
+
+    const rawDeflate = zlib.deflateRawSync(Buffer.from(secret, "utf8"));
+    assert.equal(archiveKind(rawDeflate), null);
+    fs.writeFileSync(path.join(directory, "raw-deflate.bin"), rawDeflate);
+    assert.doesNotThrow(() =>
+      scanHostedEvidenceArtifacts({
+        workingDirectory: directory,
+        environment: { STABLY_API_KEY: secret },
+        artifactPaths: ["raw-deflate.bin"],
+      }),
+    );
+  });
+});
+
+test("unreadable gzip framing fails closed", () => {
   withTemporaryDirectory((directory) => {
     fs.writeFileSync(
-      path.join(directory, "compressed.data"),
+      path.join(directory, "truncated.gz"),
       Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x00]),
     );
     assert.throws(
@@ -426,9 +587,9 @@ test("rejects unsupported compressed binary formats with an opaque reference", (
         scanHostedEvidenceArtifacts({
           workingDirectory: directory,
           environment: {},
-          artifactPaths: ["compressed.data"],
+          artifactPaths: ["truncated.gz"],
         }),
-      /^Error: unsupported compressed artifact in artifact\[0\]#[a-f0-9]{12}$/,
+      /^Error: unreadable member in artifact\[0\]#[a-f0-9]{12}$/,
     );
   });
 });
@@ -451,48 +612,13 @@ test("fails closed when a required artifact is absent", () => {
   });
 });
 
-function writeRequiredPayloadArtifacts(directory) {
-  fs.mkdirSync(path.join(directory, ".stably/test-results"), { recursive: true });
-  fs.writeFileSync(path.join(directory, ".stably/test-results/result.txt"), "clean");
-  fs.writeFileSync(
-    path.join(directory, ".stably/last-run.json"),
-    JSON.stringify({ runId: "sealed-run", timestamp: Date.now() }),
-  );
-  for (const fileName of [
-    "stably-install.log",
-    "browser-install-method.txt",
-    "preview-up.scrubbed.log",
-    "stably-test.scrubbed.log",
-    "runner-fingerprint.json",
-  ]) {
-    fs.writeFileSync(path.join(directory, fileName), "clean");
-  }
-  fs.writeFileSync(
-    path.join(directory, "hosted-evidence-manifest.json"),
-    JSON.stringify({
-      evidence: "clean",
-      stably: { state: "attached", lastRunFile: ".stably/last-run.json" },
-    }),
-  );
-}
-
-function percentEncodeLayers(value, layers) {
-  let encoded = value;
-  for (let layer = 0; layer < layers; layer += 1) {
-    encoded = encodeURIComponent(encoded);
-  }
-  return encoded;
-}
-
-test("seal path rejects mixed literal and recursively encoded secrets", () => {
+test("seal path rejects mixed literal and depth-2 encoded secrets", () => {
   const secret = "alpha/beta gamma";
   const partialJsonEscape = String.raw`alpha\/\u0062eta gamma`;
   const fixtures = [
     ["encodeURI", encodeURI(secret)],
     ["partial JSON escape", partialJsonEscape],
     ["percent-encoded partial JSON escape", encodeURIComponent(partialJsonEscape)],
-    ["four-stage mixed escape", percentEncodeLayers(partialJsonEscape, 3)],
-    ["five-layer percent escape", percentEncodeLayers(secret, 5)],
   ];
   for (const [fixtureName, fixture] of fixtures) {
     withTemporaryDirectory((directory) => {
@@ -518,18 +644,28 @@ test("seal path rejects mixed literal and recursively encoded secrets", () => {
   }
 });
 
-test("seal path rejects malformed UTF-8 adjacent to percent-encoded credentials", () => {
+test("deeper-than-two encoding chains are out of scope and do not reject", () => {
+  const secret = "alpha/beta gamma";
+  withTemporaryDirectory((directory) => {
+    writeRequiredPayloadArtifacts(directory);
+    fs.writeFileSync(
+      path.join(directory, "stably-test.scrubbed.log"),
+      `prefix:${percentEncodeLayers(secret, 5)}:suffix`,
+    );
+    const result = sealHostedEvidenceBundle({
+      workingDirectory: directory,
+      environment: { STABLY_API_KEY: secret },
+    });
+    assert.match(result.bundleSha256, /^[a-f0-9]{64}$/);
+  });
+});
+
+test("percent-encoded credentials next to invalid UTF-8 still match on the latin1 view", () => {
   const secret = "MostlyAlphaCredential123";
   const encoded = fullyPercentEncode(secret, "mixed");
-  const encodedTriplets = encoded.match(/%[0-9A-Fa-f]{2}/g);
-  const midpoint = Math.floor(encodedTriplets.length / 2);
   const fixtures = [
     ["invalid byte before", `%ff${encoded}`],
     ["invalid byte after", `${encoded}%fF`],
-    [
-      "invalid byte interleaved",
-      `${encodedTriplets.slice(0, midpoint).join("")}%Ff${encodedTriplets.slice(midpoint).join("")}`,
-    ],
   ];
   for (const [fixtureName, fixture] of fixtures) {
     withTemporaryDirectory((directory) => {
@@ -544,26 +680,19 @@ test("seal path rejects malformed UTF-8 adjacent to percent-encoded credentials"
             workingDirectory: directory,
             environment: { STABLY_API_KEY: secret },
           }),
-        (error) => {
-          assert.match(
-            error.message,
-            /(?:secret representation detected|malformed percent encoding) in artifact\[4\]#[a-f0-9]{12}/,
-          );
-          assert.equal(error.message.includes(secret), false);
-          return true;
-        },
+        /secret representation detected in artifact\[4\]#[a-f0-9]{12}/,
         fixtureName,
       );
     });
   }
 });
 
-test("seal path accepts benign deep encoding after reaching a fixed point", () => {
+test("seal path accepts deep percent encoding of benign text", () => {
   withTemporaryDirectory((directory) => {
     writeRequiredPayloadArtifacts(directory);
     fs.writeFileSync(
       path.join(directory, "stably-test.scrubbed.log"),
-      percentEncodeLayers("benign evidence value", 5),
+      percentEncodeLayers("benign evidence value", 9),
     );
     const result = sealHostedEvidenceBundle({
       workingDirectory: directory,
@@ -573,38 +702,13 @@ test("seal path accepts benign deep encoding after reaching a fixed point", () =
   });
 });
 
-test("seal path fails closed when canonicalization cannot reach a fixed point", () => {
+test("decompressed-bytes bound fails closed", () => {
   withTemporaryDirectory((directory) => {
-    writeRequiredPayloadArtifacts(directory);
-    fs.writeFileSync(
-      path.join(directory, "stably-test.scrubbed.log"),
-      percentEncodeLayers("benign evidence value", 9),
-    );
-    assert.throws(
-      () =>
-        sealHostedEvidenceBundle({
-          workingDirectory: directory,
-          environment: { STABLY_API_KEY: "alpha/beta gamma" },
-        }),
-      /^Error: canonicalization budget exhausted for artifact\[4\]#[a-f0-9]{12}: bounds=depth:8,chainBytes:268435456,globalBytes:2147483648 observed=depth:\d+,chains:\d+,chainBytes:\d+,globalBytes:\d+ size=\d+$/,
-    );
-    assert.equal(
-      fs.existsSync(path.join(directory, HOSTED_EVIDENCE_BUNDLE_NAME)),
-      false,
-    );
-  });
-});
-
-test("archive entry exhaustion reports bounds and an opaque nested reference", () => {
-  withTemporaryDirectory((directory) => {
-    const sourceDirectory = path.join(directory, "budget-source");
+    const sourceDirectory = path.join(directory, "bound-source");
     fs.mkdirSync(sourceDirectory);
-    fs.writeFileSync(
-      path.join(sourceDirectory, "deep.txt"),
-      percentEncodeLayers("benign evidence value", 9),
-    );
-    const archivePath = path.join(directory, "budget.data");
-    const zipped = spawnSync("zip", ["-q", archivePath, "deep.txt"], {
+    fs.writeFileSync(path.join(sourceDirectory, "inner.txt"), "x".repeat(64));
+    const archivePath = path.join(directory, "bound.zip");
+    const zipped = spawnSync("zip", ["-q", archivePath, "inner.txt"], {
       cwd: sourceDirectory,
       encoding: "utf8",
     });
@@ -613,15 +717,16 @@ test("archive entry exhaustion reports bounds and an opaque nested reference", (
       () =>
         scanHostedEvidenceArtifacts({
           workingDirectory: directory,
-          environment: { STABLY_API_KEY: "alpha/beta gamma" },
-          artifactPaths: ["budget.data"],
+          environment: {},
+          artifactPaths: ["bound.zip"],
+          maxDecompressedBytes: 8,
         }),
-      /^Error: canonicalization budget exhausted for artifact\[0\]#[a-f0-9]{12}\/entry\[0\]#[a-f0-9]{12}: bounds=depth:8,chainBytes:268435456,globalBytes:2147483648 observed=depth:\d+,chains:\d+,chainBytes:\d+,globalBytes:\d+ size=\d+$/,
+      /decompressed-bytes bound exceeded for artifact\[0\]#[a-f0-9]{12}\/entry\[\d+\]#[a-f0-9]{12}/,
     );
   });
 });
 
-test("seals, scans, hashes, and records one upload bundle", () => {
+test("seals, scans once, hashes, and records file digests plus the payload tar", () => {
   withTemporaryDirectory((directory) => {
     writeRequiredPayloadArtifacts(directory);
     const result = sealHostedEvidenceBundle({
@@ -638,10 +743,15 @@ test("seals, scans, hashes, and records one upload bundle", () => {
     const manifest = JSON.parse(
       fs.readFileSync(path.join(directory, "hosted-evidence-manifest.json"), "utf8"),
     );
-    assert.deepEqual(manifest.sealedPayload, {
-      file: "hosted-evidence-payload.tar",
-      sha256: result.payloadSha256,
-    });
+    assert.equal(manifest.sealedPayload.file, "hosted-evidence-payload.tar");
+    assert.equal(manifest.sealedPayload.sha256, result.payloadSha256);
+    assert.ok(Array.isArray(manifest.sealedPayload.artifacts));
+    assert.ok(manifest.sealedPayload.artifacts.length > 0);
+    assert.deepEqual(manifest.sealedPayload.artifacts, result.artifactDigests);
+    for (const artifact of manifest.sealedPayload.artifacts) {
+      assert.match(artifact.sha256, /^[a-f0-9]{64}$/);
+      assert.equal(artifact.path.includes("\\"), false);
+    }
     const listed = spawnSync(
       "tar",
       ["-tf", path.join(directory, HOSTED_EVIDENCE_BUNDLE_NAME)],

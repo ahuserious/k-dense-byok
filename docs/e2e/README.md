@@ -136,7 +136,7 @@ The real remote path is the `github-runner` job in [`.github/workflows/stably-cl
 - the embedded runner fingerprint, including runner image/identity fields available to the job; and
 - the Stably run ID and URL when the conditional reporter attached.
 
-The job uploads only `hosted-evidence-bundle.tar`. Its inner `hosted-evidence-payload.tar` contains every mandatory runner artifact, including the fresh Stably last-run record when the reporter attached; the manifest records that sealed payload's SHA-256. The outer bundle contains only that payload and the manifest, is scanned recursively, and its SHA-256 is written to the job summary. This two-layer shape avoids claiming that a file embedded in an archive can contain the archive's own self-referential hash.
+The job uploads only `hosted-evidence-bundle.tar`. Its inner `hosted-evidence-payload.tar` contains every mandatory runner artifact, including the fresh Stably last-run record when the reporter attached. Each payload file is scanned once while that tar is assembled; the manifest records the per-file SHA-256 digests plus the payload tar's SHA-256. The outer bundle contains only that payload and the manifest and is hashed once without being re-scanned. This two-layer shape avoids claiming that a file embedded in an archive can contain the archive's own self-referential hash.
 
 A dispatch with the optional grep input is diagnostic and does not satisfy this complete-suite evidence contract.
 
