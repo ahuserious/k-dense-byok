@@ -1,6 +1,6 @@
 {
   "lane": "V1",
-  "purpose": "Verification-fix lane opened 2026-08-17 from the human-sim campaign a9b34a39e4724bb612005a33 (precise visual inspection + simulated users on integration 84c7b7b): workspace-surface width containment, registry focus management, project-picker focus ring, Workshop iframe hermeticity, chat Submit reason; retained as historical checked scope after V1 returns its paths",
+  "purpose": "Verification-fix lane opened 2026-08-17 from the human-sim campaign a9b34a39e4724bb612005a33 (precise visual inspection + simulated users on integration 84c7b7b): workspace-surface width containment, registry focus management, project-picker focus ring, Workshop iframe hermeticity, chat Submit reason; retained as historical checked scope after V1 returns its paths; round 3 (2026-08-17, re-verification campaign 0aa5eafc) adds the workspace-entry focus hand-off (page.tsx + workspace-navigation), the analyst composer reason (helper-agent-chat) and the details-heading focus indicator",
   "files": [
     "docs/inventory/v1-verification.json",
     "web/src/components/persistent-workspace-surfaces.tsx",
@@ -16,6 +16,11 @@
     "web/src/components/raindrop-surface.tsx",
     "web/src/components/chat-tab.tsx",
     "e2e/scientific-pipelines.spec.ts",
-    "e2e/workspace.spec.ts"
+    "e2e/workspace.spec.ts",
+    "web/src/app/page.tsx",
+    "web/src/components/workspace-navigation.tsx",
+    "web/src/components/workspace-navigation.test.tsx",
+    "web/src/components/helper-agent-chat.tsx",
+    "web/src/components/helper-agent-chat.test.tsx"
   ]
 }
