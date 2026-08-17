@@ -1060,7 +1060,14 @@ function ChatInput({
                   // measured 1.55:1 against its surroundings. Submit repaints
                   // its own ring in the foreground colour rather than change
                   // the global --ring token every other surface shares.
-                  className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50 focus-visible:border-foreground/60 focus-visible:ring-foreground/60"
+                  //
+                  // The blocked look is carried by colour, not by
+                  // `aria-disabled:opacity-50`: `opacity` composites the whole
+                  // element including its box-shadow, which halved the ring
+                  // above to 2.05:1 — and with no provider connected
+                  // aria-disabled is the only state a user can reach, so that
+                  // was the only ring that existed in practice.
+                  className="aria-disabled:cursor-not-allowed aria-disabled:bg-muted aria-disabled:text-muted-foreground aria-disabled:hover:bg-muted aria-disabled:hover:text-muted-foreground focus-visible:border-foreground/60 focus-visible:ring-foreground/60"
                 />
               </InfoTooltip>
             </div>

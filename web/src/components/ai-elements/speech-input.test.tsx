@@ -102,6 +102,14 @@ describe("SpeechInput MediaRecorder fallback", () => {
     const button = await screen.findByRole("button", {
       name: "Hold to dictate",
     });
+    // The shared Button ring (`ring-ring/50`) measured 1.54:1 here; this
+    // control repaints it in the foreground colour, like the composer and
+    // Submit it sits between in the tab order.
+    expect(button).toHaveClass(
+      "focus-visible:border-foreground/60",
+      "focus-visible:ring-foreground/60",
+    );
+    expect(button).not.toHaveClass("focus-visible:ring-ring/50");
     fireEvent.pointerDown(button, { button: 0 });
     await waitFor(() => expect(getUserMedia).toHaveBeenCalledOnce());
     fireEvent.pointerUp(button, { button: 0 });

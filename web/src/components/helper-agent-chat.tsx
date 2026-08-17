@@ -255,7 +255,13 @@ function ScopedHelperAgentChat({
         ) : null}
         <textarea
           aria-label={`Message ${helperLabel(profile)}`}
-          className="min-h-16 w-full resize-none rounded-md border bg-background px-2.5 py-2 text-xs outline-none focus:ring-1 focus:ring-ring aria-disabled:opacity-50"
+          // A 1px `ring-ring` rendered 1.56:1 against the surround, and
+          // `aria-disabled:opacity-50` then halved even that — on the one
+          // control M4 deliberately kept in the tab order. The ring is now 2px
+          // of foreground/60 (the colour the picker and chat composer already
+          // use) and the blocked state is drawn in muted colours so the ring
+          // keeps its full opacity while the field is refusing input.
+          className="min-h-16 w-full resize-none rounded-md border bg-background px-2.5 py-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-foreground/60 aria-disabled:bg-muted aria-disabled:text-muted-foreground aria-disabled:cursor-not-allowed"
           value={draft}
           // readOnly rather than disabled: the field keeps its place in the tab
           // order (so the reason is reachable) and still refuses input.
@@ -279,7 +285,13 @@ function ScopedHelperAgentChat({
           ) : (
             <button
               type="submit"
-              className="inline-flex items-center gap-1 rounded-md bg-primary px-2 py-1 text-[10px] font-medium text-primary-foreground aria-disabled:cursor-not-allowed aria-disabled:opacity-40"
+              // No `outline-none` base: in Tailwind v4 it sets
+              // --tw-outline-style unconditionally, which would leave the
+              // focus-visible outline below styleless. The explicit 2px
+              // foreground outline replaces the browser default, which at
+              // `opacity-40` had rendered 2.68:1; the blocked look is colour,
+              // not opacity, so the outline stays at full strength.
+              className="inline-flex items-center gap-1 rounded-md bg-primary px-2 py-1 text-[10px] font-medium text-primary-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground aria-disabled:cursor-not-allowed aria-disabled:bg-muted aria-disabled:text-muted-foreground"
               aria-disabled={blocked || !draft.trim() || undefined}
               aria-describedby={blockedDescribedBy}
             >

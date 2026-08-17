@@ -226,6 +226,28 @@ test.describe("keyboard affordances", () => {
     // still land on the control and hear why it will not send.
     await submit.focus();
     await expect(submit).toBeFocused();
+
+    // ...and they must be able to SEE that they landed on it. Only real
+    // keyboard traversal sets :focus-visible, so leave and come back.
+    await workspacePage.keyboard.press("Shift+Tab");
+    await workspacePage.keyboard.press("Tab");
+    await expect(submit).toBeFocused();
+    expect(await submit.evaluate((node) => node.matches(":focus-visible"))).toBe(true);
+
+    // `aria-disabled:opacity-50` used to composite the box-shadow along with
+    // the button, so the ring below rendered at half strength — 2.05:1, and
+    // with no provider connected aria-disabled is the only state that exists.
+    // The blocked look is carried by colour now, so opacity stays 1.
+    const submitRing = () =>
+      submit.evaluate((node) => {
+        const style = window.getComputedStyle(node);
+        return `${style.opacity} ${style.boxShadow}`;
+      });
+    // The control transitions its ring in, so poll rather than sample once.
+    await expect.poll(submitRing).toContain("0px 0px 0px 3px");
+    const settled = await submitRing();
+    expect(settled.startsWith("1 ")).toBe(true);
+    expect(settled).not.toContain("oklab(0.708");
   });
 
   test("the blocked-Submit hint never flashes the transient provider check", async ({
