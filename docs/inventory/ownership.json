@@ -218,7 +218,9 @@
       "web/src/components/project-view.test.tsx",
       "web/src/components/workflows-panel.test.tsx",
       "web/src/components/helper-agent-chat.test.tsx",
-      "web/src/components/workspace-navigation.test.tsx"
+      "web/src/components/workspace-navigation.test.tsx",
+      "web/src/components/ai-elements/speech-input.tsx",
+      "web/src/components/ai-elements/speech-input.test.tsx"
     ]
   },
   "handoffs": [
