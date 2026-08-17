@@ -137,6 +137,20 @@ jobs:
       # strict, so the skip-build path can never pass here. The locked
       # --if-stale build rebuilds the bundle once under the preview build
       # environment instead.
+      - name: Start preview listener sampler
+        run: |
+          cat > preview-listener-sampler.sh <<'SAMPLER'
+          #!/usr/bin/env bash
+          for i in $(seq 1 60); do
+            sleep 5
+            echo "=== sample $i"
+            ss -ltnp 2>/dev/null | grep -E '(18000|13000|13091)'
+            echo "--- lsof 13000: $(lsof -nP -iTCP:13000 -sTCP:LISTEN -t 2>&1 | tr '\n' ' ')"
+          done
+          SAMPLER
+          nohup bash preview-listener-sampler.sh > preview-listener-samples.log 2>&1 &
+          echo $! > preview-listener-sampler.pid
+
       - name: Start hermetic preview
         id: preview
         shell: bash
@@ -151,9 +165,17 @@ jobs:
           cat preview-up.log
           exit "$preview_exit"
 
+      - name: Stop preview listener sampler
+        if: always()
+        run: |
+          test ! -f preview-listener-sampler.pid || kill "$(cat preview-listener-sampler.pid)" 2>/dev/null || true
+
       - name: Preview listeners (failure diagnostics)
         if: failure() && steps.preview.outcome == 'failure'
         run: |
+          echo "--- listener samples taken while preview-up ran"
+          cat preview-listener-samples.log 2>/dev/null || echo "(no samples)"
+          lsof -v 2>&1 | head -3 || true
           lsof -nP -iTCP:18000 -iTCP:13000 -iTCP:13091 -sTCP:LISTEN || echo "(lsof reported no listeners)"
           ss -ltnp 2>/dev/null | grep -E '(18000|13000|13091)' || echo "(ss reported no matching listeners)"
           pgrep -af 'next|bun|tsx|supervisor' || echo "(no preview processes)"
