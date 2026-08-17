@@ -6,11 +6,13 @@ import { fileURLToPath } from "node:url";
 
 import {
   instrumentPreviewLauncher,
+  previewIdentityFromCaptured,
   previewStartGateMatches,
   previewSupervisorOwnershipRecordable,
   recordPreviewChildOrKill,
 } from "./preview-launcher-observer.mjs";
-import { recordSupervisorOwnership } from "./vendored-dist-environment.mjs";
+import { captureProcessIdentity, recordSupervisorOwnership } from "./vendored-dist-environment.mjs";
+import { previewPidStartIdentity } from "./preview-state.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -38,8 +40,9 @@ test("instruments every direct preview service spawn and exit", () => {
   );
   assert.match(
     instrumented,
-    /recordPreviewServiceState\(\s*"workflow-supervisor",\s*message\.pid,\s*"spawned",[\s\S]*\{ identity \}/,
+    /recordPreviewServiceState\(\s*"workflow-supervisor",\s*message\.pid,\s*"spawned",[\s\S]*\{ identity: previewIdentityFromCaptured\(identity\) \}/,
   );
+  assert.match(instrumented, /function previewIdentityFromCaptured\(identity\)/);
   // The injected supervisor record must sit inside the ownership-result gate,
   // after the launcher's own recordSupervisorOwnership() decision.
   assert.match(
@@ -136,4 +139,44 @@ test("supervisor client reports fresh and inherited ownership before attachment"
     source,
     /if \(readyInheritedState\) \{\s*options\.onOwnership\?\.\(readyInheritedState\.pid\);\s*const drainClient = await WorkflowSupervisorClient\.attach/,
   );
+});
+
+
+test("the recorded supervisor identity uses the preview record's proc-stat shape on linux", () => {
+  // Same fake /proc as both producers read: captureProcessIdentity() (launcher
+  // side, bare start time + separate boot id) and previewPidStartIdentity()
+  // (readiness/teardown side, "<boot-id>:<start-time>"). Before the
+  // normalisation these disagreed on linux, so readiness re-resolution reported
+  // "identity no longer matches" for the supervisor record on the CI runner.
+  const bootId = "6c0f6f7e-2c8f-4c9a-9a3d-3f0a1b2c3d4e";
+  const stat = "6469 (bun) S 6353 6469 6469 0 -1 4194560 2 0 0 0 1 0 0 0 20 0 5 0 34567 900000 100 18446744073709551615 1 1 0 0 0 0 0 0 0 0 0 0 17 1 0 0 0 0 0 0 0 0 0 0 0 0 0\n";
+  const readFileSync = (target) => {
+    if (target === "/proc/sys/kernel/random/boot_id") return `${bootId}\n`;
+    if (target === "/proc/6469/stat") return stat;
+    throw Object.assign(new Error(`ENOENT: ${target}`), { code: "ENOENT" });
+  };
+  const captured = captureProcessIdentity(6469, {
+    platform: "linux",
+    readFileSync,
+    spawnProcess: () => ({ status: 1, stdout: "" }),
+    hostname: () => "runner",
+  });
+  assert.deepEqual(captured, { method: "proc-stat", value: "34567", host: "runner", boot: bootId });
+  const resolved = previewPidStartIdentity(6469, {
+    platform: "linux",
+    signalProcess: () => true,
+    readFile: readFileSync,
+    runCommand: () => ({ status: 1, stdout: "" }),
+  });
+  assert.deepEqual(resolved, { method: "proc-stat", value: `${bootId}:34567` });
+  assert.notDeepEqual({ method: captured.method, value: captured.value }, resolved);
+  assert.deepEqual(previewIdentityFromCaptured(captured), resolved);
+  // Idempotent on an already-normalised value and a darwin passthrough.
+  assert.deepEqual(previewIdentityFromCaptured(resolved), resolved);
+  assert.deepEqual(
+    previewIdentityFromCaptured({ method: "ps-lstart-utc", value: "Sun Aug 16 22:16:23 2026", host: "mac", boot: "darwin-boot-seconds:1" }),
+    { method: "ps-lstart-utc", value: "Sun Aug 16 22:16:23 2026" },
+  );
+  assert.equal(previewIdentityFromCaptured(null), undefined);
+  assert.equal(previewIdentityFromCaptured({ method: "proc-stat", value: "1", host: "h" }), undefined);
 });

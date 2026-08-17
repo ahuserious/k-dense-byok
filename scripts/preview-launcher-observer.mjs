@@ -37,6 +37,28 @@ export function previewSupervisorOwnershipRecordable(ownershipResult) {
   return ownershipResult === "recorded" || ownershipResult === "unchanged";
 }
 
+// The launcher captures the supervisor identity with
+// captureProcessIdentity() (scripts/vendored-dist-environment.mjs), whose
+// linux proc-stat value is the bare start time with the boot id carried
+// separately; the preview record and every later re-resolution
+// (previewProcessIdentity / previewPidStartIdentity) use
+// "<boot-id>:<start-time>". On darwin both sides use the same ps lstart
+// string, which is why the divergence only surfaced on the Linux runner
+// (readiness re-resolved the supervisor identity, saw a different value, and
+// reported "identity no longer matches" until the readiness deadline).
+// Normalise at the one place the two shapes meet.
+export function previewIdentityFromCaptured(identity) {
+  if (!identity || typeof identity.method !== "string" || typeof identity.value !== "string") {
+    return undefined;
+  }
+  if (identity.method === "proc-stat") {
+    if (identity.value.includes(":")) return { method: "proc-stat", value: identity.value };
+    if (typeof identity.boot !== "string" || !identity.boot) return undefined;
+    return { method: "proc-stat", value: `${identity.boot}:${identity.value}` };
+  }
+  return { method: identity.method, value: identity.value };
+}
+
 export function recordPreviewChildOrKill(
   child,
   recordChild,
@@ -162,7 +184,7 @@ export function instrumentPreviewLauncher(source) {
   let instrumented = replaceExactlyOnce(
     source,
     OBSERVER_HELPER_ANCHOR,
-    `${OBSERVER_HELPER_ANCHOR}\n${previewStartGateMatches.toString()}\n${previewSupervisorOwnershipRecordable.toString()}\n${recordPreviewChildOrKill.toString()}${OBSERVER_HELPER}`,
+    `${OBSERVER_HELPER_ANCHOR}\n${previewStartGateMatches.toString()}\n${previewSupervisorOwnershipRecordable.toString()}\n${previewIdentityFromCaptured.toString()}\n${recordPreviewChildOrKill.toString()}${OBSERVER_HELPER}`,
     "observer helper",
   );
   // registerChild() is the launcher's synchronous ownership registration, so
@@ -213,7 +235,7 @@ export function instrumentPreviewLauncher(source) {
           "spawned",
           null,
           null,
-          { identity },
+          { identity: previewIdentityFromCaptured(identity) },
         );
       }`,
     "workflow-supervisor ownership hook",
