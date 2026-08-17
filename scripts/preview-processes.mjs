@@ -28,7 +28,17 @@ export function processGroupAlive(processGroupId) {
   }
 }
 
-export function processWorkingDirectory(pid) {
+export function processWorkingDirectory(pid, { platform = process.platform } = {}) {
+  if (platform === "linux") {
+    // /proc is authoritative on linux and needs no external tool; an
+    // unreadable or vanished entry reads as "no working directory", which
+    // every caller treats as a mismatch (fail closed), never as ownership.
+    try {
+      return fs.readlinkSync(`/proc/${pid}/cwd`);
+    } catch {
+      return "";
+    }
+  }
   const output = commandOutput("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"]);
   return output
     .split("\n")
@@ -36,19 +46,41 @@ export function processWorkingDirectory(pid) {
     ?.slice(1) ?? "";
 }
 
-export function listenersOnPort(port) {
-  const result = spawnSync("lsof", [
+export function listenersOnPort(
+  port,
+  { platform = process.platform, runCommand = spawnSync } = {},
+) {
+  if (platform === "linux") {
+    // lsof 4.95 on the GitHub ubuntu-latest runner (kernel 6.17) lists no
+    // TCP listeners at all while `ss` shows them (CI run 31982742971 sampled
+    // both every 5 s during a preview boot), so readiness reported "no
+    // listener" for a socket Next.js was serving on. iproute2's ss reads the
+    // kernel tables directly and is always present on linux.
+    const result = runCommand("ss", ["-H", "-ltnp", `sport = :${port}`], { encoding: "utf-8" });
+    if (result.status !== 0) {
+      throw new Error(
+        `ss could not inspect preview port ${port}: ${(result.stderr || result.stdout || "").trim() || `exit ${result.status}`}`,
+      );
+    }
+    const pids = [];
+    for (const line of String(result.stdout ?? "").split("\n")) {
+      if (!line.trim()) continue;
+      for (const match of line.matchAll(/pid=(\d+)/g)) pids.push(Number(match[1]));
+    }
+    return [...new Set(pids)].filter((pid) => Number.isSafeInteger(pid) && pid > 1);
+  }
+  const result = runCommand("lsof", [
     "-nP",
     `-iTCP:${port}`,
     "-sTCP:LISTEN",
     "-t",
   ], { encoding: "utf-8" });
-  if (result.status !== 0 && !(result.status === 1 && !result.stderr.trim())) {
+  if (result.status !== 0 && !(result.status === 1 && !(result.stderr ?? "").trim())) {
     throw new Error(
-      `lsof could not inspect preview port ${port}: ${(result.stderr || result.stdout).trim() || `exit ${result.status}`}`,
+      `lsof could not inspect preview port ${port}: ${(result.stderr || result.stdout || "").trim() || `exit ${result.status}`}`,
     );
   }
-  const output = result.stdout.trim();
+  const output = String(result.stdout ?? "").trim();
   return [...new Set(output.split(/\s+/).filter(Boolean).map(Number))].filter(
     (pid) => Number.isSafeInteger(pid) && pid > 1,
   );

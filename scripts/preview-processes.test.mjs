@@ -12,6 +12,8 @@ import {
   quiescePreviewGeneration,
   recordedPreviewProcessGroup,
   waitForPreviewPortsFree,
+  listenersOnPort,
+  processWorkingDirectory,
 } from "./preview-processes.mjs";
 import { readPreviewServiceStateSnapshot } from "./preview-readiness.mjs";
 
@@ -441,4 +443,52 @@ test("free-port barrier returns exact holdouts at its deadline", async () => {
     },
   );
   assert.deepEqual(occupied, [{ role: "backend", port: 18000, listeners: [77] }]);
+});
+
+
+test("listener probe uses ss on linux and lsof elsewhere, returning every pid on the port", () => {
+  // Captured verbatim from CI run 31982742971 (ubuntu-latest, kernel 6.17): ss
+  // saw the Next.js dual-stack listener while lsof 4.95 returned nothing.
+  const ssOutput =
+    'LISTEN 0      511                *:13000            *:*    users:(("next-server (v1",pid=6172,fd=22))\n' +
+    'LISTEN 0      511           [::1]:13000         [::]:*    users:(("next-server (v1",pid=6172,fd=23),("node",pid=6150,fd=9))\n';
+  const calls = [];
+  const linuxRun = (command, args) => {
+    calls.push([command, ...args]);
+    assert.equal(command, "ss");
+    return { status: 0, stdout: ssOutput, stderr: "" };
+  };
+  assert.deepEqual(listenersOnPort(13000, { platform: "linux", runCommand: linuxRun }), [6172, 6150]);
+  assert.deepEqual(calls, [["ss", "-H", "-ltnp", "sport = :13000"]]);
+  // No listener: ss prints nothing and exits 0.
+  assert.deepEqual(
+    listenersOnPort(13000, { platform: "linux", runCommand: () => ({ status: 0, stdout: "", stderr: "" }) }),
+    [],
+  );
+  // ss failing to run is a probe failure, never "no listener".
+  assert.throws(
+    () => listenersOnPort(13000, { platform: "linux", runCommand: () => ({ status: 255, stdout: "", stderr: "ss: not found" }) }),
+    /ss could not inspect preview port 13000/,
+  );
+  // darwin keeps the lsof probe: -t prints one pid per line, exit 1 + empty stderr = no match.
+  const darwinRun = (command, args) => {
+    assert.equal(command, "lsof");
+    assert.deepEqual(args, ["-nP", "-iTCP:13000", "-sTCP:LISTEN", "-t"]);
+    return { status: 0, stdout: "48584\n48584\n", stderr: "" };
+  };
+  assert.deepEqual(listenersOnPort(13000, { platform: "darwin", runCommand: darwinRun }), [48584]);
+  assert.deepEqual(
+    listenersOnPort(13000, { platform: "darwin", runCommand: () => ({ status: 1, stdout: "", stderr: "" }) }),
+    [],
+  );
+  assert.throws(
+    () => listenersOnPort(13000, { platform: "darwin", runCommand: () => ({ status: 1, stdout: "", stderr: "lsof: WARNING" }) }),
+    /lsof could not inspect preview port 13000/,
+  );
+});
+
+test("working-directory probe reads /proc on linux and reports a vanished pid as empty", () => {
+  // /proc/self/cwd is always readable; a pid that cannot exist maps to "".
+  assert.equal(processWorkingDirectory(process.pid, { platform: "linux" }), process.platform === "linux" ? process.cwd() : "");
+  assert.equal(processWorkingDirectory(2 ** 22 + 12345, { platform: "linux" }), "");
 });
