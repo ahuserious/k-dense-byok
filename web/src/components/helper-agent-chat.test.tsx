@@ -135,6 +135,23 @@ describe("HelperAgentChat blocked composer states the reason", () => {
     // The placeholder survives the blocked state.
     expect(textarea).toHaveAttribute("placeholder", "Ask what failed and why…");
 
+    // The blocked look is colour, never whole-element opacity: `opacity`
+    // composites the focus indicator along with everything else, which is what
+    // dropped these two to 1.56:1 and 2.68:1.
+    for (const control of [textarea, send]) {
+      expect(control.className).not.toMatch(/(^|:)opacity-\d/);
+    }
+    expect(textarea).toHaveClass(
+      "aria-disabled:bg-muted",
+      "aria-disabled:text-muted-foreground",
+      "aria-disabled:cursor-not-allowed",
+    );
+    expect(send).toHaveClass(
+      "aria-disabled:bg-muted",
+      "aria-disabled:text-muted-foreground",
+      "aria-disabled:cursor-not-allowed",
+    );
+
     await userEvent.click(send);
     await userEvent.type(textarea, "Why did it fail?{Enter}");
     expect(mocks.send).not.toHaveBeenCalled();
@@ -171,6 +188,19 @@ describe("HelperAgentChat blocked composer states the reason", () => {
     // Empty draft still blocks the send, but that needs no explanation.
     expect(send).toHaveAttribute("aria-disabled", "true");
     expect(send).not.toHaveAttribute("aria-describedby");
+
+    // The focus indicators do not depend on the blocked state: the same
+    // foreground-coloured outline/ring is declared whether or not the control
+    // is accepting input, so the enabled state cannot regress separately.
+    expect(send).toHaveClass(
+      "focus-visible:outline-2",
+      "focus-visible:outline-offset-2",
+      "focus-visible:outline-foreground",
+    );
+    expect(screen.getByRole("textbox", { name: "Message Raindrop analyst" })).toHaveClass(
+      "focus-visible:ring-2",
+      "focus-visible:ring-foreground/60",
+    );
 
     await userEvent.type(
       screen.getByRole("textbox", { name: "Message Raindrop analyst" }),

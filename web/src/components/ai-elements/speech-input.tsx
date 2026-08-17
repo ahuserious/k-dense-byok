@@ -470,6 +470,12 @@ export const SpeechInput = ({
         {...buttonProps}
         className={cn(
           "relative z-10 rounded-full transition-all duration-300 select-none touch-none",
+          // The shared Button ring (`ring-ring/50`) measured 1.54:1 against the
+          // composer behind it. This control sits between the composer and
+          // Submit in the tab order, both of which already repaint their ring
+          // in the foreground colour; it now matches them rather than changing
+          // the global --ring token every other surface shares.
+          "focus-visible:border-foreground/60 focus-visible:ring-foreground/60",
           isListening
             ? "bg-destructive text-white hover:bg-destructive/80 hover:text-white"
             : "bg-primary text-primary-foreground hover:bg-primary/80 hover:text-primary-foreground",
