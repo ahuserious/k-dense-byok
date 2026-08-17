@@ -1,7 +1,11 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import { createRef } from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import { WorkspaceNavigation } from "./workspace-navigation";
+import {
+  WorkspaceNavigation,
+  type WorkspaceNavigationHandle,
+} from "./workspace-navigation";
 
 describe("WorkspaceNavigation", () => {
   it("renders every canonical project view and reports selections", () => {
@@ -27,5 +31,21 @@ describe("WorkspaceNavigation", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Console" }));
     expect(onChange).toHaveBeenCalledWith("console");
+  });
+
+  it("focusFirst() moves the keyboard to the first primary control", () => {
+    const ref = createRef<WorkspaceNavigationHandle>();
+    render(<WorkspaceNavigation ref={ref} view="chat" onChange={vi.fn()} />);
+
+    expect(document.activeElement).toBe(document.body);
+    ref.current?.focusFirst();
+    // "Chat" is NAVIGATION_ITEMS[0] — the first control of
+    // <nav aria-label="Project workspace">, where the shell hands focus after a
+    // project is opened from the picker.
+    const first = screen.getByRole("button", { name: "Chat" });
+    expect(document.activeElement).toBe(first);
+    expect(
+      screen.getByRole("navigation", { name: "Project workspace" }).contains(first),
+    ).toBe(true);
   });
 });

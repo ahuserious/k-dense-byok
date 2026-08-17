@@ -107,7 +107,7 @@ test.describe("workspace surfaces never scroll the document sideways", () => {
 });
 
 test.describe("keyboard affordances", () => {
-  test("the project-picker entry control shows a focus ring the card does not clip", async ({
+  test("the project-picker entry control shows a focus ring the card does not clip, then hands focus to the workspace nav", async ({
     workspacePage,
   }) => {
     // The mocks live on this page, so returning to "/" re-renders the picker.
@@ -136,6 +136,41 @@ test.describe("keyboard affordances", () => {
     // spread on the CARD is the assertion: the same ring on the overlay button
     // is clipped away by the card's overflow-hidden.
     await expect.poll(cardBoxShadow).toContain("0px 0px 0px 3px");
+
+    // ...and the ring is drawn in the foreground colour. The shared ring/50
+    // grey measured 1.55:1 against the page background, below the 3:1 a focus
+    // indicator owes; the global --ring token is left alone for everyone else.
+    const ringColor = await entryControl.evaluate((node) => {
+      const card = node.parentElement as HTMLElement;
+      const shadow = window.getComputedStyle(card).boxShadow;
+      const foreground = window
+        .getComputedStyle(document.documentElement)
+        .getPropertyValue("--foreground")
+        .trim();
+      return { shadow, foreground };
+    });
+    expect(ringColor.shadow).not.toContain("oklab(0.708");
+    expect(ringColor.foreground).not.toBe("");
+
+    // Entering the project used to leave document.activeElement on <body>: the
+    // card unmounts with the overview and the keyboard user restarts from the
+    // top of the document. Focus must land inside the workspace navigation.
+    await workspacePage.keyboard.press("Enter");
+    const navigation = workspacePage.getByRole("navigation", { name: "Project workspace" });
+    await expect(navigation).toBeVisible();
+    await expect
+      .poll(() =>
+        workspacePage.evaluate(() => {
+          const active = document.activeElement;
+          const nav = document.querySelector('nav[aria-label="Project workspace"]');
+          return {
+            insideNav: Boolean(nav && active && active !== document.body && nav.contains(active)),
+            tag: active?.tagName ?? null,
+            label: active?.textContent?.trim() ?? null,
+          };
+        }),
+      )
+      .toEqual({ insideNav: true, tag: "BUTTON", label: "Chat" });
   });
 
   /**

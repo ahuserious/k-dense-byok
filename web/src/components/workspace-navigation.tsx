@@ -8,6 +8,7 @@ import {
   TerminalSquareIcon,
   WorkflowIcon,
 } from "lucide-react";
+import { forwardRef, useImperativeHandle, useRef } from "react";
 
 import type { WorkspaceView } from "@/lib/workspace-persistence";
 import { cn } from "@/lib/utils";
@@ -25,24 +26,49 @@ const NAVIGATION_ITEMS: ReadonlyArray<{
   { view: "raindrop", label: "Raindrop", icon: BracesIcon },
 ];
 
-export function WorkspaceNavigation({
-  view,
-  onChange,
-}: {
-  view: WorkspaceView;
-  onChange: (view: WorkspaceView) => void;
-}) {
+/**
+ * Imperative handle so the shell can hand the keyboard over to this nav.
+ * Entering a project from the picker otherwise leaves `document.activeElement`
+ * on `<body>` — the activated card unmounts and nothing claims the caret — and
+ * a keyboard user has to Tab from the top of the document again.
+ */
+export type WorkspaceNavigationHandle = {
+  focusFirst: () => void;
+};
+
+export const WorkspaceNavigation = forwardRef<
+  WorkspaceNavigationHandle,
+  {
+    view: WorkspaceView;
+    onChange: (view: WorkspaceView) => void;
+  }
+>(function WorkspaceNavigation({ view, onChange }, ref) {
+  const firstControlRef = useRef<HTMLButtonElement | null>(null);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      focusFirst() {
+        // preventScroll: the caller moves focus during a screen change, and a
+        // scroll-into-view there would jump a layout the user has not seen yet.
+        firstControlRef.current?.focus({ preventScroll: true });
+      },
+    }),
+    [],
+  );
+
   return (
     <nav
       aria-label="Project workspace"
       className="flex shrink-0 items-center gap-1 overflow-x-auto border-b bg-muted/20 px-3 py-1.5 font-mono"
     >
-      {NAVIGATION_ITEMS.map((item) => {
+      {NAVIGATION_ITEMS.map((item, index) => {
         const Icon = item.icon;
         const selected = view === item.view;
         return (
           <button
             key={item.view}
+            ref={index === 0 ? firstControlRef : undefined}
             type="button"
             onClick={() => onChange(item.view)}
             aria-current={selected ? "page" : undefined}
@@ -60,4 +86,4 @@ export function WorkspaceNavigation({
       })}
     </nav>
   );
-}
+});

@@ -412,7 +412,10 @@ export function ProjectView({
         </div>
 
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          <InputGroup className="max-w-sm bg-background">
+          {/* Same 1.55:1 problem as the project card: the shared InputGroup
+              focus ring is the faint `ring/50` grey. Re-point this one field's
+              ring at the foreground colour without touching the global token. */}
+          <InputGroup className="max-w-sm bg-background has-[[data-slot=input-group-control]:focus-visible]:border-foreground/60 has-[[data-slot=input-group-control]:focus-visible]:ring-foreground/60">
             <InputGroupAddon>
               <SearchIcon />
             </InputGroupAddon>
@@ -743,7 +746,12 @@ function ProjectCard({
         // box-shadow is not clipped by its own overflow — scoped to the direct
         // child overlay so the nested actions menu keeps its own ring.
         "group/card relative gap-3 overflow-hidden bg-background py-4 transition-[border-color,box-shadow] hover:border-foreground/20 hover:shadow-md",
-        "has-[>button:focus-visible]:border-ring has-[>button:focus-visible]:ring-[3px] has-[>button:focus-visible]:ring-ring/50",
+        // The shared `ring/50` grey measured 1.55:1 against the page background
+        // here — below the 3:1 WCAG 2.2 SC 1.4.11 asks of a focus indicator.
+        // The global --ring token is shared with every other surface, so this
+        // card paints its own foreground-derived ring instead of weakening it
+        // for everyone.
+        "has-[>button:focus-visible]:border-foreground/60 has-[>button:focus-visible]:ring-[3px] has-[>button:focus-visible]:ring-foreground/60",
         activity?.errors ? "border-red-500/50" : "",
         !activity?.errors && activity?.needsInput ? "border-amber-500/50" : "",
         !activity?.errors && !activity?.needsInput && activity?.blocked
@@ -755,7 +763,7 @@ function ProjectCard({
     >
       <button
         type="button"
-        className="absolute inset-0 rounded-xl outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+        className="absolute inset-0 rounded-xl outline-none focus-visible:ring-[3px] focus-visible:ring-foreground/60"
         aria-label={`Open project ${project.name}`}
         onClick={onOpen}
       />

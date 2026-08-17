@@ -75,7 +75,10 @@ describe("HelperAgentChat server-owned context boundary", () => {
       <HelperAgentChat projectId="project-a" profile="raindrop" />,
     );
     expect(screen.getByText("Select saved context")).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Message Raindrop analyst" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "Message Raindrop analyst" })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
     expect(mocks.apiFetch).not.toHaveBeenCalled();
 
     rerender(
@@ -104,5 +107,77 @@ describe("HelperAgentChat server-owned context boundary", () => {
       expect.objectContaining({ body: JSON.stringify({ kind: "run", id: RUN_B }) }),
       "project-a",
     );
+  });
+});
+
+describe("HelperAgentChat blocked composer states the reason", () => {
+  it("keeps Send focusable, explains the missing context, and refuses to submit", async () => {
+    render(<HelperAgentChat projectId="project-a" profile="raindrop" />);
+
+    const send = screen.getByRole("button", { name: "Send" });
+    const textarea = screen.getByRole("textbox", { name: "Message Raindrop analyst" });
+
+    // Focusable, not natively disabled: the old bare `disabled` made both the
+    // reason and the control unreachable from the keyboard.
+    expect(send).not.toBeDisabled();
+    expect(textarea).not.toBeDisabled();
+    expect(send).toHaveAttribute("aria-disabled", "true");
+    expect(send).not.toHaveAttribute("title");
+    send.focus();
+    expect(send).toHaveFocus();
+
+    const hint = screen.getByTestId("helper-agent-blocked-hint");
+    expect(hint).toHaveTextContent(
+      "Select a saved DAG run or chat session to ask the Raindrop analyst.",
+    );
+    expect(send).toHaveAttribute("aria-describedby", hint.id);
+    expect(textarea).toHaveAttribute("aria-describedby", hint.id);
+    // The placeholder survives the blocked state.
+    expect(textarea).toHaveAttribute("placeholder", "Ask what failed and why…");
+
+    await userEvent.click(send);
+    await userEvent.type(textarea, "Why did it fail?{Enter}");
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.apiFetch).not.toHaveBeenCalled();
+  });
+
+  it("names the profile whose context is missing", () => {
+    const { unmount } = render(
+      <HelperAgentChat projectId="project-a" profile="workflow-rescue" />,
+    );
+    expect(screen.getByTestId("helper-agent-blocked-hint")).toHaveTextContent(
+      "Select a stopped run to ask the Workflow Rescue helper.",
+    );
+    unmount();
+
+    render(<HelperAgentChat projectId="project-a" profile="dag-builder" />);
+    expect(screen.getByTestId("helper-agent-blocked-hint")).toHaveTextContent(
+      "Open a saved workflow in the Builder to ask the DAG Builder agent.",
+    );
+  });
+
+  it("drops the hint once the helper session is ready", async () => {
+    render(
+      <HelperAgentChat
+        projectId="project-a"
+        profile="raindrop"
+        contextReference={{ kind: "run", id: RUN_A }}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.queryByTestId("helper-agent-blocked-hint")).not.toBeInTheDocument(),
+    );
+    const send = screen.getByRole("button", { name: "Send" });
+    // Empty draft still blocks the send, but that needs no explanation.
+    expect(send).toHaveAttribute("aria-disabled", "true");
+    expect(send).not.toHaveAttribute("aria-describedby");
+
+    await userEvent.type(
+      screen.getByRole("textbox", { name: "Message Raindrop analyst" }),
+      "Give me the timeline.",
+    );
+    expect(send).not.toHaveAttribute("aria-disabled");
+    await userEvent.click(send);
+    await waitFor(() => expect(mocks.send).toHaveBeenCalledWith("Give me the timeline."));
   });
 });
