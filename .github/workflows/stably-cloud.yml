@@ -151,6 +151,24 @@ jobs:
           cat preview-up.log
           exit "$preview_exit"
 
+      - name: Preview listeners (failure diagnostics)
+        if: failure() && steps.preview.outcome == 'failure'
+        run: |
+          lsof -nP -iTCP:18000 -iTCP:13000 -iTCP:13091 -sTCP:LISTEN || echo "(lsof reported no listeners)"
+          ss -ltnp 2>/dev/null | grep -E '(18000|13000|13091)' || echo "(ss reported no matching listeners)"
+          pgrep -af 'next|bun|tsx|supervisor' || echo "(no preview processes)"
+
+      - name: Preview log (failure diagnostics)
+        if: failure() && steps.preview.outcome == 'failure'
+        run: |
+          preview_log="$(sed -n 's/^Preview log: //p' preview-up.log | tail -1)"
+          if [ -n "$preview_log" ] && [ -f "$preview_log" ]; then
+            echo "--- $preview_log (last 400 lines)"
+            tail -n 400 "$preview_log"
+          else
+            echo "(no preview log path found)"
+          fi
+
       - name: Warm the main page
         run: curl --fail --silent --show-error http://127.0.0.1:13000/ > /dev/null
 
