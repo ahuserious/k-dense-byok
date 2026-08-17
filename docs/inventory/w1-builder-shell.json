@@ -1,0 +1,16 @@
+{
+  "lane": "W1",
+  "purpose": "Owner punch-list 2026-08-17 (Kady shell side): no Components Studio entry or effects; a dedicated DAG-builder assistant in the Builder rail (separate from the main Kady session); Raindrop analyst copy stays a log analyst; slim Raindrop-style builder chrome",
+  "files": [
+    "docs/inventory/w1-builder-shell.json",
+    "web/src/app/page.tsx",
+    "web/src/components/scientific-dag-studio.tsx",
+    "web/src/components/scientific-dag-studio.test.tsx",
+    "web/src/components/dag-builder-surface.tsx",
+    "web/src/components/dag-builder-surface.test.tsx",
+    "web/src/components/helper-agent-chat.tsx",
+    "web/src/components/helper-agent-chat.test.tsx",
+    "web/src/components/raindrop-panel.tsx",
+    "web/src/components/raindrop-panel.test.tsx"
+  ]
+}
