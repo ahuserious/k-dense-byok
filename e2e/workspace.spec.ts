@@ -75,6 +75,95 @@ test.describe("scientific template structure and close control", () => {
   }
 });
 
+test.describe("workspace surfaces never scroll the document sideways", () => {
+  for (const tabName of WORKSPACE_TABS) {
+    test(`${tabName} fits its pane at 1280x720`, async ({ workspacePage }) => {
+      await workspacePage.setViewportSize({ width: 1280, height: 720 });
+      await selectWorkspaceTab(workspacePage, tabName);
+
+      const metrics = await workspacePage.evaluate((view) => {
+        const surface = document.querySelector<HTMLElement>(
+          `[data-workspace-surface]:not([aria-hidden="true"])`,
+        );
+        return {
+          view,
+          documentScrollWidth: document.documentElement.scrollWidth,
+          documentClientWidth: document.documentElement.clientWidth,
+          surfaceScrollWidth: surface?.scrollWidth ?? null,
+          surfaceClientWidth: surface?.clientWidth ?? null,
+        };
+      }, tabName);
+
+      expect(metrics.documentScrollWidth).toBe(metrics.documentClientWidth);
+      if (metrics.surfaceScrollWidth !== null) {
+        // The surface wrapper is overflow-hidden, so content wider than it is
+        // unreachable rather than scrollable — it must never happen.
+        expect(metrics.surfaceScrollWidth).toBe(metrics.surfaceClientWidth);
+      }
+    });
+  }
+});
+
+test.describe("keyboard affordances", () => {
+  test("the project-picker entry control shows a focus ring the card does not clip", async ({
+    workspacePage,
+  }) => {
+    // The mocks live on this page, so returning to "/" re-renders the picker.
+    await workspacePage.goto("/");
+    await expect(workspacePage.getByRole("heading", { name: "Choose a project" })).toBeVisible();
+    const entryControl = workspacePage.getByRole("button", { name: "Open project E2E Project" });
+    await expect(entryControl).toBeVisible();
+
+    const cardBoxShadow = () =>
+      entryControl.evaluate(
+        (node) => window.getComputedStyle(node.parentElement as HTMLElement).boxShadow,
+      );
+
+    const blurred = await cardBoxShadow();
+    expect(blurred).not.toContain("0px 0px 0px 3px");
+
+    // Only real keyboard traversal sets :focus-visible.
+    for (let press = 0; press < 40; press += 1) {
+      await workspacePage.keyboard.press("Tab");
+      if (await entryControl.evaluate((node) => document.activeElement === node)) break;
+    }
+    await expect(entryControl).toBeFocused();
+    expect(await entryControl.evaluate((node) => node.matches(":focus-visible"))).toBe(true);
+
+    // The card animates the ring in, so poll rather than sample once. A 3px
+    // spread on the CARD is the assertion: the same ring on the overlay button
+    // is clipped away by the card's overflow-hidden.
+    await expect.poll(cardBoxShadow).toContain("0px 0px 0px 3px");
+  });
+
+  test("the chat Submit control explains itself whenever it refuses to send", async ({
+    workspacePage,
+  }) => {
+    await selectWorkspaceTab(workspacePage, "Chat");
+    const submit = workspacePage
+      .getByRole("button", { name: "Submit", exact: true })
+      .first();
+    await expect(submit).toBeVisible();
+
+    const hint = workspacePage.getByTestId("composer-submit-blocked-hint").first();
+    const blocked = (await submit.getAttribute("aria-disabled")) === "true";
+
+    if (blocked) {
+      // No provider connected (or the spend limit is reached): the reason must
+      // be visible next to the composer and announced with the control, not
+      // hidden in a hover title on an unfocusable disabled button.
+      await expect(hint).toBeVisible();
+      await expect(submit).toHaveAttribute("aria-describedby", await hint.getAttribute("id") ?? "");
+      expect(await submit.getAttribute("title")).toBe(await hint.textContent());
+      await submit.focus();
+      await expect(submit).toBeFocused();
+    } else {
+      await expect(hint).toHaveCount(0);
+      await expect(submit).toBeEnabled();
+    }
+  });
+});
+
 test.describe("thin inventory smoke — excluded from the substantive count", () => {
   const surfaceAssertions = [
     { tab: "Chat", placeholder: "Ask Kady anything… (@ for files, + for data / compute / skills)" },

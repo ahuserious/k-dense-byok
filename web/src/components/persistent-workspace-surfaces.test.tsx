@@ -1,6 +1,6 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   PersistentWorkspaceSurfaces,
@@ -112,5 +112,76 @@ describe("PersistentWorkspaceSurfaces", () => {
       consoleInstance ?? "",
     );
     expect(screen.getByLabelText("Selected run")).toHaveValue("run-b");
+  });
+
+  it("constrains the visible surface and its child so content cannot widen the pane", () => {
+    render(<SurfaceHarness />);
+    fireEvent.click(screen.getByRole("button", { name: "Builder" }));
+
+    const visibleSurface = document.querySelector(
+      '[data-workspace-surface="dag-builder"]',
+    );
+    expect(visibleSurface).not.toBeNull();
+    const className = (visibleSurface as HTMLElement).className;
+    // Both are load-bearing: a flex item keeps min-width:auto, so without them
+    // a wide descendant sizes the pane past the viewport and this wrapper's
+    // overflow-hidden clips every right-aligned control with no scroller.
+    expect(className).toContain("min-w-0");
+    expect(className).toContain("max-w-full");
+    expect(className).toContain("[&>*]:min-w-0");
+    expect(className).toContain("[&>*]:max-w-full");
+    expect(className).toContain("overflow-hidden");
+  });
+});
+
+const fetchSpy = vi.fn(async () =>
+  new Response(JSON.stringify({ healthy: true }), { status: 200 }),
+);
+
+describe("RaindropWorkshopPanel hermeticity", () => {
+  beforeEach(() => {
+    fetchSpy.mockClear();
+    vi.stubGlobal("fetch", fetchSpy);
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.doUnmock("@/lib/embed-config");
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  // Lane V1's file inventory carries no raindrop-*.test.tsx, so the Workshop's
+  // unconfigured-embed coverage lives with the workspace-surface tests that own
+  // the same pane rather than going uncovered.
+  it("states that the Workshop is unconfigured and frames nothing when the URL is unset", async () => {
+    vi.doMock("@/lib/embed-config", () => ({
+      PIPELINE_ENGINE_URL: "http://127.0.0.1:13091",
+      RAINDROP_URL: undefined,
+    }));
+    const { RaindropWorkshopPanel } = await import("./raindrop-workshop-panel");
+
+    render(<RaindropWorkshopPanel />);
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Raindrop Workshop is not configured (set NEXT_PUBLIC_RAINDROP_URL)",
+    );
+    expect(document.querySelector("iframe")).toBeNull();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("embeds only the explicitly configured Workshop origin", async () => {
+    vi.doMock("@/lib/embed-config", () => ({
+      PIPELINE_ENGINE_URL: "http://127.0.0.1:13091",
+      RAINDROP_URL: "http://127.0.0.1:15899",
+    }));
+    const { RaindropWorkshopPanel } = await import("./raindrop-workshop-panel");
+
+    render(<RaindropWorkshopPanel />);
+
+    expect(screen.queryByTestId("raindrop-workshop-unconfigured")).toBeNull();
+    // The health probe only runs for a configured Workshop, which also proves
+    // the unconfigured case above skipped it rather than never mounting.
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalled());
   });
 });

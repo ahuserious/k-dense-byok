@@ -23,5 +23,11 @@ export const PIPELINE_ENGINE_URL =
   legacyPipelineEngineUrl ??
   "http://localhost:3091";
 
-export const RAINDROP_URL =
-  process.env.NEXT_PUBLIC_RAINDROP_URL ?? "http://localhost:5899";
+// No default. The Workshop is an OPTIONAL external sibling checkout, so a
+// `http://localhost:5899` fallback made every build embed whatever happens to
+// listen on that port on the machine running the browser — in a hermetic
+// preview that is a foreign dev server, with its own external egress and
+// another person's sessions rendered inside the app. Unset means "not
+// configured", and the Workshop surfaces say so instead of framing anything.
+export const RAINDROP_URL: string | undefined =
+  process.env.NEXT_PUBLIC_RAINDROP_URL || undefined;

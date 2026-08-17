@@ -108,6 +108,7 @@ import {
   forwardRef,
   useCallback,
   useEffect,
+  useId,
   useImperativeHandle,
   useMemo,
   useRef,
@@ -571,6 +572,22 @@ function ChatInput({
     budgetState === "exceeded" && modelUsesBillableBudget(selectedModel);
   const controller = usePromptInputController();
 
+  // Why Submit cannot send. The button used to be natively `disabled`, which
+  // makes it unfocusable, so the only explanation lived in a hover tooltip a
+  // keyboard user could never reach and a screen reader never announced. It
+  // now stays focusable with `aria-disabled` (handleSubmit below refuses the
+  // send either way) and points at a visible hint next to the composer.
+  const submitHintId = `${useId()}-submit-blocked`;
+  const submitBlockedReason = isStreaming
+    ? null
+    : !modelAvailable
+      ? modelAvailability === "checking"
+        ? "Checking the model provider — Submit unlocks when its status loads."
+        : "Connect a provider in Settings to send"
+      : budgetBlocked
+        ? "Project spend limit reached. Raise the limit in the project settings to send."
+        : null;
+
   // "Ask Kady" handoff from the LaTeX editor: only the active tab's composer
   // appends the prefill text (it does not submit), so a background tab never
   // steals the event. Gated on the active TAB, not the visible view — tabs
@@ -846,6 +863,16 @@ function ChatInput({
           </div>
         )}
 
+        {submitBlockedReason && (
+          <p
+            id={submitHintId}
+            data-testid="composer-submit-blocked-hint"
+            className="mb-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
+          >
+            {submitBlockedReason}
+          </p>
+        )}
+
         {budgetState !== "ok" && modelUsesBillableBudget(selectedModel) && (
           <BudgetBanner
             state={budgetState}
@@ -1009,7 +1036,12 @@ function ChatInput({
                 <PromptInputSubmit
                   status={submitStatus as "streaming" | "error" | "ready"}
                   onStop={onStop}
-                  disabled={(budgetBlocked || !modelAvailable) && !isStreaming}
+                  aria-disabled={submitBlockedReason !== null}
+                  title={submitBlockedReason ?? undefined}
+                  aria-describedby={
+                    submitBlockedReason ? submitHintId : undefined
+                  }
+                  className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
                 />
               </InfoTooltip>
             </div>

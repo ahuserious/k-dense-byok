@@ -736,7 +736,14 @@ function ProjectCard({
   return (
     <Card
       className={cn(
+        // The entry control is an `absolute inset-0` overlay button, so its own
+        // focus ring (a box-shadow spread OUTSIDE its box) is clipped away by
+        // this card's `overflow-hidden` and the keyboard focus was invisible.
+        // The ring is drawn on the card itself instead — an element's own
+        // box-shadow is not clipped by its own overflow — scoped to the direct
+        // child overlay so the nested actions menu keeps its own ring.
         "group/card relative gap-3 overflow-hidden bg-background py-4 transition-[border-color,box-shadow] hover:border-foreground/20 hover:shadow-md",
+        "has-[>button:focus-visible]:border-ring has-[>button:focus-visible]:ring-[3px] has-[>button:focus-visible]:ring-ring/50",
         activity?.errors ? "border-red-500/50" : "",
         !activity?.errors && activity?.needsInput ? "border-amber-500/50" : "",
         !activity?.errors && !activity?.needsInput && activity?.blocked

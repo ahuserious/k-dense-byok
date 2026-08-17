@@ -185,4 +185,30 @@ describe("ProjectView", () => {
     expect(doneCard).not.toBeNull();
     expect(within(doneCard as HTMLElement).getByText("Done")).toBeInTheDocument();
   });
+
+  it("draws the entry control's focus ring on the card, outside the clipped overlay", () => {
+    render(<ProjectView onOpenProject={vi.fn()} />);
+
+    const card = screen.getByText("RNA pilot").closest('[data-slot="card"]');
+    expect(card).not.toBeNull();
+    const entryControl = within(card as HTMLElement).getByRole("button", {
+      name: "Open project RNA pilot",
+    });
+
+    // The control is an absolute inset-0 overlay inside an overflow-hidden
+    // card, so a ring on the control itself is clipped and keyboard focus is
+    // invisible. The card carries the ring for its direct-child overlay; the
+    // nested actions menu keeps its own.
+    expect((card as HTMLElement).className).toContain("overflow-hidden");
+    expect((card as HTMLElement).className).toContain(
+      "has-[>button:focus-visible]:ring-[3px]",
+    );
+    expect((card as HTMLElement).className).toContain(
+      "has-[>button:focus-visible]:ring-ring/50",
+    );
+    expect((card as HTMLElement).className).toContain(
+      "has-[>button:focus-visible]:border-ring",
+    );
+    expect(entryControl.parentElement).toBe(card);
+  });
 });

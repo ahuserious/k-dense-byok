@@ -48,4 +48,22 @@ describe("WorkflowsPanel template preconditions", () => {
     await userEvent.click(launchButton);
     expect(onLaunch).toHaveBeenCalledTimes(1);
   }, 30000);
+
+  it("keeps the panel and its category strip inside the pane width", () => {
+    const { container } = render(<WorkflowsPanel onLaunch={vi.fn()} />);
+
+    const root = container.firstElementChild as HTMLElement;
+    // The panel is the single flex child of the workspace surface wrapper; a
+    // flex item keeps min-width:auto, so without this the one-row category
+    // chip strip sizes the whole pane to the width of all chips.
+    expect(root.className).toContain("min-w-0");
+    expect(root.className).toContain("max-w-full");
+
+    const chipStrip = screen
+      .getByRole("button", { name: "Paper & Manuscript" })
+      .parentElement as HTMLElement;
+    expect(chipStrip.className).toContain("overflow-x-auto");
+    expect(chipStrip.className).toContain("min-w-0");
+    expect(chipStrip.className).toContain("max-w-full");
+  });
 });

@@ -617,9 +617,12 @@ export function WorkflowsPanel({
   }, []);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    // `min-w-0`/`max-w-full`: this panel is the single flex child of the
+    // workspace surface wrapper, so without them the category chip strip below
+    // sizes the whole pane to the width of all chips laid out in one row.
+    <div className="flex min-h-0 w-full min-w-0 max-w-full flex-1 flex-col">
       {/* Search + category pills */}
-      <div className="shrink-0 border-b px-4 py-3 space-y-2.5">
+      <div className="min-w-0 shrink-0 border-b px-4 py-3 space-y-2.5">
         <div className="relative">
           <SearchIcon className="absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
           <input
@@ -630,7 +633,7 @@ export function WorkflowsPanel({
           />
         </div>
 
-        <div className="flex gap-1.5 overflow-x-auto pb-0.5 scrollbar-none">
+        <div className="flex min-w-0 max-w-full gap-1.5 overflow-x-auto pb-0.5 scrollbar-none">
           {visibleCategories.map((cat) => (
             <button
               key={cat.id}
@@ -647,7 +650,7 @@ export function WorkflowsPanel({
       </div>
 
       {/* Scrollable workflow grid */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4">
+      <div ref={scrollRef} className="min-w-0 max-w-full flex-1 overflow-y-auto px-4 py-4">
         <div className="space-y-6">
           {CATEGORIES.map((cat) => {
             const workflows = grouped.get(cat.id);
