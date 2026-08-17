@@ -210,6 +210,13 @@
       "server/test/raindrop-context.test.ts",
       "server/test/steer-abort.test.ts",
       "server/test/workflow-controller.test.ts"
+    ],
+    "V1": [
+      "docs/inventory/v1-verification.json",
+      "web/src/components/persistent-workspace-surfaces.test.tsx",
+      "web/src/components/project-view.tsx",
+      "web/src/components/project-view.test.tsx",
+      "web/src/components/workflows-panel.test.tsx"
     ]
   },
   "handoffs": [
@@ -590,6 +597,76 @@
       "date": "2026-08-16",
       "path": "e2e/fixtures.ts",
       "scope": "browser mock sends the chosen header and returns the new CAS shape"
+    },
+    {
+      "from": "S1",
+      "to": "V1",
+      "date": "2026-08-17",
+      "path": "web/src/components/persistent-workspace-surfaces.tsx",
+      "scope": "min-width containment of the visible workspace surface wrapper so panes cannot widen past the viewport"
+    },
+    {
+      "from": "S1b",
+      "to": "V1",
+      "date": "2026-08-17",
+      "path": "web/src/components/dag-workflows-panel.tsx",
+      "scope": "details panel width containment (min-w-0/max-w-full, scrollable definition) and keyboard focus management on Details & run / Close details"
+    },
+    {
+      "from": "S1b",
+      "to": "V1",
+      "date": "2026-08-17",
+      "path": "web/src/components/dag-workflows-panel.test.tsx",
+      "scope": "width-containment and focus-management regressions"
+    },
+    {
+      "from": "S10",
+      "to": "V1",
+      "date": "2026-08-17",
+      "path": "web/src/components/workflows-panel.tsx",
+      "scope": "category chip strip and panel width containment"
+    },
+    {
+      "from": "S2",
+      "to": "V1",
+      "date": "2026-08-17",
+      "path": "web/src/lib/embed-config.ts",
+      "scope": "RAINDROP_URL has no localhost default: undefined when NEXT_PUBLIC_RAINDROP_URL is unset"
+    },
+    {
+      "from": "S1",
+      "to": "V1",
+      "date": "2026-08-17",
+      "path": "web/src/components/raindrop-workshop-panel.tsx",
+      "scope": "Workshop tab renders a not-configured state instead of an iframe when RAINDROP_URL is unset"
+    },
+    {
+      "from": "S1",
+      "to": "V1",
+      "date": "2026-08-17",
+      "path": "web/src/components/raindrop-surface.tsx",
+      "scope": "Workshop sub-tab gating when RAINDROP_URL is unset"
+    },
+    {
+      "from": "S8",
+      "to": "V1",
+      "date": "2026-08-17",
+      "path": "web/src/components/chat-tab.tsx",
+      "scope": "accessible reason (title/aria-describedby + visible hint) on the disabled Submit control when no provider is connected"
+    },
+    {
+      "from": "S11",
+      "to": "V1",
+      "date": "2026-08-17",
+      "path": "e2e/scientific-pipelines.spec.ts",
+      "scope": "regression: opening details keeps Details & run / Close details / alert inside the viewport at 1440x900 and 1280x720"
+    },
+    {
+      "from": "S11",
+      "to": "V1",
+      "date": "2026-08-17",
+      "path": "e2e/workspace.spec.ts",
+      "scope": "regression: workspace surfaces do not exceed the viewport width; picker focus ring visible"
     }
   ]
 }

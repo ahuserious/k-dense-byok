@@ -12,6 +12,7 @@ inventory path is owned exactly once.
 | C5 | Preview credential and environment-root isolation | `config/token-ban.json`; `server/src/{env,environment-files,legacy-engine-data,path-containment,projects,sandbox-fs}.ts`; `server/src/api/credentials.ts`; `server/test/{credential-env-isolation,env-isolation}.test.ts`; reviewed handoffs from C1, R1, S4, and S11 listed in the policy. |
 | R1 | Orchestrator-held shared root files (policy files are handled separately as policy-controlled paths) | `.gitignore`; handed off to lanes for scoped edits (see handoffs). |
 | C4 | Definition CAS prerequisite (S4 design §C4) | `docs/inventory/c4-cas.json`; the previously un-inventoried tests `server/test/{workflow-store,dag-workflows-api,chat-turn-runs-adapter,raindrop-context,steer-abort,workflow-controller}.test.ts`, `web/src/lib/dag-workflows.test.ts`; product paths via reviewed handoffs from S5, S4, S1, S1b, S10, S11 (returned per the design's post-C4 return map). |
+| V1 | Verification fixes from the human-sim campaign a9b34a39 (2026-08-17) | `docs/inventory/v1-verification.json`; the previously un-inventoried `web/src/components/{project-view,project-view.test,persistent-workspace-surfaces.test,workflows-panel.test}.tsx`; product paths via reviewed handoffs from S1, S1b, S10, S2, S8, S11 (returned when V1 lands). |
 | S1 | Consolidation and typed-surface removal | `web/src/app/page.tsx`; `web/src/components/{workspace-navigation,persistent-workspace-surfaces,dag-builder-surface,dag-builder,dag-builder-canvas,dag-builder-inspector,dag-workflow-console}.{ts,tsx}`; `web/src/lib/{workspace-persistence,dag-workflow-builder,dag-workflows}.ts` |
 | S1b | Scientific Pipelines cross-engine registry | `web/src/components/dag-workflows-panel.tsx`; `web/src/components/dag-workflows-panel.test.tsx`; `web/src/lib/scientific-pipeline-registry.ts`; `web/src/lib/scientific-pipeline-registry.test.ts`; `server/test/pipeline-engine-client.test.ts`; `docs/lanes/S1b-INTEGRATION.md` |
 | S2 | Vendor integration and naming sweep | `start.mjs`; `server/src/agent/pipeline-engine/**`; `server/src/agent/skills.ts`; `web/src/components/{pipelines-panel,pipeline-builder-panel,engine-iframe-panel}.tsx`; `web/src/lib/{engine-config,embed-config,pipelines}.ts`; vendor attribution files (`LICENSE`, `NOTICE*`, `VENDORED-FROM.md`) |
@@ -52,6 +53,16 @@ A handoff lets the recipient lane edit a path another lane owns, for the stated 
 | S1b | C4 | `web/src/components/dag-workflows-panel.test.tsx` | panel CAS outcome regression |
 | S10 | C4 | `server/test/dag-workflow-templates.test.ts` | template setup through the compatibility facade |
 | S11 | C4 | `e2e/fixtures.ts` | browser mock sends the chosen header and returns the new CAS shape |
+| S1 | V1 | `web/src/components/persistent-workspace-surfaces.tsx` | min-width containment of the visible workspace surface wrapper so panes cannot widen past the viewport |
+| S1b | V1 | `web/src/components/dag-workflows-panel.tsx` | details panel width containment (min-w-0/max-w-full, scrollable definition) and keyboard focus management on Details & run / Close details |
+| S1b | V1 | `web/src/components/dag-workflows-panel.test.tsx` | width-containment and focus-management regressions |
+| S10 | V1 | `web/src/components/workflows-panel.tsx` | category chip strip and panel width containment |
+| S2 | V1 | `web/src/lib/embed-config.ts` | RAINDROP_URL has no localhost default: undefined when NEXT_PUBLIC_RAINDROP_URL is unset |
+| S1 | V1 | `web/src/components/raindrop-workshop-panel.tsx` | Workshop tab renders a not-configured state instead of an iframe when RAINDROP_URL is unset |
+| S1 | V1 | `web/src/components/raindrop-surface.tsx` | Workshop sub-tab gating when RAINDROP_URL is unset |
+| S8 | V1 | `web/src/components/chat-tab.tsx` | accessible reason (title/aria-describedby + visible hint) on the disabled Submit control when no provider is connected |
+| S11 | V1 | `e2e/scientific-pipelines.spec.ts` | regression: opening details keeps Details & run / Close details / alert inside the viewport at 1440x900 and 1280x720 |
+| S11 | V1 | `e2e/workspace.spec.ts` | regression: workspace surfaces do not exceed the viewport width; picker focus ring visible |
 | S2 | C1 | `start.mjs` | vendored-dist build, engine-port ownership, readiness, and disabled-state sections; forced-shutdown ownership of the backend's detached workflow supervisor (second explicit signal) and process-group retirement |
 | S2 | C1 | `server/src/agent/pipeline-engine/client.ts` | launcher-disabled fail-before-fetch guard |
 | S5 | C1 | `server/src/config.ts` | explicit pipeline-engine disabled configuration sentinel |
