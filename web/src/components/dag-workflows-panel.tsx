@@ -213,6 +213,36 @@ function vendoredRunReceipt(value: unknown): VendoredRunReceipt {
   return { receiptId, runId, status: response.status };
 }
 
+// Stable identity for a registry row, used both as the React key and as the
+// row's `data-workflow-registry-id`. NOT `entry.id`: that id embeds the
+// source's structure hash, which changes the moment opening a row attaches its
+// graph — remounting the row the user just activated and dropping focus to
+// <body>, and staling any selector built on the attribute. A typed source id is
+// already engine-namespaced (`typed:<encoded id>`); the normalized name is
+// appended so two definitions the engine happens to list under a single id
+// still get distinct keys instead of colliding.
+export function scientificPipelineRowIdentity(
+  entry: ScientificPipelineRegistryEntry,
+): string {
+  return entry.typed
+    ? `${entry.typed.sourceId}:${encodeURIComponent(entry.normalizedName)}`
+    : entry.id;
+}
+
+// Escape is a panel-chrome affordance only. Inside a form control it is a
+// reflex users hit while editing (clear the field, dismiss an autocomplete),
+// and this panel keeps the run goal, precondition values and file selections
+// in local state that a close throws away — so closing from a field silently
+// destroys typed input. Buttons, the heading and the section itself still close.
+function isFormControlTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement ||
+    (target instanceof HTMLElement && target.isContentEditable)
+  );
+}
+
 function WorkflowRegistryRow({
   entry,
   opening,
@@ -235,7 +265,7 @@ function WorkflowRegistryRow({
   const vendoredRouteBlocked = entry.vendoredRouting?.routable === false;
   return (
     <li
-      data-workflow-registry-id={entry.id}
+      data-workflow-registry-id={scientificPipelineRowIdentity(entry)}
       className="border-b px-4 py-3 last:border-b-0"
     >
       <div className="flex flex-wrap items-start gap-3">
@@ -518,9 +548,11 @@ function DefinitionDetails({
       className="min-w-0 max-w-full rounded-lg border bg-background"
       aria-labelledby="typed-definition-details-title"
       onKeyDown={(event) => {
-        // Escape closes the panel from anywhere inside it; the opener's focus
-        // is restored by the parent's onClose.
+        // Escape closes the panel from its chrome; the opener's focus is
+        // restored by the parent's onClose. It deliberately does NOT close from
+        // inside a form control — see isFormControlTarget.
         if (event.key !== "Escape" || launching) return;
+        if (isFormControlTarget(event.target)) return;
         event.stopPropagation();
         onClose();
       }}
@@ -1177,13 +1209,10 @@ export function DagWorkflowsPanel({
                   const vendoredRoute = entry.vendored;
                   return (
                     <WorkflowRegistryRow
-                      // NOT entry.id: that id embeds the source's structure
-                      // hash, which changes the moment opening a row attaches
-                      // its graph — remounting the row the user just activated
-                      // and dropping focus to <body>. A typed row's backing
-                      // record identity is stable across that update and across
-                      // a later cross-engine merge into the same row.
-                      key={typedRoute ? `typed:${typedRoute.sourceId}` : entry.id}
+                      // Stable across the graph attach that opening a row
+                      // performs, and across a later cross-engine merge into
+                      // the same row — see scientificPipelineRowIdentity.
+                      key={scientificPipelineRowIdentity(entry)}
                       entry={entry}
                       opening={openingId === typedRoute?.sourceId}
                       budgetBlocked={budgetBlocked}

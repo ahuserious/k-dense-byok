@@ -242,6 +242,16 @@ test.describe("opened template details stay inside the viewport", () => {
     await expect(details).toBeVisible();
     await expect(details.getByRole("heading", { name: "E2E Workflow" })).toBeFocused();
 
+    // Escape inside a field is a reflex, not a request to leave, and this panel
+    // holds the run intent in state a close throws away — so it must not close
+    // from there.
+    const runGoal = details.getByLabel("Typed workflow run goal");
+    await runGoal.fill("keep me");
+    await runGoal.press("Escape");
+    await expect(details).toBeVisible();
+    await expect(runGoal).toHaveValue("keep me");
+
+    await details.getByRole("heading", { name: "E2E Workflow" }).focus();
     await workspacePage.keyboard.press("Escape");
     await expect(details).toBeHidden();
     await expect(opener).toBeFocused();

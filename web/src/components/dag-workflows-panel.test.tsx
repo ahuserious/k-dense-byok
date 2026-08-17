@@ -1043,6 +1043,48 @@ describe("DagWorkflowsPanel", () => {
       expect(opener).toHaveFocus();
     });
 
+    it("labels the row with an identity the graph attach cannot change", async () => {
+      mockOneTypedWorkflow();
+      renderPanel();
+      const opener = await screen.findByRole("button", {
+        name: "Open Fusion review details",
+      });
+      const row = opener.closest("li") as HTMLElement;
+      // Engine-namespaced source id + normalized name: unlike entry.id it
+      // carries no structure hash, so it cannot collide with a second
+      // definition the engine lists under the same id either.
+      expect(row.getAttribute("data-workflow-registry-id")).toBe(
+        "typed:fusion-review:fusion%20review",
+      );
+
+      await userEvent.click(opener);
+      await screen.findByRole("region", { name: "Fusion review" });
+
+      // Same node, same identity: opening attaches the graph and rewrites
+      // entry.id, which is exactly what used to remount the row.
+      expect(row.contains(opener)).toBe(true);
+      expect(row.getAttribute("data-workflow-registry-id")).toBe(
+        "typed:fusion-review:fusion%20review",
+      );
+    });
+
+    it("ignores Escape typed inside a field so it cannot discard the run intent", async () => {
+      mockOneTypedWorkflow();
+      await openDetails();
+
+      const goalInput = screen.getByLabelText("Typed workflow run goal");
+      await userEvent.type(goalInput, "keep me");
+      goalInput.focus();
+      await userEvent.keyboard("{Escape}");
+
+      // The panel holds the run goal, precondition values and file selections
+      // in state a close throws away, and Escape in a text field is a reflex
+      // (clear the field / dismiss an autocomplete), not a request to leave.
+      expect(screen.getByRole("region", { name: "Fusion review" })).toBeInTheDocument();
+      expect(goalInput).toHaveValue("keep me");
+      expect(goalInput).toHaveFocus();
+    });
+
     it("closes the panel with Escape and restores focus to the opener", async () => {
       mockOneTypedWorkflow();
       const { opener } = await openDetails();

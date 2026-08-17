@@ -588,6 +588,14 @@ function ChatInput({
         ? "Project spend limit reached. Raise the limit in the project settings to send."
         : null;
 
+  // ...but only once the reason has settled. `checking` resolves on its own a
+  // tick after mount, so rendering the amber block for it flashed a warning and
+  // pushed the composer down on every chat load. The control keeps
+  // aria-disabled and the InfoTooltip ("Checking model provider") during that
+  // window; the visible hint waits for a reason the user can act on.
+  const submitBlockedHint =
+    modelAvailability === "checking" ? null : submitBlockedReason;
+
   // "Ask Kady" handoff from the LaTeX editor: only the active tab's composer
   // appends the prefill text (it does not submit), so a background tab never
   // steals the event. Gated on the active TAB, not the visible view — tabs
@@ -863,13 +871,13 @@ function ChatInput({
           </div>
         )}
 
-        {submitBlockedReason && (
+        {submitBlockedHint && (
           <p
             id={submitHintId}
             data-testid="composer-submit-blocked-hint"
             className="mb-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
           >
-            {submitBlockedReason}
+            {submitBlockedHint}
           </p>
         )}
 
@@ -1037,10 +1045,12 @@ function ChatInput({
                   status={submitStatus as "streaming" | "error" | "ready"}
                   onStop={onStop}
                   aria-disabled={submitBlockedReason !== null}
-                  title={submitBlockedReason ?? undefined}
-                  aria-describedby={
-                    submitBlockedReason ? submitHintId : undefined
-                  }
+                  // No `title`: the wrapping InfoTooltip already explains every
+                  // blocked state on hover, and a native title on the same
+                  // control stacked a second, near-duplicate bubble under it.
+                  // The reason reaches assistive tech through aria-describedby
+                  // (and the visible hint) instead.
+                  aria-describedby={submitBlockedHint ? submitHintId : undefined}
                   className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
                 />
               </InfoTooltip>

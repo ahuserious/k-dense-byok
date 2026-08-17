@@ -28,6 +28,8 @@ export const PIPELINE_ENGINE_URL =
 // listen on that port on the machine running the browser — in a hermetic
 // preview that is a foreign dev server, with its own external egress and
 // another person's sessions rendered inside the app. Unset means "not
-// configured", and the Workshop surfaces say so instead of framing anything.
+// configured": raindrop-surface.tsx then skips the health probe entirely, never
+// shows the Workshop toggle, and never mounts the embed — the Raindrop tab is
+// exactly the native session-trace panel, with no extra chrome.
 export const RAINDROP_URL: string | undefined =
   process.env.NEXT_PUBLIC_RAINDROP_URL || undefined;

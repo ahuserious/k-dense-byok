@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -65,5 +65,35 @@ describe("WorkflowsPanel template preconditions", () => {
     expect(chipStrip.className).toContain("overflow-x-auto");
     expect(chipStrip.className).toContain("min-w-0");
     expect(chipStrip.className).toContain("max-w-full");
+  });
+
+  it("offers keyboard-operable paging when the category strip overflows", async () => {
+    render(<WorkflowsPanel onLaunch={vi.fn()} />);
+    const strip = screen.getByTestId("workflow-category-strip");
+
+    // Nothing to page while every chip fits.
+    expect(screen.queryByRole("button", { name: "Scroll categories right" })).toBeNull();
+
+    // jsdom reports 0 for both, so the overflow the real strip has at any
+    // realistic pane width has to be staged.
+    Object.defineProperty(strip, "scrollWidth", { configurable: true, value: 4000 });
+    Object.defineProperty(strip, "clientWidth", { configurable: true, value: 1200 });
+    const scrollBy = vi.fn();
+    strip.scrollBy = scrollBy;
+    fireEvent(window, new Event("resize"));
+
+    // Containing the strip means the categories past the fold are reachable
+    // only by scrolling it, and its scrollbar is suppressed — so the affordance
+    // has to be a real control a keyboard can reach, not a hover gesture.
+    const next = await screen.findByRole("button", { name: "Scroll categories right" });
+    const previous = screen.getByRole("button", { name: "Scroll categories left" });
+
+    next.focus();
+    expect(next).toHaveFocus();
+    await userEvent.keyboard("{Enter}");
+    expect(scrollBy).toHaveBeenCalledWith({ left: 960, behavior: "smooth" });
+
+    await userEvent.click(previous);
+    expect(scrollBy).toHaveBeenLastCalledWith({ left: -960, behavior: "smooth" });
   });
 });

@@ -33,8 +33,13 @@ export function RaindropSurface({
   nativePanel: ReactNode;
 }) {
   const [mode, setMode] = useState<RaindropMode>("native");
-  // null = probing; the toggle appears only once the Workshop answered.
-  const [workshopUp, setWorkshopUp] = useState<boolean | null>(null);
+  // null = probing; the toggle appears only once the Workshop answered. With no
+  // configured URL there is nothing to probe, so that is the INITIAL state
+  // rather than an effect that immediately sets it — RAINDROP_URL is a
+  // build-time constant, so this cannot go stale.
+  const [workshopUp, setWorkshopUp] = useState<boolean | null>(
+    RAINDROP_URL ? null : false,
+  );
   // Mount the embed lazily, then keep it mounted across toggles.
   const [workshopVisited, setWorkshopVisited] = useState(false);
   const selectMode = (nextMode: RaindropMode) => {
@@ -49,10 +54,7 @@ export function RaindropSurface({
   // probe is skipped entirely (no request) and the toggle stays hidden — the
   // tab is exactly the native panel, as it is when the Workshop is down.
   useEffect(() => {
-    if (!RAINDROP_URL) {
-      setWorkshopUp(false);
-      return;
-    }
+    if (!RAINDROP_URL) return;
     let cancelled = false;
     void raindropHealth().then((up) => {
       if (!cancelled) setWorkshopUp(up);
@@ -92,14 +94,18 @@ export function RaindropSurface({
       >
         {nativePanel}
       </div>
-      {workshopVisited && (
+      {workshopVisited && RAINDROP_URL && (
         <div
           className={cn(
             "min-h-0 flex-1 flex-col overflow-hidden",
             mode === "workshop" ? "flex" : "hidden",
           )}
         >
-          <RaindropWorkshopPanel />
+          {/* RAINDROP_URL is necessarily set here (workshopVisited implies the
+              toggle, which implies a successful probe, which implies a URL);
+              testing it again is what lets the embed take a plain `string` and
+              carry no unreachable "not configured" branch. */}
+          <RaindropWorkshopPanel url={RAINDROP_URL} />
         </div>
       )}
     </div>
