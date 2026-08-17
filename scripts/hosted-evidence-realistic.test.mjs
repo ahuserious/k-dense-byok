@@ -123,7 +123,7 @@ test("real Playwright list and a two-MiB reporter log stay within scanner bounds
   });
   assert.equal(listed.status, 0, listed.stderr);
   const listOutput = `${listed.stdout}${listed.stderr}`;
-  assert.match(listOutput, /Total: 249 tests in \d+ files/);
+  assert.match(listOutput, /Total: 261 tests in \d+ files/);
 
   const environment = {
     STABLY_API_KEY: "realistic-log-secret-sentinel",
