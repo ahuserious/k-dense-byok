@@ -1032,6 +1032,14 @@ describe("DagWorkflowsPanel", () => {
 
       const heading = screen.getByRole("heading", { name: "Fusion review" });
       await waitFor(() => expect(heading).toHaveFocus());
+      // ...and the arrival has to be visible. The heading used to carry
+      // `outline-none`, so focus landed on a stop that looked identical
+      // focused and unfocused. The indicator is drawn in the foreground
+      // colour, not the faint shared ring token.
+      expect(heading.className).not.toContain("outline-none");
+      expect(heading.className).toContain("focus-visible:outline-2");
+      expect(heading.className).toContain("focus-visible:outline-offset-2");
+      expect(heading.className).toContain("focus-visible:outline-foreground");
       // The row control must survive the re-render so focus has somewhere to return.
       expect(opener).toBeInTheDocument();
       expect(opener).not.toBeDisabled();

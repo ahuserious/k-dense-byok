@@ -563,7 +563,13 @@ function DefinitionDetails({
             ref={detailsHeadingRef}
             id="typed-definition-details-title"
             tabIndex={-1}
-            className="truncate text-sm font-semibold outline-none"
+            // Opening a row moves focus here, so this heading is a real focus
+            // destination and needs a real indicator. It used to carry
+            // `outline-none`, which made the arrival invisible: a sighted
+            // keyboard user saw the panel appear but had no idea focus had
+            // moved into it. The outline is drawn in the foreground colour
+            // (>=4:1 on both themes) rather than the faint shared ring token.
+            className="truncate rounded-sm text-sm font-semibold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground"
           >
             {graph.name}
           </h3>

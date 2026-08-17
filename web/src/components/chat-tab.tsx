@@ -910,7 +910,12 @@ function ChatInput({
                   : "Image is too large (20MB max).",
             )
           }
-          className="rounded-xl border shadow-sm"
+          // PromptInput puts this className on its <form>; the ring is drawn by
+          // the InputGroup it renders internally, which we cannot reach with a
+          // prop. Restate the two focus colours through a descendant variant so
+          // the composer gets the same >=3:1 indicator as the other controls,
+          // still without editing the global --ring token.
+          className="rounded-xl border shadow-sm [&_[data-slot=input-group]:has([data-slot=input-group-control]:focus-visible)]:border-foreground/60 [&_[data-slot=input-group]:has([data-slot=input-group-control]:focus-visible)]:ring-foreground/60"
         >
           <ImageAttachmentsRow />
           <ContextChipsBar
@@ -1051,7 +1056,11 @@ function ChatInput({
                   // The reason reaches assistive tech through aria-describedby
                   // (and the visible hint) instead.
                   aria-describedby={submitBlockedHint ? submitHintId : undefined}
-                  className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
+                  // The shared Button focus ring is `ring/50`, a grey that
+                  // measured 1.55:1 against its surroundings. Submit repaints
+                  // its own ring in the foreground colour rather than change
+                  // the global --ring token every other surface shares.
+                  className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50 focus-visible:border-foreground/60 focus-visible:ring-foreground/60"
                 />
               </InfoTooltip>
             </div>

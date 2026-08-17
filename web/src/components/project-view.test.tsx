@@ -203,12 +203,19 @@ describe("ProjectView", () => {
     expect((card as HTMLElement).className).toContain(
       "has-[>button:focus-visible]:ring-[3px]",
     );
+    // ...and it is painted in the foreground colour: the shared `ring/50` grey
+    // measured 1.55:1 against the page background, under the 3:1 a focus
+    // indicator owes. The global --ring token is shared, so this card and its
+    // overlay carry their own colour instead.
     expect((card as HTMLElement).className).toContain(
-      "has-[>button:focus-visible]:ring-ring/50",
+      "has-[>button:focus-visible]:ring-foreground/60",
     );
     expect((card as HTMLElement).className).toContain(
-      "has-[>button:focus-visible]:border-ring",
+      "has-[>button:focus-visible]:border-foreground/60",
     );
+    expect((card as HTMLElement).className).not.toContain("ring-ring/50");
+    expect(entryControl.className).toContain("focus-visible:ring-foreground/60");
+    expect(entryControl.className).not.toContain("ring-ring/50");
     expect(entryControl.parentElement).toBe(card);
   });
 });

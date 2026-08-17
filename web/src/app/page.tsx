@@ -14,7 +14,10 @@ import { ConsolePanel } from "@/components/console/console-panel";
 import { DagBuilderSurface } from "@/components/dag-builder-surface";
 import { RaindropPanel } from "@/components/raindrop-panel";
 import { RaindropSurface } from "@/components/raindrop-surface";
-import { WorkspaceNavigation } from "@/components/workspace-navigation";
+import {
+  WorkspaceNavigation,
+  type WorkspaceNavigationHandle,
+} from "@/components/workspace-navigation";
 import {
   PersistentWorkspaceSurfaces,
   usePersistentWorkspaceView,
@@ -165,9 +168,21 @@ export default function HomePage() {
     ));
   }, []);
 
+  // Only a real activation of a picker card bumps this. The initial render and
+  // the workspace state restore never do (the restore always lands on the
+  // project overview), so nothing grabs focus behind the user's back.
+  const [navigationFocusRequest, setNavigationFocusRequest] = useState<{
+    projectId: string;
+    seq: number;
+  } | null>(null);
+
   const openProject = useCallback((projectId: string) => {
     rememberProject(projectId);
     setScreen("workspace");
+    setNavigationFocusRequest((previous) => ({
+      projectId,
+      seq: (previous?.seq ?? 0) + 1,
+    }));
   }, [rememberProject]);
 
   if (
@@ -266,6 +281,11 @@ export default function HomePage() {
                 isActive={isActive}
                 hydrated={workspaceHydrated}
                 initialState={restoredProjects[projectId]}
+                focusNavigationRequest={
+                  navigationFocusRequest?.projectId === projectId
+                    ? navigationFocusRequest.seq
+                    : 0
+                }
                 onProjectActivityChange={handleProjectActivityChange}
                 onOpenProjectView={() => setScreen("projects")}
               />
@@ -282,6 +302,7 @@ function WorkspacePage({
   isActive,
   hydrated,
   initialState,
+  focusNavigationRequest,
   onProjectActivityChange,
   onOpenProjectView,
 }: {
@@ -289,6 +310,12 @@ function WorkspacePage({
   isActive: boolean;
   hydrated: boolean;
   initialState?: ProjectWorkspaceState;
+  /**
+   * Bumped when THIS project was just opened from the picker; 0 otherwise.
+   * A counter rather than a boolean so re-entering the same project asks
+   * again without a reset handshake.
+   */
+  focusNavigationRequest: number;
   onProjectActivityChange: (
     projectId: string,
     activity: ProjectActivitySummary,
@@ -601,6 +628,28 @@ function WorkspacePage({
     if (!isActive) return;
     return onChatPrefill(() => setView("chat"));
   }, [isActive, setView]);
+
+  // Entering the project from the picker used to leave document.activeElement
+  // on <body>: the activated card unmounts with the overview and nothing claims
+  // the caret, so a keyboard user had to Tab ~10 times from the top of the
+  // document to reach this nav. Hand focus to its first control instead. Only a
+  // picker activation of THIS project sets a non-zero request, so neither the
+  // first render nor the state restore fires it, and a caret already sitting in
+  // something the user typed into is left alone.
+  const navigationRef = useRef<WorkspaceNavigationHandle | null>(null);
+  useEffect(() => {
+    if (focusNavigationRequest === 0 || !isActive) return;
+    const active = document.activeElement;
+    if (
+      active instanceof HTMLElement &&
+      (active.isContentEditable ||
+        active instanceof HTMLInputElement ||
+        active instanceof HTMLTextAreaElement)
+    ) {
+      return;
+    }
+    navigationRef.current?.focusFirst();
+  }, [focusNavigationRequest, isActive]);
 
   // Flat list of all sandbox file paths for @ mentions (shared across tabs).
   // Cache artifacts are excluded — mentioning __pycache__/*.pyc is never useful.
@@ -1090,7 +1139,7 @@ function WorkspacePage({
         </div>
       </header>
 
-      <WorkspaceNavigation view={view} onChange={setView} />
+      <WorkspaceNavigation ref={navigationRef} view={view} onChange={setView} />
 
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
         {/* The chat workspace stays mounted behind other views so live tab

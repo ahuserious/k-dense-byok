@@ -237,10 +237,36 @@ test.describe("opened template details stay inside the viewport", () => {
   }) => {
     await openPipelineRegistry(workspacePage);
     const opener = workspacePage.getByRole("button", { name: "Open E2E Workflow details" });
-    await opener.click();
+    // Activated from the keyboard, not the mouse: the indicator asserted below
+    // is a :focus-visible one, and this is the user who needs it.
+    await opener.press("Enter");
     const details = workspacePage.getByRole("region", { name: "E2E Workflow", exact: true });
     await expect(details).toBeVisible();
-    await expect(details.getByRole("heading", { name: "E2E Workflow" })).toBeFocused();
+    const heading = details.getByRole("heading", { name: "E2E Workflow" });
+    await expect(heading).toBeFocused();
+
+    // Focus order alone is not the fix: the heading used to carry
+    // `outline-none`, so the focused and unfocused heading were pixel-identical
+    // and a sighted keyboard user never saw where focus went. Compare the
+    // computed indicator focused vs blurred rather than the class name.
+    const headingIndicator = () =>
+      heading.evaluate((node) => {
+        const style = window.getComputedStyle(node);
+        return {
+          outlineStyle: style.outlineStyle,
+          outlineWidth: style.outlineWidth,
+          boxShadow: style.boxShadow,
+        };
+      });
+    const focusedIndicator = await headingIndicator();
+    expect(focusedIndicator.outlineStyle).not.toBe("none");
+    expect(Number.parseFloat(focusedIndicator.outlineWidth)).toBeGreaterThanOrEqual(2);
+
+    await heading.evaluate((node) => (node as HTMLElement).blur());
+    const blurredIndicator = await headingIndicator();
+    expect(JSON.stringify(blurredIndicator)).not.toBe(JSON.stringify(focusedIndicator));
+    await heading.focus();
+    await expect(heading).toBeFocused();
 
     // Escape inside a field is a reflex, not a request to leave, and this panel
     // holds the run intent in state a close throws away — so it must not close
