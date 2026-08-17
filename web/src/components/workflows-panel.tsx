@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIcon,
   AtomIcon,
@@ -11,6 +11,8 @@ import {
   BrainIcon,
   BuildingIcon,
   CalculatorIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
   CircleDotIcon,
   ClipboardCheckIcon,
   CloudIcon,
@@ -579,6 +581,12 @@ export function WorkflowsPanel({
   const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null);
   const [search, setSearch] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
+  const categoryStripRef = useRef<HTMLDivElement>(null);
+  // The strip is a horizontal scroller with its scrollbar suppressed, so
+  // without an explicit affordance the categories past the fold are reachable
+  // only by a gesture with no on-screen cue. These paging buttons are that cue,
+  // and unlike a scrollbar they are keyboard operable.
+  const [categoryStripOverflows, setCategoryStripOverflows] = useState(false);
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim();
@@ -607,6 +615,25 @@ export function WorkflowsPanel({
     [grouped]
   );
 
+  useEffect(() => {
+    const strip = categoryStripRef.current;
+    if (!strip) return;
+    const measure = () =>
+      setCategoryStripOverflows(strip.scrollWidth > strip.clientWidth + 1);
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+    // Re-measures when the search filter changes how many chips are rendered.
+  }, [visibleCategories.length]);
+
+  const pageCategoryStrip = useCallback((direction: -1 | 1) => {
+    const strip = categoryStripRef.current;
+    if (!strip) return;
+    // Just under a full page, so the chip at the edge stays visible as an anchor.
+    const step = Math.max(160, Math.round(strip.clientWidth * 0.8));
+    strip.scrollBy({ left: direction * step, behavior: "smooth" });
+  }, []);
+
   const scrollToCategory = useCallback((catId: string) => {
     const container = scrollRef.current;
     if (!container) return;
@@ -617,9 +644,12 @@ export function WorkflowsPanel({
   }, []);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    // `min-w-0`/`max-w-full`: this panel is the single flex child of the
+    // workspace surface wrapper, so without them the category chip strip below
+    // sizes the whole pane to the width of all chips laid out in one row.
+    <div className="flex min-h-0 w-full min-w-0 max-w-full flex-1 flex-col">
       {/* Search + category pills */}
-      <div className="shrink-0 border-b px-4 py-3 space-y-2.5">
+      <div className="min-w-0 shrink-0 border-b px-4 py-3 space-y-2.5">
         <div className="relative">
           <SearchIcon className="absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
           <input
@@ -630,24 +660,50 @@ export function WorkflowsPanel({
           />
         </div>
 
-        <div className="flex gap-1.5 overflow-x-auto pb-0.5 scrollbar-none">
-          {visibleCategories.map((cat) => (
+        <div className="flex min-w-0 max-w-full items-center gap-1">
+          {categoryStripOverflows && (
             <button
-              key={cat.id}
-              onClick={() => scrollToCategory(cat.id)}
-              className={cn(
-                "shrink-0 rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors",
-                CATEGORY_BG[cat.id]
-              )}
+              type="button"
+              aria-label="Scroll categories left"
+              onClick={() => pageCategoryStrip(-1)}
+              className="shrink-0 rounded-full border p-1 text-muted-foreground transition-colors hover:bg-foreground/5 hover:text-foreground"
             >
-              <span className={CATEGORY_ICON_COLOR[cat.id]}>{cat.label}</span>
+              <ChevronLeftIcon className="size-3.5" />
             </button>
-          ))}
+          )}
+          <div
+            ref={categoryStripRef}
+            data-testid="workflow-category-strip"
+            className="flex min-w-0 max-w-full flex-1 gap-1.5 overflow-x-auto pb-0.5 scrollbar-none"
+          >
+            {visibleCategories.map((cat) => (
+              <button
+                key={cat.id}
+                onClick={() => scrollToCategory(cat.id)}
+                className={cn(
+                  "shrink-0 rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors",
+                  CATEGORY_BG[cat.id]
+                )}
+              >
+                <span className={CATEGORY_ICON_COLOR[cat.id]}>{cat.label}</span>
+              </button>
+            ))}
+          </div>
+          {categoryStripOverflows && (
+            <button
+              type="button"
+              aria-label="Scroll categories right"
+              onClick={() => pageCategoryStrip(1)}
+              className="shrink-0 rounded-full border p-1 text-muted-foreground transition-colors hover:bg-foreground/5 hover:text-foreground"
+            >
+              <ChevronRightIcon className="size-3.5" />
+            </button>
+          )}
         </div>
       </div>
 
       {/* Scrollable workflow grid */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4">
+      <div ref={scrollRef} className="min-w-0 max-w-full flex-1 overflow-y-auto px-4 py-4">
         <div className="space-y-6">
           {CATEGORIES.map((cat) => {
             const workflows = grouped.get(cat.id);

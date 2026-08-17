@@ -23,5 +23,13 @@ export const PIPELINE_ENGINE_URL =
   legacyPipelineEngineUrl ??
   "http://localhost:3091";
 
-export const RAINDROP_URL =
-  process.env.NEXT_PUBLIC_RAINDROP_URL ?? "http://localhost:5899";
+// No default. The Workshop is an OPTIONAL external sibling checkout, so a
+// `http://localhost:5899` fallback made every build embed whatever happens to
+// listen on that port on the machine running the browser — in a hermetic
+// preview that is a foreign dev server, with its own external egress and
+// another person's sessions rendered inside the app. Unset means "not
+// configured": raindrop-surface.tsx then skips the health probe entirely, never
+// shows the Workshop toggle, and never mounts the embed — the Raindrop tab is
+// exactly the native session-trace panel, with no extra chrome.
+export const RAINDROP_URL: string | undefined =
+  process.env.NEXT_PUBLIC_RAINDROP_URL || undefined;

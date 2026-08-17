@@ -973,4 +973,131 @@ describe("DagWorkflowsPanel", () => {
       { kind: "create" },
     );
   });
+
+  describe("opened details stay inside the pane and keep keyboard focus", () => {
+    function mockOneTypedWorkflow() {
+      const graph = createDefaultWorkflowGraph("fusion-review", "Fusion review");
+      vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([{
+        id: "fusion-review",
+        revision: 7,
+        createdAt: 1,
+        updatedAt: 2,
+        graphSha256: "abc",
+        schemaVersion: graph.schemaVersion,
+        name: "Fusion review",
+        description: graph.description ?? null,
+        nodeCount: graph.nodes.length,
+        edgeCount: graph.edges.length,
+      }]);
+      vi.spyOn(dagApi, "readDagWorkflowDefinition").mockResolvedValue({
+        etag: '"7"',
+        definition: {
+          storageVersion: 1,
+          id: "fusion-review",
+          revision: 7,
+          createdAt: 1,
+          updatedAt: 2,
+          graphSha256: "abc",
+          graph,
+        },
+      });
+    }
+
+    async function openDetails() {
+      renderPanel();
+      const opener = await screen.findByRole("button", {
+        name: "Open Fusion review details",
+      });
+      await userEvent.click(opener);
+      const details = await screen.findByRole("region", { name: "Fusion review" });
+      return { details, opener };
+    }
+
+    it("constrains the details panel and its raw definition box to the pane width", async () => {
+      mockOneTypedWorkflow();
+      const { details } = await openDetails();
+
+      // Without these the JSON's single-line prompt strings size every flex
+      // ancestor to the text, pushing Run/Close/Download off-screen.
+      expect(details.className).toContain("min-w-0");
+      expect(details.className).toContain("max-w-full");
+      const rawDefinition = screen.getByTestId("raw-typed-definition");
+      expect(rawDefinition.className).toContain("max-w-full");
+      expect(rawDefinition.className).toContain("overflow-auto");
+    });
+
+    it("moves focus into the opened panel and returns it to the row control on close", async () => {
+      mockOneTypedWorkflow();
+      const { opener } = await openDetails();
+
+      const heading = screen.getByRole("heading", { name: "Fusion review" });
+      await waitFor(() => expect(heading).toHaveFocus());
+      // The row control must survive the re-render so focus has somewhere to return.
+      expect(opener).toBeInTheDocument();
+      expect(opener).not.toBeDisabled();
+
+      await userEvent.click(screen.getByRole("button", { name: "Close details" }));
+      await waitFor(() =>
+        expect(screen.queryByRole("region", { name: "Fusion review" })).not.toBeInTheDocument(),
+      );
+      expect(opener).toHaveFocus();
+    });
+
+    it("labels the row with an identity the graph attach cannot change", async () => {
+      mockOneTypedWorkflow();
+      renderPanel();
+      const opener = await screen.findByRole("button", {
+        name: "Open Fusion review details",
+      });
+      const row = opener.closest("li") as HTMLElement;
+      // Engine-namespaced source id + normalized name: unlike entry.id it
+      // carries no structure hash, so it cannot collide with a second
+      // definition the engine lists under the same id either.
+      expect(row.getAttribute("data-workflow-registry-id")).toBe(
+        "typed:fusion-review:fusion%20review",
+      );
+
+      await userEvent.click(opener);
+      await screen.findByRole("region", { name: "Fusion review" });
+
+      // Same node, same identity: opening attaches the graph and rewrites
+      // entry.id, which is exactly what used to remount the row.
+      expect(row.contains(opener)).toBe(true);
+      expect(row.getAttribute("data-workflow-registry-id")).toBe(
+        "typed:fusion-review:fusion%20review",
+      );
+    });
+
+    it("ignores Escape typed inside a field so it cannot discard the run intent", async () => {
+      mockOneTypedWorkflow();
+      await openDetails();
+
+      const goalInput = screen.getByLabelText("Typed workflow run goal");
+      await userEvent.type(goalInput, "keep me");
+      goalInput.focus();
+      await userEvent.keyboard("{Escape}");
+
+      // The panel holds the run goal, precondition values and file selections
+      // in state a close throws away, and Escape in a text field is a reflex
+      // (clear the field / dismiss an autocomplete), not a request to leave.
+      expect(screen.getByRole("region", { name: "Fusion review" })).toBeInTheDocument();
+      expect(goalInput).toHaveValue("keep me");
+      expect(goalInput).toHaveFocus();
+    });
+
+    it("closes the panel with Escape and restores focus to the opener", async () => {
+      mockOneTypedWorkflow();
+      const { opener } = await openDetails();
+
+      await waitFor(() =>
+        expect(screen.getByRole("heading", { name: "Fusion review" })).toHaveFocus(),
+      );
+      await userEvent.keyboard("{Escape}");
+
+      await waitFor(() =>
+        expect(screen.queryByRole("region", { name: "Fusion review" })).not.toBeInTheDocument(),
+      );
+      expect(opener).toHaveFocus();
+    });
+  });
 });

@@ -1,6 +1,6 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   PersistentWorkspaceSurfaces,
@@ -112,5 +112,112 @@ describe("PersistentWorkspaceSurfaces", () => {
       consoleInstance ?? "",
     );
     expect(screen.getByLabelText("Selected run")).toHaveValue("run-b");
+  });
+
+  it("constrains the visible surface and its child so content cannot widen the pane", () => {
+    render(<SurfaceHarness />);
+    fireEvent.click(screen.getByRole("button", { name: "Builder" }));
+
+    const visibleSurface = document.querySelector(
+      '[data-workspace-surface="dag-builder"]',
+    );
+    expect(visibleSurface).not.toBeNull();
+    const className = (visibleSurface as HTMLElement).className;
+    // Both are load-bearing: a flex item keeps min-width:auto, so without them
+    // a wide descendant sizes the pane past the viewport and this wrapper's
+    // overflow-hidden clips every right-aligned control with no scroller.
+    expect(className).toContain("min-w-0");
+    expect(className).toContain("max-w-full");
+    expect(className).toContain("[&>*]:min-w-0");
+    expect(className).toContain("[&>*]:max-w-full");
+    expect(className).toContain("overflow-hidden");
+  });
+
+  it("resolves min-width:0 / max-width:100% on the surface through the cascade, not just its class string", () => {
+    // The `toContain` assertions above would still pass if a utility were
+    // misspelled into a class Tailwind never emits, because the vitest env
+    // loads no Tailwind build. This injects the CSS Tailwind generates for
+    // `min-w-0` / `max-w-full` — written independently of the className under
+    // test — and reads it back through getComputedStyle, so a typo'd class
+    // stops matching and the test fails.
+    //
+    // Scope, honestly: this is a cascade assertion, not a geometry one — jsdom
+    // has no layout, so widths themselves have no meaning here. And it can only
+    // cover the plain utilities: jsdom's selector engine does not match the
+    // escaped arbitrary-variant selector Tailwind emits for `[&>*]:min-w-0`
+    // (`.\[\&\>\*\]\:min-w-0 > *` parses into the sheet but matches nothing),
+    // so those two stay class-string assertions. The layout proof for all four
+    // is Playwright-only: e2e/workspace.spec.ts "workspace surfaces never
+    // scroll the document sideways".
+    const style = document.createElement("style");
+    style.textContent = [
+      ".min-w-0 { min-width: 0px; }",
+      ".max-w-full { max-width: 100%; }",
+    ].join("\n");
+    document.head.append(style);
+    try {
+      render(<SurfaceHarness />);
+      fireEvent.click(screen.getByRole("button", { name: "Builder" }));
+
+      const visibleSurface = document.querySelector(
+        '[data-workspace-surface="dag-builder"]',
+      ) as HTMLElement;
+      expect(visibleSurface).not.toBeNull();
+      expect(window.getComputedStyle(visibleSurface).minWidth).toBe("0px");
+      expect(window.getComputedStyle(visibleSurface).maxWidth).toBe("100%");
+    } finally {
+      style.remove();
+    }
+  });
+});
+
+const fetchSpy = vi.fn(async () =>
+  new Response(JSON.stringify({ healthy: true }), { status: 200 }),
+);
+
+describe("Raindrop Workshop hermeticity", () => {
+  beforeEach(() => {
+    fetchSpy.mockClear();
+    vi.stubGlobal("fetch", fetchSpy);
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.doUnmock("@/lib/embed-config");
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  // Lane V1's file inventory carries no raindrop-*.test.tsx, so the Workshop's
+  // coverage lives with the workspace-surface tests that own the same pane
+  // rather than going uncovered.
+  //
+  // This asserts the state a user can actually reach. The embed itself has no
+  // "not configured" branch to test: with no URL the surface never probes,
+  // never offers the toggle and never mounts the embed, so a branch inside the
+  // embed would have been unreachable code claiming to be a safety net.
+  it("shows no Workshop toggle, frames nothing and probes nothing when the URL is unset", async () => {
+    vi.doMock("@/lib/embed-config", () => ({
+      PIPELINE_ENGINE_URL: "http://127.0.0.1:13091",
+      RAINDROP_URL: undefined,
+    }));
+    const { RaindropSurface } = await import("./raindrop-surface");
+
+    render(<RaindropSurface nativePanel={<div>Session traces</div>} />);
+
+    await waitFor(() => expect(screen.getByText("Session traces")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Workshop" })).toBeNull();
+    expect(document.querySelector("iframe")).toBeNull();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("embeds only the explicitly configured Workshop origin", async () => {
+    const { RaindropWorkshopPanel } = await import("./raindrop-workshop-panel");
+
+    render(<RaindropWorkshopPanel url="http://127.0.0.1:15899" />);
+
+    // The health probe runs for a configured Workshop, which also proves the
+    // unset case above skipped it rather than never mounting.
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalled());
   });
 });

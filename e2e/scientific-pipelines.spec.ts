@@ -169,6 +169,95 @@ test.describe("deduplicated workflow registry actions", () => {
   });
 });
 
+test.describe("opened template details stay inside the viewport", () => {
+  // The template's stored definition contains single-line prompt strings
+  // hundreds of characters wide. Before the min-width fix that line sized the
+  // pane to 3201 px inside a 1440 px overflow-hidden container with no
+  // scroller, putting every right-aligned control out of reach.
+  const OVERFLOW_TEMPLATE = SCIENTIFIC_TEMPLATES[0];
+
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 1280, height: 720 },
+  ] as const) {
+    test(`${viewport.width}x${viewport.height} keeps every details control reachable`, async ({
+      workspacePage,
+    }) => {
+      await workspacePage.setViewportSize(viewport);
+      const { details, rawDefinition } = await createTypedWorkflowFromTemplate(
+        workspacePage,
+        OVERFLOW_TEMPLATE.id,
+      );
+
+      // The definition really is wider than the pane — otherwise this test
+      // would pass on a fixture that cannot reproduce the defect.
+      const rawOverflow = await rawDefinition.evaluate((node) => ({
+        scrollWidth: node.scrollWidth,
+        clientWidth: node.clientWidth,
+      }));
+      expect(rawOverflow.scrollWidth).toBeGreaterThan(rawOverflow.clientWidth);
+
+      const controls = [
+        details.getByRole("button", { name: "Run typed workflow" }),
+        details.getByRole("button", { name: "Close details" }),
+        details.getByRole("button", { name: "Download raw definition" }),
+        details.getByLabel("Typed workflow run goal"),
+        workspacePage.getByRole("button", { name: "New typed workflow" }),
+        ...(OVERFLOW_TEMPLATE.blockingMessages.length > 0
+          ? [details.getByRole("alert")]
+          : []),
+      ];
+      for (const control of controls) {
+        await expect(control).toBeVisible();
+        const box = await control.boundingBox();
+        expect(box).not.toBeNull();
+        expect(box!.x).toBeGreaterThanOrEqual(0);
+        expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
+      }
+
+      for (const rowName of ["Open E2E Workflow details", `Open ${OVERFLOW_TEMPLATE.name} details`]) {
+        const rowControl = workspacePage.getByRole("button", { name: rowName });
+        await expect(rowControl).toBeVisible();
+        const box = await rowControl.boundingBox();
+        expect(box).not.toBeNull();
+        expect(box!.x).toBeGreaterThanOrEqual(0);
+        expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
+      }
+
+      const document = await workspacePage.evaluate(() => ({
+        scrollWidth: window.document.documentElement.scrollWidth,
+        clientWidth: window.document.documentElement.clientWidth,
+      }));
+      expect(document.scrollWidth).toBe(document.clientWidth);
+    });
+  }
+
+  test("Escape closes the details panel and returns focus to the row control", async ({
+    workspacePage,
+  }) => {
+    await openPipelineRegistry(workspacePage);
+    const opener = workspacePage.getByRole("button", { name: "Open E2E Workflow details" });
+    await opener.click();
+    const details = workspacePage.getByRole("region", { name: "E2E Workflow", exact: true });
+    await expect(details).toBeVisible();
+    await expect(details.getByRole("heading", { name: "E2E Workflow" })).toBeFocused();
+
+    // Escape inside a field is a reflex, not a request to leave, and this panel
+    // holds the run intent in state a close throws away — so it must not close
+    // from there.
+    const runGoal = details.getByLabel("Typed workflow run goal");
+    await runGoal.fill("keep me");
+    await runGoal.press("Escape");
+    await expect(details).toBeVisible();
+    await expect(runGoal).toHaveValue("keep me");
+
+    await details.getByRole("heading", { name: "E2E Workflow" }).focus();
+    await workspacePage.keyboard.press("Escape");
+    await expect(details).toBeHidden();
+    await expect(opener).toBeFocused();
+  });
+});
+
 test.describe("thin inventory smoke — excluded from the substantive count", () => {
   for (const badge of ["Typed", "Vendored"] as const) {
     test(`merged registry row exposes its ${badge} engine badge`, async ({ workspacePage }) => {

@@ -1,3 +1,5 @@
+import type { Page } from "@playwright/test";
+
 import {
   createTypedWorkflowFromTemplate,
   expect,
@@ -73,6 +75,161 @@ test.describe("scientific template structure and close control", () => {
         .toBeVisible();
     });
   }
+});
+
+test.describe("workspace surfaces never scroll the document sideways", () => {
+  for (const tabName of WORKSPACE_TABS) {
+    test(`${tabName} fits its pane at 1280x720`, async ({ workspacePage }) => {
+      await workspacePage.setViewportSize({ width: 1280, height: 720 });
+      await selectWorkspaceTab(workspacePage, tabName);
+
+      const metrics = await workspacePage.evaluate((view) => {
+        const surface = document.querySelector<HTMLElement>(
+          `[data-workspace-surface]:not([aria-hidden="true"])`,
+        );
+        return {
+          view,
+          documentScrollWidth: document.documentElement.scrollWidth,
+          documentClientWidth: document.documentElement.clientWidth,
+          surfaceScrollWidth: surface?.scrollWidth ?? null,
+          surfaceClientWidth: surface?.clientWidth ?? null,
+        };
+      }, tabName);
+
+      expect(metrics.documentScrollWidth).toBe(metrics.documentClientWidth);
+      if (metrics.surfaceScrollWidth !== null) {
+        // The surface wrapper is overflow-hidden, so content wider than it is
+        // unreachable rather than scrollable — it must never happen.
+        expect(metrics.surfaceScrollWidth).toBe(metrics.surfaceClientWidth);
+      }
+    });
+  }
+});
+
+test.describe("keyboard affordances", () => {
+  test("the project-picker entry control shows a focus ring the card does not clip", async ({
+    workspacePage,
+  }) => {
+    // The mocks live on this page, so returning to "/" re-renders the picker.
+    await workspacePage.goto("/");
+    await expect(workspacePage.getByRole("heading", { name: "Choose a project" })).toBeVisible();
+    const entryControl = workspacePage.getByRole("button", { name: "Open project E2E Project" });
+    await expect(entryControl).toBeVisible();
+
+    const cardBoxShadow = () =>
+      entryControl.evaluate(
+        (node) => window.getComputedStyle(node.parentElement as HTMLElement).boxShadow,
+      );
+
+    const blurred = await cardBoxShadow();
+    expect(blurred).not.toContain("0px 0px 0px 3px");
+
+    // Only real keyboard traversal sets :focus-visible.
+    for (let press = 0; press < 40; press += 1) {
+      await workspacePage.keyboard.press("Tab");
+      if (await entryControl.evaluate((node) => document.activeElement === node)) break;
+    }
+    await expect(entryControl).toBeFocused();
+    expect(await entryControl.evaluate((node) => node.matches(":focus-visible"))).toBe(true);
+
+    // The card animates the ring in, so poll rather than sample once. A 3px
+    // spread on the CARD is the assertion: the same ring on the overlay button
+    // is clipped away by the card's overflow-hidden.
+    await expect.poll(cardBoxShadow).toContain("0px 0px 0px 3px");
+  });
+
+  /**
+   * The shared fixtures answer `/credentials` with a configured OpenRouter key,
+   * so the default model is available and Submit is NOT blocked — a test that
+   * merely branches on the live state would take the enabled path and assert
+   * nothing about the blocked one. Overriding that single response (Playwright
+   * matches the most recently registered route first) makes the blocked state
+   * deterministic instead. `delayMs` keeps the response in flight long enough
+   * for the transient "checking" window to be real and observable.
+   */
+  async function withNoConfiguredProvider(page: Page, delayMs = 0): Promise<void> {
+    await page.route("**/credentials", async (route) => {
+      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ openrouter: { set: false } }),
+      });
+    });
+  }
+
+  async function reopenWorkspace(page: Page): Promise<void> {
+    await page.goto("/");
+    await page.getByRole("button", { name: "Open project E2E Project" }).click();
+    await expect(page.getByRole("navigation", { name: "Project workspace" })).toBeVisible();
+    await selectWorkspaceTab(page, "Chat");
+  }
+
+  test("the chat Submit control explains itself whenever it refuses to send", async ({
+    workspacePage,
+  }) => {
+    await withNoConfiguredProvider(workspacePage);
+    await reopenWorkspace(workspacePage);
+
+    const submit = workspacePage
+      .getByRole("button", { name: "Submit", exact: true })
+      .first();
+    await expect(submit).toBeVisible();
+
+    const hint = workspacePage.getByTestId("composer-submit-blocked-hint").first();
+    await expect(submit).toHaveAttribute("aria-disabled", "true");
+    await expect(hint).toBeVisible();
+    await expect(hint).toHaveText("Connect a provider in Settings to send");
+    await expect(submit).toHaveAttribute(
+      "aria-describedby",
+      (await hint.getAttribute("id")) ?? "",
+    );
+    // The reason reaches a pointer user through the control's own tooltip; a
+    // native `title` alongside it stacked a second, near-duplicate bubble.
+    expect(await submit.getAttribute("title")).toBeNull();
+    // The whole point of aria-disabled over `disabled`: a keyboard user can
+    // still land on the control and hear why it will not send.
+    await submit.focus();
+    await expect(submit).toBeFocused();
+  });
+
+  test("the blocked-Submit hint never flashes the transient provider check", async ({
+    workspacePage,
+  }) => {
+    // Record every text the hint ever renders, from first paint. Provider
+    // status is "checking" until /credentials answers, and rendering the amber
+    // box for that state flashed a warning and shifted the composer down on
+    // every chat load. The half-second delay makes that window unmissable.
+    await workspacePage.addInitScript(() => {
+      const seen: string[] = [];
+      (window as unknown as { __submitHintTexts: string[] }).__submitHintTexts = seen;
+      const record = () => {
+        for (const node of document.querySelectorAll(
+          '[data-testid="composer-submit-blocked-hint"]',
+        )) {
+          const text = (node.textContent ?? "").trim();
+          if (text && seen[seen.length - 1] !== text) seen.push(text);
+        }
+      };
+      new MutationObserver(record).observe(document, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+    });
+    await withNoConfiguredProvider(workspacePage, 500);
+    await reopenWorkspace(workspacePage);
+
+    // The settled reason still arrives...
+    const hint = workspacePage.getByTestId("composer-submit-blocked-hint").first();
+    await expect(hint).toHaveText("Connect a provider in Settings to send");
+
+    // ...and it is the only thing the hint ever said.
+    const texts = await workspacePage.evaluate(
+      () => (window as unknown as { __submitHintTexts: string[] }).__submitHintTexts,
+    );
+    expect(texts).toEqual(["Connect a provider in Settings to send"]);
+  });
 });
 
 test.describe("thin inventory smoke — excluded from the substantive count", () => {

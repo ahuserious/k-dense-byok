@@ -213,6 +213,36 @@ function vendoredRunReceipt(value: unknown): VendoredRunReceipt {
   return { receiptId, runId, status: response.status };
 }
 
+// Stable identity for a registry row, used both as the React key and as the
+// row's `data-workflow-registry-id`. NOT `entry.id`: that id embeds the
+// source's structure hash, which changes the moment opening a row attaches its
+// graph — remounting the row the user just activated and dropping focus to
+// <body>, and staling any selector built on the attribute. A typed source id is
+// already engine-namespaced (`typed:<encoded id>`); the normalized name is
+// appended so two definitions the engine happens to list under a single id
+// still get distinct keys instead of colliding.
+export function scientificPipelineRowIdentity(
+  entry: ScientificPipelineRegistryEntry,
+): string {
+  return entry.typed
+    ? `${entry.typed.sourceId}:${encodeURIComponent(entry.normalizedName)}`
+    : entry.id;
+}
+
+// Escape is a panel-chrome affordance only. Inside a form control it is a
+// reflex users hit while editing (clear the field, dismiss an autocomplete),
+// and this panel keeps the run goal, precondition values and file selections
+// in local state that a close throws away — so closing from a field silently
+// destroys typed input. Buttons, the heading and the section itself still close.
+function isFormControlTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement ||
+    (target instanceof HTMLElement && target.isContentEditable)
+  );
+}
+
 function WorkflowRegistryRow({
   entry,
   opening,
@@ -226,7 +256,7 @@ function WorkflowRegistryRow({
   opening: boolean;
   budgetBlocked: boolean;
   receipt?: VendoredRunReceipt & { error?: string };
-  onOpenTyped: () => void;
+  onOpenTyped: (trigger: HTMLButtonElement) => void;
   onEditVendored: () => void;
   onRunVendored: () => void;
 }) {
@@ -235,7 +265,7 @@ function WorkflowRegistryRow({
   const vendoredRouteBlocked = entry.vendoredRouting?.routable === false;
   return (
     <li
-      data-workflow-registry-id={entry.id}
+      data-workflow-registry-id={scientificPipelineRowIdentity(entry)}
       className="border-b px-4 py-3 last:border-b-0"
     >
       <div className="flex flex-wrap items-start gap-3">
@@ -289,10 +319,14 @@ function WorkflowRegistryRow({
           {typed ? (
             <button
               type="button"
-              onClick={onOpenTyped}
-              disabled={opening}
+              onClick={(event) => onOpenTyped(event.currentTarget)}
+              // `aria-disabled` rather than `disabled`: a natively disabled
+              // button loses focus to <body> the moment the row re-renders,
+              // which is exactly the focus drop this row used to cause. The
+              // open handler already ignores re-entrant clicks.
+              aria-disabled={opening}
               aria-label={`Open ${entry.name} details`}
-              className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs hover:bg-muted/50 disabled:cursor-wait"
+              className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs hover:bg-muted/50 aria-disabled:cursor-wait"
             >
               {opening ? <LoaderCircleIcon className="size-3 animate-spin" /> : <ChevronRightIcon className="size-3" />}
               Details &amp; run
@@ -357,6 +391,8 @@ function DefinitionDetails({
   const pendingRunRequest = useRef<{ intentKey: string; requestId: string } | null>(null);
   const previousRunIntentKey = useRef<string | null>(null);
   const restoredRunIntent = useRef(false);
+  const detailsSectionRef = useRef<HTMLElement>(null);
+  const detailsHeadingRef = useRef<HTMLHeadingElement>(null);
   const rawDefinition = JSON.stringify(definition, null, 2);
   const runIntentKey = JSON.stringify([
     definition.id,
@@ -377,6 +413,13 @@ function DefinitionDetails({
       : [],
     [graph.preconditions, runGoal, runVariables, runFiles],
   );
+
+  // Activating a registry row replaces the row's rendered state and used to
+  // leave focus on <body> (17 Tabs away from the panel it just opened). The
+  // panel takes focus on open; the parent returns it to the opener on close.
+  useEffect(() => {
+    detailsHeadingRef.current?.focus();
+  }, []);
 
   useEffect(() => {
     if (!restoredRunIntent.current) {
@@ -500,19 +543,37 @@ function DefinitionDetails({
   };
 
   return (
-    <section className="rounded-lg border bg-background" aria-labelledby="typed-definition-details-title">
+    <section
+      ref={detailsSectionRef}
+      className="min-w-0 max-w-full rounded-lg border bg-background"
+      aria-labelledby="typed-definition-details-title"
+      onKeyDown={(event) => {
+        // Escape closes the panel from its chrome; the opener's focus is
+        // restored by the parent's onClose. It deliberately does NOT close from
+        // inside a form control — see isFormControlTarget.
+        if (event.key !== "Escape" || launching) return;
+        if (isFormControlTarget(event.target)) return;
+        event.stopPropagation();
+        onClose();
+      }}
+    >
       <header className="flex flex-wrap items-start justify-between gap-3 border-b px-4 py-3">
         <div className="min-w-0">
-          <h3 id="typed-definition-details-title" className="truncate text-sm font-semibold">
+          <h3
+            ref={detailsHeadingRef}
+            id="typed-definition-details-title"
+            tabIndex={-1}
+            className="truncate text-sm font-semibold outline-none"
+          >
             {graph.name}
           </h3>
           <p className="mt-1 text-[11px] text-muted-foreground">
             {definition.id} · revision {definition.revision} · {graph.nodes.length} node{graph.nodes.length === 1 ? "" : "s"} · {graph.edges.length} edge{graph.edges.length === 1 ? "" : "s"}
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
           {graph.preconditions ? (
-            <div className="flex max-w-xl flex-wrap items-end gap-2">
+            <div className="flex min-w-0 max-w-xl flex-wrap items-end gap-2">
               {graph.preconditions.requiredInputs.map((input) => (
                 <label key={input.key} className="flex min-w-40 flex-col gap-1 text-[10px] text-muted-foreground">
                   {input.label}
@@ -634,9 +695,9 @@ function DefinitionDetails({
       {graph.description ? (
         <p className="border-b px-4 py-3 text-xs text-muted-foreground">{graph.description}</p>
       ) : null}
-      <section className="p-4" aria-labelledby="raw-typed-definition-title">
-        <div className="flex items-start justify-between gap-3">
-          <div>
+      <section className="min-w-0 max-w-full p-4" aria-labelledby="raw-typed-definition-title">
+        <div className="flex min-w-0 items-start justify-between gap-3">
+          <div className="min-w-0">
             <h4 id="raw-typed-definition-title" className="text-xs font-semibold">
               Complete stored definition (read-only)
             </h4>
@@ -654,7 +715,11 @@ function DefinitionDetails({
         </div>
         <pre
           data-testid="raw-typed-definition"
-          className="mt-3 max-h-[34rem] overflow-auto rounded-md border bg-muted/20 p-3 text-[10px] leading-relaxed"
+          // The stored definition has single-line prompt strings hundreds of
+          // characters wide. `w-full max-w-full` keeps the box at the pane's
+          // width so its own `overflow-auto` is what scrolls, instead of the
+          // line widening every ancestor.
+          className="mt-3 max-h-[34rem] w-full max-w-full overflow-auto rounded-md border bg-muted/20 p-3 text-[10px] leading-relaxed"
         >
           {rawDefinition}
         </pre>
@@ -694,6 +759,11 @@ export function DagWorkflowsPanel({
   const [creating, setCreating] = useState(false);
   const [vendoredRunReceipts, setVendoredRunReceipts] = useState<Record<string, VendoredRunReceipt & { error?: string }>>({});
   const launchingVendoredRuns = useRef(new Set<string>());
+  // The control that opened the details panel, so closing it returns focus
+  // where the user left it (WCAG 2.4.3). "Create and open" leaves no surviving
+  // control, so the create toggle is the fallback target.
+  const detailsOpenerRef = useRef<HTMLButtonElement | null>(null);
+  const createFormToggleRef = useRef<HTMLButtonElement>(null);
   const loadGeneration = useRef(0);
   const structureComparisonFailures = useRef(new Set<string>());
   const selectedTemplate = findDagWorkflowTemplate(newWorkflowTemplateId);
@@ -810,8 +880,19 @@ export function DagWorkflowsPanel({
     };
   }, [projectId, typedSources, vendoredSources]);
 
-  const openDefinition = async (entry: ScientificPipelineRegistryEntry) => {
+  const closeDefinition = () => {
+    setSelectedDefinition(null);
+    const opener = detailsOpenerRef.current;
+    if (opener?.isConnected) opener.focus();
+    else createFormToggleRef.current?.focus();
+  };
+
+  const openDefinition = async (
+    entry: ScientificPipelineRegistryEntry,
+    trigger: HTMLButtonElement | null,
+  ) => {
     if (openingId) return;
+    detailsOpenerRef.current = trigger;
     const route = workflowRouteForEngine(entry, "typed");
     setOpeningId(route.sourceId);
     setError(null);
@@ -844,6 +925,9 @@ export function DagWorkflowsPanel({
     }
     setCreating(true);
     setError(null);
+    // The submit control is unmounted with the form below, so closing the
+    // details it opens must fall back to the create toggle.
+    detailsOpenerRef.current = null;
     try {
       const graph = selectedTemplate
         ? createDagWorkflowTemplateGraph(
@@ -914,7 +998,10 @@ export function DagWorkflowsPanel({
   };
 
   return (
-    <section className="flex h-full min-h-0 flex-col" aria-labelledby="scientific-pipelines-title">
+    <section
+      className="flex h-full min-h-0 w-full min-w-0 max-w-full flex-col"
+      aria-labelledby="scientific-pipelines-title"
+    >
       <header className="shrink-0 border-b px-5 py-4">
         <div className="flex items-center gap-2">
           <ListTreeIcon className="size-4 text-primary" />
@@ -927,8 +1014,8 @@ export function DagWorkflowsPanel({
         </p>
       </header>
 
-      <div className="min-h-0 flex-1 space-y-6 overflow-y-auto p-5">
-        <section className="overflow-hidden rounded-lg border bg-background" aria-labelledby="workflow-registry-title">
+      <div className="min-h-0 w-full min-w-0 max-w-full flex-1 space-y-6 overflow-y-auto p-5">
+        <section className="min-w-0 max-w-full overflow-hidden rounded-lg border bg-background" aria-labelledby="workflow-registry-title">
           <header className="border-b px-4 py-3">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
@@ -975,6 +1062,7 @@ export function DagWorkflowsPanel({
                 </button>
                 <button
                   type="button"
+                  ref={createFormToggleRef}
                   className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 text-xs font-medium hover:bg-muted"
                   onClick={() => {
                     setShowCreateForm((visible) => !visible);
@@ -1121,13 +1209,16 @@ export function DagWorkflowsPanel({
                   const vendoredRoute = entry.vendored;
                   return (
                     <WorkflowRegistryRow
-                      key={entry.id}
+                      // Stable across the graph attach that opening a row
+                      // performs, and across a later cross-engine merge into
+                      // the same row — see scientificPipelineRowIdentity.
+                      key={scientificPipelineRowIdentity(entry)}
                       entry={entry}
                       opening={openingId === typedRoute?.sourceId}
                       budgetBlocked={budgetBlocked}
                       receipt={vendoredRoute ? vendoredRunReceipts[vendoredRoute.workflowId] : undefined}
-                      onOpenTyped={() => {
-                        if (typedRoute) void openDefinition(entry);
+                      onOpenTyped={(trigger) => {
+                        if (typedRoute) void openDefinition(entry, trigger);
                       }}
                       onEditVendored={() => {
                         if (vendoredRoute) {
@@ -1161,7 +1252,7 @@ export function DagWorkflowsPanel({
             activeSessionId={activeSessionId}
             budgetBlocked={budgetBlocked}
             uploadedFiles={uploadedFiles}
-            onClose={() => setSelectedDefinition(null)}
+            onClose={closeDefinition}
           />
         ) : null}
       </div>

@@ -15,6 +15,7 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
+import { RAINDROP_URL } from "@/lib/embed-config";
 import { raindropHealth } from "@/lib/raindrop-workshop";
 import { RaindropWorkshopPanel } from "@/components/raindrop-workshop-panel";
 
@@ -32,8 +33,13 @@ export function RaindropSurface({
   nativePanel: ReactNode;
 }) {
   const [mode, setMode] = useState<RaindropMode>("native");
-  // null = probing; the toggle appears only once the Workshop answered.
-  const [workshopUp, setWorkshopUp] = useState<boolean | null>(null);
+  // null = probing; the toggle appears only once the Workshop answered. With no
+  // configured URL there is nothing to probe, so that is the INITIAL state
+  // rather than an effect that immediately sets it — RAINDROP_URL is a
+  // build-time constant, so this cannot go stale.
+  const [workshopUp, setWorkshopUp] = useState<boolean | null>(
+    RAINDROP_URL ? null : false,
+  );
   // Mount the embed lazily, then keep it mounted across toggles.
   const [workshopVisited, setWorkshopVisited] = useState(false);
   const selectMode = (nextMode: RaindropMode) => {
@@ -44,7 +50,11 @@ export function RaindropSurface({
   // One probe on mount. The Workshop is a manually-started sidecar; if it
   // comes up later, revisiting the view (remount) or reloading picks it up.
   // No poll here — the embed's own EngineIframePanel polls once it's chosen.
+  // With no NEXT_PUBLIC_RAINDROP_URL there is no Workshop to reach, so the
+  // probe is skipped entirely (no request) and the toggle stays hidden — the
+  // tab is exactly the native panel, as it is when the Workshop is down.
   useEffect(() => {
+    if (!RAINDROP_URL) return;
     let cancelled = false;
     void raindropHealth().then((up) => {
       if (!cancelled) setWorkshopUp(up);
@@ -55,7 +65,7 @@ export function RaindropSurface({
   }, []);
 
   return (
-    <div className="flex h-full min-h-0 w-full flex-col">
+    <div className="flex h-full min-h-0 w-full min-w-0 max-w-full flex-col">
       {workshopUp === true && (
         <div className="flex shrink-0 items-center gap-1 border-b px-3 py-1 font-mono">
           {MODE_SEGMENTS.map((segment) => (
@@ -84,14 +94,18 @@ export function RaindropSurface({
       >
         {nativePanel}
       </div>
-      {workshopVisited && (
+      {workshopVisited && RAINDROP_URL && (
         <div
           className={cn(
             "min-h-0 flex-1 flex-col overflow-hidden",
             mode === "workshop" ? "flex" : "hidden",
           )}
         >
-          <RaindropWorkshopPanel />
+          {/* RAINDROP_URL is necessarily set here (workshopVisited implies the
+              toggle, which implies a successful probe, which implies a URL);
+              testing it again is what lets the embed take a plain `string` and
+              carry no unreachable "not configured" branch. */}
+          <RaindropWorkshopPanel url={RAINDROP_URL} />
         </div>
       )}
     </div>

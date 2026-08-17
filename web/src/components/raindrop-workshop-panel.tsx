@@ -6,6 +6,9 @@
 // /raindrop/health proxy (Workshop is a different origin, so the browser can't
 // read its status cross-origin).
 //
+// It renders only when the Workshop is actually configured AND answering, so
+// it carries no "not configured" state of its own — see the `url` prop below.
+//
 // NOTE: ported from the reference tree's raindrop-panel.tsx and RENAMED — the
 // target's own raindrop-panel.tsx is the native session-trace viewer and must
 // stay untouched (additive mandate). This embed appears only as a secondary
@@ -15,13 +18,24 @@
 "use client";
 
 import { EngineIframePanel } from "@/components/engine-iframe-panel";
-import { RAINDROP_URL } from "@/lib/embed-config";
 import { raindropHealth } from "@/lib/raindrop-workshop";
 
-export function RaindropWorkshopPanel() {
+export function RaindropWorkshopPanel({
+  /**
+   * The configured Workshop origin. REQUIRED, and never defaulted: with no
+   * NEXT_PUBLIC_RAINDROP_URL there is nothing this embed could honestly point
+   * at, so raindrop-surface.tsx does not render it at all rather than letting
+   * it guess a localhost port and frame whatever answers there. Passing the URL
+   * in (instead of reading the module constant and branching on it here) is
+   * what keeps that unreachable "not configured" state from existing.
+   */
+  url,
+}: {
+  url: string;
+}) {
   return (
     <EngineIframePanel
-      src={RAINDROP_URL}
+      src={url}
       title="Raindrop Workshop"
       healthCheck={raindropHealth}
       engineLabel="Raindrop Workshop"

@@ -67,7 +67,14 @@ export function PersistentWorkspaceSurfaces({
         aria-hidden={!isVisible}
         className={
           isVisible
-            ? "flex h-full min-h-0 w-full overflow-hidden"
+            // `min-w-0`/`max-w-full` on the wrapper AND on its direct child are
+            // both required: a flex item keeps `min-width: auto`, so without
+            // them a wide descendant (a long `<pre>` line, a category chip
+            // strip) sizes the pane to its content instead of to the viewport,
+            // and the `overflow-hidden` here then clips every right-aligned
+            // control with no scroller to reach it. The child rule is applied
+            // from here because `surfaces` is arbitrary caller-owned JSX.
+            ? "flex h-full min-h-0 w-full min-w-0 max-w-full overflow-hidden [&>*]:min-w-0 [&>*]:max-w-full"
             : "hidden"
         }
       >
