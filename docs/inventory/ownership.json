@@ -1156,6 +1156,20 @@
       "date": "2026-08-18",
       "path": "web/src/lib/dag-workflows.ts",
       "scope": "row-level validation of the saved-workflow list at the source, beside isSavedDefinitionEnvelope (#62/N1) \u2014 this scope only"
+    },
+    {
+      "from": "S7",
+      "to": "W1",
+      "date": "2026-08-18",
+      "path": "server/src/agent/session-registry.ts",
+      "scope": "M3 reconciliation, comment block at :142-152 only: record that lane W3's bridge merged WITHOUT giving the helper's answer a path to the canvas, so the apply-to-canvas sentence must not be restored; the prompt text itself is unchanged"
+    },
+    {
+      "from": "C4",
+      "to": "W1",
+      "date": "2026-08-18",
+      "path": "server/test/raindrop-context.test.ts",
+      "scope": "M3 reconciliation: keep the assertion that the dag-builder prompt makes no apply-to-canvas promise, and state in the test why merging W3 did not retire it"
     }
   ]
 }

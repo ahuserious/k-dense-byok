@@ -108,6 +108,8 @@ A handoff lets the recipient lane edit a path another lane owns, for the stated 
 | S1 | S1b | `web/src/lib/dag-workflows.ts` | row-level validation of the saved-workflow list at the source, beside `isSavedDefinitionEnvelope` (#62/N1) — this scope only |
 | S4 | S5 | `server/src/agent/workflow-delegation-session.ts` | restore a harness dispatch decision reachable from the supervised transport (N-A7/#55) |
 | C4 | S8B | `server/test/raindrop-context.test.ts` | regressions for the no-workflow dag-builder context |
+| S7 | W1 | `server/src/agent/session-registry.ts` | M3 reconciliation, comment block at :142-152 only: record that lane W3's bridge merged WITHOUT giving the helper's answer a path to the canvas, so the apply-to-canvas sentence must not be restored; the prompt text itself is unchanged |
+| C4 | W1 | `server/test/raindrop-context.test.ts` | M3 reconciliation: keep the assertion that the dag-builder prompt makes no apply-to-canvas promise, and state in the test why merging W3 did not retire it |
 | S11 | W1 | `e2e/studio.spec.ts` | retire the Components Studio spec together with the header entry (owner: 'there should be no components studio'); DELETED in W1 r2 |
 | S8 | W1 | `web/src/components/chat-rail.tsx` | delete: unreferenced after the Builder rail hosts the DAG-builder assistant; DELETED in W1 r2 |
 | S1 | W3 | `web/src/components/dag-builder-surface.tsx` | host-authoritative typed document, builder bridge, source picker above the iframe, helper context/patch hooks (W1 owns the rail placement) |
