@@ -102,6 +102,27 @@ function modelReceipt(model: string) {
   };
 }
 
+/**
+ * The node-control bindings that ride a hosted-Fusion frame. Hosted Fusion has
+ * no child process to hold a node-control envelope, so `nodeControl` is a
+ * required member of the frame and has to survive the round-trip verbatim.
+ */
+function hostedNodeControl(): SerializedHostedOpenRouterFusionRequest["nodeControl"] {
+  return {
+    version: 1,
+    harness: "pi",
+    providerRequest: { temperature: 0.2, top_p: 0.9, sampling: { seed: 7 } },
+    databases: [
+      { ref: "pubmed", id: "pubmed", name: "PubMed", url: "https://pubmed.ncbi.nlm.nih.gov", domain: "science" },
+    ],
+    skills: { mode: "auto-manual", configured: ["database-lookup"], delegated: ["database-lookup"] },
+    subagents: { mode: "auto-manual", permitted: true },
+    autonomy: "strict",
+    toolPolicy: { allowedTools: ["read", "grep", "find", "ls"] },
+    billingMode: "inherit",
+  };
+}
+
 function hostedRequest(): SerializedHostedOpenRouterFusionRequest {
   const router = openRouterModelRequest("openrouter/fusion");
   const analyst = openRouterModelRequest("anthropic/claude-sonnet-4.5");
@@ -135,6 +156,7 @@ function hostedRequest(): SerializedHostedOpenRouterFusionRequest {
     maxTokens: 10_000,
     maxCostUsd: 12,
     timeoutMs: 120_000,
+    nodeControl: hostedNodeControl(),
   };
 }
 

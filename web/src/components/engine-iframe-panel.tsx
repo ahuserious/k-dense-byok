@@ -19,10 +19,18 @@
 // `healthCheck` is optional and engine-specific (the workflow engine and Raindrop probe different
 // origins) — when omitted the iframe renders immediately with just the load overlay.
 
+// Host mode: when a `BuilderHostProvider` is above this panel (only the DAG
+// Builder surface installs one), the iframe URL gains `?host=kady` and the
+// mounted frame is handed to the host bridge. Every other embed — Raindrop, and
+// any direct use of the pipeline builder panel — sees no provider and behaves
+// exactly as before.
+
 "use client";
 
 import { LoaderCircleIcon, ExternalLinkIcon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+
+import { useBuilderHostAttachment } from "@/components/builder/builder-host-context";
 
 const POLL_INTERVAL_MS = 3000;
 const MAX_POLLS = 10; // ~30s of grace for a sidecar that starts a beat after Kady
@@ -42,6 +50,9 @@ export function EngineIframePanel({
   /** Human label for the engine, used in the loading + error copy. */
   engineLabel?: string;
 }) {
+  const hostAttachment = useBuilderHostAttachment();
+  const frameSrc = hostAttachment ? hostAttachment.decorateSrc(src) : src;
+
   // null = probing (or no probe yet); true = reachable; false = gave up after retries.
   const [healthy, setHealthy] = useState<boolean | null>(healthCheck ? null : true);
   // The iframe has fired its `load` event — lets us fade out the skeleton.
@@ -137,9 +148,15 @@ export function EngineIframePanel({
           probe), so we don't burn a cross-origin load against a down sidecar. */}
       {healthy !== null && (
         <iframe
-          src={src}
+          src={frameSrc}
           title={title}
-          onLoad={() => setLoaded(true)}
+          ref={hostAttachment?.attachFrame}
+          onLoad={() => {
+            setLoaded(true);
+            // A fresh document is about to announce itself, so the host's
+            // ready timer restarts here rather than only at mount.
+            hostAttachment?.onFrameLoad();
+          }}
           className="absolute inset-0 h-full w-full border-0"
         />
       )}

@@ -78,13 +78,15 @@ Orchestrator evidence at 6c7054c (2026-08-17, lane V1 verification fixes merged:
 
 Lane W1 evidence at 2026-08-18 (owner direction “there should be no components studio”): the Components Studio entry point was retired and `e2e/studio.spec.ts` was deleted with it, removing 34 items — 33 substantive and 1 fixme. `npx playwright test --list` now reports `E2E inventory verified: 227 total = 192 executing-substantive + 35 thin; 3 fixme + 0 skip.`, and the per-file pins in `e2e/item-count-reporter.ts` no longer carry a `studio.spec.ts` row. No other spec gained or lost an item.
 
+Lane W1 evidence at 2026-08-18 (round 6, the M3 reconciliation: lanes W3 and W4 merged into the W1 tree at `c0fe2c0`): the merge added `e2e/builder-typed.spec.ts` (14 items, all substantive — lane W3's typed authoring path) and `e2e/console-live.spec.ts` (12 items, all substantive — lane W4's Console live-graph session half), and three lanes had pinned `e2e/item-count-reporter.ts` against three different worlds, so that file merged conflicted. Resolved by hand rather than by taking a side, then MEASURED: `npx playwright test --list` reports `E2E inventory verified: 253 total = 218 executing-substantive + 35 thin; 3 fixme + 0 skip.` and `Total: 253 tests in 8 files`. The measurement agrees with both independent projections (`225 − 33 + 14 + 12` from the per-lane deltas and `253 − 35` from the per-file map), and clears the ADR S11 floor of 200 executing-substantive items by 18. No spec was edited to reach that number; `studio.spec.ts` is still absent and has no row.
+
 To prove consecutive cleanup, run the complete up/curl/down sequence three times. A later `preview-up.mjs` must not encounter occupied ports or reuse state from an earlier cycle.
 
 The orchestrator's 2026-08-12 live proof completed three consecutive cycles: every service was healthy at roughly 24 seconds, every teardown removed the isolated state, and no listener or child process survived.
 
 ## Test inventory
 
-Playwright expands the parameterized declarations into 227 independent test items. A local reporter
+Playwright expands the parameterized declarations into 253 independent test items. A local reporter
 fails collection if any per-file count or the substantive/thin split changes without an intentional update:
 
 | Surface | Items |
@@ -93,11 +95,13 @@ fails collection if any per-file count or the substantive/thin split changes wit
 | Scientific Pipelines and 23 templates | 57 |
 | Chat lifecycle and live Scientific DAG | 28 |
 | DAG Builder, node cards, and every NodeSpec field | 60 |
+| Typed authoring: host source list, canvas bridge, conditional save | 14 |
 | Console and Raindrop | 33 |
+| Console live graph, session half | 12 |
 | Unmocked backend and engine contracts | 3 |
-| **Total** | **227** |
+| **Total** | **253** |
 
-Of those 227 items, 192 are substantive behavior checks and 35 are explicitly labelled thin inventory
+Of those 253 items, 218 are substantive behavior checks and 35 are explicitly labelled thin inventory
 or documented-product-gap items. All three `@live` items are substantive because each asserts exact values returned by a real service and a corresponding browser-visible consequence. The split is checked at collection time as well as the per-file totals.
 
 Each item establishes the state required by its surface. Builder items open a named draft before using the canvas; live Scientific DAG items submit a run before expecting a projection; typed-pipeline items create and open their stored definition; Console and Raindrop items wait for durable records. Assertions use Playwright's signal-based locator waits and do not contain fixed sleeps.
@@ -138,7 +142,7 @@ The real remote path is the `github-runner` job in [`.github/workflows/stably-cl
 
 - the exact test command and relevant environment (`CI`, `KADY_E2E_BASE_URL`, workers, and `KADY_E2E_WORKERS` when set), with `STABLY_API_KEY` and `STABLY_PROJECT_ID` recorded only as variable names;
 - the tested commit SHA and GitHub run ID;
-- `E2E inventory verified: 227 total = 192 executing-substantive + 35 thin; 3 fixme + 0 skip.`;
+- `E2E inventory verified: 253 total = 218 executing-substantive + 35 thin; 3 fixme + 0 skip.`;
 - the final Playwright summary line and suite outcome;
 - the embedded runner fingerprint, including runner image/identity fields available to the job; and
 - the Stably run ID and URL when the conditional reporter attached.

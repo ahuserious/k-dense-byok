@@ -414,26 +414,25 @@ const HARNESS_EXECUTABLES: Record<Exclude<WorkflowHarness, "pi">, string[]> = {
 };
 
 /**
- * Select the node's execution harness without silently falling back to Pi.
- * Pi is the fully bound Wave-B implementation. Other frozen harness values
- * have an explicit discovery seam so installing a CLI changes the diagnostic,
- * but cannot accidentally grant it workflow authority before an adapter lands.
+ * The harness → adapter decision itself, with no knowledge of which transport
+ * owns the Pi session. Returns for `pi` — the only fully bound Wave-B
+ * implementation — and throws the explicit discovery diagnostic for every
+ * other frozen harness value, so installing a CLI changes the message but
+ * cannot accidentally grant it workflow authority before an adapter lands.
+ *
+ * Both transports call this before the node executor reserves any budget: the
+ * in-process executor through `dispatchWorkflowHarness` below, and the
+ * supervised transport through its own `getDelegationSession` override, which
+ * owns a Pi session living in another process and so cannot reuse the factory.
  */
-export async function dispatchWorkflowHarness(
+export function assertWorkflowHarnessAdapterBound(
   harness: WorkflowHarness,
-  projectId: string,
-  paths: ProjectPaths,
-  dependencyOverrides: Partial<WorkflowHarnessDispatchDependencies> = {},
-): Promise<WorkflowDelegationSession> {
-  const dependencies: WorkflowHarnessDispatchDependencies = {
-    pi: getOrCreateWorkflowDelegationSession,
-    findExecutable: lookPath,
-    ...dependencyOverrides,
-  };
-  if (harness === "pi") return dependencies.pi(projectId, paths);
+  findExecutable: (command: string) => string | null = lookPath,
+): void {
+  if (harness === "pi") return;
 
   const installed = HARNESS_EXECUTABLES[harness]
-    .map((command) => dependencies.findExecutable(command))
+    .map((command) => findExecutable(command))
     .find((candidate): candidate is string => candidate !== null);
   if (!installed) {
     throw new WorkflowHarnessDispatchError(
@@ -447,6 +446,26 @@ export async function dispatchWorkflowHarness(
     harness,
     `Workflow harness ${harness} was found at ${installed}, but this Kady build has no trusted delegation adapter for it.`,
   );
+}
+
+/**
+ * Select the node's execution harness without silently falling back to Pi.
+ * In-process transport: reach the adapter decision, then build the local Pi
+ * session it selected.
+ */
+export async function dispatchWorkflowHarness(
+  harness: WorkflowHarness,
+  projectId: string,
+  paths: ProjectPaths,
+  dependencyOverrides: Partial<WorkflowHarnessDispatchDependencies> = {},
+): Promise<WorkflowDelegationSession> {
+  const dependencies: WorkflowHarnessDispatchDependencies = {
+    pi: getOrCreateWorkflowDelegationSession,
+    findExecutable: lookPath,
+    ...dependencyOverrides,
+  };
+  assertWorkflowHarnessAdapterBound(harness, dependencies.findExecutable);
+  return dependencies.pi(projectId, paths);
 }
 
 interface LiveWorkflowDelegationSession extends WorkflowDelegationSession {

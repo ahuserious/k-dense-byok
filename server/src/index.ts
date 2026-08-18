@@ -12,10 +12,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fastifyCors from "@fastify/cors";
 import multipart from "@fastify/multipart";
-import Fastify, { type FastifyRequest } from "fastify";
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { DEFAULT_PROJECT_ID, HOST, PORT, modalConfigured } from "./config.ts";
 import { isCorsOriginAllowed } from "./cors.ts";
-import { ensureProjectExists, getProject, listProjects } from "./projects.ts";
+import {
+  ensureProjectExists,
+  getProject,
+  listProjects,
+  ProjectRepositoryContainmentError,
+} from "./projects.ts";
 import { withActiveProject } from "./scope.ts";
 import { registerProjectRoutes } from "./api/projects.ts";
 import { registerSessionRoutes } from "./api/sessions.ts";
@@ -90,6 +95,49 @@ function resolveProjectId(req: FastifyRequest): string {
     if (c && c.trim()) return c.trim();
   }
   return DEFAULT_PROJECT_ID;
+}
+
+/**
+ * Answer a project-repository containment refusal instead of serving the
+ * request from somewhere else.
+ *
+ * This is the API-layer mapping `ProjectRepositoryContainmentError` is thrown
+ * for. It is deliberately an explicit reply rather than a re-throw: a re-throw
+ * is only visible through Fastify's *default* error serializer, which any
+ * later `setErrorHandler` would silently reshape — and being silently reshaped
+ * is the failure mode this whole path exists to prevent. The reply also keeps
+ * the `{ detail, reason }` shape of the sibling `unknown_project` refusal in
+ * the same hook, which clients already parse.
+ *
+ * 500, not 4xx: the caller asked for a project that exists. The sandbox behind
+ * it is not the repository it claims to be, which is an operator
+ * misconfiguration on this server (a projects root pointed at a checkout).
+ */
+function refuseProjectRepositoryContainment(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  requestedProjectId: string,
+  error: ProjectRepositoryContainmentError,
+): void {
+  req.log.error(
+    {
+      projectId: requestedProjectId,
+      sandbox: error.sandbox,
+      offendingToplevel: error.offendingToplevel,
+      invariant: error.invariant,
+    },
+    "refusing to scope a request to a project whose sandbox is not its own repository",
+  );
+  // An unknown project id on a GET sets this header before falling back to the
+  // default project, and the fallback is what then refuses. Leaving it on the
+  // reply tells a client it was served from the default project when it was in
+  // fact served nothing: the same false reassurance the refusal exists to stop.
+  reply.removeHeader("X-Project-Fallback");
+  reply.code(500).send({
+    detail: error.message,
+    reason: "project_repository_containment",
+    invariant: error.invariant,
+  });
 }
 
 export interface BuildAppOptions {
@@ -181,7 +229,17 @@ export async function buildApp(options: BuildAppOptions = {}) {
         projectId = DEFAULT_PROJECT_ID;
       }
       ensureProjectExists(projectId);
-    } catch {
+    } catch (error) {
+      // A containment refusal names one *specific* project whose sandbox is
+      // not the repository it claims to be. Redirecting it into the default
+      // project would serve the request — a write included — from a project
+      // the caller never asked for: the same silent move the unknown-id branch
+      // above refuses, only harder to notice because the id was real. Every
+      // other failure keeps its fallback.
+      if (error instanceof ProjectRepositoryContainmentError) {
+        refuseProjectRepositoryContainment(req, reply, projectId, error);
+        return;
+      }
       projectId = DEFAULT_PROJECT_ID;
       ensureProjectExists(projectId);
     }

@@ -8,6 +8,15 @@ RunState v1 is the JSON-safe live-run projection exposed through
 `server/src/api/workflow-run-state.ts`. It is distinct from the durable
 event-reducer `WorkflowRunState` used for storage and replay.
 
+**One other document describes this union, and it is subordinate to this one (V-5, 2026-08-18).**
+`docs/inventory/run-state-v1-event-taxonomy.md` was derived from code rather than from this contract, so for
+a while two documents described one frozen union with only one of them under the freeze. That file now opens
+by saying it does not extend, narrow, or amend the union, that a change to the union may not be recorded
+there, and that where the two disagree this contract is right and that file is stale. Its §1 mirrors the
+union; its §§2-6 describe the *chat run* surface (`GET /sessions/:id/run/state`), which is a different
+projection and is not frozen. If the union changes here, that taxonomy is the file to re-derive — never the
+other way round.
+
 | Field | Semantics |
 | --- | --- |
 | `schemaVersion` | Required literal `1` discriminator. |

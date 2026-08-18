@@ -3,14 +3,16 @@ import path from "node:path";
 import type { FullConfig, Reporter, Suite } from "@playwright/test/reporter";
 
 const EXPECTED_ITEMS_BY_FILE = new Map([
+  ["builder-typed.spec.ts", 14],
   ["builder.spec.ts", 60],
   ["chat.spec.ts", 28],
+  ["console-live.spec.ts", 12],
   ["console-raindrop.spec.ts", 33],
   ["live-backend.spec.ts", 3],
   ["scientific-pipelines.spec.ts", 57],
   ["workspace.spec.ts", 46],
 ]);
-const EXPECTED_SUBSTANTIVE_ITEMS = 192;
+const EXPECTED_SUBSTANTIVE_ITEMS = 218;
 const EXPECTED_THIN_ITEMS = 35;
 const EXPECTED_FIXME_ITEMS = 3;
 const EXPECTED_SKIP_ITEMS = 0;

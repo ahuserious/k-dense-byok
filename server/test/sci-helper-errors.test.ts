@@ -61,6 +61,16 @@ describe("helper failures reach the caller as a usable message", () => {
     fs.writeFileSync(file, "<mzML>truncated");
     const res = await runSciHelper("massspec", "summarize", [file]);
     expect(res.status).not.toBe(0);
+    // This asserts the PARSE error a helper reports for corrupt input. Reaching the parser needs
+    // pyteomics, which a clone without the Python scientific stack does not have — every lane clone
+    // is such a clone, so the test failed there on a dependency rather than on the behaviour and
+    // showed up as a red suite in five separate lanes' evidence. Skip explicitly when the dependency
+    // is absent, so the assertion still runs wherever it can actually be evaluated. It must never
+    // pass by treating the missing module AS the parse error: that is the thing being distinguished.
+    if (/pyteomics not installed/.test(res.stderr)) {
+      expect(res.stderr).not.toMatch(/XMLSyntaxError|Premature end of data/);
+      return;
+    }
     expect(res.stderr).toMatch(/XMLSyntaxError|Premature end of data/);
     expect(res.stderr).not.toMatch(/hdf5plugin/);
   }, 30_000);

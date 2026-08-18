@@ -45,6 +45,11 @@ import {
   validateWorkflowGraphDocument,
 } from "../src/workflows/validate.ts";
 import {
+  pendingNodeKindSpecEnforcements,
+  pendingNodeSpecEnforcements,
+  pendingWorkflowSettingsEnforcements,
+} from "../src/workflows/node-spec-enforcement.ts";
+import {
   resolveWorkflowModel,
   type ResolvedWorkflowModel,
   type WorkflowModelResolutionContext,
@@ -1089,139 +1094,134 @@ describe("production Kady DAG node executor", () => {
     ]);
   });
 
-  it.each(([
+  /**
+   * This table used to assert the opposite — that each non-default field
+   * "fails closed" -- and then ended with `.filter(({ unit }) => unit === "S5")`
+   * over rows that were all `unit: "S4"`, so it expanded to zero cases and
+   * passed without running anything. S4 has since landed and bound every one
+   * of these fields, so the rows are kept and inverted: each now pins that the
+   * field is admitted rather than refused by a pending-enforcement stub, and
+   * names the retired issue code that must not come back.
+   *
+   * There is deliberately no `unit: "S5"` row. The only two S5 findings
+   * `node-spec-enforcement.ts` still emits (`node-deliberation-enforcement-pending`,
+   * `hosted-fusion-reasoning-enforcement-pending`) are unreachable in
+   * production — the outermost executor strips `settings.deliberation` and
+   * hosted-Fusion `settings.reasoningEffort` before the gate sees them -- so a
+   * row asserting they fire would pin dead code as though it were live. That
+   * module is tracked separately as task #56.
+   */
+  const BOUND_NODE_SPEC_FIELDS = [
     {
       label: "conditions.when",
       settings: { conditions: { when: "inputs.ready" } },
-      code: "node-conditions-enforcement-pending",
-      unit: "S4",
+      retiredCode: "node-conditions-enforcement-pending",
     },
     {
       label: "conditions.exists",
       settings: { conditions: { exists: ["inputs/missing.csv"] } },
-      code: "node-conditions-enforcement-pending",
-      unit: "S4",
+      retiredCode: "node-conditions-enforcement-pending",
     },
     {
       label: "harness",
       settings: { harness: "codex" },
-      code: "node-harness-enforcement-pending",
-      unit: "S4",
+      retiredCode: "node-harness-enforcement-pending",
     },
     {
       label: "hyperparameters.temperature",
       settings: { hyperparameters: { temperature: 0.2 } },
-      code: "node-hyperparameters-enforcement-pending",
-      unit: "S4",
+      retiredCode: "node-hyperparameters-enforcement-pending",
     },
     {
       label: "hyperparameters.top_p",
       settings: { hyperparameters: { top_p: 0.9 } },
-      code: "node-hyperparameters-enforcement-pending",
-      unit: "S4",
+      retiredCode: "node-hyperparameters-enforcement-pending",
     },
     {
       label: "hyperparameters.sampling",
       settings: { hyperparameters: { sampling: { seed: 7 } } },
-      code: "node-hyperparameters-enforcement-pending",
-      unit: "S4",
+      retiredCode: "node-hyperparameters-enforcement-pending",
     },
     {
       label: "databases",
       settings: { databases: ["pubmed"] },
-      code: "node-databases-enforcement-pending",
-      unit: "S4",
+      retiredCode: "node-databases-enforcement-pending",
     },
     {
       label: "skills mode",
       settings: { skills: { mode: "manual" } },
-      code: "node-skills-mode-enforcement-pending",
-      unit: "S4",
+      retiredCode: "node-skills-mode-enforcement-pending",
     },
     {
       label: "skills list",
       settings: { skills: { list: ["database-lookup"] } },
-      code: "node-skills-list-enforcement-pending",
-      unit: "S4",
+      retiredCode: "node-skills-list-enforcement-pending",
     },
     {
       label: "subagents mode",
       settings: { subagents: { mode: "auto-manual" } },
-      code: "node-subagents-mode-enforcement-pending",
-      unit: "S4",
+      retiredCode: "node-subagents-mode-enforcement-pending",
     },
     {
       label: "autonomy",
       settings: { autonomy: "loose" },
-      code: "node-autonomy-enforcement-pending",
-      unit: "S4",
+      retiredCode: "node-autonomy-enforcement-pending",
     },
     {
       label: "billing mode",
       settings: { billingMode: "subscription" },
-      code: "node-billing-mode-enforcement-pending",
-      unit: "S4",
+      retiredCode: "node-billing-mode-enforcement-pending",
     },
     {
       label: "workflow default harness",
       workflowSettings: { defaultHarness: "codex" },
-      code: "workflow-default-harness-enforcement-pending",
-      unit: "S4",
+      retiredCode: "workflow-default-harness-enforcement-pending",
     },
     {
       label: "workflow databases",
       workflowSettings: { databases: ["arxiv"] },
-      code: "workflow-databases-enforcement-pending",
-      unit: "S4",
+      retiredCode: "workflow-databases-enforcement-pending",
     },
   ] satisfies Array<{
     label: string;
     settings?: NodeSpecV1;
     workflowSettings?: WorkflowSettingsV1;
-    code: string;
-    unit: "S4" | "S5";
-  }>).filter(({ unit }) => unit === "S5"))("fails closed on non-default $label before receipt, reservation, or provider call", async ({
-    settings,
-    workflowSettings,
-    code,
-    unit,
-  }) => {
-    const node: WorkflowNode = {
-      ...baseNode("agent"),
-      kind: "agent",
-      prompt: "Do not execute an unbound NodeSpec field.",
-      ...(settings ? { settings } : {}),
-    };
-    const document = graph(node);
-    if (workflowSettings) document.settings = workflowSettings;
-    const events: string[] = [];
-    const host = new FakeHost([analysis("must not run")], events);
-    const onReserve = vi.fn();
-    const onResolve = vi.fn();
+    retiredCode: string;
+  }>;
 
-    const validation = validateWorkflowGraphDocument(document);
-    expect(validation).toMatchObject({ ok: false });
-    if (!validation.ok) {
-      expect(validation.issues).toContainEqual(expect.objectContaining({
-        code,
-        message: expect.stringContaining(`(${unit})`),
-      }));
-    }
-
-    await expect(
-      executorFor(host, document, { onReserve, onResolve })(
-        contextFor(document, events),
-      ),
-    ).rejects.toMatchObject({
-      code: "WORKFLOW_NODE_INVALID_CONTEXT",
-      message: expect.stringContaining(`(${unit})`),
-    });
-
-    expect(events.some((event) => event.startsWith("record:"))).toBe(false);
-    expect(onReserve).not.toHaveBeenCalled();
-    expect(onResolve).not.toHaveBeenCalled();
-    expect(host.calls).toHaveLength(0);
+  it("covers every bound NodeSpec field, so the suite below cannot expand to nothing", () => {
+    expect(BOUND_NODE_SPEC_FIELDS).toHaveLength(14);
+    expect(new Set(BOUND_NODE_SPEC_FIELDS.map(({ label }) => label)).size)
+      .toBe(BOUND_NODE_SPEC_FIELDS.length);
   });
+
+  it.each(BOUND_NODE_SPEC_FIELDS)(
+    "admits a non-default $label instead of refusing it as unbound",
+    ({ settings, workflowSettings, retiredCode }) => {
+      const node: WorkflowNode = {
+        ...baseNode("agent"),
+        kind: "agent",
+        prompt: "Execute a bound NodeSpec field.",
+        ...(settings ? { settings } : {}),
+      };
+      const document = graph(node);
+      if (workflowSettings) document.settings = workflowSettings;
+
+      const validation = validateWorkflowGraphDocument(document);
+      expect(validation).toMatchObject({ ok: true });
+      if (!validation.ok) {
+        expect(validation.issues.map((issue) => issue.code)).not.toContain(retiredCode);
+      }
+
+      // The enforcement-pending module is the thing that used to refuse these;
+      // it must have nothing to say about any of them.
+      expect([
+        ...pendingWorkflowSettingsEnforcements(document.settings),
+        ...pendingNodeSpecEnforcements(node.settings),
+        ...pendingNodeKindSpecEnforcements(node),
+      ]).toEqual([]);
+    },
+  );
 
   it("binds every deliberation staffing field into execution and model-call receipts", async () => {
     const node: WorkflowNode = {

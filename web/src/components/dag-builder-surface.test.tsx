@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -274,21 +274,33 @@ describe("DagBuilderSurface", () => {
     mocks.listDagWorkflowDefinitions.mockResolvedValue([]);
     render(<DagBuilderSurface projectId="project-a" />);
 
-    await waitFor(() => expect(mocks.listDagWorkflowDefinitions).toHaveBeenCalledTimes(1));
+    // COUNTED AS A DELTA, not an absolute. Since the W3 typed controller merged
+    // into this surface there are two independent listers on one mount — the
+    // controller builds the source list it pushes to the canvas, and the rail
+    // builds its own revision picker — so the interesting number is how many
+    // MORE calls each rail-owned trigger causes, not the total.
+    await waitFor(() => expect(mocks.listDagWorkflowDefinitions).toHaveBeenCalled());
+    const afterMount = mocks.listDagWorkflowDefinitions.mock.calls.length;
 
     // A workflow is saved in the canvas while the rail is open.
     mocks.listDagWorkflowDefinitions.mockResolvedValue([workflow("microscopy_qc", 4, "Microscopy QC")]);
     await userEvent.click(screen.getByRole("button", { name: "Reload the workflow list" }));
     await waitFor(() =>
-      expect(screen.getByRole("option", { name: "Microscopy QC · rev 4" })).toBeInTheDocument(),
+      expect(
+        within(screen.getByLabelText("SAVED WORKFLOW REVISION")).getByRole("option", {
+          name: "Microscopy QC · rev 4",
+        }),
+      ).toBeInTheDocument(),
     );
-    expect(mocks.listDagWorkflowDefinitions).toHaveBeenCalledTimes(2);
+    expect(mocks.listDagWorkflowDefinitions).toHaveBeenCalledTimes(afterMount + 1);
 
     // Collapsing and reopening the rail refetches too.
     await userEvent.click(screen.getByRole("button", { name: "Hide builder assistant" }));
-    expect(mocks.listDagWorkflowDefinitions).toHaveBeenCalledTimes(2);
+    expect(mocks.listDagWorkflowDefinitions).toHaveBeenCalledTimes(afterMount + 1);
     await userEvent.click(screen.getByRole("button", { name: "Show builder assistant" }));
-    await waitFor(() => expect(mocks.listDagWorkflowDefinitions).toHaveBeenCalledTimes(3));
+    await waitFor(() =>
+      expect(mocks.listDagWorkflowDefinitions).toHaveBeenCalledTimes(afterMount + 2),
+    );
   });
 
   it("keeps the Builder up when localStorage is unavailable", async () => {
@@ -377,7 +389,12 @@ describe("DagBuilderSurface", () => {
     await waitFor(() =>
       expect(screen.getByRole("option", { name: "Microscopy QC · rev 4" })).toBeInTheDocument(),
     );
-    const options = screen.getAllByRole("option");
+    // Scoped to the RAIL's picker: the typed controller merged into this
+    // surface renders its own source list as `role="option"` buttons, so an
+    // unscoped sweep now counts rows this assertion is not about.
+    const options = within(screen.getByLabelText("SAVED WORKFLOW REVISION")).getAllByRole(
+      "option",
+    );
     expect(options).toHaveLength(2); // the placeholder and the one usable row
     for (const option of options) {
       expect(option.textContent ?? "").not.toMatch(/undefined/);

@@ -11,6 +11,7 @@ import type {
 } from "../pi-packages/dag-fusion-drive/index.ts";
 import { resolvePaths } from "../src/projects.ts";
 import type { HostedOpenRouterFusionRequest } from "../src/workflows/hosted-fusion.ts";
+import type { S4NodeExecutionBindings } from "../src/workflows/kady-node-executor.ts";
 import type { SupervisedWorkflowBudgetDescriptorV1 } from "../src/workflows/supervised-budget.ts";
 import {
   WorkflowSupervisorClientError,
@@ -313,6 +314,25 @@ function modelReceipt(model: string) {
   };
 }
 
+/**
+ * The node-control bindings a hosted-Fusion node carries. Hosted Fusion has no
+ * child process to hold an envelope, so these ride the request itself and the
+ * client refuses the attempt outright when they are absent.
+ */
+function hostedNodeControl(): S4NodeExecutionBindings {
+  return {
+    version: 1,
+    harness: "pi",
+    providerRequest: { temperature: 0.2, top_p: 0.9, sampling: { seed: 7 } },
+    databases: [],
+    skills: { mode: "auto", configured: [], delegated: [] },
+    subagents: { mode: "auto", permitted: false },
+    autonomy: "strict",
+    toolPolicy: { allowedTools: ["read", "grep", "find", "ls"] },
+    billingMode: "inherit",
+  };
+}
+
 function hostedSerialized(): SerializedHostedOpenRouterFusionRequest {
   const router = openRouterModelRequest("openrouter/fusion");
   const analyst = openRouterModelRequest("anthropic/claude-sonnet-4.5");
@@ -354,6 +374,7 @@ function hostedSerialized(): SerializedHostedOpenRouterFusionRequest {
     maxTokens: 10_000,
     maxCostUsd: 12,
     timeoutMs: 120_000,
+    nodeControl: hostedNodeControl(),
   };
 }
 
@@ -507,6 +528,7 @@ describe("workflow supervisor client", () => {
       } as HostedOpenRouterFusionRequest,
       {
         supervisedBudget: budget("2", hosted.identity, "openrouter", "api_key"),
+        nodeControl: hosted.nodeControl,
       },
     );
     expect(hostedResult).toEqual({

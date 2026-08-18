@@ -96,14 +96,21 @@ function helperEmptyState(
     //
     //   * r1: "I draft the VISUAL DAG" promised an apply path into the canvas.
     //   * r3 F1: "Save a workflow in the canvas on the left" named a route that
-    //     cannot produce a revision THIS picker lists. The canvas saves to the
-    //     vendored pipeline engine's own store (PUT /api/workflows/<name> on the
-    //     iframe's origin); the picker lists Kady's typed store (GET
-    //     /dag-workflows). Nothing bridges them, and in the very state this copy
-    //     is written for the canvas's Save is disabled outright
-    //     ("Open a workflow from the registry before saving"). The only route
-    //     that produces a listed revision is Scientific Pipelines → "New typed
-    //     workflow", so that is the only route named.
+    //     cannot produce a revision THIS picker lists — TRUE WHEN WRITTEN, and
+    //     no longer true of the whole product. The engine-native path is
+    //     unchanged: the canvas's own Save writes to the vendored engine's store
+    //     (PUT /api/workflows/<name> on the iframe's origin) and this picker
+    //     lists Kady's typed store (GET /dag-workflows), which still never shows
+    //     those rows. What lane W3 added is a SECOND path through the same
+    //     canvas: "Load workflow" above it lists the Workflows library, loading
+    //     a template publishes a typed `WorkflowGraphDocument` the host owns,
+    //     and the host's own "Save workflow" validates it and PUTs it to
+    //     /dag-workflows with `If-None-Match: *` (dag-builder-surface.tsx
+    //     `loadSource`/`saveDocument`; pinned by "saves a library draft as a
+    //     create" in e2e/builder-typed.spec.ts). That produces exactly the
+    //     revision this picker lists. So the r6 defect was the MIRROR of r3's:
+    //     copy denying a route the user could by then walk. Both routes are
+    //     named now, shortest first.
     //   * r3 F2: "draft YAML you can copy into the canvas" named a paste target
     //     that does not exist. The engine's YAML surface is a <pre> that is
     //     read-only in both YAML and Split modes; the "Read-only YAML preview"
@@ -112,8 +119,29 @@ function helperEmptyState(
     //     mode the surface still refuses edits and simply does not announce it
     //     (r4 review R6). There is no YAML import anywhere in the vendored app
     //     or in Kady's web app, and
-    //     /dag-workflow-imports/* has no caller in web/src. The draft is text in
-    //     THIS chat and nothing more, so that is what the copy says.
+    //     /dag-workflow-imports/* — a server-side PREVIEW route that translates
+    //     legacy Pipeline YAML and writes nothing — has no caller in web/src.
+    //     The draft is text in THIS chat and nothing more, so that is what the
+    //     copy says. W3's bridge did NOT change this and could not: it carries a
+    //     document the HOST loaded from the typed store or built from a library
+    //     template, never chat output, and `builder.documentReplaced` — the one
+    //     message that could carry a hand-authored document — has a handler and
+    //     no producer anywhere in the tree (web/src/lib/builder-bridge.ts:57-66).
+    //     The "Nothing I write reaches the canvas" sentence below is therefore
+    //     still exactly true and must not be softened.
+    //     ONE YAML CLAIM, TOLD TWO WAYS — and the two are about different
+    //     objects, which is why they read as a contradiction and are not one.
+    //     The dag-builder profile prompt (server/src/agent/session-registry.ts,
+    //     "Kady's one YAML surface is a preview-only importer for the legacy
+    //     Pipeline format") names the SERVER route above, which really does
+    //     translate YAML into a WorkflowGraphDocument and really does write
+    //     nothing. This bullet names the BUILDER's YAML/Split view, which is a
+    //     one-way serializer and not an importer at all. Both are accurate;
+    //     neither names the other's referent, so a reader meeting both is owed
+    //     this sentence. The prompt's word "one" is the only thing that does not
+    //     survive the merge — there are two YAML surfaces, one input-side and
+    //     one output-side — and correcting it is outside this round's grant on
+    //     that file (r6 report, Item 4).
     //   * r3 F3: "then pick its revision above" was false at the moment the user
     //     followed it — PersistentWorkspaceSurfaces keeps this rail mounted, so
     //     returning to the Builder does not refetch. The Reload control is the
@@ -160,10 +188,10 @@ function helperEmptyState(
       return {
         title: "No saved workflow to work on yet",
         description:
-          "I work on typed workflow revisions, and this project has none yet. Create one in Scientific Pipelines with New typed workflow, then press Reload above and pick its revision. The canvas on the left saves into the pipeline engine's own store, which this picker cannot list.",
-        placeholder: "Create a typed workflow first, then ask about it…",
+          "I work on typed workflow revisions, and this project has none yet. Quickest: in the builder toolbar press Load workflow, start from a Workflows library template, then press Save workflow — that writes a typed revision. Scientific Pipelines → New typed workflow produces one too. Either way, press Reload above and pick it.",
+        placeholder: "Save a typed workflow first, then ask about it…",
         missingContext:
-          "Create a typed workflow in Scientific Pipelines, then press Reload above and pick its revision.",
+          "Save a Workflows library template from the builder toolbar, or create one in Scientific Pipelines, then press Reload above and pick its revision.",
       };
     }
     if (contextState === "unselected") {

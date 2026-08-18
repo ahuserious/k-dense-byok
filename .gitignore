@@ -77,3 +77,8 @@ CLAUDE.md
 /.stably/test-results/
 /playwright-report/
 .stably-playwright-wrapper.config.*
+# The Stably CLI drops these wherever it is invoked from; they are tool scratch, never sources.
+# Untracked files count as changed paths in scripts/ownership-check.mjs, so leaving them unignored
+# made the gate fail in any lane clone that had ever run Stably.
+/.stably-browser/
+e2e/.stably/

@@ -89,6 +89,55 @@ export interface WorkflowNodePosition {
   y: number;
 }
 
+/** The CLI harness a node's work is dispatched to. Mirrors schema.ts HarnessSchema. */
+export type WorkflowNodeHarness =
+  | "pi"
+  | "claude-code"
+  | "codex"
+  | "opencode"
+  | "copilot";
+
+/**
+ * The persisted per-node NodeSpec v1.
+ *
+ * Only the fields the Kady host reads are named. The open index signature is
+ * deliberate: the host must round-trip every other NodeSpec key untouched, and
+ * a closed type would invite a well-meaning rebuild that drops one. The host
+ * never reconstructs a node from the canvas (see typed-canvas-adapter.ts), so
+ * preservation is structural rather than a matter of listing every key here.
+ */
+export interface WorkflowNodeSpecV1 {
+  version?: 1;
+  harness?: WorkflowNodeHarness;
+  model?: WorkflowModelRequest;
+  reasoningEffort?: WorkflowReasoningLevel;
+  databases?: string[];
+  autonomy?: "strict" | "loose";
+  [key: string]: unknown;
+}
+
+/**
+ * Where a node or document came from. Additive and optional; carried for
+ * import/stitch provenance and excluded from validation semantics.
+ */
+export interface WorkflowProvenance {
+  source: string;
+  id: string;
+  sha256?: string;
+}
+
+/** Flatten provenance for a node that came from a stitched-in subgraph. */
+export interface WorkflowNodeCompositeOrigin {
+  kind: string;
+  sourceId: string;
+  sourceGraphSha256?: string;
+  label?: string;
+}
+
+export interface WorkflowNodeMeta {
+  compositeOf?: WorkflowNodeCompositeOrigin;
+}
+
 interface CommonWorkflowNode {
   id: string;
   name: string;
@@ -99,6 +148,9 @@ interface CommonWorkflowNode {
   limits?: WorkflowNodeLimits;
   rescue?: WorkflowRescuePolicy;
   evidence?: WorkflowEvidencePolicy;
+  settings?: WorkflowNodeSpecV1;
+  meta?: WorkflowNodeMeta;
+  provenance?: WorkflowProvenance;
 }
 
 interface ModelDrivenWorkflowNode extends CommonWorkflowNode {
@@ -235,6 +287,7 @@ export interface WorkflowGraphDocument {
   preconditions?: ScientificWorkflowPreconditions;
   nodes: WorkflowGraphNode[];
   edges: WorkflowGraphEdge[];
+  provenance?: WorkflowProvenance;
 }
 
 export interface DagWorkflowDefinitionSummary {
@@ -426,14 +479,72 @@ export class DagWorkflowApiError extends Error {
   readonly status: number;
   readonly detail: string;
   readonly code?: string;
+  /**
+   * On a definition-write conflict, the revision the SERVER compared against —
+   * when it published one. `undefined` on every other failure, and `null` when
+   * the conflict carried no usable ETag, which is the case where a conditional
+   * retry cannot be offered at all.
+   */
+  readonly currentRevision?: number | null;
 
-  constructor(status: number, detail: string, code?: string) {
+  constructor(
+    status: number,
+    detail: string,
+    code?: string,
+    currentRevision?: number | null,
+  ) {
     super(detail);
     this.name = "DagWorkflowApiError";
     this.status = status;
     this.detail = detail;
     this.code = code;
+    this.currentRevision = currentRevision;
   }
+}
+
+/**
+ * A definition write lost its conditional precondition.
+ *
+ * The typed store answers a failed `If-Match`/`If-None-Match` with `409` and
+ * re-publishes the compared revision as an ETag; a malformed or absent
+ * precondition is a `400`/`428` and never reaches here. `422` is included
+ * because the store's own `PRECONDITION_FAILED` code maps there, and a client
+ * that only handled one of the two would drop the other on the floor.
+ */
+const DEFINITION_CONFLICT_STATUSES: readonly number[] = [409, 412, 422];
+
+function isDefinitionConflictStatus(status: number): boolean {
+  return DEFINITION_CONFLICT_STATUSES.includes(status);
+}
+
+/** `"<revision>"` → revision. Anything else (weak, padded, absent) → null. */
+function parseRevisionEtag(value: string | null): number | null {
+  if (value === null) return null;
+  const match = /^"(0|[1-9]\d*)"$/.exec(value.trim());
+  if (!match) return null;
+  const revision = Number(match[1]);
+  return Number.isSafeInteger(revision) ? revision : null;
+}
+
+/**
+ * A definition write that lost its precondition, carrying the revision the
+ * server compared against.
+ *
+ * `currentRevision === null` means the caller may offer Reload or Save-as-copy
+ * but MUST NOT offer force-overwrite: there is no revision to make the retry
+ * conditional with, and an unconditional write is not something this client can
+ * express.
+ */
+export interface DagWorkflowConflict extends DagWorkflowApiError {
+  currentRevision: number | null;
+}
+
+export function isDagWorkflowConflict(error: unknown): error is DagWorkflowConflict {
+  return (
+    error instanceof DagWorkflowApiError
+    && error.currentRevision !== undefined
+    && isDefinitionConflictStatus(error.status)
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -556,7 +667,24 @@ export async function saveDagWorkflowDefinition(
     { method: "PUT", headers, body: JSON.stringify(graph) },
     projectId,
   );
-  const body = await parseResponse<unknown>(response);
+  let body: unknown;
+  try {
+    body = await parseResponse<unknown>(response);
+  } catch (error) {
+    // A CAS conflict is the one failure the caller can act on, and the only
+    // way to act on it safely is with the revision the SERVER just compared
+    // against. Force-overwrite is offered only when that ETag is present, so a
+    // retry is still a conditional write and a blind overwrite is unreachable.
+    if (error instanceof DagWorkflowApiError && isDefinitionConflictStatus(error.status)) {
+      throw new DagWorkflowApiError(
+        error.status,
+        error.detail,
+        error.code,
+        parseRevisionEtag(response.headers.get("ETag")),
+      );
+    }
+    throw error;
+  }
   if (!isSavedDefinitionEnvelope(body)) {
     throw new DagWorkflowApiError(
       response.status,
@@ -569,6 +697,65 @@ export async function saveDagWorkflowDefinition(
     definition: body.definition,
     etag: response.headers.get("ETag"),
   };
+}
+
+export interface DagWorkflowValidationIssue {
+  code: string;
+  severity: "error" | "warning";
+  path: string;
+  message: string;
+  nodeId?: string;
+  edgeId?: string;
+}
+
+export type DagWorkflowValidationResult =
+  | {
+      ok: true;
+      document: WorkflowGraphDocument;
+      graphSha256: string;
+      warnings: DagWorkflowValidationIssue[];
+    }
+  | { ok: false; issues: DagWorkflowValidationIssue[] };
+
+function isValidationEnvelope(body: unknown): body is DagWorkflowValidationResult {
+  if (!isRecord(body) || typeof body.ok !== "boolean") return false;
+  if (body.ok === false) return Array.isArray(body.issues);
+  return (
+    isRecord(body.document)
+    && typeof body.graphSha256 === "string"
+    && Array.isArray(body.warnings)
+  );
+}
+
+/**
+ * Validate a typed document without writing anything.
+ *
+ * An invalid document is a SUCCESSFUL evaluation — HTTP 200 with `ok:false`.
+ * A non-2xx from this call is transport, auth, size, or an unparseable body,
+ * never "your workflow has a problem", and is raised as DagWorkflowApiError.
+ */
+export async function validateDagWorkflowDocument(
+  projectId: string,
+  document: WorkflowGraphDocument,
+): Promise<DagWorkflowValidationResult> {
+  const response = await apiFetch(
+    "/dag-workflows/validate",
+    {
+      method: "POST",
+      headers: new Headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ document }),
+    },
+    projectId,
+  );
+  const body = await parseResponse<unknown>(response);
+  if (!isValidationEnvelope(body)) {
+    throw new DagWorkflowApiError(
+      response.status,
+      "The workflow validation route returned no valid {ok,…} envelope.",
+      "MALFORMED_VALIDATION_RESPONSE",
+    );
+  }
+  return body;
 }
 
 export async function createDagWorkflowRun(

@@ -284,10 +284,16 @@ describe("HelperAgentChat blocked composer states the reason", () => {
     );
     unmountLoading();
 
-    // (b) The list came back empty. Only ONE route produces a revision this
-    // picker lists — Scientific Pipelines' "New typed workflow" — and only the
-    // rail's own Reload control refreshes the list, so those are the two things
-    // named. The canvas is named for what it actually does, not offered.
+    // (b) The list came back empty. TWO routes now produce a revision this
+    // picker lists — the builder toolbar's "Load workflow" → a Workflows library
+    // template → "Save workflow", which PUTs a typed document to /dag-workflows
+    // with `If-None-Match: *`, and Scientific Pipelines' "New typed workflow" —
+    // and only the rail's own Reload control refreshes the list. All three are
+    // named, shortest route first. Round 5 named only the second and asserted
+    // that the canvas "saves into the pipeline engine's own store, which this
+    // picker cannot list": true of the ENGINE-native save, and read by a
+    // first-run user as "the thing in front of you cannot get you out of this
+    // state", which after lane W3 is false.
     const { unmount: unmountUnavailable } = render(
       <HelperAgentChat
         projectId="project-a"
@@ -297,10 +303,10 @@ describe("HelperAgentChat blocked composer states the reason", () => {
     );
     collectVisibleCopy(
       "No saved workflow to work on yet",
-      "I work on typed workflow revisions, and this project has none yet. Create one in Scientific Pipelines with New typed workflow, then press Reload above and pick its revision. The canvas on the left saves into the pipeline engine's own store, which this picker cannot list.",
+      "I work on typed workflow revisions, and this project has none yet. Quickest: in the builder toolbar press Load workflow, start from a Workflows library template, then press Save workflow — that writes a typed revision. Scientific Pipelines → New typed workflow produces one too. Either way, press Reload above and pick it.",
     );
     expect(screen.getByTestId("helper-agent-blocked-hint")).toHaveTextContent(
-      "Create a typed workflow in Scientific Pipelines, then press Reload above and pick its revision.",
+      "Save a Workflows library template from the builder toolbar, or create one in Scientific Pipelines, then press Reload above and pick its revision.",
     );
     unmountUnavailable();
 
@@ -376,6 +382,102 @@ describe("HelperAgentChat blocked composer states the reason", () => {
     for (const text of visibleCopy) {
       expect(text).not.toMatch(NOTHING_GOES_INTO_THE_CANVAS);
     }
+  });
+
+  // The two assertions below are the WEB half of a reciprocal pair. The server
+  // half is in server/test/raindrop-context.test.ts: the dag-builder profile
+  // prompt must contain no apply-to-canvas promise. That direction was guarded
+  // from lane S8B onward; this direction was not, which is why round 5 shipped
+  // copy that DENIED a route lane W3 had built. Both directions are guarded now.
+  //
+  // Rendered rather than asserted against `helperEmptyState` directly: the
+  // export is internal, and what a user is harmed by is what reaches the DOM.
+  const collectDagBuilderCopy = async () => {
+    const states: Array<Partial<React.ComponentProps<typeof HelperAgentChat>>> = [
+      { hasSelectableContext: false, contextListLoading: true },
+      { hasSelectableContext: false },
+      { hasSelectableContext: false, contextListFailed: true },
+      {},
+      { contextReference: { kind: "workflow" as const, id: "microscopy_qc@4" } },
+    ];
+    const copy: string[] = [];
+    for (const state of states) {
+      const { unmount } = render(
+        <HelperAgentChat projectId="project-a" profile="dag-builder" {...state} />,
+      );
+      const textarea = await screen.findByRole("textbox", {
+        name: "Message DAG Builder agent",
+      });
+      copy.push(
+        ...Array.from(
+          textarea.closest("section")?.querySelectorAll<HTMLElement>("p, h1, h2, h3, h4") ?? [],
+        ).map((element) => element.textContent ?? ""),
+        textarea.getAttribute("placeholder") ?? "",
+        screen.queryByTestId("helper-agent-blocked-hint")?.textContent ?? "",
+      );
+      unmount();
+    }
+    return copy.filter((text) => text.trim().length > 0);
+  };
+
+  it("never tells the user the canvas cannot produce a revision this picker lists", async () => {
+    // Round 5 wrote, for a first-run project with nothing saved: "The canvas on
+    // the left saves into the pipeline engine's own store, which this picker
+    // cannot list." True of the canvas's ENGINE-native Save, and false as the
+    // thing a first-run user takes from it — after lane W3 merged, "Load
+    // workflow" above the builder lists the Workflows library, and saving a
+    // template with "Save workflow" PUTs a typed document to /dag-workflows,
+    // which is exactly the revision this picker lists (e2e/builder-typed.spec.ts
+    // "saves a library draft as a create", web/src/lib/dag-workflows.ts
+    // `saveDagWorkflowDefinition` with `If-None-Match: *`).
+    //
+    // The pattern catches the SHAPE of that denial — the canvas named in the
+    // same sentence as an inability to list or reach a revision — rather than
+    // the one sentence that happened to be wrong.
+    const CANVAS_CANNOT_PRODUCE_A_REVISION =
+      /\bcanvas\b[^.]*\b(?:cannot|can ?not|can't|never|no way)\b[^.]*\b(?:list|listed|listable|picker|revision)\b/i;
+    const copy = await collectDagBuilderCopy();
+
+    expect(copy.length).toBeGreaterThan(0);
+    for (const text of copy) {
+      expect(text).not.toMatch(CANVAS_CANNOT_PRODUCE_A_REVISION);
+    }
+
+    // And the state that needs the route actually names it, control by control,
+    // so a user can walk it without leaving the Builder.
+    const emptyStateCopy = copy.join("\n");
+    expect(emptyStateCopy).toContain("Load workflow");
+    expect(emptyStateCopy).toContain("Workflows library");
+    expect(emptyStateCopy).toContain("Save workflow");
+    // The second route is still real and still named.
+    expect(emptyStateCopy).toContain("Scientific Pipelines");
+  });
+
+  it("never claims what the assistant writes reaches the canvas", async () => {
+    // The reciprocal of the server-side prompt assertion, and the reason the
+    // load-bearing sentence survives round 6 unchanged: W3's bridge carries a
+    // document the HOST loaded from the typed store or built from a library
+    // template, never chat output, and `builder.documentReplaced` — the one
+    // message that could carry a hand-authored document — has a handler and no
+    // producer (web/src/lib/builder-bridge.ts:57-66).
+    //
+    // Direction-aware, because "reaches the canvas" appears in the copy as a
+    // DENIAL: every sentence that mentions the canvas must also negate it.
+    const NEGATED = /\b(?:no|not|nothing|cannot|can ?not|can't|never|neither|without)\b/i;
+    const copy = await collectDagBuilderCopy();
+    const canvasSentences = copy
+      .flatMap((text) => text.split(/(?<=[.!?])\s+/))
+      .filter((sentence) => /\bcanvas\b/i.test(sentence));
+
+    // The denial sentences are present — otherwise an empty filter would pass
+    // this test by saying nothing at all.
+    expect(canvasSentences.length).toBeGreaterThan(0);
+    for (const sentence of canvasSentences) {
+      expect(sentence).toMatch(NEGATED);
+    }
+    expect(copy.join("\n")).toContain(
+      "Nothing I write reaches the canvas: it has no YAML import, and I cannot edit it.",
+    );
   });
 
   it("states the provider reason first and refuses to send without one", async () => {

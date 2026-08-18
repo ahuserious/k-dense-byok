@@ -13,6 +13,7 @@ import {
   parseSupervisedWorkflowBudgetDescriptor,
   type SupervisedWorkflowBudgetDescriptorV1,
 } from "../supervised-budget.ts";
+import type { S4NodeExecutionBindings } from "../kady-node-executor.ts";
 import {
   isWorkflowSupervisorCredentialKey,
   type WorkflowSupervisorCredentialKey,
@@ -45,6 +46,19 @@ const ATTEMPT_STATES = [
   "cancelling",
   "quarantined",
 ] as const;
+
+const WORKFLOW_HARNESSES = [
+  "pi",
+  "claude-code",
+  "codex",
+  "opencode",
+  "copilot",
+] as const;
+
+const SKILL_SELECTION_MODES = ["auto", "auto-manual", "manual"] as const;
+const SUBAGENT_SELECTION_MODES = ["auto", "auto-manual"] as const;
+const NODE_AUTONOMY_LEVELS = ["strict", "loose"] as const;
+const NODE_BILLING_MODES = ["inherit", "api", "subscription"] as const;
 
 const DELEGATION_RESPONSE_STATUSES = [
   "completed",
@@ -148,7 +162,16 @@ export type WorkflowSupervisorAttemptState = (typeof ATTEMPT_STATES)[number];
 export type SerializedHostedOpenRouterFusionRequest = Omit<
   HostedOpenRouterFusionRequest,
   "paths" | "signal" | "reconcileUsage"
->;
+> & {
+  /**
+   * The node's resolved S4 control policy. Hosted Fusion has no child process
+   * to carry a node-control envelope, so the bindings ride the request itself
+   * and the supervisor binds `providerRequest` onto the session it creates.
+   * The field is required: a hosted-Fusion request that arrives without it is
+   * refused, never run with provider defaults.
+   */
+  nodeControl: S4NodeExecutionBindings;
+};
 
 interface WorkflowSupervisorRequestBase {
   version: typeof WORKFLOW_SUPERVISOR_PROTOCOL_VERSION;
@@ -680,6 +703,133 @@ function isOwnedDelegationRequest(
   );
 }
 
+/**
+ * Sampling keys the trusted binders refuse to overwrite. `resolveS4NodeExecutionBindings`
+ * already rejects them at bind time, so their presence on the wire means the
+ * sender is not the bindings resolver — fail the frame rather than strip them.
+ */
+const RESERVED_SAMPLING_KEYS = new Set([
+  "messages",
+  "model",
+  "tools",
+  "stream",
+  "max_tokens",
+  "temperature",
+  "top_p",
+]);
+
+const SAMPLING_KEY_RE = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
+
+function isSamplingMap(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.length > 16) return false;
+  return keys.every((key) => {
+    if (!SAMPLING_KEY_RE.test(key) || RESERVED_SAMPLING_KEYS.has(key)) return false;
+    const entry = value[key];
+    return (
+      typeof entry === "boolean" ||
+      (typeof entry === "number" && Number.isFinite(entry)) ||
+      isBoundedString(entry, 256)
+    );
+  });
+}
+
+function isBoundedStringArray(
+  value: unknown,
+  maximumItems: number,
+  maximumLength = MAX_GENERIC_ID_LENGTH,
+): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= maximumItems &&
+    value.every((entry) => isBoundedString(entry, maximumLength))
+  );
+}
+
+function isBoundDatabaseReference(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    hasExactKeys(
+      value,
+      ["ref"],
+      ["id", "name", "url", "description", "category", "domain"],
+    ) &&
+    isBoundedString(value.ref, MAX_GENERIC_ID_LENGTH) &&
+    (value.id === undefined || isBoundedString(value.id, MAX_GENERIC_ID_LENGTH)) &&
+    (value.name === undefined || isBoundedString(value.name, MAX_GENERIC_ID_LENGTH)) &&
+    (value.url === undefined || isBoundedString(value.url, 2_048)) &&
+    (value.description === undefined || isBoundedString(value.description, 4_096)) &&
+    (value.category === undefined ||
+      isBoundedString(value.category, MAX_GENERIC_ID_LENGTH)) &&
+    (value.domain === undefined || isOneOf(value.domain, ["science", "finance"]))
+  );
+}
+
+/**
+ * The whole `S4NodeExecutionBindings` object, validated exactly. It crosses the
+ * wire in full so the supervised hosted-Fusion attempt receives the same node
+ * control policy the in-process transport receives — the supervisor binds
+ * `providerRequest`, and the remaining fields keep the journal's request digest
+ * an honest record of the policy that was in force.
+ */
+function isNodeControlBindings(
+  value: unknown,
+): value is SerializedHostedOpenRouterFusionRequest["nodeControl"] {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "version",
+      "harness",
+      "providerRequest",
+      "databases",
+      "skills",
+      "subagents",
+      "autonomy",
+      "toolPolicy",
+      "billingMode",
+    ])
+  ) {
+    return false;
+  }
+  const providerRequest = value.providerRequest;
+  const skills = value.skills;
+  const subagents = value.subagents;
+  const toolPolicy = value.toolPolicy;
+  return (
+    value.version === 1 &&
+    isOneOf(value.harness, WORKFLOW_HARNESSES) &&
+    isRecord(providerRequest) &&
+    hasExactKeys(providerRequest, ["temperature", "top_p", "sampling"]) &&
+    typeof providerRequest.temperature === "number" &&
+    Number.isFinite(providerRequest.temperature) &&
+    providerRequest.temperature >= 0 &&
+    providerRequest.temperature <= 2 &&
+    typeof providerRequest.top_p === "number" &&
+    Number.isFinite(providerRequest.top_p) &&
+    providerRequest.top_p >= 0 &&
+    providerRequest.top_p <= 1 &&
+    isSamplingMap(providerRequest.sampling) &&
+    Array.isArray(value.databases) &&
+    value.databases.length <= 64 &&
+    value.databases.every(isBoundDatabaseReference) &&
+    isRecord(skills) &&
+    hasExactKeys(skills, ["mode", "configured", "delegated"]) &&
+    isOneOf(skills.mode, SKILL_SELECTION_MODES) &&
+    isBoundedStringArray(skills.configured, 64) &&
+    isBoundedStringArray(skills.delegated, 1_024) &&
+    isRecord(subagents) &&
+    hasExactKeys(subagents, ["mode", "permitted"]) &&
+    isOneOf(subagents.mode, SUBAGENT_SELECTION_MODES) &&
+    typeof subagents.permitted === "boolean" &&
+    isOneOf(value.autonomy, NODE_AUTONOMY_LEVELS) &&
+    isRecord(toolPolicy) &&
+    hasExactKeys(toolPolicy, ["allowedTools"]) &&
+    isBoundedStringArray(toolPolicy.allowedTools, 64) &&
+    isOneOf(value.billingMode, NODE_BILLING_MODES)
+  );
+}
+
 function isHostedRequest(
   value: unknown,
   projectId: string,
@@ -695,7 +845,9 @@ function isHostedRequest(
       "maxTokens",
       "maxCostUsd",
       "timeoutMs",
+      "nodeControl",
     ]) &&
+    isNodeControlBindings(value.nodeControl) &&
     value.projectId === projectId &&
     isIdentity(value.identity) &&
     isRecord(value.fusion) &&

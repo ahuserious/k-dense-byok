@@ -26,6 +26,7 @@ import { resolveWorkflowBuilderBinding } from '@/lib/workflow-builder-binding';
 import { useBuilderKeyboard } from '@/hooks/useBuilderKeyboard';
 import { useBuilderUndo } from '@/hooks/useBuilderUndo';
 import { useBuilderValidation } from '@/hooks/useBuilderValidation';
+import { useHostBridge, viewToFlow } from '@/host/HostBridge';
 import type { ValidationIssue } from '@/hooks/useBuilderValidation';
 import { BuilderToolbar } from './BuilderToolbar';
 import type { ViewMode } from './BuilderToolbar';
@@ -173,6 +174,38 @@ function WorkflowBuilderInner(): React.ReactElement {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const activeBindingKey = useRef(bindingKey);
 
+  // Host mode (the Kady embed). Outside it every hook below is inert and the
+  // builder behaves exactly as it does standalone.
+  const host = useHostBridge();
+  const appliedHostView = useRef<string | null>(null);
+  const { detachCanvas } = host;
+  /**
+   * The canvas is about to show something the host did not push (an engine
+   * pipeline). Forgetting the applied stamp matters as much as detaching: the
+   * host may push the very same view again afterwards, and a stamp left behind
+   * would make that push a no-op against a canvas that no longer shows it.
+   */
+  const leaveHostView = useCallback((): void => {
+    appliedHostView.current = null;
+    detachCanvas();
+  }, [detachCanvas]);
+
+  useEffect(() => {
+    if (!host.hostMode || !host.view) return;
+    // The host is authoritative: a pushed view REPLACES the canvas. Applying
+    // the same view twice would clobber edits the author made since it landed.
+    const stamp = `${host.view.documentId}\u0000${host.view.graphSha256 ?? ''}`;
+    if (appliedHostView.current === stamp) return;
+    appliedHostView.current = stamp;
+    const projected = viewToFlow(host.view);
+    setWorkflowName(host.view.name);
+    setWorkflowDescription(host.view.description ?? '');
+    setNodes(projected.nodes);
+    setEdges(projected.edges);
+    setSelectedNodeId(null);
+    setHasUnsavedChanges(false);
+  }, [host.hostMode, host.view, setNodes, setEdges]);
+
   // Loop state
 
   // Commands for palette/inspector
@@ -191,13 +224,37 @@ function WorkflowBuilderInner(): React.ReactElement {
   const { fitView } = useReactFlow();
 
   const validationIssues = useBuilderValidation(workflowName, workflowDescription, nodes, edges);
+  // The host's TYPED-validator issues, in the same Problems panel as the
+  // builder's own client-side ones.
+  //
+  // Without this the host fed `builder.setIssues` into a state nothing read: an
+  // author whose save was refused saw the reason in the Kady status line above
+  // the canvas and had nothing on the canvas to act on. `nodeId` — which the
+  // host resolves from the validator's array-index pointer, because only it
+  // holds the document — is what makes this panel's focus chip appear, and the
+  // chip is the one affordance that takes an author from a message to the node.
+  const hostIssues = useMemo(
+    (): ValidationIssue[] =>
+      host.issues.map(issue => ({
+        severity: issue.severity,
+        // The validator's own words, unedited. The host renders the location
+        // beside them in its own list; here the node chip IS the location.
+        message: issue.message,
+        ...(issue.nodeId !== undefined ? { nodeId: issue.nodeId } : {}),
+      })),
+    [host.issues]
+  );
+
+  // The status-bar badge counts what the Problems panel lists, host issues
+  // included. Outside host mode `host.issues` is always empty, so the count
+  // standalone is unchanged.
   const errorCount = useMemo(
-    () => validationIssues.filter(i => i.severity === 'error').length,
-    [validationIssues]
+    () => [...hostIssues, ...validationIssues].filter(i => i.severity === 'error').length,
+    [hostIssues, validationIssues]
   );
   const warningCount = useMemo(
-    () => validationIssues.filter(i => i.severity === 'warning').length,
-    [validationIssues]
+    () => [...hostIssues, ...validationIssues].filter(i => i.severity === 'warning').length,
+    [hostIssues, validationIssues]
   );
 
   const markDirty = useCallback((): void => {
@@ -212,6 +269,20 @@ function WorkflowBuilderInner(): React.ReactElement {
     nodesRef.current = nodes;
     edgesRef.current = edges;
   }, [nodes, edges]);
+
+  // Report the canvas to the host, which diffs it into deltas against the view
+  // it last pushed. Diffing there keeps every mutation path covered without a
+  // hook in each handler.
+  //
+  // Depend on the two STABLE members, never on `host` itself: the hook returns a
+  // fresh object every render, so `[host, …]` re-runs this effect on every
+  // render and restarts the 250 ms delta debounce each time. On a busy page that
+  // starves the timer and an edit silently never reaches the host.
+  const { hostMode, syncCanvas } = host;
+  useEffect(() => {
+    if (!hostMode) return;
+    syncCanvas(nodes, edges);
+  }, [hostMode, syncCanvas, nodes, edges]);
 
   const pushSnapshotLatest = useCallback((): void => {
     pushSnapshot({ nodes: nodesRef.current, edges: edgesRef.current });
@@ -284,6 +355,14 @@ function WorkflowBuilderInner(): React.ReactElement {
     setSelectedNodeId(null);
     if (editName) void loadWorkflow(editName, bindingKey);
   }, [bindingKey, editName, loadWorkflow, setEdges, setNodes]);
+
+  // A host-picked ENGINE pipeline goes through the builder's own loader, because
+  // the engine document model is the iframe's, not the host's.
+  useEffect(() => {
+    if (!host.hostMode || !host.enginePipelineRequest) return;
+    leaveHostView();
+    void loadWorkflow(host.enginePipelineRequest.id, bindingKey);
+  }, [host.hostMode, host.enginePipelineRequest, leaveHostView, loadWorkflow, bindingKey]);
 
   const handleToggleValidationPanel = useCallback((): void => {
     setValidationPanelOpen(v => !v);
@@ -441,9 +520,10 @@ function WorkflowBuilderInner(): React.ReactElement {
   const toolbarValidationErrors = useMemo(
     (): string[] => [
       ...validationErrors,
+      ...hostIssues.filter(i => i.severity === 'error').map(i => i.message),
       ...validationIssues.filter(i => i.severity === 'error').map(i => i.message),
     ],
-    [validationErrors, validationIssues]
+    [validationErrors, hostIssues, validationIssues]
   );
 
   // Convert validation issues for the panel (merge server-side errors with client-side)
@@ -452,8 +532,28 @@ function WorkflowBuilderInner(): React.ReactElement {
       severity: 'error' as const,
       message: msg,
     }));
-    return [...serverIssues, ...validationIssues];
-  }, [validationErrors, validationIssues]);
+    return [...serverIssues, ...hostIssues, ...validationIssues];
+  }, [validationErrors, hostIssues, validationIssues]);
+
+  /**
+   * Take the author from an issue to the node it names.
+   *
+   * `setSelectedNodeId` alone opens the right-hand inspector and leaves the
+   * CANVAS looking untouched, which is no help when the offending node is one
+   * of many. Marking the node `selected` is what React Flow renders as a ring
+   * (`DagNodeRender`), so the node the issue names is the node the author sees.
+   *
+   * Selection is presentational and safe to write into node state: the host's
+   * `diffToDeltas` compares ids, positions, names, harnesses and edges only, so
+   * this produces no delta, marks nothing dirty, and pushes no snapshot.
+   */
+  const handleFocusNode = useCallback(
+    (nodeId: string): void => {
+      setSelectedNodeId(nodeId);
+      setNodes(current => current.map(node => ({ ...node, selected: node.id === nodeId })));
+    },
+    [setNodes]
+  );
 
   // Keyboard shortcuts — stabilize actions object to avoid re-registering handler on every render
   const keyboardActions = useMemo(
@@ -550,13 +650,24 @@ function WorkflowBuilderInner(): React.ReactElement {
           void handleValidate();
         }}
         onSave={(): void => {
+          // Host-owned save applies only while the canvas is actually showing a
+          // host-pushed document. In host mode with nothing pushed — a draft, or
+          // an engine pipeline the author opened here — this builder still owns
+          // its own document and must save it the way it always has.
+          if (host.hostMode && host.view) {
+            host.requestSave();
+            return;
+          }
           void handleSave();
         }}
-        saveDisabledReason={saveDisabledReason}
+        saveDisabledReason={host.hostMode && host.view ? undefined : saveDisabledReason}
+        hostSourceGroups={host.sourceGroups}
+        onLoadHostSource={host.requestSource}
         onRun={(): void => {
           void handleRun();
         }}
         onLoadWorkflow={(name): void => {
+          if (host.hostMode) leaveHostView();
           void loadWorkflow(name, bindingKey);
         }}
       />
@@ -631,7 +742,7 @@ function WorkflowBuilderInner(): React.ReactElement {
         issues={allValidationIssues}
         isOpen={validationPanelOpen}
         onToggle={handleToggleValidationPanel}
-        onFocusNode={setSelectedNodeId}
+        onFocusNode={handleFocusNode}
       />
 
       {/* Status Bar */}
