@@ -11,6 +11,7 @@ import type {
 } from "../pi-packages/dag-fusion-drive/index.ts";
 import type { WorkflowDelegationSession } from "../src/agent/workflow-delegation-session.ts";
 import { resolvePaths } from "../src/projects.ts";
+import type { S4NodeExecutionBindings } from "../src/workflows/kady-node-executor.ts";
 import {
   WorkflowSupervisorCoordinator,
   WorkflowSupervisorCoordinatorError,
@@ -100,11 +101,31 @@ function activeBudgetReservation(
   };
 }
 
+/**
+ * The node-control bindings a hosted-Fusion request carries across the wire.
+ * Hosted Fusion has no child process to hold a node-control envelope, so the
+ * bindings ride the request; the coordinator refuses a request that arrives
+ * without them rather than running the router on provider defaults.
+ */
+function hostedNodeControl(): S4NodeExecutionBindings {
+  return {
+    version: 1,
+    harness: "pi",
+    providerRequest: { temperature: 0.2, top_p: 0.9, sampling: { seed: 7 } },
+    databases: [],
+    skills: { mode: "auto", configured: [], delegated: [] },
+    subagents: { mode: "auto", permitted: false },
+    autonomy: "strict",
+    toolPolicy: { allowedTools: ["read", "grep", "find", "ls"] },
+    billingMode: "inherit",
+  };
+}
+
 function hostedRequest(
   memberCount: number,
   overrides: Partial<Pick<
     SerializedHostedOpenRouterFusionRequest,
-    "maxCostUsd" | "maxTokens"
+    "maxCostUsd" | "maxTokens" | "nodeControl"
   >> = {},
 ): SerializedHostedOpenRouterFusionRequest {
   return {
@@ -121,6 +142,7 @@ function hostedRequest(
     },
     maxTokens: 4_000,
     maxCostUsd: 4,
+    nodeControl: hostedNodeControl(),
     ...overrides,
   } as unknown as SerializedHostedOpenRouterFusionRequest;
 }
@@ -652,6 +674,51 @@ describe("workflow supervisor coordinator", () => {
       request: hosted,
       budget,
     })).rejects.toThrow("exceeded its durable budget reservation");
+    expect(runHostedFusion).not.toHaveBeenCalled();
+    expect(harness.journal.list()).toEqual([]);
+  });
+
+  /**
+   * The three cases above all carry bindings, so a guard added ahead of the
+   * budget assertion would make them fail with *its* message instead — which is
+   * exactly what happened when the node-control refusal landed. This case pins
+   * the ordering directly: with a fully valid request, the only reason hosted
+   * Fusion may be refused before provider dispatch is budget inflation, so no
+   * future precondition can quietly take over this path.
+   */
+  it("still reaches the budget-inflation rejection when bindings are present, so no earlier guard can mask it", async () => {
+    const hosted = hostedRequest(2, { maxTokens: 4_001 });
+    expect(hosted.nodeControl?.providerRequest).toEqual({
+      temperature: 0.2,
+      top_p: 0.9,
+      sampling: { seed: 7 },
+    });
+    const budget = hostedBudget(hosted);
+    const runHostedFusion = vi.fn();
+    const harness = coordinator(fakeSession({ delegate: vi.fn() }), {
+      runHostedFusion,
+      budgetReservation: () => activeBudgetReservation(budget, "default", {
+        maxTokens: 4_000,
+        maxCostUsd: 4,
+        modelCallCount: 4,
+      }),
+    });
+    await harness.coordinator.attach(1);
+
+    const refusal = await harness.coordinator.hostedFusion({
+      epoch: 1,
+      messageId: "msg-bindings-present-hosted-fusion",
+      projectId: "default",
+      request: hosted,
+      budget,
+    }).then(
+      () => { throw new Error("Expected the inflated hosted Fusion request to be refused."); },
+      (error: unknown) => error,
+    );
+
+    expect(refusal).toBeInstanceOf(Error);
+    expect((refusal as Error).message).toContain("exceeded its durable budget reservation");
+    expect((refusal as Error).message).not.toContain("provider-request controls");
     expect(runHostedFusion).not.toHaveBeenCalled();
     expect(harness.journal.list()).toEqual([]);
   });

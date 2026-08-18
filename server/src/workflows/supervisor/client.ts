@@ -11,6 +11,7 @@ import type {
   OwnedDelegationRequest,
 } from "../../../pi-packages/dag-fusion-drive/index.ts";
 import {
+  assertWorkflowHarnessAdapterBound,
   prepareWorkflowDelegationProject,
 } from "../../agent/workflow-delegation-session.ts";
 import { resolvePaths, type ProjectPaths } from "../../projects.ts";
@@ -1547,6 +1548,16 @@ export class WorkflowSupervisorClient {
         "Supervised hosted Fusion requires a durable budget descriptor.",
       );
     }
+    // Hosted Fusion has no child process to carry a node-control envelope, so
+    // the bindings must ride the request. Matching the in-process wrapper
+    // `runS4HostedFusionWithNodeControl`, their absence fails the attempt
+    // closed rather than letting the router run on provider defaults.
+    if (transport.nodeControl === undefined) {
+      throw clientError(
+        "PROTOCOL_ERROR",
+        "Supervised hosted Fusion received no trusted S4 provider-request controls.",
+      );
+    }
     assertBudgetIdentity(transport.supervisedBudget, request.identity);
     const {
       paths: _paths,
@@ -1554,8 +1565,10 @@ export class WorkflowSupervisorClient {
       reconcileUsage,
       ...serialized
     } = request;
-    const stableRequest: SerializedHostedOpenRouterFusionRequest =
-      structuredClone(serialized);
+    const stableRequest: SerializedHostedOpenRouterFusionRequest = {
+      ...structuredClone(serialized),
+      nodeControl: structuredClone(transport.nodeControl),
+    };
     const messageId = mintMessageId();
     const response = await this.operationRequest(
       {
@@ -1681,7 +1694,13 @@ export class WorkflowSupervisorClient {
     "getDelegationSession" | "runHostedFusion"
   > {
     return {
-      getDelegationSession: async (projectId, paths) => {
+      getDelegationSession: async (projectId, paths, harness) => {
+        // The supervised transport owns the only trusted adapter there is (a
+        // Pi session in the supervisor process), so the harness decision has
+        // to happen here. The executor awaits this seam before it reserves any
+        // budget, which is why an unavailable or unbound harness is refused
+        // with the dispatch diagnostic instead of quietly buying a Pi child.
+        assertWorkflowHarnessAdapterBound(harness);
         const canonical = assertCanonicalProjectPaths(projectId, paths);
         prepareWorkflowDelegationProject(projectId, canonical);
         return {
