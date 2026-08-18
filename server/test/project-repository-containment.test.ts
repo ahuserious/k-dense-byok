@@ -9,16 +9,27 @@
  * inherited from one — it wrote `user.name`/`user.email` into that checkout and
  * moved its branch ref to a fabricated commit.
  *
+ * The second half covers the follow-up: a containment refusal for one *known*
+ * project must reach the caller, not be swallowed by the request-scoping hook
+ * into a silent redirect that lands the request — writes included — in the
+ * default project.
+ *
  * Every case builds real temporary repositories; nothing about Git is mocked.
  */
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { DEFAULT_PROJECT_ID, PROJECTS_ROOT } from "../src/config.ts";
+import { buildApp } from "../src/index.ts";
 import {
+  createProjectRunSnapshot,
+  ensureProjectExists,
   ensureProjectRepository,
+  getProject,
   ProjectRepositoryContainmentError,
+  resolvePaths,
 } from "../src/projects.ts";
 
 const temporaryRoots: string[] = [];
@@ -287,5 +298,277 @@ describe("project repository containment", () => {
     // ...and the sandbox got its own repository anyway.
     expect(git(sandbox, ["rev-parse", "--show-toplevel"])).toBe(sandbox);
     expect(git(sandbox, ["log", "-1", "--format=%s"])).toBe("Initialize Kady project");
+  });
+});
+
+/**
+ * A project whose sandbox violates containment, registered so the scope hook
+ * treats it as a known project. `createProject` cannot build this fixture: it
+ * calls `ensureProjectRepository` itself and would refuse before the request
+ * under test ever runs.
+ */
+function registerProjectWithoutRepository(
+  projectId: string,
+  name: string,
+): ReturnType<typeof resolvePaths> {
+  const paths = resolvePaths(projectId);
+  fs.mkdirSync(paths.root, { recursive: true });
+  const timestamp = "2026-08-18T00:00:00.000Z";
+  fs.writeFileSync(
+    paths.projectJson,
+    JSON.stringify(
+      {
+        id: projectId,
+        name,
+        description: "",
+        tags: [],
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        archived: false,
+        spendLimitUsd: null,
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf-8",
+  );
+  return paths;
+}
+
+/**
+ * Replace a project's sandbox with a linked worktree of somebody else's
+ * checkout: the exact arrangement whose `.git` is a pointer file rather than a
+ * repository the sandbox owns.
+ */
+function makeSandboxALinkedWorktree(
+  sandbox: string,
+  checkout: string,
+  branch: string,
+): void {
+  fs.rmSync(sandbox, { recursive: true, force: true });
+  git(checkout, ["worktree", "add", "--quiet", sandbox, "-b", branch]);
+  expect(fs.lstatSync(path.join(sandbox, ".git")).isFile()).toBe(true);
+}
+
+const LEAKED_FILE = "leaked-write.txt";
+
+describe("request scoping refuses a containment violation instead of redirecting", () => {
+  let app: Awaited<ReturnType<typeof buildApp>>;
+
+  beforeAll(async () => {
+    app = await buildApp();
+  });
+
+  afterAll(async () => {
+    await app.close();
+    fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
+    fs.mkdirSync(PROJECTS_ROOT, { recursive: true });
+  });
+
+  it("does not land a write addressed to a contained-violating project in the healthy default project", async () => {
+    // A healthy default project, exactly as a running backend would have it.
+    const defaultSandbox = ensureProjectExists(DEFAULT_PROJECT_ID).sandbox;
+    expect(git(defaultSandbox, ["rev-parse", "--show-toplevel"])).toBe(
+      fs.realpathSync(defaultSandbox),
+    );
+
+    // ...and one specifically-named project whose sandbox belongs to somebody
+    // else's checkout. The caller addresses *this* project.
+    const outerRoot = makeTemporaryRoot();
+    const checkout = makeCheckoutWithHistory(outerRoot, "operator-checkout");
+    const poisoned = registerProjectWithoutRepository("worktree-study", "Worktree study");
+    makeSandboxALinkedWorktree(poisoned.sandbox, checkout, "study-branch");
+    expect(getProject("worktree-study")).not.toBeNull();
+    const checkoutBefore = fingerprintCheckout(checkout);
+
+    const response = await app.inject({
+      method: "PUT",
+      url: `/sandbox/file?path=${LEAKED_FILE}`,
+      headers: {
+        "x-project-id": "worktree-study",
+        "content-type": "application/octet-stream",
+      },
+      payload: "written for worktree-study\n",
+    });
+
+    // The point of the regression: the write must not appear in the default
+    // project's sandbox on disk. Asserted before the status code, because the
+    // misroute answered 200 while depositing the file here.
+    expect(fs.existsSync(path.join(defaultSandbox, LEAKED_FILE))).toBe(false);
+    // Nor anywhere else: the refusal happens before the handler runs.
+    expect(fs.existsSync(path.join(poisoned.sandbox, LEAKED_FILE))).toBe(false);
+
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toMatchObject({
+      reason: "project_repository_containment",
+      invariant: "sandbox_git_is_a_pointer_file",
+    });
+    // The refusal is attributable: it names the sandbox and the repository at
+    // risk, so an operator can find the misconfigured projects root.
+    expect(String(response.json().detail)).toContain(fs.realpathSync(poisoned.sandbox));
+    expect(String(response.json().detail)).toContain(checkout);
+    // A silent redirect is not a fallback: no fallback header is offered.
+    expect(response.headers["x-project-fallback"]).toBeUndefined();
+
+    // The operator's checkout is byte-identical across the refused request.
+    expect(fingerprintCheckout(checkout)).toEqual(checkoutBefore);
+  });
+
+  it("refuses a read addressed to a contained-violating project rather than serving the default project's files", async () => {
+    const defaultSandbox = ensureProjectExists(DEFAULT_PROJECT_ID).sandbox;
+    fs.writeFileSync(
+      path.join(defaultSandbox, "default-only.txt"),
+      "belongs to the default project\n",
+      "utf-8",
+    );
+    const outerRoot = makeTemporaryRoot();
+    const checkout = makeCheckoutWithHistory(outerRoot, "operator-checkout");
+    const poisoned = registerProjectWithoutRepository("worktree-study", "Worktree study");
+    makeSandboxALinkedWorktree(poisoned.sandbox, checkout, "study-branch");
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/sandbox/tree",
+      headers: { "x-project-id": "worktree-study" },
+    });
+
+    // Asserted before the status code: the redirect answered 200 while handing
+    // this caller the *default* project's file listing.
+    expect(response.body).not.toContain("default-only.txt");
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toMatchObject({
+      reason: "project_repository_containment",
+    });
+    expect(response.headers["x-project-fallback"]).toBeUndefined();
+  });
+
+  it("refuses rather than redirects when the default project itself violates containment", async () => {
+    const defaultSandbox = ensureProjectExists(DEFAULT_PROJECT_ID).sandbox;
+    const outerRoot = makeTemporaryRoot();
+    const checkout = makeCheckoutWithHistory(outerRoot, "operator-checkout");
+    makeSandboxALinkedWorktree(defaultSandbox, checkout, "default-branch");
+
+    const response = await app.inject({
+      method: "PUT",
+      url: `/sandbox/file?path=${LEAKED_FILE}`,
+      headers: { "content-type": "application/octet-stream" },
+      payload: "written for the default project\n",
+    });
+
+    expect(fs.existsSync(path.join(defaultSandbox, LEAKED_FILE))).toBe(false);
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toMatchObject({
+      reason: "project_repository_containment",
+      invariant: "sandbox_git_is_a_pointer_file",
+    });
+  });
+
+  it("serves a healthy second project's write into that project's own sandbox", async () => {
+    // The refusal must be specific to the violating project: a well-formed
+    // project alongside it keeps working.
+    ensureProjectExists(DEFAULT_PROJECT_ID);
+    const healthy = ensureProjectExists("healthy-study");
+
+    const response = await app.inject({
+      method: "PUT",
+      url: `/sandbox/file?path=${LEAKED_FILE}`,
+      headers: {
+        "x-project-id": "healthy-study",
+        "content-type": "application/octet-stream",
+      },
+      payload: "written for healthy-study\n",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fs.readFileSync(path.join(healthy.sandbox, LEAKED_FILE), "utf-8")).toBe(
+      "written for healthy-study\n",
+    );
+    expect(
+      fs.existsSync(path.join(resolvePaths(DEFAULT_PROJECT_ID).sandbox, LEAKED_FILE)),
+    ).toBe(false);
+  });
+
+  it("keeps the default-project fallback for a scoping failure that is not a containment refusal", async () => {
+    // An id that cannot resolve to a path at all fails inside `getProject`
+    // with a plain Error. That path is unchanged: reads still degrade to the
+    // default project rather than failing the request.
+    ensureProjectExists(DEFAULT_PROJECT_ID);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/projects",
+      headers: { "x-project-id": "../escape" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toBeInstanceOf(Array);
+  });
+});
+
+describe("project commits carry their own authoring identity", () => {
+  afterAll(() => {
+    fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
+    fs.mkdirSync(PROJECTS_ROOT, { recursive: true });
+  });
+
+  it("authors a run snapshot as Kady in a sandbox-owned repository that has no identity of its own", () => {
+    // The awkward case: the sandbox owns its repository, so nothing here may
+    // write `user.name`/`user.email` into it — but it arrived with neither, so
+    // there is no configured identity for `commit-tree` to fall back to. The
+    // identity has to be supplied per-invocation or the host's own Git identity
+    // ends up signing project history.
+    const paths = resolvePaths("identityless-study");
+    fs.mkdirSync(paths.sandbox, { recursive: true });
+    git(paths.sandbox, ["init", "--quiet", "."]);
+    expect(gitOrNull(paths.sandbox, ["config", "--local", "user.name"])).toBeNull();
+
+    ensureProjectExists("identityless-study");
+    // Its baseline commit already had this fixed for it in round 14...
+    expect(git(paths.sandbox, ["log", "-1", "--format=%an <%ae>|%cn <%ce>"])).toBe(
+      "Kady <kady@localhost>|Kady <kady@localhost>",
+    );
+
+    // ...now prove the snapshot does too, with a host identity in the ambient
+    // environment that a fallback would otherwise pick up.
+    const inherited = {
+      authorName: process.env.GIT_AUTHOR_NAME,
+      authorEmail: process.env.GIT_AUTHOR_EMAIL,
+      committerName: process.env.GIT_COMMITTER_NAME,
+      committerEmail: process.env.GIT_COMMITTER_EMAIL,
+    };
+    process.env.GIT_AUTHOR_NAME = "Host Developer";
+    process.env.GIT_AUTHOR_EMAIL = "host@example.test";
+    process.env.GIT_COMMITTER_NAME = "Host Developer";
+    process.env.GIT_COMMITTER_EMAIL = "host@example.test";
+    let snapshot: string;
+    try {
+      snapshot = createProjectRunSnapshot("identityless-study", "run-identity-check");
+    } finally {
+      for (const [key, value] of [
+        ["GIT_AUTHOR_NAME", inherited.authorName],
+        ["GIT_AUTHOR_EMAIL", inherited.authorEmail],
+        ["GIT_COMMITTER_NAME", inherited.committerName],
+        ["GIT_COMMITTER_EMAIL", inherited.committerEmail],
+      ] as const) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+
+    expect(
+      git(paths.sandbox, ["show", "-s", "--format=%an <%ae>|%cn <%ce>", snapshot]),
+    ).toBe("Kady <kady@localhost>|Kady <kady@localhost>");
+    // The sandbox's repository still has no identity written into it: the
+    // commits carry theirs, the repository is left as it was found.
+    expect(gitOrNull(paths.sandbox, ["config", "--local", "user.name"])).toBeNull();
+    expect(gitOrNull(paths.sandbox, ["config", "--local", "user.email"])).toBeNull();
   });
 });

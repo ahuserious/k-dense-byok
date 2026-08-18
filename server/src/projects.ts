@@ -299,9 +299,12 @@ const PROJECT_REPOSITORY_AUTHOR_NAME = "Kady";
 const PROJECT_REPOSITORY_AUTHOR_EMAIL = "kady@localhost";
 
 /**
- * Authoring identity for the baseline commit, passed per-invocation. A
- * repository this function did not create keeps whatever identity it has, so
- * the commit cannot depend on `git config` having been written.
+ * Authoring identity for the commits this module writes, passed per-invocation
+ * on every one of them. A repository this module did not create keeps whatever
+ * identity it has — a sandbox-owned repository that arrived with no commits and
+ * no `user.name`/`user.email` of its own is legitimate — so no commit here may
+ * depend on `git config` having been written, nor fall through to the host's
+ * global Git identity.
  */
 const PROJECT_REPOSITORY_IDENTITY_ENVIRONMENT = {
   GIT_AUTHOR_NAME: PROJECT_REPOSITORY_AUTHOR_NAME,
@@ -331,8 +334,9 @@ const PROJECT_REPOSITORY_INVARIANT_REASONS: Record<ProjectRepositoryInvariant, s
  * written into it, no ref of it moved.
  *
  * This is an operator misconfiguration (a projects root pointed at a source
- * checkout), not bad user input — see the API-layer mapping in the route that
- * catches it.
+ * checkout), not bad user input — see `refuseProjectRepositoryContainment` in
+ * `index.ts`, which answers it rather than letting the request be scoped
+ * somewhere else.
  */
 export class ProjectRepositoryContainmentError extends Error {
   readonly code = "project_repository_containment";
@@ -681,6 +685,7 @@ export function createProjectRunSnapshot(projectId: string, runIdentity: string)
   const temporaryDirectory = fs.mkdtempSync(path.join(paths.root, ".run-snapshot-"));
   const temporaryIndex = path.join(temporaryDirectory, "index");
   const gitEnvironment = projectGitEnvironment({
+    ...PROJECT_REPOSITORY_IDENTITY_ENVIRONMENT,
     GIT_INDEX_FILE: temporaryIndex,
     GIT_LITERAL_PATHSPECS: "1",
   });
