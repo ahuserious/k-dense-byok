@@ -123,7 +123,17 @@ test("real Playwright list and a two-MiB reporter log stay within scanner bounds
   });
   assert.equal(listed.status, 0, listed.stderr);
   const listOutput = `${listed.stdout}${listed.stderr}`;
-  assert.match(listOutput, /Total: 261 tests in \d+ files/);
+
+  // This test is about scanner bounds, not about the inventory — the count is here only to prove a REAL,
+  // complete listing reached the scanner rather than a truncated or empty one. It used to assert a literal
+  // `Total: 261`, which made it a second inventory pin that nobody maintained: the 2026-08-18 wave moved the
+  // real pin in e2e/item-count-reporter.ts to 253 and this line went red for a reason that had nothing to do
+  // with scanner bounds. Cross-check the reporter's own verified total against Playwright's instead, so the
+  // single source of truth stays the pin and this stays a bounds test. It still fails on a truncated list,
+  // on a missing reporter line, and on the two disagreeing — which is everything it was ever really guarding.
+  const inventory = listOutput.match(/E2E inventory verified: (\d+) total = \d+ executing-substantive/);
+  assert.ok(inventory, `the inventory reporter line must be present in a full listing:\n${listOutput.slice(0, 400)}`);
+  assert.match(listOutput, new RegExp(`Total: ${inventory[1]} tests in \\d+ files`));
 
   const environment = {
     STABLY_API_KEY: "realistic-log-secret-sentinel",
