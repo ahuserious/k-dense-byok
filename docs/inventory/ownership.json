@@ -225,7 +225,8 @@
     "W1": [
       "docs/inventory/w1-builder-shell.json",
       "web/src/components/dag-builder-surface.test.tsx",
-      "web/src/components/raindrop-panel.test.tsx"
+      "web/src/components/raindrop-panel.test.tsx",
+      "web/src/components/dag-compose-popover.tsx"
     ],
     "W2": [
       "docs/inventory/w2-vendored-builder.json",
@@ -1067,6 +1068,20 @@
       "date": "2026-08-18",
       "path": "e2e/console-raindrop.spec.ts",
       "scope": "drop the retired Components Studio overlap assertion (the pill no longer exists)"
+    },
+    {
+      "from": "S11",
+      "to": "W1",
+      "date": "2026-08-18",
+      "path": "e2e/studio.spec.ts",
+      "scope": "retire the Components Studio spec together with the header entry (owner: 'there should be no components studio'); DELETED in W1 r2"
+    },
+    {
+      "from": "S8",
+      "to": "W1",
+      "date": "2026-08-18",
+      "path": "web/src/components/chat-rail.tsx",
+      "scope": "delete: unreferenced after the Builder rail hosts the DAG-builder assistant; DELETED in W1 r2"
     }
   ]
 }

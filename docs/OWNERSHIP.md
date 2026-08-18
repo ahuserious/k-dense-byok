@@ -99,6 +99,8 @@ A handoff lets the recipient lane edit a path another lane owns, for the stated 
 | S9 | W1 | `web/src/components/scientific-dag-studio-launcher.tsx` | retire the launcher (unmounted from the workspace header) |
 | S11 | W1 | `docs/e2e/README.md` | inventory table after retiring studio.spec.ts |
 | S11 | W1 | `e2e/console-raindrop.spec.ts` | drop the retired Components Studio overlap assertion (the pill no longer exists) |
+| S11 | W1 | `e2e/studio.spec.ts` | retire the Components Studio spec together with the header entry (owner: 'there should be no components studio'); DELETED in W1 r2 |
+| S8 | W1 | `web/src/components/chat-rail.tsx` | delete: unreferenced after the Builder rail hosts the DAG-builder assistant; DELETED in W1 r2 |
 | S1 | W3 | `web/src/components/dag-builder-surface.tsx` | host-authoritative typed document, builder bridge, source picker above the iframe, helper context/patch hooks (W1 owns the rail placement) |
 | S2 | W3 | `web/src/components/engine-iframe-panel.tsx` | iframe host: bridge origin/targetOrigin, ready timeout banner, ?host=kady |
 | S5 | W3 | `server/src/workflows/schema.ts` | additive optional fields only: top-level ui {positions,viewport}, per-node meta.compositeOf, document/node provenance — excluded from validation semantics and graphSha256 |
