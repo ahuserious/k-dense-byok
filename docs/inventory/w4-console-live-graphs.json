@@ -1,0 +1,25 @@
+{
+  "lane": "W4",
+  "purpose": "Owner direction 2026-08-17: the Console shows running DAG workflow runs visually and every open project/chat session as a live graph (LLM logs projected into a DAG live), with a promote-to-DAG action; plan = fusion-drive job job-29bb6bd75394696d8fd3a5d2 (s11/fusion/w3w4-fused-plan.md)",
+  "files": [
+    "docs/inventory/w4-console-live-graphs.json",
+    "web/src/lib/session-dag-projection.ts",
+    "web/src/lib/session-dag-projection.test.ts",
+    "web/src/lib/dag-run-graph-projection.ts",
+    "web/src/lib/dag-run-graph-projection.test.ts",
+    "web/src/lib/console-live-sources.ts",
+    "web/src/lib/console-live-sources.test.ts",
+    "web/src/components/console/live-graph-console.tsx",
+    "web/src/components/console/live-graph-console.test.tsx",
+    "web/src/components/console/live-source-rail.tsx",
+    "web/src/components/console/live-event-drawer.tsx",
+    "docs/inventory/run-state-v1-event-taxonomy.md",
+    "e2e/console-live.spec.ts",
+    "web/src/components/console/console-panel.tsx",
+    "web/src/components/console/kady-console.tsx",
+    "web/src/components/dag-workflow-console.tsx",
+    "web/src/components/chat-live-graph.tsx",
+    "server/src/api/sessions.ts",
+    "e2e/item-count-reporter.ts"
+  ]
+}

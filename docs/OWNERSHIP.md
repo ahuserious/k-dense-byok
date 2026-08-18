@@ -15,6 +15,8 @@ inventory path is owned exactly once.
 | V1 | Verification fixes from the human-sim campaigns a9b34a39 and 0aa5eafc (2026-08-17) | `docs/inventory/v1-verification.json`; the previously un-inventoried `web/src/components/{project-view,project-view.test,persistent-workspace-surfaces.test,workflows-panel.test,helper-agent-chat.test,workspace-navigation.test}.tsx, `web/src/components/ai-elements/speech-input{,.test}.tsx`; product paths via reviewed handoffs from S1, S1b, S10, S2, S8, S11 (returned when V1 lands). |
 | W1 | Owner punch-list 2026-08-17, Kady shell side (no Components Studio entry/effects, DAG-builder assistant in the Builder rail, Raindrop analyst copy) | `docs/inventory/w1-builder-shell.json`; un-inventoried `web/src/components/{dag-builder-surface.test,raindrop-panel.test}.tsx`; product paths via reviewed handoffs from S1, S9, V1. |
 | W2 | Owner punch-list 2026-08-17, vendored builder side (zoom/fitView, explicit expand, no effects, no legacy-brand text, harness pre-selection) | `docs/inventory/w2-vendored-builder.json`; un-inventoried vendored `WorkflowBuilder/BuilderToolbar/StatusBar/CanvasChatPopout.tsx` + `index.css`; product paths via reviewed handoffs from S3. |
+| W3 | Authoring path (owner direction 2026-08-17): typed-document adapter — builder loads Kady typed workflows and library items, stitches workflows (flatten on save), harness reaches the runtime; plan s11/fusion/w3w4-fused-plan.md | `docs/inventory/w3-authoring-path.json`; new server/web/vendored-host files listed there; product paths via reviewed handoffs from S1, S2, S5, S4, S1b, S10, S3, W2, S11. |
+| W4 | Console live graphs (owner direction 2026-08-17): running DAG runs + every open project/chat as a live graph, promote-to-DAG | `docs/inventory/w4-console-live-graphs.json`; new projection/source/console files listed there; product paths via reviewed handoffs from S1, S8, S11. |
 | S1 | Consolidation and typed-surface removal | `web/src/app/page.tsx`; `web/src/components/{workspace-navigation,persistent-workspace-surfaces,dag-builder-surface,dag-builder,dag-builder-canvas,dag-builder-inspector,dag-workflow-console}.{ts,tsx}`; `web/src/lib/{workspace-persistence,dag-workflow-builder,dag-workflows}.ts` |
 | S1b | Scientific Pipelines cross-engine registry | `web/src/components/dag-workflows-panel.tsx`; `web/src/components/dag-workflows-panel.test.tsx`; `web/src/lib/scientific-pipeline-registry.ts`; `web/src/lib/scientific-pipeline-registry.test.ts`; `server/test/pipeline-engine-client.test.ts`; `docs/lanes/S1b-INTEGRATION.md` |
 | S2 | Vendor integration and naming sweep | `start.mjs`; `server/src/agent/pipeline-engine/**`; `server/src/agent/skills.ts`; `web/src/components/{pipelines-panel,pipeline-builder-panel,engine-iframe-panel}.tsx`; `web/src/lib/{engine-config,embed-config,pipelines}.ts`; vendor attribution files (`LICENSE`, `NOTICE*`, `VENDORED-FROM.md`) |
@@ -83,6 +85,30 @@ A handoff lets the recipient lane edit a path another lane owns, for the stated 
 | S3 | W2 | `server/vendor/pipeline-engine/packages/web/src/components/workflows/WorkflowCanvas.tsx` | balanced fitView/zoom on load and after add; remove background glow/effects; working zoom controls |
 | S3 | W2 | `server/vendor/pipeline-engine/packages/web/src/components/workflows/WorkflowCanvas.test.ts` | viewport regressions |
 | S3 | W2 | `server/vendor/pipeline-engine/packages/web/src/components/workflows/NodeLibrary.tsx` | node library: harness pre-selection for quick nodes; slim chrome |
+| S1 | W4 | `web/src/components/console/console-panel.tsx` | mount the live-graph console (rail + main graph + event drawer) as the DAG Runs surface; keep the Agents & Loops sub-tab |
+| S8 | W4 | `web/src/components/console/kady-console.tsx` | route live-graph selections and deep links (?run=, ?session=) |
+| S1 | W4 | `web/src/components/dag-workflow-console.tsx` | reuse of the run list/event semantics inside the drawer; Workflow Rescue entry point from the run graph |
+| S8 | W4 | `web/src/components/chat-live-graph.tsx` | export reuse for session projections; additive exports only (RunStateV1 event union taxonomy) |
+| S8 | W4 | `server/src/api/sessions.ts` | additive: list active sessions across projects for the console (scope=all&active=1) if missing; no behaviour change to existing routes |
+| S11 | W4 | `e2e/item-count-reporter.ts` | inventory pins for the new console-live.spec.ts items |
+| S1 | W3 | `web/src/components/dag-builder-surface.tsx` | host-authoritative typed document, builder bridge, source picker above the iframe, helper context/patch hooks (W1 owns the rail placement) |
+| S2 | W3 | `web/src/components/engine-iframe-panel.tsx` | iframe host: bridge origin/targetOrigin, ready timeout banner, ?host=kady |
+| S5 | W3 | `server/src/workflows/schema.ts` | additive optional fields only: top-level ui {positions,viewport}, per-node meta.compositeOf, document/node provenance — excluded from validation semantics and graphSha256 |
+| S5 | W3 | `server/src/workflows/validate.ts` | reuse for POST /dag-workflows/validate; no semantic change |
+| S4 | W3 | `server/src/api/dag-workflows.ts` | mount validate/import routes; run-document snapshot + graphSha256 + workflowId on GET /dag-workflow-runs/:id |
+| S4 | W3 | `server/src/workflows/kady-node-executor.ts` | harness switch: dispatch on nodeSpec.harness with per-harness adapters, harness_unavailable, no silent Pi fallback |
+| S4 | W3 | `server/src/agent/workflow-delegation-session.ts` | dispatchWorkflowHarness adapters (bounded) |
+| S1 | W3 | `web/src/lib/dag-workflows.ts` | client for validate/import + CAS save helpers |
+| S1b | W3 | `web/src/components/dag-workflows-panel.tsx` | open-in-builder action → typed load |
+| S10 | W3 | `web/src/lib/workflow-library-template-builder.ts` | export reuse of createScientificWorkflowTemplateNodes for library → typed one/few-node DAG import |
+| S10 | W3 | `web/src/lib/dag-workflow-templates.ts` | export reuse of createDagWorkflowTemplateGraph / findDagWorkflowTemplate |
+| S10 | W3 | `web/src/components/workflows-panel.tsx` | 'Open in builder' action on library cards → import |
+| W2 | W3 | `server/vendor/pipeline-engine/packages/web/src/components/workflows/BuilderToolbar.tsx` | host mode: route Validate/Save/Run through the bridge and render the host-fed source list (call-site edit only) |
+| S3 | W3 | `server/vendor/pipeline-engine/packages/web/src/components/workflows/QuickAddPicker.tsx` | mount HarnessPicker; stamp spec.harness on the dragged node (call-site edit only) |
+| S3 | W3 | `server/vendor/pipeline-engine/packages/web/src/lib/api.ts` | host-mode: skip engine list when host-fed |
+| S3 | W3 | `server/vendor/pipeline-engine/packages/web/src/hooks/useBuilderValidation.ts` | host mode: harness is not an inline error when the document is typed (typed route validates) |
+| W2 | W3 | `server/vendor/pipeline-engine/packages/web/src/components/workflows/WorkflowBuilder.tsx` | host mode wiring after W2 lands |
+| S11 | W3 | `e2e/item-count-reporter.ts` | inventory pins for the new builder-typed.spec.ts items |
 | V1 | W1 | `web/src/components/helper-agent-chat.test.tsx` | dag-builder profile regressions |
 | S2 | C1 | `start.mjs` | vendored-dist build, engine-port ownership, readiness, and disabled-state sections; forced-shutdown ownership of the backend's detached workflow supervisor (second explicit signal) and process-group retirement |
 | S2 | C1 | `server/src/agent/pipeline-engine/client.ts` | launcher-disabled fail-before-fetch guard |
