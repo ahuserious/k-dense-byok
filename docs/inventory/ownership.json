@@ -125,7 +125,11 @@
       "server/src/workflows/supervisor/server.ts",
       "server/src/api/raindrop.ts",
       "server/test/kady-node-executor.test.ts",
-      "server/test/raindrop-base-url.test.ts"
+      "server/test/raindrop-base-url.test.ts",
+      "server/test/supervisor-node-control-transport.test.ts",
+      "server/test/workflow-supervisor-client.test.ts",
+      "server/test/workflow-supervisor-coordinator.test.ts",
+      "server/test/workflow-supervisor-protocol.test.ts"
     ],
     "S6": [
       "server/src/workflows/prompt-opt*.ts",
