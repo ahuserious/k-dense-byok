@@ -32,7 +32,22 @@ jobs:
   github-runner:
     name: GitHub-hosted runner
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Derived from the measured phases of run 32006038040 (a clean 24m10s job) rather than rounded
+    # up from the previous 45:
+    #   pre-suite steps excluding the browser install   119s measured, x1.5 runner variance =  3m
+    #   browser install                                 its own 8m budget + 3m for the fallback = 11m
+    #   the suite                                       its own budget, E2E_SUITE_TIMEOUT_MINUTES = 35m
+    #   post-suite steps (counts, manifest, scan, upload) 120s measured, x1.5 variance         =  3m
+    #   runner scheduling slop                                                                 =  1m
+    # 53m sits one minute above that 52m sum, which is the property that matters: every component
+    # now has a tighter budget of its own, so this ceiling should never be the thing that fires.
+    # When it does fire, that is itself the finding -- something outside every budgeted phase.
+    timeout-minutes: 53
+    env:
+      # Single source of truth for the two budgets below and for the figure the job summary
+      # compares the observed suite wall clock against.
+      E2E_SUITE_TIMEOUT_MINUTES: "35"
+      E2E_BROWSER_INSTALL_TIMEOUT_MINUTES: "8"
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -73,9 +88,18 @@ jobs:
       - name: Check vendored builder dist
         run: npm run check:vendored-dist
 
+      # `--with-deps` pulls 114 MB of apt archives (the full browser dependency set, not just
+      # Chromium's). Run 32006038040 fetched them in 3s at 33.5 MB/s; run 32094043747 fetched the
+      # identical 114 MB in 40m21s at 47.2 kB/s from a degraded azure.archive.ubuntu.com mirror and
+      # consumed the whole job budget before the suite could start. This cap is 10x the measured
+      # cost and 5x below that pathology. A timeout sets this step's `outcome` to failure, which is
+      # what the fallback below keys on -- and the fallback only needs Chromium's own dependencies,
+      # which the runner image already ships at the required versions, so it downloads almost
+      # nothing even when the mirror is degraded.
       - name: Install Chromium with Stably
         id: stably-browser-install
         continue-on-error: true
+        timeout-minutes: ${{ fromJSON(env.E2E_BROWSER_INSTALL_TIMEOUT_MINUTES) }}
         run: npx --yes stably@4.12.28 install --with-deps > stably-install.log 2>&1
 
       - name: Install Chromium with Playwright fallback
@@ -209,9 +233,14 @@ jobs:
             echo "E2E_SUITE_NAME=sds-outer-loop-ci-${GITHUB_RUN_NUMBER}"
           } >> "$GITHUB_ENV"
 
+      # A step budget, not a job budget. When `timeout-minutes` on the job fires, the job is
+      # cancelled: no counts, no manifest, and a "cancelled" conclusion that reads like a person
+      # pressed a button. When it fires here the step merely fails, every `if: always()` step below
+      # still runs, and the summary records that the suite exceeded its budget.
       - name: Run complete Playwright suite
         id: suite-all
         if: inputs.grep == ''
+        timeout-minutes: ${{ fromJSON(env.E2E_SUITE_TIMEOUT_MINUTES) }}
         env:
           CI: "1"
           KADY_E2E_BASE_URL: http://127.0.0.1:13000
@@ -224,6 +253,7 @@ jobs:
       - name: Run filtered Playwright suite
         id: suite-grep
         if: inputs.grep != ''
+        timeout-minutes: ${{ fromJSON(env.E2E_SUITE_TIMEOUT_MINUTES) }}
         env:
           CI: "1"
           KADY_E2E_BASE_URL: http://127.0.0.1:13000
@@ -233,6 +263,25 @@ jobs:
           STABLY_PROJECT_ID: ${{ secrets.STABLY_PROJECT_ID }}
           INPUT_GREP: ${{ inputs.grep }}
         run: npx playwright test --workers="$E2E_WORKERS" --grep "$INPUT_GREP" --trace on > stably-test.log 2>&1
+
+      # Stamped here rather than inferred later, so the elapsed figure covers the suite step and
+      # nothing else, whichever of the two suite steps above ran.
+      - name: Stamp suite elapsed time
+        if: always()
+        run: |
+          if [[ -z "${E2E_RUN_STARTED_AT:-}" ]]; then
+            echo "suite start was never stamped; elapsed suite time is not recoverable" >&2
+            exit 0
+          fi
+          suite_ended_at="$(node -e 'process.stdout.write(String(Date.now()))')"
+          echo "E2E_SUITE_ELAPSED_SECONDS=$(( (suite_ended_at - E2E_RUN_STARTED_AT) / 1000 ))" >> "$GITHUB_ENV"
+
+      # A step stopped by `timeout-minutes` leaves the Playwright process tree behind, exactly as
+      # the cancelled run 32094043747 did, and those orphans keep writing into and deleting from the
+      # artifact directory the evidence scan walks. The script explains the failure it prevents.
+      - name: Quiesce leftover suite processes
+        if: always()
+        run: node e2e/quiesce-suite-processes.mjs
 
       - name: Enforce hosted evidence log size limit
         id: evidence-log-cap
@@ -285,6 +334,12 @@ jobs:
             echo "- Failed: $E2E_FAILED"
             echo "- Skipped/fixme: $E2E_SKIPPED"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # Reads the NDJSON streamed by e2e/spec-timing-reporter.ts. It is written per finished test,
+      # so a suite stopped by its budget still reports timings for the part that did run.
+      - name: Summarise per-spec timings
+        if: always()
+        run: node e2e/spec-timing-summary.mjs --top 10
 
       - name: Write GitHub-runner evidence summary
         if: always()
