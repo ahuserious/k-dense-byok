@@ -103,6 +103,7 @@ A handoff lets the recipient lane edit a path another lane owns, for the stated 
 | S11 | W1 | `e2e/console-raindrop.spec.ts` | drop the retired Components Studio overlap assertion (the pill no longer exists) |
 | S8 | S8B | `server/src/api/sessions.ts` | context-free dag-builder helper sessions: parseHelperSource/getOrCreateProfileSession must accept a dag-builder session with no workflow pointer so a user can start from nothing |
 | S7 | S8B | `server/src/agent/session-registry.ts` | dag-builder profile prompt must stop instructing the model to return changes 'for the visual Builder to validate and apply' until lane W3's bridge lands |
+| S7 | C5 | `server/src/index.ts` | `registerRoutes` onRequest hook: a project-repository containment refusal must re-throw, not silently redirect the request — writes included — into the default project (N-30 follow-up) |
 | C4 | S8B | `server/test/raindrop-context.test.ts` | regressions for the no-workflow dag-builder context |
 | S11 | W1 | `e2e/studio.spec.ts` | retire the Components Studio spec together with the header entry (owner: 'there should be no components studio'); DELETED in W1 r2 |
 | S8 | W1 | `web/src/components/chat-rail.tsx` | delete: unreferenced after the Builder rail hosts the DAG-builder assistant; DELETED in W1 r2 |
