@@ -261,6 +261,10 @@
       "web/src/lib/dag-compose*.ts",
       "web/src/components/builder/**",
       "server/vendor/pipeline-engine/packages/web/src/host/**"
+    ],
+    "S8B": [
+      "docs/inventory/s8b-helper-sessions.json",
+      "server/src/agent/raindrop-context.ts"
     ]
   },
   "handoffs": [
@@ -1082,6 +1086,27 @@
       "date": "2026-08-18",
       "path": "web/src/components/chat-rail.tsx",
       "scope": "delete: unreferenced after the Builder rail hosts the DAG-builder assistant; DELETED in W1 r2"
+    },
+    {
+      "from": "S8",
+      "to": "S8B",
+      "date": "2026-08-18",
+      "path": "server/src/api/sessions.ts",
+      "scope": "context-free dag-builder helper sessions: parseHelperSource/getOrCreateProfileSession must accept a dag-builder session with no workflow pointer so a user can start from nothing"
+    },
+    {
+      "from": "S7",
+      "to": "S8B",
+      "date": "2026-08-18",
+      "path": "server/src/agent/session-registry.ts",
+      "scope": "dag-builder profile prompt must stop instructing the model to return changes 'for the visual Builder to validate and apply' until lane W3's bridge lands"
+    },
+    {
+      "from": "C4",
+      "to": "S8B",
+      "date": "2026-08-18",
+      "path": "server/test/raindrop-context.test.ts",
+      "scope": "regressions for the no-workflow dag-builder context"
     }
   ]
 }

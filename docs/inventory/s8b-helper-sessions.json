@@ -1,0 +1,11 @@
+{
+  "lane": "S8B",
+  "purpose": "Server side of the owner's builder-chat requirement (2026-08-17): a DAG-builder helper session must work on a project with no saved workflow, and its profile prompt must not promise canvas apply until lane W3's bridge exists. Raised by lane W1 round 3 (report s11/claude-lanes/w1-r3.report.md \u00a77).",
+  "files": [
+    "docs/inventory/s8b-helper-sessions.json",
+    "server/src/agent/raindrop-context.ts",
+    "server/src/api/sessions.ts",
+    "server/src/agent/session-registry.ts",
+    "server/test/raindrop-context.test.ts"
+  ]
+}
