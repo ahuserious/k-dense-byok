@@ -1,8 +1,30 @@
 # NodeSpec v1 — FROZEN
 
-**FROZEN:** Wave B lanes may extend this contract only through a PR that updates
-this document and the TypeBox schema together. Existing fields may not be
-removed or reinterpreted.
+**FROZEN:** Wave B lanes may extend this contract only through a change that
+updates this document and the TypeBox schema together. Existing fields may not
+be removed or reinterpreted.
+
+**How "together" is satisfied in this repository, and why the wording changed.**
+The clause used to say "through a PR". This repository has no PR workflow —
+lanes are reviewed by independent adversarial agents and the orchestrator merges
+locally — so "a PR" had no referent, and on 2026-08-18 it was read as "the merge
+wave" to justify landing the schema and this document in two adjacent commits.
+That reading produced exactly what the clause exists to prevent: commit
+`6342ec0` on the published branch carries the schema's `meta`/`provenance`
+additions while this document does not yet describe them. One commit, resolved
+by the next one, but reachable by checkout, bisect, revert or cherry-pick. See
+`docs/adr/S11-contract-freeze-mechanism.md`.
+
+Adjacency is not atomicity, and the fix is not to try harder at atomicity —
+a lane may not write `docs/contracts/` at all (these files are uninventoried,
+which is how `ownership-check` spells orchestrator-only), so "one commit
+containing both" is unsatisfiable by construction. **The document leads.** An
+orchestrator commit describing the new fields lands BEFORE the lane merge that
+adds them to the schema. A document that describes a field the schema does not
+yet carry is harmless — it is a specification ahead of its implementation, and
+this section is where you would say so. A schema that carries a field the
+document does not describe is the dangerous direction, and ordering the two
+makes that state unreachable rather than merely discouraged.
 
 NodeSpec v1 is the optional `settings` object shared by every node in a typed
 `WorkflowGraphDocument`. The schema is `NodeSpecV1Schema`; omitted settings keep
