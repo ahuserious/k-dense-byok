@@ -277,6 +277,129 @@ describe("live-graph console shell", () => {
     expect(apiFetchPaths).toContain("/sessions/session-a/run/state");
   });
 
+  it("says `not checked` for the chats past the probe cap, and states the bound", async () => {
+    // Round 2 badged the 9th and later chats `idle`, which is a positive claim
+    // about a chat nothing had asked about.
+    sessionRows = Array.from({ length: 12 }, (_, index) => ({
+      id: `capped-${index}`,
+      name: `Capped chat ${index}`,
+      created: new Date(NOW - 300_000).toISOString(),
+      modified: new Date(NOW - 5_000).toISOString(),
+    }));
+    runStateBody = {
+      status: "running",
+      run: {
+        runId: "run-1",
+        prompt: "",
+        images: [],
+        baseline: { messages: [], contextUsage: null },
+        frames: RUN_FRAMES,
+        lastSeq: 4,
+      },
+    };
+    render(<LiveGraphConsole projectId="default" runsConsole={<div>typed run console</div>} />);
+
+    const rail = await screen.findByRole("complementary", { name: "Live work" });
+    // Scoped to the Sessions section: the typed run in the DAG runs section is
+    // also `running`, and it is not what this bound is about.
+    const sessions = await within(rail).findByRole("region", { name: "Sessions" });
+    await waitFor(() => {
+      expect(sessions.querySelectorAll('[data-status="running"]')).toHaveLength(8);
+    });
+    expect(sessions.querySelectorAll('[data-status="unknown"]')).toHaveLength(4);
+    // Nothing claims to be idle; four rows say they were never asked.
+    expect(sessions.querySelectorAll('[data-status="idle"]')).toHaveLength(0);
+    expect(within(sessions).getAllByText("not checked")).toHaveLength(4);
+    expect(
+      within(rail).getByText("checking 8 of 12 chats for live status"),
+    ).toBeInTheDocument();
+    // Eight distinct chats were actually probed — not nine, not twelve.
+    const probed = new Set(
+      apiFetchPaths.filter((path) => path.endsWith("/run/state")),
+    );
+    expect(probed.size).toBe(8);
+  });
+
+  it("renders the requested-vs-resolved model receipt on a run's events", async () => {
+    vi.mocked(dagApi.pageDagWorkflowRunEvents).mockResolvedValue({
+      events: [
+        {
+          schemaVersion: 1,
+          eventId: "e1",
+          runId: "wrun_1",
+          seq: 1,
+          ts: NOW,
+          type: "model_resolved",
+          nodeId: "analyze",
+          data: {
+            modelCallSlotId: "primary",
+            receipt: {
+              request: {
+                requested: {
+                  source: "fixed",
+                  provider: "anthropic",
+                  model: "claude-opus-5",
+                  auth: { kind: "oauth" },
+                  reasoning: "high",
+                },
+                resolution: { mode: "exact" },
+              },
+              resolved: {
+                provider: "anthropic",
+                model: "claude-sonnet-5",
+                auth: { kind: "api-key" },
+                reasoning: "high",
+                runtime: "pi",
+              },
+              fallbackUsed: true,
+              resolutionReason: "Requested model was rate limited.",
+            },
+          },
+        },
+      ],
+      lastSeq: 1,
+      hasMore: false,
+      diagnostics: [],
+    });
+    const user = userEvent.setup();
+    render(<LiveGraphConsole projectId="default" runsConsole={<div>typed run console</div>} />);
+
+    const rail = await screen.findByRole("complementary", { name: "Live work" });
+    await user.click(await within(rail).findByRole("button", { name: /rna-seq/ }));
+
+    const receipts = await screen.findByRole("region", { name: "Model receipts" });
+    expect(within(receipts).getByText("anthropic / claude-opus-5")).toBeInTheDocument();
+    expect(within(receipts).getByText("anthropic / claude-sonnet-5")).toBeInTheDocument();
+    expect(within(receipts).getByText("fallback taken")).toBeInTheDocument();
+  });
+
+  it("offers the promote action on a session graph and creates nothing until asked", async () => {
+    runStateBody = {
+      status: "running",
+      run: {
+        runId: "run-1",
+        prompt: "Cluster the RNA-seq counts.",
+        images: [],
+        baseline: { messages: [], contextUsage: null },
+        frames: RUN_FRAMES,
+        lastSeq: 4,
+      },
+    };
+    const save = vi.spyOn(dagApi, "saveDagWorkflowDefinition");
+    const user = userEvent.setup();
+    render(<LiveGraphConsole projectId="default" runsConsole={<div>typed run console</div>} />);
+
+    const rail = await screen.findByRole("complementary", { name: "Live work" });
+    await user.click(await within(rail).findByRole("button", { name: /RNA clustering/ }));
+    const graph = await screen.findByRole("region", { name: "Session live graph" });
+    await user.click(await within(graph).findByRole("button", { name: "Turn into a DAG" }));
+
+    const dialog = await screen.findByTestId("promote-dialog");
+    expect(dialog).toHaveTextContent("Cluster the RNA-seq counts.");
+    // Opening the preview is not a write.
+    expect(save).not.toHaveBeenCalled();
+  });
+
   it("lists the session's real frames in the drawer, not its projected nodes", async () => {
     runStateBody = {
       status: "running",

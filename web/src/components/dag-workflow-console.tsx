@@ -14,6 +14,10 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import {
+  ModelReceiptCard,
+  parseModelReceipt,
+} from "@/components/console/live-model-receipt";
 import { HelperAgentChat } from "@/components/helper-agent-chat";
 import { PromptOptimizationConsoleSurface } from "@/components/prompt-opt-console";
 import {
@@ -250,6 +254,7 @@ function RunBudgetStrip({ budget }: { budget: WorkflowRunBudgetSummary }) {
 }
 
 function EventRow({ event }: { event: WorkflowRunEvent }) {
+  const receipt = parseModelReceipt(event.data);
   return (
     <li className="border-b px-4 py-3 last:border-b-0">
       <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
@@ -268,6 +273,9 @@ function EventRow({ event }: { event: WorkflowRunEvent }) {
           execution {event.executionId}
         </div>
       ) : null}
+      {/* The requested-vs-resolved receipt, read rather than dumped. The raw
+          payload stays behind the disclosure below for anyone who wants it. */}
+      {receipt ? <ModelReceiptCard receipt={receipt} className="mt-2" /> : null}
       {event.data && Object.keys(event.data).length > 0 ? (
         <details className="mt-2 text-[11px]">
           <summary className="cursor-pointer text-muted-foreground">Event data</summary>

@@ -37,6 +37,8 @@ import {
   RECENT_ACTIVITY_WINDOW_MS,
   SELECTED_IDLE_POLL_MS,
   SELECTED_RUNNING_POLL_MS,
+  sessionProbeCoverage,
+  sessionProbeNotice,
   sessionsToProbe,
   sessionSources,
   SOURCE_FRAME_RING,
@@ -725,7 +727,8 @@ describe("rail run-state probes", () => {
     projectId: "default",
     projectName: "Default",
     title: id,
-    status: "idle",
+    // Discovery's own answer: it knows the chat exists, not whether it runs.
+    status: "unknown",
     live: false,
     lastActivityAt: NOW,
     origins: ["recent"],
@@ -761,11 +764,55 @@ describe("rail run-state probes", () => {
     expect(promoted[0].status).toBe("running");
     expect(promoted[0].live).toBe(true);
     expect(promoted[0].origins).toContain("active-run");
-    // A session with no probe, or a finished one, is left exactly as it was.
+    // A session with no probe is left exactly as it was — still `unknown`,
+    // because the rail never asked.
     expect(promoted[1]).toBe(idle);
-    expect(
-      applySessionRunStates([busy], new Map([[busy.key, { status: "complete", runId: null }]]))[0],
-    ).toBe(busy);
+    expect(promoted[1].status).toBe("unknown");
+  });
+
+  it("only says `idle` about a session the server actually answered for", () => {
+    const asked = sessionSource("asked");
+    const notAsked = sessionSource("not-asked");
+    const applied = applySessionRunStates(
+      [asked, notAsked],
+      new Map([[asked.key, { status: "complete" as const, runId: null }]]),
+    );
+    const byId = new Map(applied.map((source) => [source.id, source]));
+    // "complete" is a real observation: the server was asked and said no run.
+    expect(byId.get("asked")?.status).toBe("idle");
+    expect(byId.get("asked")?.live).toBe(false);
+    // Never probed. `idle` here was a positive false statement about the 9th
+    // open chat, which is exactly what a reader looks at this rail to learn.
+    expect(byId.get("not-asked")?.status).toBe("unknown");
+  });
+
+  it("a `none` probe is also an observation and reads as idle", () => {
+    const [applied] = applySessionRunStates(
+      [sessionSource("quiet")],
+      new Map([[liveSourceKey("session", "default", "quiet"), { status: "none" as const, runId: null }]]),
+    );
+    expect(applied.status).toBe("idle");
+  });
+
+  it("states the probe budget when more chats exist than it watches", () => {
+    const sources = Array.from({ length: 12 }, (_, index) => sessionSource(`s${index}`));
+    const ranks = assignPollRanks(sources, null);
+    const coverage = sessionProbeCoverage(sources, ranks, null);
+    expect(coverage).toEqual({ watched: MAX_CONCURRENT_SESSION_POLLERS, total: 12 });
+    expect(sessionProbeNotice(coverage)).toBe("checking 8 of 12 chats for live status");
+  });
+
+  it("counts the selected chat as watched, and says nothing when every chat is watched", () => {
+    const sources = Array.from({ length: 8 }, (_, index) => sessionSource(`s${index}`));
+    const selectedKey = sources[7].key;
+    const ranks = assignPollRanks(sources, selectedKey);
+    // The selected chat is excluded from `sessionsToProbe` because
+    // `useSessionGraph` polls it directly, so it is still watched.
+    expect(sessionProbeCoverage(sources, ranks, selectedKey)).toEqual({
+      watched: 8,
+      total: 8,
+    });
+    expect(sessionProbeNotice({ watched: 8, total: 8 })).toBeNull();
   });
 
   it("polls run state for the probed sessions and reports the running one", async () => {

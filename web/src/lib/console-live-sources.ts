@@ -88,12 +88,29 @@ export type LiveSourceKind = "dag-run" | "session";
 export type LiveSourceOrigin = "dag-run" | "open-tab" | "recent" | "active-run";
 
 export type LiveSourceStatus =
+  /** Never probed. NOT a claim: the rail must not say "idle" about a chat it never asked about. */
+  | "unknown"
   | "queued"
   | "running"
   | "idle"
   | "ok"
   | "error"
   | "cancelled";
+
+/**
+ * How much a status claims, so a merge of two discovery inputs keeps the
+ * strongest one. `unknown` is weakest by construction: it is the absence of an
+ * observation, and any real observation must win over it.
+ */
+const STATUS_STRENGTH: Record<LiveSourceStatus, number> = {
+  unknown: 0,
+  idle: 1,
+  queued: 2,
+  ok: 2,
+  error: 2,
+  cancelled: 2,
+  running: 3,
+};
 
 export interface LiveSource {
   /** `${kind}:${projectId}:${id}` — stable across polls and projects. */
@@ -256,7 +273,11 @@ export function sessionSources(
       projectId,
       projectName,
       title: sessionTitle(row),
-      status: "idle",
+      // Discovery only knows this chat EXISTS and when it was last touched.
+      // Whether it is running right now lives on GET /sessions/:id/run/state,
+      // which only the ranked-in sessions are probed for, so a row starts out
+      // saying nothing rather than claiming to be idle.
+      status: "unknown",
       live: false,
       lastActivityAt,
       origins: isProjectBusy(projectActivity) ? ["recent", "active-run"] : ["recent"],
@@ -298,7 +319,9 @@ export function openTabSources(
     projectId: tab.projectId,
     projectName: projectNames.get(tab.projectId) ?? tab.projectId,
     title: tab.title || tab.sessionId,
-    status: "idle" as LiveSourceStatus,
+    // Same as `sessionSources`: an open tab is a reason to LIST the chat, not
+    // an observation of whether it is running.
+    status: "unknown" as LiveSourceStatus,
     live: false,
     // An open tab is "here now" even when its transcript is old, so it sorts
     // with the freshest work rather than falling off the 30-minute window.
@@ -336,7 +359,7 @@ export function mergeLiveSources(groups: readonly (readonly LiveSource[])[]): Li
       if (existing.title === existing.id && source.title !== source.id) {
         existing.title = source.title;
       }
-      if (existing.status === "idle" && source.status !== "idle") {
+      if (STATUS_STRENGTH[source.status] > STATUS_STRENGTH[existing.status]) {
         existing.status = source.status;
       }
       if (existing.projectName === existing.projectId) {
@@ -872,17 +895,25 @@ export function sessionsToProbe(
 }
 
 /**
- * Fold probe results back into the rail's rows: a session the server reports as
+ * Fold probe results back into the rail's rows. A session the server reports as
  * running is `running` with the live badge and an `active-run` origin, and it
- * re-sorts to the top exactly the way discovery would have ordered it.
+ * re-sorts to the top exactly the way discovery would have ordered it. A
+ * session the server answered for and reported NOT running becomes `idle` —
+ * that is a real observation. A session with no probe at all stays `unknown`,
+ * because the rail never asked: `idle` there is a false statement about the 9th
+ * open chat, which is exactly what a reader is looking for.
  */
 export function applySessionRunStates(
   sources: readonly LiveSource[],
   probes: ReadonlyMap<string, SessionRunProbe>,
 ): LiveSource[] {
   const applied = sources.map((source) => {
+    if (source.kind !== "session") return source;
     const probe = probes.get(source.key);
-    if (!probe || source.kind !== "session" || probe.status !== "running") return source;
+    if (!probe) return source;
+    if (probe.status !== "running") {
+      return { ...source, status: "idle" as LiveSourceStatus, live: false };
+    }
     return {
       ...source,
       status: "running" as LiveSourceStatus,
@@ -893,6 +924,41 @@ export function applySessionRunStates(
     };
   });
   return applied.sort(compareLiveSources);
+}
+
+/**
+ * How many of the rail's chats are actually being watched for run state, and
+ * how many exist. The probe budget (MAX_CONCURRENT_SESSION_POLLERS) is a real
+ * bound on what the console knows, and round 1's M5 already established that a
+ * bound this surface applies must be stated ("showing 19 of 30 busy projects")
+ * rather than left silent.
+ *
+ * The selected session counts as watched: it is excluded from `sessionsToProbe`
+ * precisely because `useSessionGraph` polls it directly.
+ */
+export function sessionProbeCoverage(
+  sources: readonly LiveSource[],
+  ranks: ReadonlyMap<string, number>,
+  selectedKey: string | null,
+  cap = MAX_CONCURRENT_SESSION_POLLERS,
+): { watched: number; total: number } {
+  const sessions = sources.filter((source) => source.kind === "session");
+  const watched = sessions.filter(
+    (source) => source.key === selectedKey || (ranks.get(source.key) ?? cap) < cap,
+  ).length;
+  return { watched, total: sessions.length };
+}
+
+/**
+ * The rail chip for that bound, or null when every chat is watched. Kept beside
+ * `discoveryNotices` in wording and shape; it lives apart only because the
+ * probe plan is decided after discovery, from the ranks.
+ */
+export function sessionProbeNotice(
+  coverage: { watched: number; total: number },
+): string | null {
+  if (coverage.total <= coverage.watched) return null;
+  return `checking ${coverage.watched} of ${coverage.total} chats for live status`;
 }
 
 /**
@@ -1015,6 +1081,12 @@ export interface SessionGraphState {
    */
   frames: SessionFrame[];
   runStatus: SessionRunStatus;
+  /**
+   * True once a run-state read for THIS session has actually succeeded. Until
+   * then `runStatus` is the initial `"none"`, which the rail must not publish
+   * as `idle` — same rule as an unprobed row.
+   */
+  observed: boolean;
   error: string | null;
   loading: boolean;
 }
@@ -1042,6 +1114,7 @@ export function useSessionGraph(options: {
     projection: emptySessionGraph(sessionId ?? ""),
     frames: [],
     runStatus: "none",
+    observed: false,
     error: null,
     loading: true,
   }));
@@ -1055,6 +1128,7 @@ export function useSessionGraph(options: {
       projection: projectionRef.current,
       frames: [],
       runStatus: "none",
+      observed: false,
       error: null,
       loading: Boolean(sessionId),
     });
@@ -1125,6 +1199,7 @@ export function useSessionGraph(options: {
           projection: projectionRef.current,
           frames: framesRef.current,
           runStatus: snapshot.status,
+          observed: true,
           error: null,
           loading: false,
         });

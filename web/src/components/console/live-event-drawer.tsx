@@ -16,6 +16,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { GripVerticalIcon, XIcon } from "lucide-react";
 
 import { HelperAgentChat } from "@/components/helper-agent-chat";
+import {
+  ModelReceiptCard,
+  modelReceiptsFrom,
+} from "@/components/console/live-model-receipt";
 import { virtualTreeRange } from "@/lib/file-tree-virtualization";
 import { cn } from "@/lib/utils";
 
@@ -141,6 +145,34 @@ function VirtualizedEvents({ events }: { events: LiveDrawerEvent[] }) {
         </ul>
       </div>
     </div>
+  );
+}
+
+/**
+ * The requested-vs-resolved model receipts carried by the events currently in
+ * the drawer, lifted out of the virtualized list.
+ *
+ * They sit above the list rather than inside a row for two reasons: the row
+ * list is fixed-height virtualized (DRAWER_ROW_HEIGHT), so a variable-height
+ * row would mis-place every row after it; and the requirement is that receipts
+ * stay VISIBLE — scrolling several hundred events to find the one that recorded
+ * which model actually served the run is not visible.
+ */
+function ModelReceipts({ events }: { events: LiveDrawerEvent[] }) {
+  const receipts = modelReceiptsFrom(events.map((event) => event.data));
+  if (receipts.length === 0) return null;
+  return (
+    <section
+      aria-label="Model receipts"
+      className="shrink-0 space-y-1 border-b border-border/60 px-3 py-2"
+    >
+      <h3 className="font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+        Requested vs resolved ({receipts.length})
+      </h3>
+      {receipts.map((receipt, index) => (
+        <ModelReceiptCard key={receipt.slotId ?? `receipt-${index}`} receipt={receipt} />
+      ))}
+    </section>
   );
 }
 
@@ -288,7 +320,10 @@ export function LiveEventDrawer({
             {emptyMessage}
           </p>
         ) : (
-          <VirtualizedEvents events={events} />
+          <>
+            <ModelReceipts events={events} />
+            <VirtualizedEvents events={events} />
+          </>
         )}
       </div>
     </aside>

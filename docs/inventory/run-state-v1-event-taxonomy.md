@@ -1,4 +1,21 @@
-# RunState v1 + chat-run event taxonomy (lane W4, round 1)
+# RunState v1 + chat-run event taxonomy (lane W4, rounds 1-3)
+
+> **Subordinate to `docs/contracts/RUNSTATE-V1.md` (contract freeze V-5).** That
+> document and `RunStateV1Schema` are the contract; this file is a derived
+> reading of the code that consumes it, written for lane W4's console work. It
+> **does not extend, narrow, or amend the frozen union**, and it is not a place
+> a change to that union may be recorded: per `RUNSTATE-V1.md:3-5`, S8 and later
+> lanes may extend the contract only through a change that updates that document
+> and `RunStateV1Schema` together. Where this file and the contract disagree,
+> the contract is right and this file is stale — fix it here.
+>
+> §1 below mirrors the frozen union; §§2-6 describe the *chat run*
+> (`GET /sessions/:id/run/state`, `server/src/agent/run-broker.ts`), which is a
+> different surface and is **not** under the V-5 freeze. §0 is the distinction.
+>
+> W4 asked for a reciprocal pointer line in `RUNSTATE-V1.md` itself;
+> `docs/contracts/` is outside W4's writable set, so the exact text is a handoff
+> request in `s11/claude-lanes/w4-r3.report.md`.
 
 Derived by reading the code, then confirmed against a hermetic preview
 (`scripts/preview-up.mjs --backend-port 18500 --frontend-port 13500
@@ -315,7 +332,46 @@ the server sent is invisible in the console.
 
 ---
 
-## 6. Not covered by this round
+## 6. Promote: which parts of this vocabulary become a typed node (round 3)
+
+`web/src/lib/session-dag-projection-promote.ts` turns a folded session into a
+`WorkflowGraphDocument` that `PUT /dag-workflows/:id` accepts. The typed node
+union (`server/src/workflows/schema.ts:478-487`) is `agent`,
+`research-until-goal`, `council`, `fusion`, `prompt-optimization`, `best-of-n`,
+`evidence-gate`, `lean4`. None of them means "a tool call" or "a delegated
+subagent", so the mapping is deliberately narrow and everything outside it is
+**reported**, never dropped:
+
+| Projection node | Typed node | Why |
+|---|---|---|
+| `session` root | *(the workflow itself)* | The document is the session; it is not a node inside itself. |
+| `turn` with retained user text | `agent`, `prompt` = the whole user message | The only faithful mapping: the instruction is text the user actually sent. |
+| `turn` with no retained user text | *(none — reported)* | The ring evicted it, or the turn was opened by a tool. A substitute prompt would be an instruction the user never wrote. |
+| `tool` | *(none — reported)* | No typed node executes a tool. The tool's name is kept on the owning turn's node `description`. |
+| `subagent` | *(none — reported)* | Same; recorded on the turn's `description`. |
+| `group` (collapsed tools) | *(none — reported)* | The collapsed calls' identities are not in the projection at all. |
+| `dag` (delegated typed run) | *(none — reported)* | A link to a run that already exists; promoting a chat must not copy it. |
+| `event:<seq>` (unmodelled frame) | *(none — reported)* | §4.2's fallback. A typed node here would be a guess about a frame this fold deliberately refuses to guess about. |
+
+Shape: one `agent` node per representable turn, chained in conversation order
+with `always` edges, entry at the first, terminal at the last. Every node gets a
+read-only workspace with no write paths, and the workflow's `defaultModel` is
+Kady Current requested `exact` — a chat records no provider or model, and naming
+one would invent a decision it never made.
+
+Two facts about the typed route that this lane learned by running
+`validateWorkflowGraphDocument` over the produced documents rather than by
+reading the schema:
+
+* `document.id` must equal the workflow id in the URL, or the store answers
+  `INVALID_DEFINITION` (`server/src/workflows/store.ts:2241-2247`).
+* `limits.maxSubagents` may not be `0`. Every model-driven node demands one
+  Pi-subagent execution slot (`deriveWorkflowNodeDemand` →
+  `minimumConcurrentSubagents: 1`, `server/src/workflows/validate.ts:534-545`),
+  so a zero-subagent workflow is rejected with
+  `node-subagent-demand-exceeds-limit`.
+
+## 7. Not covered by this round
 
 * The DAG-run graph (`projectRunToGraph`) needs the executed-document snapshot
   from `GET /dag-workflow-runs/:id` (probe B6, lane W3-R1). It is **not**
@@ -324,4 +380,8 @@ the server sent is invisible in the console.
   persisted events, which is the whole of the contract that does not need the
   snapshot.
 * `GET /sessions/:id/history` as a "load older" source (see §3.1).
-* Promote-this-session-to-a-DAG (W4-R3).
+* Promoting a *sub-range* of a session (a chosen window of turns) rather than
+  the whole retained conversation.
+* Deliberation staffing receipts (`WorkflowDeliberationStaffingReceipt`,
+  `server/src/workflows/run-state.ts:145-152`). Round 3 renders the **model**
+  resolution receipts; the staffing receipt has no rendered surface yet.

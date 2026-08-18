@@ -22,12 +22,34 @@ import {
 import { cn } from "@/lib/utils";
 
 const STATUS_DOT: Record<LiveSourceStatus, string> = {
+  unknown: "bg-transparent ring-1 ring-inset ring-zinc-500",
   queued: "bg-amber-500",
   running: "bg-cyan-500",
   idle: "bg-zinc-500",
   ok: "bg-emerald-500",
   error: "bg-destructive",
   cancelled: "bg-zinc-600",
+};
+
+/**
+ * What the row SAYS. Every other status is an observation and reads as itself;
+ * `unknown` is the absence of one, so it must not be spelled with a word that
+ * asserts something. "idle" here was a positive false statement about the 9th
+ * open chat — it sat outside the run-state probe cap and was never asked.
+ */
+const STATUS_LABEL: Record<LiveSourceStatus, string> = {
+  unknown: "not checked",
+  queued: "queued",
+  running: "running",
+  idle: "idle",
+  ok: "ok",
+  error: "error",
+  cancelled: "cancelled",
+};
+
+const STATUS_TITLE: Partial<Record<LiveSourceStatus, string>> = {
+  unknown:
+    "Outside the run-state probe budget, so the Console has not asked whether this chat is running. Select it to watch it live.",
 };
 
 const ORIGIN_LABEL: Record<LiveSourceOrigin, string> = {
@@ -82,7 +104,12 @@ function SourceRow({
           <span className="truncate rounded border border-border/70 px-1" title={source.projectName}>
             {source.projectName}
           </span>
-          <span>{source.status}</span>
+          <span
+            data-status={source.status}
+            {...(STATUS_TITLE[source.status] ? { title: STATUS_TITLE[source.status] } : {})}
+          >
+            {STATUS_LABEL[source.status]}
+          </span>
           <span className="ml-auto shrink-0">
             {formatElapsed(now - source.lastActivityAt)}
           </span>

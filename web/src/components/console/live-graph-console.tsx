@@ -6,14 +6,21 @@
 // initially, the LLM's logs should be able to turn into a DAG here & be viewed
 // live."
 //
-// Round 1 delivers the session half plus the shell:
+// The surface:
 //   left rail   — every DAG run and chat session this browser can see running
 //   main        — a chat session's LLM logs folded into a live graph
 //                 (lib/session-dag-projection.ts), or the typed run console
 //                 when nothing is selected
-//   right drawer— the ordered events behind the selected node
+//   right drawer— the ordered events behind the selected node, plus the
+//                 requested-vs-resolved model receipts they carry
 //
-// The DAG-run *graph* is round 2: it needs the executed-document snapshot from
+// Round 3 adds the VERB. "Turn into a DAG" on a session graph opens
+// live-promote-dialog.tsx, which previews the typed document that
+// lib/session-dag-projection-promote.ts derives and, only when the reader says
+// so, creates it through PUT /dag-workflows/:id. Nothing about the session or
+// its run is mutated by promoting it.
+//
+// The DAG-run *graph* still needs the executed-document snapshot from
 // GET /dag-workflow-runs/:id, which is server data this lane cannot fabricate
 // (a run of a since-edited workflow would render the wrong topology). Selecting
 // a run therefore says so, in words, instead of showing a spinner or a guess.
@@ -27,6 +34,7 @@ import {
   LiveEventDrawer,
   type LiveDrawerEvent,
 } from "@/components/console/live-event-drawer";
+import { LivePromoteDialog } from "@/components/console/live-promote-dialog";
 import { LiveSourceRail } from "@/components/console/live-source-rail";
 import {
   applySessionRunStates,
@@ -39,6 +47,8 @@ import {
   matchDeepLink,
   nextPollDelayMs,
   parseDeepLink,
+  sessionProbeCoverage,
+  sessionProbeNotice,
   sessionsToProbe,
   useOpenWork,
   useSessionGraph,
@@ -278,6 +288,11 @@ function runDrawerEvents(events: WorkflowRunEvent[]): LiveDrawerEvent[] {
     // Hover-only: the execution id is a 32-hex opaque token, not something the
     // reader scans a list for.
     ...(event.executionId !== undefined ? { hint: `execution ${event.executionId}` } : {}),
+    // Carried so the drawer can render the durable model-resolution receipts a
+    // `model_resolved` event holds. It was declared on LiveDrawerEvent and never
+    // populated, which made the live console strictly less informative about a
+    // run than the durable one.
+    ...(event.data !== undefined ? { data: event.data } : {}),
     ts: event.ts,
   }));
 }
@@ -369,6 +384,8 @@ interface SessionGraphSnapshot {
   projection: SessionGraphProjection;
   frames: SessionFrame[];
   runStatus: SessionRunStatus;
+  /** A run-state read for this session has succeeded at least once. */
+  observed: boolean;
 }
 
 export function LiveGraphConsole({
@@ -445,7 +462,11 @@ export function LiveGraphConsole({
     enabled: active,
   });
   const runStates = useMemo<ReadonlyMap<string, SessionRunProbe>>(() => {
-    if (!sessionSnapshot) return probes;
+    // Only a snapshot that has genuinely read run state speaks for its row. A
+    // freshly selected session sits at the initial `runStatus: "none"` until
+    // its first poll returns, and publishing that would badge it `idle` on the
+    // strength of a read that has not happened.
+    if (!sessionSnapshot || !sessionSnapshot.observed) return probes;
     const merged = new Map(probes);
     merged.set(sessionSnapshot.sourceKey, {
       status: sessionSnapshot.runStatus,
@@ -538,6 +559,16 @@ export function LiveGraphConsole({
         )
       : [];
 
+  // The probe budget is a real bound on what this surface knows, so it is
+  // stated next to discovery's own truncation chips instead of being left to a
+  // reader to infer from eight `running` rows and a tail of quiet ones.
+  const railNotices = useMemo(() => {
+    const probeNotice = sessionProbeNotice(
+      sessionProbeCoverage(liveSources, ranks, selectedKey),
+    );
+    return probeNotice === null ? notices : [...notices, probeNotice];
+  }, [liveSources, notices, ranks, selectedKey]);
+
   const emptyMessage = describeEmptyState(allProjects ? null : activeProjectName);
   // The URL named something discovery cannot see. Silence read as "nothing is
   // running" even when the link pointed at a real run that had just finished.
@@ -557,7 +588,7 @@ export function LiveGraphConsole({
         allProjects={allProjects}
         onAllProjectsChange={setAllProjects}
         error={error}
-        notices={notices}
+        notices={railNotices}
         deepLinkNotice={deepLinkNotice}
         emptyMessage={emptyMessage}
         now={now}
@@ -628,7 +659,7 @@ function SessionGraphView({
   onSelectNode: (node: SessionGraphNode, source: LiveSource) => void;
   onSnapshot: (snapshot: SessionGraphSnapshot) => void;
 }) {
-  const { projection, frames, runStatus, error } = useSessionGraph({
+  const { projection, frames, runStatus, observed, error } = useSessionGraph({
     projectId: source.projectId,
     sessionId: source.id,
     selected: true,
@@ -636,10 +667,14 @@ function SessionGraphView({
     enabled: active,
   });
   const sourceKey = source.key;
+  const [promoteOpen, setPromoteOpen] = useState(false);
   useEffect(() => {
-    onSnapshot({ sourceKey, projection, frames, runStatus });
-  }, [frames, onSnapshot, projection, runStatus, sourceKey]);
+    onSnapshot({ sourceKey, projection, frames, runStatus, observed });
+  }, [frames, observed, onSnapshot, projection, runStatus, sourceKey]);
   const notices = projectionNotices(projection);
+  // A chat with no turn folded yet has nothing to promote, and offering the
+  // action anyway would open a dialog whose only content is a refusal.
+  const promotable = projection.nodes.some((node) => node.kind === "turn");
   return (
     <section
       className="flex min-h-0 flex-1 flex-col"
@@ -659,7 +694,29 @@ function SessionGraphView({
         <span className="ml-auto font-mono text-[10px] text-muted-foreground">
           {projection.nodes.length} nodes · cursor {projection.cursor}
         </span>
+        {promotable ? (
+          <button
+            type="button"
+            onClick={() => setPromoteOpen(true)}
+            className="shrink-0 rounded-md border border-cyan-500/50 px-2 py-0.5 font-mono text-[10px] text-cyan-700 transition-colors hover:bg-cyan-500/10 dark:text-cyan-300"
+          >
+            Turn into a DAG
+          </button>
+        ) : null}
       </header>
+
+      {promoteOpen ? (
+        <LivePromoteDialog
+          open={promoteOpen}
+          onOpenChange={setPromoteOpen}
+          projectId={source.projectId}
+          projectName={source.projectName}
+          sessionId={source.id}
+          sessionTitle={source.title}
+          projection={projection}
+          frames={frames}
+        />
+      ) : null}
 
       {notices.length > 0 && (
         <div className="flex shrink-0 flex-wrap gap-1 border-b border-border/60 px-3 py-1">
