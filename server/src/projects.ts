@@ -417,6 +417,23 @@ function projectGitArguments(args: string[]): string[] {
  * discovery runs synchronously while this module initialises, so it is bounded
  * and falls through to the pinned fallback when the bound is hit.
  */
+/**
+ * What a failed project Git invocation is allowed to say.
+ *
+ * `execFileSync` puts the whole argv in its message, and for this module that
+ * argv is the overrides-laden project Git command line — which then reaches the
+ * client as the detail of an unclassified 500. Every one of these failures is
+ * either a bug here or the sandbox breaking its own repository underneath a
+ * write; neither is worth handing back the command line. Name the operation and
+ * the sandbox, keep the exit status, drop the rest.
+ */
+function projectGitFailure(operation: string, sandbox: string, error: unknown): Error {
+  const status = (error as { status?: number | null }).status;
+  return new Error(
+    `Project git ${operation} failed for ${sandbox}: exited ${status ?? "abnormally"}`,
+  );
+}
+
 const GIT_DISCOVERY_TIMEOUT_MS = 2_000;
 
 function discoverGitLocalEnvironmentKeys(): string[] | null {
@@ -607,6 +624,14 @@ interface ProjectRepositoryProof {
    * may be written through it until it has been relocated beside the sandbox.
    */
   repositoryIsInsideSandbox: boolean;
+  /**
+   * Our own pointer file survives in the sandbox naming a repository directory
+   * that is gone. The ownership is `absent` — there is no repository — but the
+   * pointer has to be removed before one can be created, because `git init`
+   * handed a worktree whose `.git` is a gitfile naming a missing directory
+   * fails outright rather than replacing it.
+   */
+  pointerOutlivedItsRepository: boolean;
 }
 
 function gitOutputOrNull(
@@ -662,6 +687,30 @@ function resolveRealPath(target: string): string {
 }
 
 /**
+ * A path resolved through its parent, keeping its last component as written.
+ *
+ * `fs.realpathSync` answers nothing at all for a path whose last component is
+ * missing, and `resolveRealPath`'s fallback then leaves the symlinked
+ * components *above* it unresolved too. Comparing the pointer's target with
+ * the repository directory that way went wrong in exactly one case and it is
+ * the case that matters: once the repository directory is deleted, one side of
+ * the comparison is `/tmp/…/sandbox.git` and the other is
+ * `/private/tmp/…/sandbox.git`, so the module refused its own pointer instead
+ * of recovering. The parent — the project directory — always exists, so
+ * resolving that and re-joining the basename gives the same answer whether or
+ * not the leaf is there.
+ *
+ * The leaf is deliberately not resolved. Whether it is itself a symbolic link
+ * is proven separately, by `lstat` and by the subtree rule; resolving it here
+ * would instead make a symlinked repository directory compare equal to
+ * whatever it names.
+ */
+function resolveRealPathOfParent(target: string): string {
+  const resolved = path.resolve(target);
+  return path.join(resolveRealPath(path.dirname(resolved)), path.basename(resolved));
+}
+
+/**
  * The worktree a common Git directory belongs to: its parent for the usual
  * `<toplevel>/.git`, otherwise the directory itself (a submodule's
  * `.git/modules/<name>` has no toplevel of its own).
@@ -673,34 +722,44 @@ function toplevelOwningCommonDirectory(resolvedCommonDirectory: string): string 
 }
 
 /**
- * Where a project's Git repository actually lives: beside the sandbox, never
- * inside it.
+ * Where a project's Git repository lives: beside the sandbox, at
+ * `<sandbox>.git`, never inside it.
  *
- * Every invariant below proves something *about* `<sandbox>/.git` — that it is
- * a real directory, that the repository claiming the sandbox is the sandbox,
- * that the claim resolves to its own store, that no enclosing checkout owns it.
- * None of them says anything about the *contents* of that directory, and the
- * directory sits inside the sandbox, which is the agent's own `cwd`. Replacing
- * `<sandbox>/.git/objects` or `<sandbox>/.git/refs` with a symlink at a
- * checkout next door left every one of those invariants answering correctly
- * while `hash-object` planted the sandbox's blobs in that checkout and
- * `update-ref` planted a Kady-authored `refs/heads/main` in it — `fsck` clean,
- * so nothing announced it.
+ * Round 18 moved it here from `<sandbox>/.git` and asserted that this put it
+ * out of the sandbox's reach. That assertion was false, and correcting it
+ * matters more than the move did. The main agent session is created with
+ * `cwd: paths.sandbox` and a tool list containing `bash`
+ * (`agent/tools.ts`, `agent/session-registry.ts`); that shell runs as the
+ * server user, with no path filter in the tool and no OS confinement anywhere
+ * in this server. `cd ..` reaches this directory. `../../<other>/sandbox.git`
+ * reaches another project's. An absolute path reaches anything the server user
+ * can write, including a host-private root under `$HOME`.
  *
- * The answer is not a list of the entries an attacker may symlink. `.git` gains
- * entries across Git versions, and a hand-maintained list is the shape that was
- * wrong in rounds 14, 15 and 16. This removes the premise instead: the
- * repository directory is moved to `<sandbox>.git`, a sibling of the sandbox
- * and outside it, and `<sandbox>/.git` becomes the pointer file Git itself
- * writes for `--separate-git-dir`. There is then nothing inside the sandbox for
- * a symlink to redirect — the only Git entry the agent can reach is the
- * pointer, and a pointer that does not resolve to this sandbox's own repository
- * directory is refused rather than followed.
+ * So *location is not a boundary here*, and no choice of location makes it one:
+ * moving the repository to a repositories root outside the projects root would
+ * lengthen the path an attacker types and nothing else, while orphaning
+ * repositories on `deleteProject`, breaking the "a project is self-contained
+ * under `projects/<id>/`" layout this file documents, and spending a second
+ * on-disk migration in two rounds. Turning location back into a boundary needs
+ * something outside this module: a path filter on the agent's own tools, OS
+ * confinement of the agent process, or running Git as a different uid.
  *
- * The premise this rests on is the one the sandbox exists to state: the agent
- * writes inside `<sandbox>`. Code that can write to `<sandbox>.git` can equally
- * write to `project.json` and to every other project file, which is a different
- * containment failure from this one.
+ * What this module can do is refuse to write *through* a repository directory
+ * it has not just proven. The invariants below prove things about
+ * `<sandbox>/.git` and about which repository claims the sandbox; the subtree
+ * rule proves the contents of the directory those writes are bound to; and
+ * since round 19 the second is re-proven immediately before every Git process
+ * that writes, rather than once when the directory was attached — see
+ * `projectGitWrite`. That is what closes the attack this comment used to deny:
+ * two `ln -s` from the agent's own shell replacing `<sandbox>.git/objects` and
+ * `<sandbox>.git/refs` with links at a checkout next door, after which every
+ * ownership question still answered correctly while `hash-object` and
+ * `update-ref` planted a Kady-authored commit and its objects in that
+ * checkout, `fsck` clean, so nothing announced it.
+ *
+ * The pointer file keeps its shape: `<sandbox>/.git` is the gitfile Git itself
+ * writes for `--separate-git-dir`, and a pointer that does not resolve to this
+ * sandbox's own repository directory is refused rather than followed.
  */
 function projectRepositoryDirectory(sandbox: string): string {
   const resolved = path.resolve(sandbox);
@@ -721,6 +780,19 @@ function gitDirectoryPointerContents(repositoryDirectory: string): string {
  * writes into that file, anything running in the sandbox can write too, so
  * "the host wrote it" is not a property the file can carry; where it points is
  * the property that decides whether following it is safe.
+ *
+ * This parse deliberately diverges from Git's and must stay stricter, not
+ * looser. `read_gitfile_gently` requires `"gitdir: "` including the space and
+ * then takes everything from byte 8 to the end of the buffer, so a file with a
+ * second line names one path to Git and a different, shorter one here. Both
+ * directions of that divergence land on a refusal today — no space fails the
+ * prefix test and is refused as a pointer this module will not follow, and a
+ * junk second line parses here to the project's own repository and then leaves
+ * Git unable to resolve `…/sandbox.git\nJUNK`, so the ownership proof prints
+ * fewer lines than it needs and refuses. Making the parse match Git's byte for
+ * byte would be the permissive direction: it would start following targets
+ * that are currently refused, and the two parses would still have to agree for
+ * that to be safe. Refusing what the two read differently is the safe half.
  */
 function gitDirectoryPointerTarget(sandbox: string): string | null {
   let contents: string;
@@ -738,15 +810,29 @@ function gitDirectoryPointerTarget(sandbox: string): string | null {
 /**
  * Refuse a repository directory holding a symbolic link anywhere inside it.
  *
- * This only ever runs on a directory that has just been moved out of the
- * sandbox, or one that is about to be re-attached to it — the two moments when
- * its contents could still have come from inside the sandbox. Afterwards the
- * directory is out of reach, so the hot path never pays for this walk.
- *
  * Git creates no symbolic link under a Git directory, so the rule is about the
  * whole subtree rather than about the handful of entries that happen to matter
  * today: burying the link deeper does not get around it, and an entry Git
  * invents in a later version is covered without being named.
+ *
+ * Round 18 ran this only when the directory was relocated or re-attached, on
+ * the reasoning that it was afterwards out of the sandbox's reach. It is not —
+ * see `projectRepositoryDirectory` — so a link planted after the attach was
+ * never looked at again, and that is the whole of the attack this round
+ * closes. It now also runs immediately before each Git process that writes,
+ * through `projectGitWrite`, which is the moment its answer is actually
+ * load-bearing.
+ *
+ * What it covers is symbolic links, and only those. A hard link is
+ * indistinguishable from an ordinary file and passes; that is deliberate
+ * rather than overlooked. A hard link is not a write primitive here — hard
+ * links to directories are unavailable to a non-root user, and every file Git
+ * rewrites under a Git directory (`config`, `packed-refs`, loose refs, loose
+ * objects, the index) it rewrites through a lock file plus `rename`, which
+ * breaks the link rather than writing through it — while refusing a link count
+ * above one would refuse a repository that an ordinary `git clone --local`
+ * elsewhere on the machine had hard-linked objects out of. Bind mounts are in
+ * the same category and cannot be distinguished from a directory at all.
  */
 function refuseRepositoryDirectoryHoldingSymlink(
   resolvedSandbox: string,
@@ -947,7 +1033,16 @@ function inspectProjectRepositoryOwnership(sandbox: string): ProjectRepositoryPr
     const pointerTarget = gitEntry.isFile() ? gitDirectoryPointerTarget(sandbox) : null;
     if (
       pointerTarget === null ||
-      !isSamePath(resolveRealPath(pointerTarget), resolveRealPath(repositoryDirectory))
+      !isSamePath(
+        // Both sides resolved the same way, and through the parent rather than
+        // the leaf: `git init --separate-git-dir` writes the realpath into the
+        // pointer while this module computes the path as configured, so on a
+        // projects root with a symlinked component the two agree only while the
+        // repository directory exists to be resolved. See
+        // `resolveRealPathOfParent`.
+        resolveRealPathOfParent(pointerTarget),
+        resolveRealPathOfParent(repositoryDirectory),
+      )
     ) {
       throw new ProjectRepositoryContainmentError(
         resolvedSandbox,
@@ -965,7 +1060,11 @@ function inspectProjectRepositoryOwnership(sandbox: string): ProjectRepositoryPr
       // Our own pointer, naming a repository that is gone. Treated as no
       // repository at all, so `git init --separate-git-dir` writes both again
       // rather than every later call failing to resolve a dangling pointer.
-      return { ownership: "absent", repositoryIsInsideSandbox: false };
+      return {
+        ownership: "absent",
+        repositoryIsInsideSandbox: false,
+        pointerOutlivedItsRepository: true,
+      };
     }
     if (!repositoryEntry.isDirectory()) {
       // The repository directory sits outside the sandbox, so this is not
@@ -980,6 +1079,7 @@ function inspectProjectRepositoryOwnership(sandbox: string): ProjectRepositoryPr
     return {
       ownership: proveSandboxOwnsRepository(sandbox, resolvedSandbox, repositoryDirectory),
       repositoryIsInsideSandbox: false,
+      pointerOutlivedItsRepository: false,
     };
   }
 
@@ -1002,6 +1102,7 @@ function inspectProjectRepositoryOwnership(sandbox: string): ProjectRepositoryPr
         path.join(sandbox, ".git"),
       ),
       repositoryIsInsideSandbox: true,
+      pointerOutlivedItsRepository: false,
     };
   }
 
@@ -1010,7 +1111,13 @@ function inspectProjectRepositoryOwnership(sandbox: string): ProjectRepositoryPr
   // at a source checkout — a configuration error, not something to initialize
   // a nested repository inside.
   const walkStart = deepestExistingDirectory(sandbox);
-  if (walkStart === null) return { ownership: "absent", repositoryIsInsideSandbox: false };
+  if (walkStart === null) {
+    return {
+      ownership: "absent",
+      repositoryIsInsideSandbox: false,
+      pointerOutlivedItsRepository: false,
+    };
+  }
   const enclosingToplevel = gitOutputOrNull(walkStart, ["rev-parse", "--show-toplevel"]);
   if (enclosingToplevel !== null) {
     const resolvedEnclosing = resolveRealPath(enclosingToplevel);
@@ -1022,7 +1129,11 @@ function inspectProjectRepositoryOwnership(sandbox: string): ProjectRepositoryPr
       );
     }
   }
-  return { ownership: "absent", repositoryIsInsideSandbox: false };
+  return {
+    ownership: "absent",
+    repositoryIsInsideSandbox: false,
+    pointerOutlivedItsRepository: false,
+  };
 }
 
 function processIsRunning(processId: number): boolean {
@@ -1062,6 +1173,80 @@ function acquireProjectRepositoryLock(sandbox: string): () => void {
     }
   }
   throw new Error(`Timed out initializing project repository: ${sandbox}`);
+}
+
+/**
+ * Re-prove that the sandbox still owns the repository the next write is about
+ * to be bound to.
+ *
+ * This is the Git half of the check `projectGitWrite` runs: which repository
+ * claims the sandbox as its toplevel, and whose refs and objects that claim
+ * actually resolves to. It costs a subprocess, and it runs per write invocation
+ * anyway, because the two halves catch different things. The filesystem half —
+ * the subtree rule — catches a symbolic link. It cannot catch a `commondir`
+ * file, which is ordinary text and redirects every ref and object written
+ * through `GIT_DIR` into the repository it names; only Git can answer where its
+ * refs and objects actually resolve, so Git is asked, immediately before each
+ * write rather than once when the repository was attached.
+ */
+function proveProjectRepositoryBeforeWriting(sandbox: string): void {
+  const proof = inspectProjectRepositoryOwnership(sandbox);
+  if (proof.ownership === "absent" || proof.repositoryIsInsideSandbox) {
+    throw new ProjectRepositoryContainmentError(
+      resolveRealPath(sandbox),
+      resolveRealPath(path.join(sandbox, ".git")),
+      "sandbox_is_not_repository_toplevel",
+    );
+  }
+}
+
+/**
+ * Run a Git invocation that writes into the project's repository, proving the
+ * repository directory holds no redirect immediately before the process starts.
+ *
+ * Every write this module performs goes through here, so a call added later
+ * cannot miss the check without also missing `-C`, the pinned subcommand list
+ * and the argument overrides. `read-tree` and `update-index` are deliberately
+ * not routed through it: they write the temporary index named by
+ * `GIT_INDEX_FILE` and nothing in the repository.
+ *
+ * Proving per invocation rather than once per batch is the point. A snapshot
+ * spends tens of milliseconds across seven processes, and `update-ref` — the
+ * process whose write is worth stealing — is the last of them; a single check at
+ * the top of the batch would leave the whole batch as the window. What remains
+ * is the window between these checks returning and the child process opening
+ * the path, which is not closable from inside this process: Git addresses its
+ * repository by path, so any check this module makes is a check about a path
+ * whose meaning the sandbox can change afterwards. Closing that needs the
+ * agent's own tools to stop reaching the path at all, which is not this
+ * module's to write — see `projectRepositoryDirectory`.
+ */
+function projectGitWrite(
+  sandbox: string,
+  args: string[],
+  options: { env: NodeJS.ProcessEnv; input?: string | Buffer; capture?: boolean },
+): string {
+  proveProjectRepositoryBeforeWriting(sandbox);
+  refuseRepositoryDirectoryHoldingSymlink(
+    resolveRealPath(sandbox),
+    projectRepositoryDirectory(sandbox),
+  );
+  let output: string;
+  try {
+    output = execFileSync("git", projectGitArguments(["-C", sandbox, ...args]), {
+      env: options.env,
+      input: options.input,
+      encoding: "utf-8",
+      stdio: [
+        options.input === undefined ? "ignore" : "pipe",
+        options.capture === true ? "pipe" : "ignore",
+        "pipe",
+      ],
+    });
+  } catch (error) {
+    throw projectGitFailure(args[0], sandbox, error);
+  }
+  return options.capture === true ? output.trim() : "";
 }
 
 const BASELINE_EXCLUDED_DIRECTORIES = new Set([
@@ -1111,33 +1296,27 @@ function privacySafeProjectSnapshotPaths(sandbox: string): string[] {
 
 
 /**
- * Stage `permittedPaths` into the temporary index without letting the sandbox's
- * own repository choose what code runs.
+ * Stage exactly `permittedPaths` into the temporary index, recording for each
+ * one the mode and blob `git add --force` would record.
  *
- * `git add` resolves every path through the attribute stack — the sandbox's
- * in-tree `.gitattributes` *and* its `.git/info/attributes`, both writable by
- * whatever runs in the sandbox — and executes the `filter.<driver>.clean`
- * named there, as the server, once per staged file. Unlike `core.hooksPath`
- * this cannot be turned off with `-c`: the driver name is chosen by the
- * attacker, so there is no fixed key to override.
+ * Every blob is hashed by one `hash-object --stdin-paths`, including the two
+ * kinds of entry that cannot be named on that stream as they stand: a symbolic
+ * link, whose content is its target rather than the file it points at, and a
+ * path holding a newline, which the stream cannot delimit. Both are written to
+ * a file in `scratchDirectory` under a plain name and hashed from there —
+ * `--no-filters` means no attribute lookup, so the blob a path produces does
+ * not depend on where the path is, and the object names come out identical.
  *
- * Hashing the bytes here removes the machinery instead of configuring it.
- * `hash-object --no-filters` consults no attributes and runs no filter, and
- * `update-index --index-info` records the object names it is handed.
- *
- * The mode is Git's own rule rather than an approximation of it, because the
- * two diverge on real files: Git reads the *owner* execute bit alone, so a
- * `0654` or `0645` file is `100644` to `git add` and was `100755` here until
- * round 18; and Git honours `core.fileMode`, which it sets to false by itself
- * on filesystems that do not preserve the bit, where `git add` records every
- * file `100644`. Both are read below.
- *
- * The one deliberate behaviour change: content is recorded exactly as it is on
- * disk, so a `text`/`eol` attribute no longer rewrites line endings on the way
- * in — which is what a snapshot of the sandbox's inputs should do anyway.
+ * Doing it in one invocation rather than one per awkward entry is not only
+ * tidier: each write invocation re-proves the repository directory (see
+ * `projectGitWrite`), and a per-entry loop made that proof's cost the product
+ * of the sandbox's symbolic-link count and the repository's size — 200 links
+ * against a repository holding 20,000 loose objects took a snapshot from
+ * 1.1 s to 5.3 s, and both of those numbers are the sandbox's to choose.
  */
 function stageProjectSnapshotPaths(
   sandbox: string,
+  scratchDirectory: string,
   gitEnvironment: NodeJS.ProcessEnv,
   permittedPaths: string[],
 ): void {
@@ -1145,8 +1324,10 @@ function stageProjectSnapshotPaths(
 
   const modeForPath = new Map<string, string>();
   const objectNameForPath = new Map<string, string>();
-  const batchedPaths: string[] = [];
-  const individuallyHashedPaths: string[] = [];
+  // What Git is asked to hash, in order, and which sandbox-relative path each
+  // answer belongs to.
+  const hashedPaths: string[] = [];
+  const pathForAnswer: string[] = [];
   // The effective value, not the repository's own: `git add` resolves this key
   // through the whole config stack, and matching its tree means resolving it
   // the same way. Absent means true, which is what `git init` writes wherever
@@ -1158,64 +1339,50 @@ function stageProjectSnapshotPaths(
       gitEnvironment,
     ) !== "false";
 
+  const stageFromScratch = (relativePath: string, content: Buffer): void => {
+    const scratchPath = path.join(scratchDirectory, `blob-${hashedPaths.length}`);
+    fs.writeFileSync(scratchPath, content);
+    hashedPaths.push(scratchPath);
+    pathForAnswer.push(relativePath);
+  };
+
   for (const relativePath of permittedPaths) {
-    const entry = fs.lstatSync(path.join(sandbox, relativePath));
+    const absolutePath = path.join(sandbox, relativePath);
+    const entry = fs.lstatSync(absolutePath);
     if (entry.isSymbolicLink()) {
+      // A symlink is stored as a blob holding its target, which is what Git
+      // does and what keeps the link from being followed out of the sandbox.
       modeForPath.set(relativePath, "120000");
-      individuallyHashedPaths.push(relativePath);
+      stageFromScratch(relativePath, Buffer.from(fs.readlinkSync(absolutePath)));
       continue;
     }
     // S_IXUSR, the bit Git reads — a file executable only by its group or by
     // others is a regular `100644` blob to Git, and to this.
     const isExecutable = executableBitIsRecorded && (entry.mode & 0o100) !== 0;
     modeForPath.set(relativePath, isExecutable ? "100755" : "100644");
-    // `--stdin-paths` is newline-delimited, so a path containing one cannot go
-    // through the batch and is hashed from its bytes instead.
-    if (/[\n\r]/.test(relativePath)) individuallyHashedPaths.push(relativePath);
-    else batchedPaths.push(relativePath);
-  }
-
-  if (batchedPaths.length > 0) {
-    const objectNames = execFileSync(
-      "git",
-      projectGitArguments(["-C", sandbox, "hash-object", "--no-filters", "-w", "--stdin-paths"]),
-      {
-        env: gitEnvironment,
-        input: batchedPaths.join("\n") + "\n",
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-      },
-    )
-      .trim()
-      .split("\n");
-    if (objectNames.length !== batchedPaths.length) {
-      throw new Error(
-        `git hash-object returned ${objectNames.length} object names for ` +
-          `${batchedPaths.length} paths in ${sandbox}`,
-      );
+    // `--stdin-paths` is newline-delimited, so a path containing one is hashed
+    // from its bytes instead of by name.
+    if (/[\n\r]/.test(relativePath)) stageFromScratch(relativePath, fs.readFileSync(absolutePath));
+    else {
+      hashedPaths.push(relativePath);
+      pathForAnswer.push(relativePath);
     }
-    batchedPaths.forEach((relativePath, index) => {
-      objectNameForPath.set(relativePath, objectNames[index]);
-    });
   }
 
-  for (const relativePath of individuallyHashedPaths) {
-    const absolutePath = path.join(sandbox, relativePath);
-    // A symlink is stored as a blob holding its target, which is what Git does
-    // and what keeps the link from being followed out of the sandbox.
-    const content =
-      modeForPath.get(relativePath) === "120000"
-        ? Buffer.from(fs.readlinkSync(absolutePath))
-        : fs.readFileSync(absolutePath);
-    objectNameForPath.set(
-      relativePath,
-      execFileSync(
-        "git",
-        projectGitArguments(["-C", sandbox, "hash-object", "--no-filters", "-w", "--stdin"]),
-        { env: gitEnvironment, input: content, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
-      ).trim(),
+  const objectNames = projectGitWrite(
+    sandbox,
+    ["hash-object", "--no-filters", "-w", "--stdin-paths"],
+    { env: gitEnvironment, input: hashedPaths.join("\n") + "\n", capture: true },
+  ).split("\n");
+  if (objectNames.length !== hashedPaths.length) {
+    throw new Error(
+      `git hash-object returned ${objectNames.length} object names for ` +
+        `${hashedPaths.length} paths in ${sandbox}`,
     );
   }
+  pathForAnswer.forEach((relativePath, index) => {
+    objectNameForPath.set(relativePath, objectNames[index]);
+  });
 
   // NUL-terminated records, so a path containing a newline or a tab still
   // names exactly one entry.
@@ -1225,16 +1392,21 @@ function stageProjectSnapshotPaths(
         `${modeForPath.get(relativePath)} ${objectNameForPath.get(relativePath)}\t${relativePath}\0`,
     )
     .join("");
-  execFileSync(
-    "git",
-    projectGitArguments(["-C", sandbox, "update-index", "-z", "--index-info"]),
-    { env: gitEnvironment, input: indexRecords, stdio: ["pipe", "ignore", "pipe"] },
-  );
+  try {
+    execFileSync(
+      "git",
+      projectGitArguments(["-C", sandbox, "update-index", "-z", "--index-info"]),
+      { env: gitEnvironment, input: indexRecords, stdio: ["pipe", "ignore", "pipe"] },
+    );
+  } catch (error) {
+    throw projectGitFailure("update-index", sandbox, error);
+  }
 }
 
 /**
  * Create the sandbox's very first commit from a temporary index. Only ever
- * called for a repository the sandbox owns and whose HEAD is unborn.
+ * called for a repository the sandbox owns and whose HEAD is unborn, and under
+ * the repository lock.
  */
 function writeProjectBaselineCommit(sandbox: string): void {
   const temporaryDirectory = fs.mkdtempSync(path.join(path.dirname(sandbox), ".git-baseline-"));
@@ -1245,31 +1417,34 @@ function writeProjectBaselineCommit(sandbox: string): void {
     GIT_LITERAL_PATHSPECS: "1",
   });
   try {
-    execFileSync("git", projectGitArguments(["-C", sandbox, "read-tree", "--empty"]), {
-      env: gitEnvironment,
-      stdio: "ignore",
-    });
-    stageProjectSnapshotPaths(sandbox, gitEnvironment, privacySafeProjectSnapshotPaths(sandbox));
-    const tree = execFileSync("git", projectGitArguments(["-C", sandbox, "write-tree"]), {
-      env: gitEnvironment,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
-    const commit = execFileSync(
-      "git",
-      projectGitArguments(["-C", sandbox, "commit-tree", tree, "-m", "Initialize Kady project"]),
-      {
+    try {
+      execFileSync("git", projectGitArguments(["-C", sandbox, "read-tree", "--empty"]), {
         env: gitEnvironment,
-        encoding: "utf-8",
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    ).trim();
+        stdio: "ignore",
+      });
+    } catch (error) {
+      throw projectGitFailure("read-tree", sandbox, error);
+    }
+    stageProjectSnapshotPaths(
+      sandbox,
+      temporaryDirectory,
+      gitEnvironment,
+      privacySafeProjectSnapshotPaths(sandbox),
+    );
+    const tree = projectGitWrite(sandbox, ["write-tree"], {
+      env: gitEnvironment,
+      capture: true,
+    });
+    const commit = projectGitWrite(
+      sandbox,
+      ["commit-tree", tree, "-m", "Initialize Kady project"],
+      { env: gitEnvironment, capture: true },
+    );
     // The empty old-value makes Git itself refuse the update unless the ref is
     // still unborn: a history that appeared since the check above is never
     // overwritten, even under a lock this process does not hold.
-    execFileSync("git", projectGitArguments(["-C", sandbox, "update-ref", "HEAD", commit, ""]), {
+    projectGitWrite(sandbox, ["update-ref", "HEAD", commit, ""], {
       env: boundProjectGitEnvironment(sandbox),
-      stdio: "ignore",
     });
   } finally {
     fs.rmSync(temporaryDirectory, { recursive: true, force: true });
@@ -1306,6 +1481,72 @@ function relocateProjectRepositoryBesideSandbox(sandbox: string): void {
 }
 
 /**
+ * Create the repository and hand the sandbox its pointer, without ever handing
+ * Git a path inside the sandbox.
+ *
+ * `git init --separate-git-dir=R W` run directly on the sandbox is a
+ * repository-relocation gadget whenever `W/.git` is a symbolic link: Git
+ * *moves* the repository that link names to `R` and leaves a pointer behind in
+ * it. Proving `<sandbox>/.git` absent first does not close that, because the
+ * proof is an `lstat` and the write is a process spawn some milliseconds later,
+ * and one `ln -s` from the sandbox in between is all it takes. Round 18's
+ * reviewer proved the gadget in raw Git and ran 40 rounds against a spinning
+ * attacker without winning the race; a window nobody has won is still a window.
+ *
+ * So Git is given a staging worktree this call creates itself — an empty
+ * `mkdtemp` directory under the project root, whose name the sandbox does not
+ * know in advance and which has no `.git` entry for anything to redirect — and
+ * the sandbox's own entry is claimed afterwards with `link`, which fails
+ * `EEXIST` on anything already at that path, symbolic links included, and does
+ * not follow it. Nothing here reconstructs by hand what `git init` decides:
+ * the repository is whatever Git wrote, and the pointer is byte-for-byte the
+ * gitfile Git wrote, moved to the sandbox rather than composed.
+ *
+ * `repositoryDirectory` may already exist — a repository whose pointer was
+ * deleted is re-attached here — and re-running `git init` over it preserves its
+ * refs, its tags, its reflog and its identity, which is the migration case that
+ * matters most.
+ */
+function initializeProjectRepository(sandbox: string, repositoryDirectory: string): void {
+  fs.mkdirSync(sandbox, { recursive: true });
+  const stagingWorktree = fs.mkdtempSync(path.join(path.dirname(sandbox), ".git-init-"));
+  try {
+    try {
+      execFileSync(
+        "git",
+        projectGitArguments([
+          "init",
+          "--quiet",
+          `--separate-git-dir=${repositoryDirectory}`,
+          stagingWorktree,
+        ]),
+        {
+          env: projectGitEnvironment(),
+          stdio: "ignore",
+        },
+      );
+    } catch (error) {
+      throw projectGitFailure("init", sandbox, error);
+    }
+    try {
+      fs.linkSync(path.join(stagingWorktree, ".git"), path.join(sandbox, ".git"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      // Something took `<sandbox>/.git` while this call was creating the
+      // repository. That is the claim doing its job — a raw `EEXIST` carrying
+      // a temporary path is not what a caller should be told about it.
+      throw new ProjectRepositoryContainmentError(
+        resolveRealPath(sandbox),
+        resolveRealPath(path.join(sandbox, ".git")),
+        "sandbox_git_directory_shadows_project_repository",
+      );
+    }
+  } finally {
+    fs.rmSync(stagingWorktree, { recursive: true, force: true });
+  }
+}
+
+/**
  * Give the sandbox a repository of its own, beside it, with one baseline commit.
  *
  * Exported for the containment regression tests, which need to point it at
@@ -1321,13 +1562,15 @@ export function ensureProjectRepository(sandbox: string): void {
   const repositoryDirectory = projectRepositoryDirectory(sandbox);
   const releaseLock = acquireProjectRepositoryLock(sandbox);
   try {
-    let { ownership, repositoryIsInsideSandbox } = inspectProjectRepositoryOwnership(sandbox);
+    let { ownership, repositoryIsInsideSandbox, pointerOutlivedItsRepository } =
+      inspectProjectRepositoryOwnership(sandbox);
     if (repositoryIsInsideSandbox) {
       // A sandbox from before round 18, or one whose repository this call is
       // about to write through. Ownership has just been proven for it, which is
       // what makes moving it this module's to move.
       relocateProjectRepositoryBesideSandbox(sandbox);
-      ({ ownership, repositoryIsInsideSandbox } = inspectProjectRepositoryOwnership(sandbox));
+      ({ ownership, repositoryIsInsideSandbox, pointerOutlivedItsRepository } =
+        inspectProjectRepositoryOwnership(sandbox));
       if (repositoryIsInsideSandbox) {
         throw new ProjectRepositoryContainmentError(
           resolveRealPath(sandbox),
@@ -1338,6 +1581,27 @@ export function ensureProjectRepository(sandbox: string): void {
     }
     if (ownership === "own-with-history") return;
     if (ownership === "absent") {
+      if (pointerOutlivedItsRepository) {
+        // The recovery this module documented but did not perform. `git init
+        // --separate-git-dir=X W` where `W/.git` is a gitfile naming a missing
+        // X fails outright — `fatal: not a git repository: X` — so the project
+        // stayed 500-ing on every request until someone deleted the pointer by
+        // hand, and on the default project the scope hook made that every
+        // request the server answers. Removing our own dangling pointer here
+        // does not by itself make the create path safe — an entry can appear at
+        // that path again a microsecond later — which is why the pointer is
+        // re-claimed with `link` rather than written over; see
+        // `initializeProjectRepository`.
+        //
+        // The history that pointer named is gone before this runs, and this
+        // does not bring it back: the project restarts from a fresh baseline
+        // commit. That is the documented behaviour and the alternative is a
+        // sticky whole-server refusal, but it does mean anything with write
+        // access to the repository directory — which, per
+        // `projectRepositoryDirectory`, includes the sandbox — can discard a
+        // project's history and have the next request quietly start a new one.
+        fs.rmSync(path.join(sandbox, ".git"), { force: true });
+      }
       if (fs.existsSync(repositoryDirectory)) {
         // A repository directory that outlived its pointer file is re-attached
         // rather than replaced, so deleting the pointer does not silently cost
@@ -1346,22 +1610,11 @@ export function ensureProjectRepository(sandbox: string): void {
         // after the move, so it is proven clean before it is attached.
         refuseRepositoryDirectoryHoldingSymlink(resolveRealPath(sandbox), repositoryDirectory);
       }
-      execFileSync(
-        "git",
-        projectGitArguments([
-          "init",
-          "--quiet",
-          `--separate-git-dir=${repositoryDirectory}`,
-          sandbox,
-        ]),
-        {
-          env: projectGitEnvironment(),
-          stdio: "ignore",
-        },
-      );
+      initializeProjectRepository(sandbox, repositoryDirectory);
       // Re-prove ownership: only a repository this call brought into existence
       // may be given an identity.
-      ({ ownership, repositoryIsInsideSandbox } = inspectProjectRepositoryOwnership(sandbox));
+      ({ ownership, repositoryIsInsideSandbox, pointerOutlivedItsRepository } =
+        inspectProjectRepositoryOwnership(sandbox));
       if (ownership === "absent" || repositoryIsInsideSandbox) {
         throw new ProjectRepositoryContainmentError(
           resolveRealPath(sandbox),
@@ -1375,19 +1628,15 @@ export function ensureProjectRepository(sandbox: string): void {
         // GIT_CONFIG and writes wherever that points — the variable is scrubbed
         // above, and this makes a future regression that unscrubs it a loud
         // error here instead of a silent write into somebody's checkout.
-        execFileSync(
-          "git",
-          projectGitArguments([
-            "-C", sandbox, "config", "--local", "user.name", PROJECT_REPOSITORY_AUTHOR_NAME,
-          ]),
-          { env: boundProjectGitEnvironment(sandbox), stdio: "ignore" },
+        projectGitWrite(
+          sandbox,
+          ["config", "--local", "user.name", PROJECT_REPOSITORY_AUTHOR_NAME],
+          { env: boundProjectGitEnvironment(sandbox) },
         );
-        execFileSync(
-          "git",
-          projectGitArguments([
-            "-C", sandbox, "config", "--local", "user.email", PROJECT_REPOSITORY_AUTHOR_EMAIL,
-          ]),
-          { env: boundProjectGitEnvironment(sandbox), stdio: "ignore" },
+        projectGitWrite(
+          sandbox,
+          ["config", "--local", "user.email", PROJECT_REPOSITORY_AUTHOR_EMAIL],
+          { env: boundProjectGitEnvironment(sandbox) },
         );
       }
     }
@@ -1408,6 +1657,19 @@ export function createProjectRunSnapshot(projectId: string, runIdentity: string)
   // TODO(#33-hardening): bound retained snapshot refs/manifests and add safe GC in the hardening lane.
   validateId(projectId);
   const paths = ensureProjectExists(projectId);
+  // The same lock `ensureProjectRepository` takes, held across the whole batch:
+  // a relocation or a re-attach running concurrently with these writes would be
+  // deciding where they land while they are in flight. `ensureProjectExists`
+  // has released it by the time it returns, so this cannot deadlock on itself.
+  const releaseLock = acquireProjectRepositoryLock(paths.sandbox);
+  try {
+    return writeProjectRunSnapshot(paths, runIdentity);
+  } finally {
+    releaseLock();
+  }
+}
+
+function writeProjectRunSnapshot(paths: ProjectPaths, runIdentity: string): string {
   const temporaryDirectory = fs.mkdtempSync(path.join(paths.root, ".run-snapshot-"));
   const temporaryIndex = path.join(temporaryDirectory, "index");
   const gitEnvironment = boundProjectGitEnvironment(paths.sandbox, {
@@ -1416,43 +1678,44 @@ export function createProjectRunSnapshot(projectId: string, runIdentity: string)
     GIT_LITERAL_PATHSPECS: "1",
   });
   try {
-    execFileSync("git", projectGitArguments(["-C", paths.sandbox, "read-tree", "--empty"]), {
-      env: gitEnvironment,
-      stdio: "ignore",
-    });
+    try {
+      execFileSync("git", projectGitArguments(["-C", paths.sandbox, "read-tree", "--empty"]), {
+        env: gitEnvironment,
+        stdio: "ignore",
+      });
+    } catch (error) {
+      throw projectGitFailure("read-tree", paths.sandbox, error);
+    }
     stageProjectSnapshotPaths(
       paths.sandbox,
+      temporaryDirectory,
       gitEnvironment,
       privacySafeProjectSnapshotPaths(paths.sandbox),
     );
-    const tree = execFileSync("git", projectGitArguments(["-C", paths.sandbox, "write-tree"]), {
+    const tree = projectGitWrite(paths.sandbox, ["write-tree"], {
       env: gitEnvironment,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
-    const parent = execFileSync("git", projectGitArguments(["-C", paths.sandbox, "rev-parse", "HEAD"]), {
-      env: boundProjectGitEnvironment(paths.sandbox),
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
-    const snapshot = execFileSync(
-      "git",
-      projectGitArguments([
-        "-C", paths.sandbox, "commit-tree", tree, "-p", parent, "-m", `Kady run snapshot ${runIdentity}`,
-      ]),
-      {
-        env: gitEnvironment,
+      capture: true,
+    });
+    let parent: string;
+    try {
+      parent = execFileSync("git", projectGitArguments(["-C", paths.sandbox, "rev-parse", "HEAD"]), {
+        env: boundProjectGitEnvironment(paths.sandbox),
         encoding: "utf-8",
         stdio: ["ignore", "pipe", "pipe"],
-      },
-    ).trim();
+      }).trim();
+    } catch (error) {
+      throw projectGitFailure("rev-parse", paths.sandbox, error);
+    }
+    const snapshot = projectGitWrite(
+      paths.sandbox,
+      ["commit-tree", tree, "-p", parent, "-m", `Kady run snapshot ${runIdentity}`],
+      { env: gitEnvironment, capture: true },
+    );
     const snapshotRef = crypto.createHash("sha256").update(runIdentity).digest("hex");
-    execFileSync(
-      "git",
-      projectGitArguments([
-        "-C", paths.sandbox, "update-ref", `refs/kady/run-snapshots/${snapshotRef}`, snapshot,
-      ]),
-      { env: boundProjectGitEnvironment(paths.sandbox), stdio: "ignore" },
+    projectGitWrite(
+      paths.sandbox,
+      ["update-ref", `refs/kady/run-snapshots/${snapshotRef}`, snapshot],
+      { env: boundProjectGitEnvironment(paths.sandbox) },
     );
     return snapshot;
   } finally {

@@ -1316,25 +1316,31 @@ describe("git runs no code the project sandbox supplied", () => {
     );
   });
 
-  it("hands git the same overrides and --local on every invocation, and runs no other subcommand", () => {
-    // `--local` and the `-c` overrides are belt-and-braces whose whole point is
-    // to hold under a *future* change, so nothing about today's behaviour pins
-    // them. The argv Git is handed does. The subcommand list is pinned with
-    // them because the reasoning for which config keys are unreachable — no
-    // diff, no network transport, no interactive command, no upload-pack — is
-    // only true of this set.
-    const root = makeTemporaryRoot();
-    const record = path.join(root, "git-argv.log");
+  /**
+   * One recorded run, four assertions.
+   *
+   * Round 18's reviewer flagged this: the `-c` overrides, `--local` and the
+   * `GIT_DIR` binding are three independent properties, and they were pinned by
+   * one assertion block, so a future edit that loosened that one test would
+   * unpin all three at once. Recording once and asserting separately keeps the
+   * child process cheap and the pins independent.
+   */
+  let invocations: string[][] = [];
+  let gitDirectoryOfInvocation: string[] = [];
+  let recordingRoot = "";
+
+  beforeAll(() => {
+    recordingRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "kady-argv-")));
+    const record = path.join(recordingRoot, "git-argv.log");
     const shim = makeGitShim(
-      root,
+      recordingRoot,
       `{ printf 'GIT_DIR=%s\u001f' "$GIT_DIR"; for a in "$@"; do printf '%s\u001f' "$a"; done; ` +
         `printf '\\n'; } >> ${JSON.stringify(record)}`,
     );
-    const projectsRoot = path.join(root, "child-projects");
     runInChildProcess(
-      root,
+      recordingRoot,
       [
-        `process.env.KADY_PROJECTS_ROOT = ${JSON.stringify(projectsRoot)};`,
+        `process.env.KADY_PROJECTS_ROOT = ${JSON.stringify(path.join(recordingRoot, "child-projects"))};`,
         `const projects = await import(${JSON.stringify(PROJECTS_MODULE_PATH)});`,
         `projects.ensureProjectExists("argv-study");`,
         `projects.createProjectRunSnapshot("argv-study", "argv-run");`,
@@ -1342,58 +1348,74 @@ describe("git runs no code the project sandbox supplied", () => {
       ].join("\n"),
       { PATH: `${shim}${path.delimiter}${process.env.PATH ?? ""}` },
     );
-
     const recorded = fs
       .readFileSync(record, "utf-8")
       .split("\n")
       .filter(Boolean)
       .map((line) => line.split("\u001f").filter(Boolean));
-    const invocations = recorded.map((fields) => fields.slice(1));
-    const gitDirectoryOfInvocation = recorded.map((fields) =>
-      fields[0].slice("GIT_DIR=".length),
-    );
+    invocations = recorded.map((fields) => fields.slice(1));
+    gitDirectoryOfInvocation = recorded.map((fields) => fields[0].slice("GIT_DIR=".length));
     expect(invocations.length).toBeGreaterThan(0);
+  }, 120_000);
 
-    // Every invocation that writes names the repository it writes to, so a
-    // pointer file swapped between the proof and the write cannot move it.
+  afterAll(() => {
+    if (recordingRoot) fs.rmSync(recordingRoot, { recursive: true, force: true });
+  });
+
+  /** The subcommand an invocation runs, past `--no-pager`, `-c` and `-C`. */
+  function subcommandOf(argv: string[]): string | undefined {
+    return argv.find(
+      (argument, index) =>
+        !argument.startsWith("-") && argv[index - 1] !== "-c" && argv[index - 1] !== "-C",
+    );
+  }
+
+  it("neutralises the config keys that make git execute something, on every invocation", () => {
+    // Belt-and-braces whose whole point is to hold under a *future* change, so
+    // nothing about today's behaviour pins them. The argv Git is handed does.
+    for (const argv of invocations) {
+      expect(argv).toContain(`core.hooksPath=${os.devNull}`);
+      expect(argv).toContain("core.fsmonitor=false");
+      expect(argv).toContain("--no-pager");
+    }
+  });
+
+  it("names the file `git config` writes to with --local", () => {
+    // Without it, `git config` writes wherever GIT_CONFIG points. The one
+    // config invocation that is a read — `core.fileMode`, resolved through the
+    // whole stack the way `git add` resolves it — is `--get` and writes nothing.
+    const configWrites = invocations.filter(
+      (argv) => subcommandOf(argv) === "config" && !argv.includes("--get"),
+    );
+    expect(configWrites.length).toBeGreaterThan(0);
+    for (const argv of configWrites) expect(argv).toContain("--local");
+  });
+
+  it("binds every writing invocation to the repository directory it proved", () => {
+    // So a pointer file swapped between the proof and the write cannot move it.
     const writingSubcommands = new Set([
       "commit-tree", "config", "hash-object", "read-tree",
       "update-index", "update-ref", "write-tree",
     ]);
     let boundWrites = 0;
     invocations.forEach((argv, index) => {
-      const subcommand = argv.find(
-        (argument, position) =>
-          !argument.startsWith("-") &&
-          argv[position - 1] !== "-c" &&
-          argv[position - 1] !== "-C",
-      );
+      const subcommand = subcommandOf(argv);
       if (!subcommand || !writingSubcommands.has(subcommand)) return;
       expect(gitDirectoryOfInvocation[index]).toMatch(/[/\\]sandbox\.git$/);
       boundWrites += 1;
     });
     expect(boundWrites).toBeGreaterThan(0);
+  });
 
+  it("runs no subcommand outside the pinned set, and no `git add`", () => {
+    // The reasoning for which config keys are unreachable — no diff, no network
+    // transport, no interactive command, no upload-pack — is only true of this
+    // set, so the set is pinned with the overrides rather than left implicit.
     const subcommands = new Set<string>();
     for (const argv of invocations) {
-      // Every invocation neutralises the config keys that make Git execute
-      // something, whatever the sandbox's own config says.
-      expect(argv).toContain(`core.hooksPath=${os.devNull}`);
-      expect(argv).toContain("core.fsmonitor=false");
-      expect(argv).toContain("--no-pager");
-      const subcommand = argv.find(
-        (argument, index) =>
-          !argument.startsWith("-") && argv[index - 1] !== "-c" && argv[index - 1] !== "-C",
-      );
+      const subcommand = subcommandOf(argv);
       expect(subcommand).toBeDefined();
       subcommands.add(subcommand!);
-      // The identity write names the file it writes: without `--local`,
-      // `git config` writes wherever GIT_CONFIG points. The one config
-      // invocation that is a read — `core.fileMode`, resolved through the whole
-      // stack the way `git add` resolves it — is `--get` and writes nothing.
-      if (subcommand === "config" && !argv.includes("--get")) {
-        expect(argv).toContain("--local");
-      }
     }
     for (const subcommand of subcommands) {
       expect(PROJECT_GIT_SUBCOMMANDS).toContain(subcommand);
@@ -1402,7 +1424,19 @@ describe("git runs no code the project sandbox supplied", () => {
     expect(subcommands.has("add")).toBe(false);
     expect(subcommands.has("config")).toBe(true);
     expect(subcommands.has("update-ref")).toBe(true);
-  }, 120_000);
+  });
+
+  it("hands `git init` a staging worktree rather than the sandbox", () => {
+    // `git init --separate-git-dir=R W` where `W/.git` is a symbolic link moves
+    // the repository that link names to R. W is therefore never the sandbox: it
+    // is a directory this module has just created, whose name the sandbox does
+    // not know, and the sandbox's own `.git` is claimed afterwards with `link`.
+    const initInvocations = invocations.filter((argv) => subcommandOf(argv) === "init");
+    expect(initInvocations.length).toBe(1);
+    const worktree = initInvocations[0][initInvocations[0].length - 1];
+    expect(path.basename(worktree)).toMatch(/^\.git-init-/);
+    expect(path.basename(worktree)).not.toBe("sandbox");
+  });
 });
 
 describe("inherited git environment", () => {
@@ -1510,6 +1544,299 @@ describe("inherited git environment", () => {
         ]),
       ].sort(),
     );
+  }, 120_000);
+});
+
+describe("the repository is re-proven at the moment it is written through", () => {
+  /**
+   * Round 18's blocking finding, and the reason these live here rather than
+   * beside the other reach tests: the whole-subtree rule ran when the
+   * repository was relocated and when it was re-attached, and never again.
+   * `ensureProjectRepository` returns early for a repository it has already
+   * proven, so a symbolic link planted after that was never looked at — and
+   * every ownership question kept answering correctly while `hash-object` and
+   * `update-ref` wrote through it into a checkout next door. Nothing short of a
+   * *write* reaches these paths, so nothing short of a write can test them.
+   */
+  afterAll(() => {
+    fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
+    fs.mkdirSync(PROJECTS_ROOT, { recursive: true });
+  });
+
+  function refusalFromSnapshot(projectId: string, runIdentity: string): unknown {
+    let thrown: unknown;
+    try {
+      createProjectRunSnapshot(projectId, runIdentity);
+    } catch (error) {
+      thrown = error;
+    }
+    return thrown;
+  }
+
+  it("refuses a symlink planted in the repository directory after it was attached", () => {
+    const root = makeTemporaryRoot();
+    const victim = makeCheckoutWithHistory(root, "after-attach-victim");
+    const paths = resolvePaths("after-attach-study");
+    ensureProjectExists("after-attach-study");
+    createProjectRunSnapshot("after-attach-study", "clean-run");
+    const before = fingerprintCheckout(victim);
+    const victimRefs = git(victim, ["for-each-ref", "--format=%(refname)"]);
+
+    const repository = projectRepositoryDirectoryFor(paths.sandbox);
+    for (const entry of ["objects", "refs"]) {
+      fs.rmSync(path.join(repository, entry), { recursive: true, force: true });
+      fs.symlinkSync(path.join(victim, ".git", entry), path.join(repository, entry));
+    }
+    // The ownership proof is not what refuses this, and saying so is the point:
+    // the sandbox is still the toplevel of the repository its pointer names.
+    expect(git(paths.sandbox, ["rev-parse", "--show-toplevel"])).toBe(
+      fs.realpathSync(paths.sandbox),
+    );
+
+    const thrown = refusalFromSnapshot("after-attach-study", "redirected-run");
+    expect(thrown).toBeInstanceOf(ProjectRepositoryContainmentError);
+    expect((thrown as ProjectRepositoryContainmentError).invariant).toBe(
+      "project_repository_holds_a_symlink",
+    );
+    expect(fingerprintCheckout(victim)).toEqual(before);
+    expect(git(victim, ["for-each-ref", "--format=%(refname)"])).toBe(victimRefs);
+  });
+
+  it("refuses a symlink that redirects one project's writes into another project's repository", () => {
+    ensureProjectExists("alice");
+    createProjectRunSnapshot("alice", "alice-run");
+    ensureProjectExists("bob");
+    createProjectRunSnapshot("bob", "bob-run");
+    const alice = resolvePaths("alice");
+    const bob = resolvePaths("bob");
+    const aliceRefsBefore = git(alice.sandbox, ["for-each-ref", "--format=%(refname)"]);
+    const aliceHead = git(alice.sandbox, ["rev-parse", "HEAD"]);
+
+    // `<sandbox>.git` is a sibling of the sandbox, so the shortest path from
+    // one project's shell to another project's repository is two `..`.
+    const aliceRepository = projectRepositoryDirectoryFor(alice.sandbox);
+    const bobRepository = projectRepositoryDirectoryFor(bob.sandbox);
+    for (const entry of ["objects", "refs"]) {
+      fs.rmSync(path.join(bobRepository, entry), { recursive: true, force: true });
+      fs.symlinkSync(path.join(aliceRepository, entry), path.join(bobRepository, entry));
+    }
+
+    const thrown = refusalFromSnapshot("bob", "cross-project-run");
+    expect(thrown).toBeInstanceOf(ProjectRepositoryContainmentError);
+    expect((thrown as ProjectRepositoryContainmentError).invariant).toBe(
+      "project_repository_holds_a_symlink",
+    );
+    expect(git(alice.sandbox, ["for-each-ref", "--format=%(refname)"])).toBe(aliceRefsBefore);
+    expect(git(alice.sandbox, ["rev-parse", "HEAD"])).toBe(aliceHead);
+  });
+
+  it("refuses a symlink that appears between two writes of the same snapshot", () => {
+    // Why the proof runs per invocation rather than once per batch: a snapshot
+    // spends seven processes and tens of milliseconds, and `update-ref` — the
+    // write worth stealing — is the last of them, so a single check at the top
+    // of the batch would leave the rest of the batch as the window. The link
+    // here is planted by a `git` shim as `write-tree` starts, which is after
+    // that invocation's own check has already passed: only a later invocation's
+    // check can catch it.
+    const root = makeTemporaryRoot();
+    const victim = makeCheckoutWithHistory(root, "mid-batch-victim");
+    const projectsRoot = path.join(root, "child-projects");
+    const repository = path.join(projectsRoot, "mid-batch-study", "sandbox.git");
+    const record = path.join(root, "outcome.log");
+    const shim = makeGitShim(
+      root,
+      `case " $* " in *" write-tree "*) ` +
+        `rm -rf ${JSON.stringify(path.join(repository, "refs"))}; ` +
+        `ln -s ${JSON.stringify(path.join(victim, ".git", "refs"))} ` +
+        `${JSON.stringify(path.join(repository, "refs"))};; esac`,
+    );
+    const before = fingerprintCheckout(victim);
+
+    runInChildProcess(
+      root,
+      [
+        `process.env.KADY_PROJECTS_ROOT = ${JSON.stringify(projectsRoot)};`,
+        'const fs = await import("node:fs");',
+        `const projects = await import(${JSON.stringify(PROJECTS_MODULE_PATH)});`,
+        "let outcome = '(accepted)';",
+        // The shim fires on the first `write-tree` of the run, which is the one
+        // in the baseline batch, so the refusal is raised by whichever of these
+        // two batches gets there first — both are batches of the same shape.
+        "try {",
+        "  projects.ensureProjectExists('mid-batch-study');",
+        "  projects.createProjectRunSnapshot('mid-batch-study', 'mid-batch-run');",
+        "} catch (error) { outcome = error?.invariant ?? String(error?.message ?? error); }",
+        `fs.writeFileSync(${JSON.stringify(record)}, outcome, "utf-8");`,
+        "",
+      ].join("\n"),
+      { PATH: `${shim}${path.delimiter}${process.env.PATH ?? ""}` },
+    );
+
+    expect(fs.readFileSync(record, "utf-8")).toBe("project_repository_holds_a_symlink");
+    expect(fingerprintCheckout(victim)).toEqual(before);
+  }, 120_000);
+
+  it("refuses a commondir file planted between two writes of the same snapshot", () => {
+    // The half the subtree rule cannot answer. `commondir` is ordinary text,
+    // invisible to a scan for symbolic links, and it redirects every ref and
+    // object written through `GIT_DIR` into the repository it names — so the
+    // filesystem check alone would let a batch finish writing into a checkout
+    // next door. Only Git can say where its refs and objects actually resolve,
+    // so Git is asked, immediately before each write rather than once at the
+    // start of the batch: this link is planted as `write-tree` starts, which is
+    // after that invocation's own check has already passed.
+    const root = makeTemporaryRoot();
+    const victim = makeCheckoutWithHistory(root, "commondir-victim");
+    const projectsRoot = path.join(root, "child-projects");
+    const repository = path.join(projectsRoot, "commondir-study", "sandbox.git");
+    const record = path.join(root, "outcome.log");
+    const shim = makeGitShim(
+      root,
+      // `update-index` writes the temporary index and nothing in the
+      // repository, so the plant lands between two repository writes without
+      // any write happening under it.
+      `case " $* " in *" update-index "*) ` +
+        `printf '%s\\n' ${JSON.stringify(path.join(victim, ".git"))} ` +
+        `> ${JSON.stringify(path.join(repository, "commondir"))};; esac`,
+    );
+    const before = fingerprintCheckout(victim);
+
+    runInChildProcess(
+      root,
+      [
+        `process.env.KADY_PROJECTS_ROOT = ${JSON.stringify(projectsRoot)};`,
+        'const fs = await import("node:fs");',
+        `const projects = await import(${JSON.stringify(PROJECTS_MODULE_PATH)});`,
+        "let outcome = '(accepted)';",
+        "try {",
+        "  projects.ensureProjectExists('commondir-study');",
+        "  projects.createProjectRunSnapshot('commondir-study', 'commondir-run');",
+        "} catch (error) { outcome = error?.invariant ?? String(error?.message ?? error); }",
+        `fs.writeFileSync(${JSON.stringify(record)}, outcome, "utf-8");`,
+        "",
+      ].join("\n"),
+      { PATH: `${shim}${path.delimiter}${process.env.PATH ?? ""}` },
+    );
+
+    expect(fs.readFileSync(record, "utf-8")).toBe("sandbox_git_common_dir_is_foreign");
+    expect(fingerprintCheckout(victim)).toEqual(before);
+  }, 120_000);
+
+  it("recovers rather than bricking when the repository directory is deleted", () => {
+    // Introduced by round 18 and agent-triggerable with one `rm -rf ../sandbox.git`:
+    // `git init --separate-git-dir=X W` where `W/.git` is a gitfile naming a
+    // missing X fails outright, so the project answered an unclassified 500 on
+    // every request — and on the default project, every request the server
+    // answers — until someone removed the pointer by hand.
+    ensureProjectExists("deleted-repository-study");
+    const paths = resolvePaths("deleted-repository-study");
+    createProjectRunSnapshot("deleted-repository-study", "before-deletion");
+    expect(fs.lstatSync(path.join(paths.sandbox, ".git")).isFile()).toBe(true);
+
+    fs.rmSync(projectRepositoryDirectoryFor(paths.sandbox), { recursive: true, force: true });
+
+    const snapshot = createProjectRunSnapshot("deleted-repository-study", "after-deletion");
+    expect(snapshot).toMatch(/^[0-9a-f]{40}$/);
+    expect(fs.lstatSync(path.join(paths.sandbox, ".git")).isFile()).toBe(true);
+    expect(git(paths.sandbox, ["rev-parse", "--show-toplevel"])).toBe(
+      fs.realpathSync(paths.sandbox),
+    );
+    // A second call is not a refusal either: the recovery is not one-shot.
+    expect(createProjectRunSnapshot("deleted-repository-study", "again")).toMatch(
+      /^[0-9a-f]{40}$/,
+    );
+  });
+
+  it("compares the pointer with the repository directory the same way on both sides", () => {
+    // `git init --separate-git-dir` writes the realpath into the pointer while
+    // this module computes the path as configured. Resolving only paths that
+    // exist made the two disagree exactly when the repository directory was
+    // gone — which is the one case the recovery above exists for — so the
+    // module refused its own pointer on any projects root with a symlinked
+    // component, `/tmp` on macOS being the obvious one.
+    const paths = resolvePaths("pointer-resolution-study");
+    ensureProjectExists("pointer-resolution-study");
+    const repository = projectRepositoryDirectoryFor(paths.sandbox);
+    const pointerTarget = fs
+      .readFileSync(path.join(paths.sandbox, ".git"), "utf-8")
+      .split("\n", 1)[0]
+      .slice("gitdir: ".length);
+
+    // Both spellings name the same directory and both must keep working, with
+    // the directory present and with it deleted.
+    for (const spelling of [pointerTarget, repository]) {
+      fs.writeFileSync(path.join(paths.sandbox, ".git"), `gitdir: ${spelling}\n`, "utf-8");
+      expect(createProjectRunSnapshot("pointer-resolution-study", `present-${spelling}`)).toMatch(
+        /^[0-9a-f]{40}$/,
+      );
+      fs.rmSync(projectRepositoryDirectoryFor(paths.sandbox), { recursive: true, force: true });
+      fs.writeFileSync(path.join(paths.sandbox, ".git"), `gitdir: ${spelling}\n`, "utf-8");
+      expect(createProjectRunSnapshot("pointer-resolution-study", `absent-${spelling}`)).toMatch(
+        /^[0-9a-f]{40}$/,
+      );
+    }
+  });
+
+  it("refuses rather than following an entry that takes the sandbox's .git during creation", () => {
+    // `git init` is handed a staging worktree this module created, and the
+    // sandbox's own entry is claimed with `link`, which fails rather than
+    // following whatever is already there. Simulated by putting the entry there
+    // first: the claim is what has to refuse, not the proof before it.
+    const root = makeTemporaryRoot();
+    const victim = makeCheckoutWithHistory(root, "claim-victim");
+    const paths = resolvePaths("claimed-entry-study");
+    fs.mkdirSync(paths.sandbox, { recursive: true });
+    fs.symlinkSync(path.join(victim, ".git"), path.join(paths.sandbox, ".git"));
+    const before = fingerprintCheckout(victim);
+
+    let thrown: unknown;
+    try {
+      ensureProjectRepository(paths.sandbox);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(ProjectRepositoryContainmentError);
+    // The victim's repository is still a directory: `git init` never saw it.
+    expect(fs.lstatSync(path.join(victim, ".git")).isDirectory()).toBe(true);
+    expect(fingerprintCheckout(victim)).toEqual(before);
+  });
+
+  it("reports a failing git invocation without handing back the command line", () => {
+    // The overrides-laden project Git command line reached the client as the
+    // detail of an unclassified 500. It names every config key this module
+    // pins and the absolute paths of the repository and the sandbox.
+    const root = makeTemporaryRoot();
+    const record = path.join(root, "out.log");
+    const shim = makeGitShim(
+      root,
+      `case " $* " in *" write-tree "*) exit 3;; esac`,
+    );
+    const projectsRoot = path.join(root, "child-projects");
+    const output = runInChildProcess(
+      root,
+      [
+        `process.env.KADY_PROJECTS_ROOT = ${JSON.stringify(projectsRoot)};`,
+        'const fs = await import("node:fs");',
+        `const projects = await import(${JSON.stringify(PROJECTS_MODULE_PATH)});`,
+        "let message = '(no error)';",
+        "try { projects.ensureProjectExists('git-failure-study'); }",
+        "catch (error) { message = error instanceof Error ? error.message : String(error); }",
+        `fs.writeFileSync(${JSON.stringify(record)}, message, "utf-8");`,
+        "",
+      ].join("\n"),
+      { PATH: `${shim}${path.delimiter}${process.env.PATH ?? ""}` },
+    );
+    void output;
+
+    const message = fs.readFileSync(record, "utf-8");
+    expect(message).toContain("Project git write-tree failed");
+    expect(message).not.toContain("core.hooksPath");
+    expect(message).not.toContain("--no-pager");
+    expect(message).not.toContain("Command failed");
   }, 120_000);
 });
 
