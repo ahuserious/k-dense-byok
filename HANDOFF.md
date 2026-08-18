@@ -118,7 +118,9 @@ dropped the usage) versus post-fix `SUPERVISOR_BUSY` — the actual bug.
 - **Orphaned processes poison later runs.** A failed integration test leaves a
   detached backend + supervisor alive; they accumulate and cause spurious
   startup-timeout failures. Clear before any run you intend to cite as evidence:
-  `pkill -f kady-workflow-supervisor; pkill -f 'tsx/dist/preflight.cjs'`
+  list the exact pids first (`ps -Ao pid=,lstart=,command= | grep kady-workflow-supervisor`) and kill only
+  those you can attribute to a finished run, by exact pid — never a pattern kill, which can take down a
+  supervisor a live preview still owns
 - **Single-file vitest runs stall ~300 s on import**; the full suite imports in
   ~33 s and finishes in ~110 s. Prefer the full suite — it is genuinely faster.
 - **`vitest.config.ts` sets `PI_CODING_AGENT_DIR` run-wide**, which a spawned

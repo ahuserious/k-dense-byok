@@ -140,7 +140,8 @@ follow-ups.
   execs, so a failed `backend-shutdown-ipc` run orphans a backend (and its
   supervisor). `start.mjs` handles this correctly with `waitForOwnedTree`; the
   tests do not. Accumulated orphans slow later runs. Clean up with
-  `pkill -f kady-workflow-supervisor` and `pkill -f 'tsx/dist/preflight.cjs'`.
+  by listing pids (`ps -Ao pid=,lstart=,command= | grep -E 'kady-workflow-supervisor|preflight'`) and killing
+  only the attributable ones by exact pid; never a pattern kill (it can take down a live preview's supervisor).
 - `vitest.config.ts` sets `PI_CODING_AGENT_DIR` for the whole run, which any
   spawned production backend inherits — it overrides a test's own
   `KADY_PI_AGENT_DIR`, so supervisor state lands in the shared vitest agent

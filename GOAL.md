@@ -127,7 +127,8 @@ Nothing is reported as done without:
 5. Claims in docs re-read against the code after the change, not before.
 
 Suite runs on a loaded machine are not evidence — clear orphans first
-(`pkill -f kady-workflow-supervisor`, `pkill -f 'tsx/dist/preflight.cjs'`).
+(list pids with `ps -Ao pid=,lstart=,command= | grep kady-workflow-supervisor` and kill only the
+attributable ones by exact pid; pattern kills are forbidden — they can kill a live preview's supervisor).
 
 ## Termination and budget
 

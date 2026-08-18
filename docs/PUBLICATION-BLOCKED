@@ -2,3 +2,10 @@ Scientific DAG Studio publication is blocked pending explicit owner approval.
 
 This marker is enforced by the Phase R repository guard. Do not remove it as
 part of release preparation without separate publication authorization.
+
+Status note, 2026-08-18: the owner authorized publication of ONE ref only —
+`integration/dfg-20260807-135127` pushed to the fork `ahuserious/k-dense-byok`, no force, fork `main`
+untouched (recorded 2026-08-15, exercised on 2026-08-16/17/18). That authorization does not extend to
+`K-Dense-AI/*` (its push URL stays `no_push`), to the fork's `main`, to any tag or release, or to the
+`pr/dfg-1..7` stack. This marker therefore stays in place; remove it only with separate, explicit
+publication authorization for the specific ref being published.
