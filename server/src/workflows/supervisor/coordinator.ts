@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { ProjectPaths } from "../../projects.ts";
 import { resolvePaths } from "../../projects.ts";
 import {
+  createS4HostedFusionSession,
   disposeAllWorkflowDelegationSessions,
   disposeWorkflowDelegationSession,
   getOrCreateWorkflowDelegationSession,
@@ -115,7 +116,14 @@ export interface WorkflowSupervisorCoordinatorDependencies {
   disposeAllDelegationSessions(): Promise<void>;
   runHostedFusion(
     request: Parameters<typeof runHostedOpenRouterFusion>[0],
+    dependencyOverrides?: Parameters<typeof runHostedOpenRouterFusion>[1],
   ): Promise<HostedOpenRouterFusionResult>;
+  /**
+   * Builds the hosted-Fusion session with the node's S4 provider bindings
+   * installed behind the Fusion request extension. Kept as a dependency so a
+   * test can observe the bindings the supervised transport actually delivered.
+   */
+  hostedFusionSessionFactory: typeof createS4HostedFusionSession;
   hostedQuarantines(projectId?: string): ReturnType<typeof hostedFusionQuarantineSnapshot>;
   waitHostedQuarantines(): Promise<void>;
   assertNoHostedQuarantine(projectId?: string): void;
@@ -173,6 +181,7 @@ const defaultDependencies: WorkflowSupervisorCoordinatorDependencies = {
   delegationSessionSnapshot: workflowDelegationSessionSnapshot,
   disposeAllDelegationSessions: disposeAllWorkflowDelegationSessions,
   runHostedFusion: runHostedOpenRouterFusion,
+  hostedFusionSessionFactory: createS4HostedFusionSession,
   hostedQuarantines: hostedFusionQuarantineSnapshot,
   waitHostedQuarantines: waitForHostedFusionQuarantines,
   assertNoHostedQuarantine: assertNoHostedFusionQuarantine,
@@ -786,6 +795,14 @@ export class WorkflowSupervisorCoordinator {
     request: SerializedHostedOpenRouterFusionRequest;
     budget: SupervisedWorkflowBudgetDescriptorV1;
   }): Promise<WorkflowSupervisorHostedResult> {
+    // The protocol parser already rejects a frame without bindings; this is the
+    // same refusal for any caller that reaches the coordinator directly. Hosted
+    // Fusion never runs on provider defaults, on either transport.
+    if (!input.request.nodeControl?.providerRequest) {
+      throw new Error(
+        "Hosted Fusion received no trusted S4 provider-request controls.",
+      );
+    }
     const identity = input.request.identity;
     const operationId = workflowSupervisorOperationId(
       "hosted-fusion",
@@ -827,22 +844,33 @@ export class WorkflowSupervisorCoordinator {
       if (input.request.projectId !== input.projectId) {
         throw new Error("Hosted Fusion project identity changed across IPC.");
       }
-      const result = await this.dependencies.runHostedFusion({
-        ...structuredClone(input.request),
-        paths: this.dependencies.pathsForProject(input.projectId),
-        signal: attempt.controller.signal,
-        reconcileUsage: async (observed) => {
-          settlement = this.normalizeSettlement(identity, settlement, observed);
-          settlementIsDurable = false;
-          await this.persistSettlement(
-            attempt,
-            input.projectId,
-            budget,
-            settlement,
-          );
-          settlementIsDurable = true;
+      const { nodeControl, ...hostedRequest } = structuredClone(input.request);
+      const providerRequest = nodeControl.providerRequest;
+      const result = await this.dependencies.runHostedFusion(
+        {
+          ...hostedRequest,
+          paths: this.dependencies.pathsForProject(input.projectId),
+          signal: attempt.controller.signal,
+          reconcileUsage: async (observed) => {
+            settlement = this.normalizeSettlement(identity, settlement, observed);
+            settlementIsDurable = false;
+            await this.persistSettlement(
+              attempt,
+              input.projectId,
+              budget,
+              settlement,
+            );
+            settlementIsDurable = true;
+          },
         },
-      });
+        {
+          createSession: (sessionInput) =>
+            this.dependencies.hostedFusionSessionFactory(
+              sessionInput,
+              providerRequest,
+            ),
+        },
+      );
       if (!settlement) {
         return this.retainQuarantine(
           attempt,
