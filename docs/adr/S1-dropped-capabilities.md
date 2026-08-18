@@ -58,3 +58,19 @@ remains importable for tests and documentation. Consequence recorded honestly: t
 tracked as backlog #40) had no other user-reachable entry, so that showcase is now unreachable by design; the font
 gaps it was meant to demonstrate stay tracked separately. Consequence on the S11 item floor is recorded in
 `docs/adr/S11-requirement-traceability.md`.
+
+## 2026-08-18 amendment — the chat rail and the DAG compose popover are retired, and that reverses E1 step 6
+
+Lane W1 round 2 deletes `chat-rail.tsx` and `dag-compose-popover.tsx` as unreferenced after round 1 replaced the rail
+with the dedicated DAG-builder assistant the owner asked for ("the workflow builder should have a chat in there that
+help build the visual / yaml dag workflows"). Recorded here because the deletion is not merely dead-code cleanup:
+`e1/e1-port-plan.md` step 6 ported both surfaces deliberately and gated them ("rail collapses/persists, compose stacks
+multiple items into one prompt, a rail turn executes and appears in cost UI"), and the project's standing rule is
+additive-only — new requirements do not remove sidecar-era capability without a decision.
+
+The decision: the compose-popover capability (stacking several items into one prompt) is **retired**, not ported
+forward. The replacement assistant is scoped to proposing DAG structure for the workflow you have open; it does not
+stack arbitrary items into a prompt, and it holds no tools. The trade is deliberate — the owner asked for a builder
+chat, not for the general rail — and it is strictly a reduction in what a user can do, which is why it is written
+down rather than left to the diff. If the stacking capability is wanted back, it returns as its own requirement
+against the new assistant, not as a revert.
