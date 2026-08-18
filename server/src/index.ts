@@ -128,6 +128,11 @@ function refuseProjectRepositoryContainment(
     },
     "refusing to scope a request to a project whose sandbox is not its own repository",
   );
+  // An unknown project id on a GET sets this header before falling back to the
+  // default project, and the fallback is what then refuses. Leaving it on the
+  // reply tells a client it was served from the default project when it was in
+  // fact served nothing: the same false reassurance the refusal exists to stop.
+  reply.removeHeader("X-Project-Fallback");
   reply.code(500).send({
     detail: error.message,
     reason: "project_repository_containment",

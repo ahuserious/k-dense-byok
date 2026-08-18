@@ -268,30 +268,103 @@ export interface CreateProjectInput {
 // --- project repository containment --------------------------------------
 
 /**
- * Git environment variables that relocate the repository a `git` invocation
- * acts on. A backend started from inside a developer's checkout (or from a Git
+ * Git's own answer to "which variables bind a process to one specific
+ * repository", as printed by `git rev-parse --local-env-vars` — the list Git
+ * itself clears before acting on a different repository.
+ *
+ * This copy exists only as the fallback for when that invocation cannot be run.
+ * It is not the source of truth and must not be maintained as one: a
+ * hand-written denylist is exactly how the incident behind this module
+ * happened, and how it happened a second time. `GIT_CONFIG` was missing from
+ * the hand-written list, and `git config <key> <value>` without `--local`
+ * honours it while every other Git command ignores it — so ownership was proven
+ * correctly and the identity write still landed in the operator's checkout.
+ *
+ * Pinned by `project-repository-containment.test.ts`, which fails if the
+ * installed Git names a variable this constant does not.
+ */
+export const GIT_LOCAL_ENVIRONMENT_KEYS_FALLBACK: readonly string[] = [
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_COMMON_DIR",
+  "GIT_CONFIG",
+  "GIT_CONFIG_COUNT",
+  "GIT_CONFIG_PARAMETERS",
+  "GIT_DIR",
+  "GIT_GRAFT_FILE",
+  "GIT_IMPLICIT_WORK_TREE",
+  "GIT_INDEX_FILE",
+  "GIT_NO_REPLACE_OBJECTS",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_PREFIX",
+  "GIT_REPLACE_REF_BASE",
+  "GIT_SHALLOW_FILE",
+  "GIT_WORK_TREE",
+];
+
+/**
+ * Variables Git omits from `--local-env-vars` because they steer repository
+ * *discovery* rather than bind an already-chosen one, and that still have to
+ * go: a ceiling directory changes which enclosing repository a sandbox resolves
+ * to, and a namespace changes which refs a write lands on.
+ */
+const DISCOVERY_STEERING_GIT_ENVIRONMENT_KEYS: readonly string[] = [
+  "GIT_CEILING_DIRECTORIES",
+  "GIT_NAMESPACE",
+];
+
+/**
+ * `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` carry the settings
+ * `GIT_CONFIG_COUNT` counts. Their names are not fixed, so Git cannot list
+ * them and neither can a constant; scrubbing the count disarms them, and
+ * removing them too keeps a later caller's own count from re-arming them.
+ */
+const NUMBERED_GIT_CONFIG_ENVIRONMENT_PATTERN = /^GIT_CONFIG_(?:KEY|VALUE)_\d+$/;
+
+function discoverGitLocalEnvironmentKeys(): string[] | null {
+  const environment: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of GIT_LOCAL_ENVIRONMENT_KEYS_FALLBACK) delete environment[key];
+  try {
+    const printed = execFileSync("git", ["rev-parse", "--local-env-vars"], {
+      env: environment,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const keys = printed.split("\n").map((line) => line.trim()).filter(Boolean);
+    return keys.length > 0 ? keys : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every Git environment variable a project-repository invocation starts
+ * without. A backend started from inside a developer's checkout (or from a Git
  * hook, alias, or rebase todo script) inherits them, and `git -C <sandbox>
  * config` / `update-ref` would then operate on THAT repository while
  * `rev-parse --show-toplevel` still reports the sandbox. That is how a project
  * bootstrap once wrote an identity into a real checkout and moved its branch
- * ref. Every project-repository call starts from a scrubbed environment.
+ * ref.
+ *
+ * Derived from Git, not from this file: resolved once per process, falling back
+ * to `GIT_LOCAL_ENVIRONMENT_KEYS_FALLBACK` only if `git rev-parse` cannot be
+ * run at all.
  */
-const RELOCATING_GIT_ENVIRONMENT_KEYS = [
-  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  "GIT_CEILING_DIRECTORIES",
-  "GIT_COMMON_DIR",
-  "GIT_DIR",
-  "GIT_INDEX_FILE",
-  "GIT_NAMESPACE",
-  "GIT_OBJECT_DIRECTORY",
-  "GIT_WORK_TREE",
-];
+export const RELOCATING_GIT_ENVIRONMENT_KEYS: readonly string[] = [
+  ...new Set([
+    ...(discoverGitLocalEnvironmentKeys() ?? GIT_LOCAL_ENVIRONMENT_KEYS_FALLBACK),
+    ...GIT_LOCAL_ENVIRONMENT_KEYS_FALLBACK,
+    ...DISCOVERY_STEERING_GIT_ENVIRONMENT_KEYS,
+  ]),
+].sort();
 
 function projectGitEnvironment(
   overrides: Record<string, string> = {},
 ): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = { ...process.env };
   for (const key of RELOCATING_GIT_ENVIRONMENT_KEYS) delete environment[key];
+  for (const key of Object.keys(environment)) {
+    if (NUMBERED_GIT_CONFIG_ENVIRONMENT_PATTERN.test(key)) delete environment[key];
+  }
   return Object.assign(environment, overrides);
 }
 
@@ -316,12 +389,15 @@ const PROJECT_REPOSITORY_IDENTITY_ENVIRONMENT = {
 /** Which containment invariant a sandbox violated, carried on the thrown error. */
 export type ProjectRepositoryInvariant =
   | "sandbox_git_is_a_pointer_file"
+  | "sandbox_git_common_dir_is_foreign"
   | "sandbox_is_not_repository_toplevel"
   | "sandbox_inside_tracked_repository";
 
 const PROJECT_REPOSITORY_INVARIANT_REASONS: Record<ProjectRepositoryInvariant, string> = {
   sandbox_git_is_a_pointer_file:
     "its .git entry is not a repository directory but a pointer (a linked worktree, a submodule, or a symlink), so the repository it names belongs to someone else",
+  sandbox_git_common_dir_is_foreign:
+    "its .git directory borrows another repository's refs and objects through a commondir pointer, so every ref it writes lands in that repository",
   sandbox_is_not_repository_toplevel:
     "it is not the toplevel of the repository that owns it",
   sandbox_inside_tracked_repository:
@@ -393,9 +469,19 @@ function resolveRealPath(target: string): string {
 }
 
 /**
- * The repository a `.git` pointer file hands work to: the main worktree for a
- * linked worktree, otherwise the common Git directory itself (a submodule's
+ * The worktree a common Git directory belongs to: its parent for the usual
+ * `<toplevel>/.git`, otherwise the directory itself (a submodule's
  * `.git/modules/<name>` has no toplevel of its own).
+ */
+function toplevelOwningCommonDirectory(resolvedCommonDirectory: string): string {
+  return path.basename(resolvedCommonDirectory) === ".git"
+    ? path.dirname(resolvedCommonDirectory)
+    : resolvedCommonDirectory;
+}
+
+/**
+ * The repository a `.git` pointer file hands work to: the main worktree for a
+ * linked worktree, otherwise the common Git directory itself.
  */
 function pointerRepositoryToplevel(sandbox: string): string | null {
   const commonDirectory = gitOutputOrNull(sandbox, [
@@ -404,10 +490,28 @@ function pointerRepositoryToplevel(sandbox: string): string | null {
     "--git-common-dir",
   ]);
   if (commonDirectory === null) return null;
-  const resolvedCommonDirectory = resolveRealPath(commonDirectory);
-  return path.basename(resolvedCommonDirectory) === ".git"
-    ? path.dirname(resolvedCommonDirectory)
-    : resolvedCommonDirectory;
+  return toplevelOwningCommonDirectory(resolveRealPath(commonDirectory));
+}
+
+/**
+ * The deepest directory that exists at or above `target`. Git resolves a
+ * repository by walking upward from a directory that exists, so this is where
+ * the walk for a not-yet-created sandbox starts — and it gives the same answer
+ * the sandbox itself will give once it is created, because everything between
+ * the two is about to be created empty.
+ */
+function deepestExistingDirectory(target: string): string | null {
+  let candidate = path.resolve(target);
+  for (;;) {
+    try {
+      if (fs.statSync(candidate).isDirectory()) return candidate;
+    } catch {
+      /* does not exist yet; keep walking up */
+    }
+    const parent = path.dirname(candidate);
+    if (parent === candidate) return null;
+    candidate = parent;
+  }
 }
 
 /** True when a repository already holds content worth protecting. */
@@ -418,14 +522,72 @@ function repositoryHasTrackedContent(toplevel: string): boolean {
 }
 
 /**
+ * Sandboxes already proven to own a repository that holds history, keyed by
+ * their resolved path and fingerprinted so the proof cannot outlive what it
+ * proved.
+ *
+ * `ensureProjectExists` runs on every HTTP request and the proof costs two
+ * `git` subprocesses, which is the difference between a per-request cost of
+ * microseconds and of milliseconds. The fingerprint is what makes skipping it
+ * honest: it pins the identity (`dev`/`ino`) of both the sandbox and its `.git`
+ * directory, and the timestamps and size of `.git`, so replacing either
+ * directory, or writing anything at all inside `.git` — a `commondir` file, a
+ * new `config` — invalidates the entry and the proof runs again.
+ *
+ * Only `own-with-history` is ever recorded: it is the state in which
+ * `ensureProjectRepository` does nothing, so the cached answer can never
+ * authorise a write.
+ */
+const provenSandboxRepositories = new Map<string, string>();
+const PROVEN_SANDBOX_REPOSITORY_LIMIT = 256;
+
+function sandboxRepositoryFingerprint(sandbox: string): string | null {
+  try {
+    const sandboxEntry = fs.lstatSync(sandbox);
+    const gitEntry = fs.lstatSync(path.join(sandbox, ".git"));
+    if (!sandboxEntry.isDirectory() || !gitEntry.isDirectory()) return null;
+    return [
+      sandboxEntry.dev,
+      sandboxEntry.ino,
+      gitEntry.dev,
+      gitEntry.ino,
+      gitEntry.size,
+      gitEntry.mtimeMs,
+      gitEntry.ctimeMs,
+    ].join(":");
+  } catch {
+    return null;
+  }
+}
+
+function recordProvenSandboxRepository(memoKey: string, fingerprint: string): void {
+  if (provenSandboxRepositories.size >= PROVEN_SANDBOX_REPOSITORY_LIMIT) {
+    provenSandboxRepositories.clear();
+  }
+  provenSandboxRepositories.set(memoKey, fingerprint);
+}
+
+/**
  * Prove which repository — if any — owns `sandbox`, refusing every arrangement
  * in which writing to it would write to somebody else's repository.
  *
  * `fs.existsSync(<sandbox>/.git)` does not prove ownership: the entry can be a
- * worktree/submodule pointer, and its absence does not stop Git from walking
- * up into an enclosing checkout.
+ * worktree/submodule pointer, it can be a directory that borrows another
+ * repository's store, and its absence does not stop Git from walking up into an
+ * enclosing checkout.
+ *
+ * `sandbox` need not exist yet — the enclosing-repository half of the proof is
+ * answered from the deepest directory above it that does, so a caller can refuse
+ * before it creates anything.
  */
 function inspectProjectRepositoryOwnership(sandbox: string): ProjectRepositoryOwnership {
+  const memoKey = path.resolve(sandbox);
+  const fingerprint = sandboxRepositoryFingerprint(sandbox);
+  if (fingerprint !== null && provenSandboxRepositories.get(memoKey) === fingerprint) {
+    return "own-with-history";
+  }
+  provenSandboxRepositories.delete(memoKey);
+
   const resolvedSandbox = resolveRealPath(sandbox);
   let gitEntry: fs.Stats | null = null;
   try {
@@ -445,8 +607,18 @@ function inspectProjectRepositoryOwnership(sandbox: string): ProjectRepositoryOw
   }
 
   if (gitEntry !== null) {
-    const toplevel = gitOutputOrNull(sandbox, ["rev-parse", "--show-toplevel"]);
-    const resolvedToplevel = toplevel ? resolveRealPath(toplevel) : null;
+    // One invocation answers both halves of ownership: which repository claims
+    // this directory as its toplevel, and whose refs and objects that claim
+    // actually resolves to. They differ whenever the `.git` directory holds a
+    // `commondir` file — `--show-toplevel` still answers "the sandbox" while
+    // every ref written lands in the repository `commondir` names.
+    const located = gitOutputOrNull(sandbox, [
+      "rev-parse",
+      "--path-format=absolute",
+      "--show-toplevel",
+      "--git-common-dir",
+    ])?.split("\n") ?? [];
+    const resolvedToplevel = located.length === 2 ? resolveRealPath(located[0]) : null;
     if (resolvedToplevel === null || !isSamePath(resolvedToplevel, resolvedSandbox)) {
       throw new ProjectRepositoryContainmentError(
         resolvedSandbox,
@@ -454,7 +626,17 @@ function inspectProjectRepositoryOwnership(sandbox: string): ProjectRepositoryOw
         "sandbox_is_not_repository_toplevel",
       );
     }
+    const resolvedCommonDirectory = resolveRealPath(located[1]);
+    const ownGitDirectory = resolveRealPath(path.join(sandbox, ".git"));
+    if (!isSamePath(resolvedCommonDirectory, ownGitDirectory)) {
+      throw new ProjectRepositoryContainmentError(
+        resolvedSandbox,
+        toplevelOwningCommonDirectory(resolvedCommonDirectory),
+        "sandbox_git_common_dir_is_foreign",
+      );
+    }
     if (gitOutputOrNull(sandbox, ["rev-parse", "--verify", "HEAD"]) !== null) {
+      if (fingerprint !== null) recordProvenSandboxRepository(memoKey, fingerprint);
       return "own-with-history";
     }
     // An unborn HEAD is not proof of an empty repository: HEAD can point at a
@@ -465,14 +647,18 @@ function inspectProjectRepositoryOwnership(sandbox: string): ProjectRepositoryOw
       "--count=1",
       "--format=%(refname)",
     ]);
-    return anyRef !== null && anyRef.length > 0 ? "own-with-history" : "own-empty";
+    if (anyRef === null || anyRef.length === 0) return "own-empty";
+    if (fingerprint !== null) recordProvenSandboxRepository(memoKey, fingerprint);
+    return "own-with-history";
   }
 
   // No repository of its own: Git would walk upward from here. An enclosing
   // repository that already tracks content means the projects root was pointed
   // at a source checkout — a configuration error, not something to initialize
   // a nested repository inside.
-  const enclosingToplevel = gitOutputOrNull(sandbox, ["rev-parse", "--show-toplevel"]);
+  const walkStart = deepestExistingDirectory(sandbox);
+  if (walkStart === null) return "absent";
+  const enclosingToplevel = gitOutputOrNull(walkStart, ["rev-parse", "--show-toplevel"]);
   if (enclosingToplevel !== null) {
     const resolvedEnclosing = resolveRealPath(enclosingToplevel);
     if (repositoryHasTrackedContent(resolvedEnclosing)) {
@@ -653,14 +839,19 @@ export function ensureProjectRepository(sandbox: string): void {
         );
       }
       if (ownership === "own-empty") {
+        // `--local` names the file to write: the repository's own config, the
+        // one ownership was just proven for. Without it `git config` honours
+        // GIT_CONFIG and writes wherever that points — the variable is scrubbed
+        // above, and this makes a future regression that unscrubs it a loud
+        // error here instead of a silent write into somebody's checkout.
         execFileSync(
           "git",
-          ["-C", sandbox, "config", "user.name", PROJECT_REPOSITORY_AUTHOR_NAME],
+          ["-C", sandbox, "config", "--local", "user.name", PROJECT_REPOSITORY_AUTHOR_NAME],
           { env: projectGitEnvironment(), stdio: "ignore" },
         );
         execFileSync(
           "git",
-          ["-C", sandbox, "config", "user.email", PROJECT_REPOSITORY_AUTHOR_EMAIL],
+          ["-C", sandbox, "config", "--local", "user.email", PROJECT_REPOSITORY_AUTHOR_EMAIL],
           { env: projectGitEnvironment(), stdio: "ignore" },
         );
       }
@@ -852,6 +1043,12 @@ export function touchProject(projectId: string): void {
 export function ensureProjectExists(projectId: string): ProjectPaths {
   validateId(projectId);
   const paths = resolvePaths(projectId);
+  // Before anything is created. `ensureProjectRepository` refuses on its own,
+  // but by the time it is reached the skeleton and the seed files have already
+  // been written — into the developer's checkout, in exactly the configuration
+  // the refusal exists to catch, and again on every request, since this hook
+  // re-runs the same prefix each time. A refusal must leave no trace.
+  inspectProjectRepositoryOwnership(paths.sandbox);
   fs.mkdirSync(paths.root, { recursive: true });
   fs.mkdirSync(paths.sandbox, { recursive: true });
   fs.mkdirSync(paths.kadyDir, { recursive: true });

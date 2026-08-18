@@ -28,7 +28,9 @@ import {
   ensureProjectExists,
   ensureProjectRepository,
   getProject,
+  GIT_LOCAL_ENVIRONMENT_KEYS_FALLBACK,
   ProjectRepositoryContainmentError,
+  RELOCATING_GIT_ENVIRONMENT_KEYS,
   resolvePaths,
 } from "../src/projects.ts";
 
@@ -299,6 +301,225 @@ describe("project repository containment", () => {
     expect(git(sandbox, ["rev-parse", "--show-toplevel"])).toBe(sandbox);
     expect(git(sandbox, ["log", "-1", "--format=%s"])).toBe("Initialize Kady project");
   });
+
+  it("ignores a GIT_CONFIG inherited from a real checkout instead of rewriting its identity", () => {
+    // The second half of the incident, and the one a hand-written scrub list
+    // missed: `git config <key> <value>` honours GIT_CONFIG and writes to the
+    // file it names, while no other git command reads it — so ownership is
+    // proven correctly for the sandbox and the identity write lands in the
+    // developer's checkout anyway.
+    const root = makeTemporaryRoot();
+    const checkout = makeCheckoutWithHistory(root, "inherited-config-checkout");
+    const sandbox = path.join(root, "project", "sandbox");
+    makeSandboxWithFile(sandbox);
+    const before = fingerprintCheckout(checkout);
+
+    const inheritedGitConfig = process.env.GIT_CONFIG;
+    process.env.GIT_CONFIG = path.join(checkout, ".git", "config");
+    try {
+      ensureProjectRepository(sandbox);
+    } finally {
+      if (inheritedGitConfig === undefined) delete process.env.GIT_CONFIG;
+      else process.env.GIT_CONFIG = inheritedGitConfig;
+    }
+
+    // The checkout's config is byte-identical: no Kady identity written into it.
+    expect(fingerprintCheckout(checkout)).toEqual(before);
+    expect(git(checkout, ["config", "--local", "user.name"])).toBe("Outer Developer");
+    expect(git(checkout, ["config", "--local", "user.email"])).toBe(
+      "outer@example.test",
+    );
+    // ...and the identity landed where it belongs, in the sandbox's own
+    // repository, rather than being diverted out of it.
+    expect(git(sandbox, ["config", "--local", "user.name"])).toBe("Kady");
+    expect(git(sandbox, ["config", "--local", "user.email"])).toBe("kady@localhost");
+    expect(git(sandbox, ["log", "-1", "--format=%s"])).toBe("Initialize Kady project");
+  });
+
+  it("scrubs every environment variable git itself names as repository-local", () => {
+    // The list is derived from `git rev-parse --local-env-vars` rather than
+    // maintained by hand, because maintaining it by hand is how both halves of
+    // the incident happened. This fails if the installed git names a variable
+    // the static fallback does not — the fallback is what runs when that
+    // invocation cannot, so it going stale silently reopens the hole.
+    const named = execFileSync("git", ["rev-parse", "--local-env-vars"], {
+      encoding: "utf-8",
+    })
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    expect(named.length).toBeGreaterThan(0);
+    expect(named).toContain("GIT_CONFIG");
+    for (const key of named) {
+      expect(RELOCATING_GIT_ENVIRONMENT_KEYS).toContain(key);
+      expect(GIT_LOCAL_ENVIRONMENT_KEYS_FALLBACK).toContain(key);
+    }
+    // Discovery-steering variables are not on git's list and still have to go.
+    expect(RELOCATING_GIT_ENVIRONMENT_KEYS).toContain("GIT_CEILING_DIRECTORIES");
+    expect(RELOCATING_GIT_ENVIRONMENT_KEYS).toContain("GIT_NAMESPACE");
+  });
+
+  it("ignores inherited config injected through GIT_CONFIG_PARAMETERS and GIT_CONFIG_COUNT", () => {
+    // Both carry arbitrary settings into every git invocation. `init.defaultBranch`
+    // is the observable one: it changes what `git init` writes to HEAD, so a
+    // leaked setting is visible in the sandbox's own repository afterwards.
+    const root = makeTemporaryRoot();
+    const sandbox = path.join(root, "project", "sandbox");
+    makeSandboxWithFile(sandbox);
+
+    const injected: Record<string, string | undefined> = {
+      GIT_CONFIG_PARAMETERS: "'init.defaultBranch=injected-parameters'",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "init.defaultBranch",
+      GIT_CONFIG_VALUE_0: "injected-count",
+    };
+    const inherited: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(injected)) {
+      inherited[key] = process.env[key];
+      process.env[key] = value;
+    }
+    try {
+      ensureProjectRepository(sandbox);
+    } finally {
+      for (const key of Object.keys(injected)) {
+        if (inherited[key] === undefined) delete process.env[key];
+        else process.env[key] = inherited[key];
+      }
+    }
+
+    // Whatever this host's default branch is, it is not one the environment
+    // dictated. (The name itself is a global-config setting these tests refuse
+    // to depend on, so only the injected values are ruled out.)
+    const sandboxHead = git(sandbox, ["symbolic-ref", "HEAD"]);
+    expect(sandboxHead).not.toBe("refs/heads/injected-parameters");
+    expect(sandboxHead).not.toBe("refs/heads/injected-count");
+    expect(git(sandbox, ["log", "-1", "--format=%s"])).toBe("Initialize Kady project");
+  });
+
+  it("refuses a sandbox whose .git directory borrows another repository's refs", () => {
+    // A `.git` DIRECTORY holding a `commondir` file is a repository whose refs
+    // and objects live somewhere else, and `--show-toplevel` still answers "the
+    // sandbox" — the same illusion an inherited GIT_DIR creates, one layout
+    // over. With no refs of its own yet, the victim reads as an empty
+    // repository, so nothing downstream stops the write.
+    const root = makeTemporaryRoot();
+    const victim = path.join(root, "victim-fresh");
+    fs.mkdirSync(victim, { recursive: true });
+    git(victim, ["init", "--quiet", "-b", "main", "."]);
+    const refsBefore = git(victim, ["for-each-ref", "--format=%(refname)"]);
+    expect(refsBefore).toBe("");
+
+    const sandbox = path.join(root, "borrowing-sandbox");
+    const sandboxGit = path.join(sandbox, ".git");
+    makeSandboxWithFile(sandbox);
+    fs.mkdirSync(sandboxGit, { recursive: true });
+    fs.writeFileSync(
+      path.join(sandboxGit, "commondir"),
+      path.join(victim, ".git") + "\n",
+      "utf-8",
+    );
+    fs.writeFileSync(path.join(sandboxGit, "HEAD"), "ref: refs/heads/kady-sandbox\n", "utf-8");
+    fs.writeFileSync(path.join(sandboxGit, "gitdir"), sandbox + "\n", "utf-8");
+    // The layout the old check walked past: a directory, and a toplevel that
+    // answers "the sandbox".
+    expect(fs.lstatSync(sandboxGit).isDirectory()).toBe(true);
+    expect(git(sandbox, ["rev-parse", "--show-toplevel"])).toBe(sandbox);
+
+    let thrown: unknown;
+    try {
+      ensureProjectRepository(sandbox);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ProjectRepositoryContainmentError);
+    const containmentError = thrown as ProjectRepositoryContainmentError;
+    expect(containmentError.invariant).toBe("sandbox_git_common_dir_is_foreign");
+    expect(containmentError.offendingToplevel).toBe(victim);
+    // No branch and no objects were planted in the repository next door.
+    expect(git(victim, ["for-each-ref", "--format=%(refname)"])).toBe("");
+  });
+
+  it("re-proves ownership when the .git directory it proved is changed underneath it", () => {
+    // Ownership is proven once per sandbox and then remembered, because this
+    // runs on every request. The memo is fingerprinted on the identity and the
+    // timestamps of `<sandbox>/.git`, so a repository that stops being the
+    // sandbox's own is caught on the very next call rather than trusted.
+    const root = makeTemporaryRoot();
+    const sandbox = path.join(root, "proved-sandbox");
+    makeSandboxWithFile(sandbox);
+    ensureProjectRepository(sandbox);
+    // Prove it twice: the second call is the one that records the memo.
+    ensureProjectRepository(sandbox);
+    ensureProjectRepository(sandbox);
+
+    // A `commondir` written into the very directory that was proven — the same
+    // path, the same inode, nothing a path-keyed cache would notice.
+    const victim = makeCheckoutWithHistory(root, "commondir-victim");
+    fs.writeFileSync(
+      path.join(sandbox, ".git", "commondir"),
+      path.join(victim, ".git") + "\n",
+      "utf-8",
+    );
+    const victimBefore = fingerprintCheckout(victim);
+
+    let thrown: unknown;
+    try {
+      ensureProjectRepository(sandbox);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(ProjectRepositoryContainmentError);
+    expect((thrown as ProjectRepositoryContainmentError).invariant).toBe(
+      "sandbox_git_common_dir_is_foreign",
+    );
+    expect(fingerprintCheckout(victim)).toEqual(victimBefore);
+  });
+});
+
+describe("ensureProjectExists refuses before it creates anything", () => {
+  afterEach(() => {
+    fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
+  });
+
+  it("writes no skeleton and no seed files when the projects root is inside a checkout", () => {
+    // `ensureProjectRepository` refuses, but its caller had already run
+    // mkdir → mkdir → mkdir → seedSandboxFiles by the time it was reached, so
+    // a refusal deposited three untracked files in the developer's checkout —
+    // and, because the scope hook re-runs on every request, kept depositing
+    // them. The inspection has to happen above the first mkdir.
+    fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
+    fs.mkdirSync(PROJECTS_ROOT, { recursive: true });
+    git(PROJECTS_ROOT, ["init", "--quiet", "-b", "main", "."]);
+    git(PROJECTS_ROOT, ["config", "user.name", "Outer Developer"]);
+    git(PROJECTS_ROOT, ["config", "user.email", "outer@example.test"]);
+    fs.writeFileSync(path.join(PROJECTS_ROOT, "tracked.txt"), "real work\n", "utf-8");
+    git(PROJECTS_ROOT, ["add", "tracked.txt"]);
+    git(PROJECTS_ROOT, ["commit", "--quiet", "-m", "real commit"]);
+    expect(git(PROJECTS_ROOT, ["status", "--porcelain", "-uall"])).toBe("");
+
+    let thrown: unknown;
+    try {
+      ensureProjectExists("nested-study");
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ProjectRepositoryContainmentError);
+    expect((thrown as ProjectRepositoryContainmentError).invariant).toBe(
+      "sandbox_inside_tracked_repository",
+    );
+    // Nothing at all in the checkout: not the project root, not the sandbox,
+    // not the seed files, not a stray lock.
+    expect(git(PROJECTS_ROOT, ["status", "--porcelain", "-uall"])).toBe("");
+    expect(fs.existsSync(resolvePaths("nested-study").root)).toBe(false);
+    // ...and it stays that way however many requests arrive.
+    expect(() => ensureProjectExists("nested-study")).toThrow(
+      ProjectRepositoryContainmentError,
+    );
+    expect(git(PROJECTS_ROOT, ["status", "--porcelain", "-uall"])).toBe("");
+  });
 });
 
 /**
@@ -465,6 +686,29 @@ describe("request scoping refuses a containment violation instead of redirecting
       reason: "project_repository_containment",
       invariant: "sandbox_git_is_a_pointer_file",
     });
+  });
+
+  it("offers no fallback header on a refusal reached through an unknown project id", async () => {
+    // An unknown id on a GET sets X-Project-Fallback and *then* falls back to
+    // the default project — which is the project that refuses. A client reading
+    // the header off the 500 would conclude it had been served from the default
+    // project when it had been served nothing.
+    const defaultSandbox = ensureProjectExists(DEFAULT_PROJECT_ID).sandbox;
+    const outerRoot = makeTemporaryRoot();
+    const checkout = makeCheckoutWithHistory(outerRoot, "operator-checkout");
+    makeSandboxALinkedWorktree(defaultSandbox, checkout, "default-branch");
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/sandbox/tree",
+      headers: { "x-project-id": "no-such-project" },
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toMatchObject({
+      reason: "project_repository_containment",
+    });
+    expect(response.headers["x-project-fallback"]).toBeUndefined();
   });
 
   it("serves a healthy second project's write into that project's own sandbox", async () => {
