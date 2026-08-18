@@ -2,8 +2,15 @@
 //
 // The "Console" view host: two sub-feeds behind a toggle.
 //
-//   - "DAG Runs"       : the target-native typed-engine run console
-//                        (dag-workflow-console.tsx), unchanged and the default.
+//   - "DAG Runs"       : the live-graph console (live-graph-console.tsx) — the
+//                        left rail of everything running (typed DAG runs and
+//                        chat sessions, across projects), the selected source's
+//                        live graph, and the event drawer. The target-native
+//                        typed-engine run console (dag-workflow-console.tsx) is
+//                        unchanged and remains this surface's main area until a
+//                        source is selected, so the authoritative run list,
+//                        controls, and diagnostics stay exactly one click from
+//                        where they have always been.
 //   - "Agents & Loops" : the ported Agent Console (kady-console.tsx) — KADY's
 //                        own run + goal-loop feed read from /console/runs +
 //                        /console/loops (file-backed runs-index), where e.g.
@@ -20,6 +27,7 @@
 import { useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import { KadyConsole } from "@/components/console/kady-console";
+import { LiveGraphConsole } from "@/components/console/live-graph-console";
 
 type ConsoleFeed = "dag-runs" | "agents";
 
@@ -68,7 +76,7 @@ export function ConsolePanel({
           feed === "dag-runs" ? "flex" : "hidden",
         )}
       >
-        {dagConsole}
+        <LiveGraphConsole active={feed === "dag-runs"} runsConsole={dagConsole} />
       </div>
       {agentsVisited && (
         <div
