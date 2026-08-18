@@ -266,6 +266,12 @@
     "S8B": [
       "docs/inventory/s8b-helper-sessions.json",
       "server/src/agent/raindrop-context.ts"
+    ],
+    "NT1": [
+      "docs/inventory/nt1-rescue-skill.json",
+      "server/seed/skills/scientific-dag-studio/SKILL.md",
+      "server/seed/skills/scientific-dag-studio/references/rescue-playbook.md",
+      "server/test/rescue-skill-content.test.ts"
     ]
   },
   "handoffs": [
