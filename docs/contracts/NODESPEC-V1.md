@@ -9,6 +9,41 @@ NodeSpec v1 is the optional `settings` object shared by every node in a typed
 all persisted workflow v1 documents valid. `resolveNodeSpecV1()` applies defaults
 without mutating stored documents.
 
+## What this freeze does and does not cover
+
+The frozen surface is `NodeSpecV1Schema` — the `settings` object — and nothing
+else. A node in a `WorkflowGraphDocument` carries fields beside `settings`, and
+those are governed by their own reviews rather than by the clause above.
+
+Lane W3 (2026-08-18) added two of them. They are recorded here because the
+boundary is easy to misread, not because they are part of NodeSpec v1:
+
+| Field | Where it lives | What it is |
+| --- | --- | --- |
+| `meta.compositeOf` | `WorkflowNodeSchema`, sibling of `settings` | Optional. Flattens the origin of a node that arrived as part of a stitched-in subgraph. |
+| `provenance` | `WorkflowNodeSchema` and the document root | Optional. Names where a node or document came from. |
+
+Two things about them are worth stating plainly, because the handoff that
+authorised them got one of them wrong:
+
+1. **They are outside validation semantics.** `server/src/workflows/validate.ts`
+   is untouched and no validation path reads either field.
+2. **They are inside `graphSha256`.** The handoff said "excluded from …
+   `graphSha256`", and that is not how the hash works: it is
+   `sha256(validation.document)`, and `canonicalize()` sorts keys while
+   stripping nothing, so every persisted field participates. This is deliberate
+   and follows the same rule the pre-existing per-node `position` already did —
+   the store treats an identical hash as "unchanged" and skips the write, so a
+   hash that ignored these fields would make a change to them a silent no-op
+   that never persisted.
+
+Round 1 of that lane also carried a document-level `ui` object holding
+`positions` and `viewport`. It was removed before merge, and the reasoning is
+worth keeping: it was persisted and round-tripped but never emitted and never
+applied, and an optional field under `additionalProperties: false` is not free —
+a document written with it is a document an older server rejects as CORRUPT on
+read.
+
 ## Enforcement status
 
 `BOUND` means the current production runtime consumes the field. `FAIL-CLOSED(unit)`
