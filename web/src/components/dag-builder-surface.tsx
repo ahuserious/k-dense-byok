@@ -33,11 +33,27 @@
 //
 // WHAT THE ASSISTANT CANNOT DO, and why the copy must not imply otherwise:
 // the no-bridge fact above cuts BOTH ways. Nothing the assistant produces can
-// reach the canvas either — there is no apply path, so its output is text the
-// user copies in by hand. Until lane W3's bridge lands, every user-facing
-// string in this rail and in `helperEmptyState("dag-builder")` is limited to
-// explain / draft YAML you paste in / propose fixes. Do not write "apply", and
-// do not write "visual DAG": the assistant cannot draw one.
+// reach the canvas either. There is no apply path AND no paste target: the
+// engine's YAML surface is a read-only <pre> ("Read-only YAML preview") in both
+// YAML and Split modes, there is no YAML import anywhere in the vendored app or
+// in Kady's web app, and /dag-workflow-imports/* has no caller in web/src. So
+// the draft is text in the rail's own transcript and nothing more, until lane
+// W3's typed authoring path lands.
+//
+// The TWO STORES matter to the copy as much as the missing bridge. This rail's
+// picker lists Kady's TYPED workflows (GET /dag-workflows). The canvas saves
+// into the vendored engine's own store (PUT /api/workflows/<name> on the
+// iframe's origin), and those appear in Scientific Pipelines as `vendored` rows
+// that this picker never shows. So "save it in the canvas" is not a route to a
+// selectable revision — "Scientific Pipelines → New typed workflow" is the only
+// one — and the copy must not offer the first.
+//
+// The rule for every user-facing string here and in
+// `helperEmptyState("dag-builder")`: it must name a route a user can walk end
+// to end, and someone must have walked it. Rounds 1 and 3 both shipped copy that
+// passed the word ban and still described something the product cannot do, so
+// the ban ("apply", "applies", "visual" — pinned across every string in every
+// state by helper-agent-chat.test.tsx) is a floor, not the test.
 //
 // The main Kady chat is unaffected: it keeps its own `/sessions` sessions and
 // never shares a transcript with this rail.
@@ -218,6 +234,10 @@ function BuilderAssistantRail({
   // Only true once a list has actually come back: before that the rail must not
   // tell the user there is nothing to select.
   const hasSelectableContext = !workflowsLoaded || workflows.length > 0;
+  // "The list failed" is not "the project is empty". Left conflated, a failed
+  // fetch made the rail assert "No saved workflow to work on yet" and then send
+  // the user off to create a workflow they may already own (r3 review F8).
+  const contextListFailed = workflowsError !== null;
 
   // "No provider connected" for a helper that has no model picker of its own:
   // the catalogue marks every entry unavailable exactly when nothing is
@@ -254,15 +274,23 @@ function BuilderAssistantRail({
           <button
             type="button"
             onClick={() => setRefreshToken((token) => token + 1)}
-            // Deliberately not "…saved workflow revisions": Playwright matches
-            // an accessible name by substring, so a label containing the
-            // picker's own "SAVED WORKFLOW REVISION" text would make every
-            // getByLabel for the picker ambiguous.
-            aria-label="Refresh the workflow list"
+            // "Reload", not "Refresh", and not "…saved workflow revisions".
+            // Playwright matches an accessible name by substring for BOTH
+            // getByLabel and getByRole(role, { name }), so: a label containing
+            // the picker's own "SAVED WORKFLOW REVISION" text would make every
+            // getByLabel for the picker ambiguous, and a label containing
+            // "Refresh" would be a second match for the
+            // getByRole("button", { name: "Refresh" }) already used by
+            // e2e/console-raindrop.spec.ts:195, e2e/scientific-pipelines.spec.ts
+            // and e2e/live-backend.spec.ts — a strict-mode violation waiting for
+            // the first spec that visits the Builder with this rail visible
+            // (r3 review F7). The visible label matches, so the empty-state copy
+            // can tell the user to "press Reload" and mean this control.
+            aria-label="Reload the workflow list"
             className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-foreground/5 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground"
           >
             <RefreshCwIcon className="size-3" />
-            Refresh
+            Reload
           </button>
         </div>
         <select
@@ -274,9 +302,11 @@ function BuilderAssistantRail({
           <option value="">
             {!workflowsLoaded
               ? "Loading saved workflows…"
-              : workflows.length === 0
-                ? "No saved workflows yet"
-                : "Select a saved workflow…"}
+              : workflows.length > 0
+                ? "Select a saved workflow…"
+                : workflowsError
+                  ? "Saved workflows could not be listed"
+                  : "No saved workflows yet"}
           </option>
           {workflows.map((workflow) => (
             <option key={workflowRevisionId(workflow)} value={workflowRevisionId(workflow)}>
@@ -307,9 +337,13 @@ function BuilderAssistantRail({
           </p>
         ) : null}
         {/* The other half of the boundary, and just as permanent: nothing comes
-            BACK either. There is no bridge from this rail into the canvas. */}
+            BACK either. This line used to end "…drafts YAML you copy in", which
+            named a paste target that does not exist — the canvas's YAML surface
+            is read-only and nothing in the product imports YAML (r3 review F2).
+            It now states the limit instead of implying a route. */}
         <p className="mt-0.5 text-[10px] text-muted-foreground">
-          The assistant explains and drafts YAML you copy in. It cannot edit the canvas.
+          The assistant explains and drafts YAML here in the chat. It cannot edit the canvas, and the
+          canvas has no YAML import.
         </p>
       </div>
       <div className="min-h-0 flex-1">
@@ -322,6 +356,7 @@ function BuilderAssistantRail({
               : undefined
           }
           hasSelectableContext={hasSelectableContext}
+          contextListFailed={contextListFailed}
           providerBlocked={providerBlocked}
         />
       </div>

@@ -185,7 +185,7 @@ describe("HelperAgentChat blocked composer states the reason", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        "Choose a saved revision above. I then explain its nodes and edges, draft YAML you can copy into the canvas, and propose fixes for validation errors.",
+        "Choose a saved revision above. I then explain its nodes and edges, draft YAML here in the chat, and propose fixes for validation errors. Nothing I write reaches the canvas: it has no YAML import, and I cannot edit it.",
       ),
     ).toBeInTheDocument();
     unmount();
@@ -219,6 +219,37 @@ describe("HelperAgentChat blocked composer states the reason", () => {
     // where the project has no saved workflow at all and the composer is
     // therefore hard-blocked with no way out from this rail. Each state now says
     // what is true of it.
+    //
+    // R3 [F5]: the previous version of this assertion applied the word ban to
+    // five strings (the unavailable title and hint, and the selected title,
+    // description and placeholder), leaving the whole unselected state and the
+    // unavailable description and placeholder unchecked — and the unavailable
+    // description was precisely the string the r3 review's F1 was about. Every
+    // user-visible string in every state is collected and checked now.
+    //
+    // The ban is a FLOOR, not the test. Both r1's and r3's false promises would
+    // have to be caught by reading the sentence, not by matching a word: "Save a
+    // workflow in the canvas on the left" (F1) and "draft YAML you can copy into
+    // the canvas" (F2) both pass this regex. The routes themselves are pinned by
+    // the exact-text assertions below and walked in the lane report.
+    const NO_CANVAS_REACH = /\bapply\b|\bapplies\b|\bvisual\b/i;
+    const visibleCopy: string[] = [];
+    const collectVisibleCopy = (title: string, description: string) => {
+      expect(screen.getByText(title)).toBeInTheDocument();
+      expect(screen.getByText(description)).toBeInTheDocument();
+      visibleCopy.push(
+        title,
+        description,
+        screen.getByRole("textbox", { name: "Message DAG Builder agent" })
+          .getAttribute("placeholder") ?? "",
+        screen.getByTestId("helper-agent-blocked-hint").textContent ?? "",
+      );
+    };
+
+    // (a) The list came back empty. Only ONE route produces a revision this
+    // picker lists — Scientific Pipelines' "New typed workflow" — and only the
+    // rail's own Reload control refreshes the list, so those are the two things
+    // named. The canvas is named for what it actually does, not offered.
     const { unmount: unmountUnavailable } = render(
       <HelperAgentChat
         projectId="project-a"
@@ -226,25 +257,50 @@ describe("HelperAgentChat blocked composer states the reason", () => {
         hasSelectableContext={false}
       />,
     );
-    expect(screen.getByText("No saved workflow to work on yet")).toBeInTheDocument();
-    expect(screen.getByTestId("helper-agent-blocked-hint")).toHaveTextContent(
-      "Save a workflow first, or create one in Scientific Pipelines, then pick its revision above.",
+    collectVisibleCopy(
+      "No saved workflow to work on yet",
+      "I work on typed workflow revisions, and this project has none yet. Create one in Scientific Pipelines with New typed workflow, then press Reload above and pick its revision. The canvas on the left saves into the pipeline engine's own store, which this picker cannot list.",
     );
-    const unavailableCopy = [
-      screen.getByText("No saved workflow to work on yet").textContent ?? "",
-      screen.getByTestId("helper-agent-blocked-hint").textContent ?? "",
-    ];
+    expect(screen.getByTestId("helper-agent-blocked-hint")).toHaveTextContent(
+      "Create a typed workflow in Scientific Pipelines, then press Reload above and pick its revision.",
+    );
     unmountUnavailable();
 
+    // (b) The list could NOT be fetched (r3 review F8). Saying "no saved
+    // workflow exists" here is a guess, and the wrong one for a project that is
+    // full of them, so this state claims nothing about what the project has.
+    const { unmount: unmountUnlistable } = render(
+      <HelperAgentChat
+        projectId="project-a"
+        profile="dag-builder"
+        hasSelectableContext={false}
+        contextListFailed
+      />,
+    );
+    collectVisibleCopy(
+      "Saved workflows could not be listed",
+      "The list above did not load, so I do not know which revisions this project has. Press Reload above to try again.",
+    );
+    expect(screen.getByTestId("helper-agent-blocked-hint")).toHaveTextContent(
+      "Saved workflows could not be listed. Press Reload above to try again.",
+    );
+    unmountUnlistable();
+
+    // (c) Revisions exist, none picked.
     const { unmount: unmountUnselected } = render(
       <HelperAgentChat projectId="project-a" profile="dag-builder" />,
     );
-    expect(screen.getByText("Pick a saved workflow revision to start")).toBeInTheDocument();
+    collectVisibleCopy(
+      "Pick a saved workflow revision to start",
+      "Choose a saved revision above. I then explain its nodes and edges, draft YAML here in the chat, and propose fixes for validation errors. Nothing I write reaches the canvas: it has no YAML import, and I cannot edit it.",
+    );
     expect(screen.getByTestId("helper-agent-blocked-hint")).toHaveTextContent(
       "Pick a saved workflow revision above to ask the DAG Builder agent.",
     );
     unmountUnselected();
 
+    // (d) A revision is bound. Only here does the drafting copy appear, and even
+    // then it names both limits: no apply path AND no paste target.
     render(
       <HelperAgentChat
         projectId="project-a"
@@ -252,23 +308,32 @@ describe("HelperAgentChat blocked composer states the reason", () => {
         contextReference={{ kind: "workflow", id: "microscopy_qc@4" }}
       />,
     );
-    // Only with a revision bound does the drafting copy appear, and even then it
-    // names its own limit.
     const selectedTitle = await screen.findByText("Build on this saved workflow revision");
     const selectedDescription = screen.getByText(
-      "I explain the nodes and edges of the revision above, draft YAML you can copy into the canvas, and propose fixes for validation errors. I cannot edit the canvas myself.",
+      "I explain the nodes and edges of the revision above, draft YAML here in the chat, and propose fixes for validation errors. Nothing I write reaches the canvas: it has no YAML import, and I cannot edit it.",
     );
-
-    // R1 [medium]: there is no bridge from this rail into the cross-origin
-    // builder canvas, so no state may claim it draws or applies anything there.
-    for (const text of [
-      ...unavailableCopy,
+    visibleCopy.push(
       selectedTitle.textContent ?? "",
       selectedDescription.textContent ?? "",
       screen.getByRole("textbox", { name: "Message DAG Builder agent" })
         .getAttribute("placeholder") ?? "",
-    ]) {
-      expect(text).not.toMatch(/\bapply\b|\bapplies\b|\bvisual\b/i);
+    );
+
+    // R1 [medium]: there is no bridge from this rail into the cross-origin
+    // builder canvas, so no state may claim it draws or applies anything there.
+    // 15 strings: title/description/placeholder/hint for each of (a)–(c), and
+    // title/description/placeholder for (d), which has no blocked hint once a
+    // revision is bound.
+    expect(visibleCopy).toHaveLength(15);
+    for (const text of visibleCopy) {
+      expect(text).not.toMatch(NO_CANVAS_REACH);
+    }
+    // No state may name the canvas as a place to put something, which is the
+    // shape both r3 findings took. "Save a workflow in the canvas", "copy into
+    // the canvas" and "paste into the canvas" all match; "reaches the canvas"
+    // and "edit the canvas" — statements of the limit — do not.
+    for (const text of visibleCopy) {
+      expect(text).not.toMatch(/\b(?:save|copy|paste|drop|put|import)\b[^.]*\b(?:in|into|to)\s+the\s+canvas\b/i);
     }
   });
 

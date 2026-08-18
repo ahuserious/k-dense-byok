@@ -46,7 +46,14 @@ type HelperContextState =
   /** Selectable contexts exist, the user has not chosen one. */
   | "unselected"
   /** The picker is empty — nothing in this project can be selected yet. */
-  | "unavailable";
+  | "unavailable"
+  /**
+   * The picker's list could not be fetched, so the helper does not KNOW what
+   * this project has. Distinct from "unavailable" on purpose (r3 review F8): an
+   * errored list left the rail asserting "No saved workflow to work on yet" and
+   * then telling the user to go create a workflow they may already own.
+   */
+  | "unlistable";
 
 function helperEmptyState(
   profile: HelperAgentProfile,
@@ -64,30 +71,60 @@ function helperEmptyState(
   missingContext: string;
 } {
   if (profile === "dag-builder") {
-    // The DAG-BUILDING chat the owner asked for, and the only one. Two hard
-    // limits shape every string here, and the round-1 review failed on the
-    // first: (1) the composer is HARD BLOCKED until a SAVED revision is
-    // selected, so on a project with no saved workflow the old copy invited the
-    // user to "describe the pipeline you want" into a box that could never
-    // send; (2) there is no bridge from this rail into the canvas
-    // (dag-builder-surface.tsx header), so "I draft the VISUAL DAG" promised an
-    // apply path that does not exist. The copy below says only what is true in
-    // each state: explain, draft YAML the user copies in, propose fixes.
+    // The DAG-BUILDING chat the owner asked for, and the only one. EVERY
+    // sentence below names a route a user can walk end to end; rounds 1 and 3
+    // both failed here, and both failures were the same shape — copy describing
+    // a capability the product does not have:
+    //
+    //   * r1: "I draft the VISUAL DAG" promised an apply path into the canvas.
+    //   * r3 F1: "Save a workflow in the canvas on the left" named a route that
+    //     cannot produce a revision THIS picker lists. The canvas saves to the
+    //     vendored pipeline engine's own store (PUT /api/workflows/<name> on the
+    //     iframe's origin); the picker lists Kady's typed store (GET
+    //     /dag-workflows). Nothing bridges them, and in the very state this copy
+    //     is written for the canvas's Save is disabled outright
+    //     ("Open a workflow from the registry before saving"). The only route
+    //     that produces a listed revision is Scientific Pipelines → "New typed
+    //     workflow", so that is the only route named.
+    //   * r3 F2: "draft YAML you can copy into the canvas" named a paste target
+    //     that does not exist. The engine's YAML surface is a read-only <pre>
+    //     headed "Read-only YAML preview" in both YAML and Split modes, there is
+    //     no YAML import anywhere in the vendored app or in Kady's web app, and
+    //     /dag-workflow-imports/* has no caller in web/src. The draft is text in
+    //     THIS chat and nothing more, so that is what the copy says.
+    //   * r3 F3: "then pick its revision above" was false at the moment the user
+    //     followed it — PersistentWorkspaceSurfaces keeps this rail mounted, so
+    //     returning to the Builder does not refetch. The Reload control is the
+    //     trigger the rail actually owns, so the copy names it.
+    //
+    // A word ban cannot police this (neither r3 sentence used a banned word);
+    // the assertion in helper-agent-chat.test.tsx pins the ban across every
+    // string in every state, and the walk-throughs in the lane report are what
+    // pin the routes.
+    if (contextState === "unlistable") {
+      return {
+        title: "Saved workflows could not be listed",
+        description:
+          "The list above did not load, so I do not know which revisions this project has. Press Reload above to try again.",
+        placeholder: "Reload the list above, then ask…",
+        missingContext: "Saved workflows could not be listed. Press Reload above to try again.",
+      };
+    }
     if (contextState === "unavailable") {
       return {
         title: "No saved workflow to work on yet",
         description:
-          "This assistant works on SAVED workflow revisions, so it needs one to exist first. Save a workflow in the canvas on the left, or create one in Scientific Pipelines, then pick its revision above.",
-        placeholder: "Save a workflow first, then ask about it…",
+          "I work on typed workflow revisions, and this project has none yet. Create one in Scientific Pipelines with New typed workflow, then press Reload above and pick its revision. The canvas on the left saves into the pipeline engine's own store, which this picker cannot list.",
+        placeholder: "Create a typed workflow first, then ask about it…",
         missingContext:
-          "Save a workflow first, or create one in Scientific Pipelines, then pick its revision above.",
+          "Create a typed workflow in Scientific Pipelines, then press Reload above and pick its revision.",
       };
     }
     if (contextState === "unselected") {
       return {
         title: "Pick a saved workflow revision to start",
         description:
-          "Choose a saved revision above. I then explain its nodes and edges, draft YAML you can copy into the canvas, and propose fixes for validation errors.",
+          "Choose a saved revision above. I then explain its nodes and edges, draft YAML here in the chat, and propose fixes for validation errors. Nothing I write reaches the canvas: it has no YAML import, and I cannot edit it.",
         placeholder: "Pick a saved revision above, then ask…",
         missingContext: "Pick a saved workflow revision above to ask the DAG Builder agent.",
       };
@@ -95,7 +132,7 @@ function helperEmptyState(
     return {
       title: "Build on this saved workflow revision",
       description:
-        "I explain the nodes and edges of the revision above, draft YAML you can copy into the canvas, and propose fixes for validation errors. I cannot edit the canvas myself.",
+        "I explain the nodes and edges of the revision above, draft YAML here in the chat, and propose fixes for validation errors. Nothing I write reaches the canvas: it has no YAML import, and I cannot edit it.",
       placeholder: "Ask about this workflow…",
       missingContext: "Pick a saved workflow revision above to ask the DAG Builder agent.",
     };
@@ -126,12 +163,14 @@ function ScopedHelperAgentChat({
   profile,
   contextReference,
   hasSelectableContext = true,
+  contextListFailed = false,
   providerBlocked = false,
 }: {
   projectId: string;
   profile: HelperAgentProfile;
   contextReference?: HelperAgentContextReference;
   hasSelectableContext?: boolean;
+  contextListFailed?: boolean;
   providerBlocked?: boolean;
 }) {
   const agent = useAgent(projectId);
@@ -205,9 +244,19 @@ function ScopedHelperAgentChat({
   const contextReady = Boolean(contextKind && contextId);
   // `hasSelectableContext` defaults to true, so a call site that does not know
   // whether its picker is empty keeps the previous two-state behaviour.
+  // "unlistable" ranks BELOW "unselected": a caller whose list failed but whose
+  // previous snapshot still holds options can still pick one, and the picker's
+  // own role=alert already reports the failure. It ranks ABOVE "unavailable"
+  // because a failed fetch is not evidence that the project is empty.
   const emptyState = helperEmptyState(
     profile,
-    contextReady ? "selected" : hasSelectableContext ? "unselected" : "unavailable",
+    contextReady
+      ? "selected"
+      : hasSelectableContext
+        ? "unselected"
+        : contextListFailed
+          ? "unlistable"
+          : "unavailable",
   );
 
   // The composer used to be a bare native `disabled` on both the textarea and
@@ -382,6 +431,13 @@ export function HelperAgentChat(props: {
    * and defaulted true: call sites that cannot tell keep the previous copy.
    */
   hasSelectableContext?: boolean;
+  /**
+   * True when the caller's picker could not FETCH its list, which is a different
+   * thing from fetching an empty one. Without this the rail told a user whose
+   * list request failed that no saved workflow exists, and then sent them off to
+   * create one they may already have (r3 review F8). Optional and defaulted off.
+   */
+  contextListFailed?: boolean;
   /**
    * True when no model provider is connected, so no helper turn can be served.
    * Optional and defaulted off: call sites that do not run the provider check

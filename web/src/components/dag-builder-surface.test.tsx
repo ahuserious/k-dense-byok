@@ -21,6 +21,7 @@ vi.mock("@/components/helper-agent-chat", () => ({
     profile: string;
     contextReference?: { kind: string; id: string };
     hasSelectableContext?: boolean;
+    contextListFailed?: boolean;
     providerBlocked?: boolean;
   }) => {
     helperProps.capture(props);
@@ -29,6 +30,7 @@ vi.mock("@/components/helper-agent-chat", () => ({
         {props.profile}:
         {props.contextReference ? `${props.contextReference.kind}:${props.contextReference.id}` : "no-context"}
         {props.hasSelectableContext === false ? ":nothing-to-select" : ""}
+        {props.contextListFailed ? ":list-failed" : ""}
         {props.providerBlocked ? ":provider-blocked" : ""}
       </div>
     );
@@ -128,6 +130,7 @@ describe("DagBuilderSurface", () => {
       profile: "dag-builder",
       contextReference: { kind: "workflow", id: "microscopy_qc@4" },
       hasSelectableContext: true,
+      contextListFailed: false,
       providerBlocked: false,
     });
 
@@ -174,7 +177,9 @@ describe("DagBuilderSurface", () => {
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getByText("The assistant explains and drafts YAML you copy in. It cannot edit the canvas."),
+      screen.getByText(
+        "The assistant explains and drafts YAML here in the chat. It cannot edit the canvas, and the canvas has no YAML import.",
+      ),
     ).toBeInTheDocument();
     expect(screen.queryByText(/sent as bounded, server-rebuilt context/)).not.toBeInTheDocument();
   });
@@ -195,6 +200,57 @@ describe("DagBuilderSurface", () => {
     ).toBeInTheDocument();
   });
 
+  it("distinguishes a list that failed from a project with nothing saved", async () => {
+    // R3 [F8]: the .catch set the error and marked the list loaded while leaving
+    // `workflows` at [], so the rail asserted "No saved workflow to work on yet"
+    // and then told the user to go create one they may already own. A failed
+    // fetch is not evidence about what the project contains.
+    mocks.listDagWorkflowDefinitions.mockRejectedValue(new Error("Saved workflows could not be listed."));
+    render(<DagBuilderSurface projectId="project-a" />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("builder-assistant")).toHaveTextContent(":list-failed"),
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent("Saved workflows could not be listed.");
+    // The picker stops claiming the project is empty too.
+    expect(
+      screen.getByRole("option", { name: "Saved workflows could not be listed" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "No saved workflows yet" })).not.toBeInTheDocument();
+
+    // A successful reload clears both the alert and the failed flag.
+    mocks.listDagWorkflowDefinitions.mockResolvedValue([workflow("microscopy_qc", 4, "Microscopy QC")]);
+    await userEvent.click(screen.getByRole("button", { name: "Reload the workflow list" }));
+    await waitFor(() =>
+      expect(screen.getByRole("option", { name: "Microscopy QC · rev 4" })).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByTestId("builder-assistant")).not.toHaveTextContent(":list-failed");
+  });
+
+  it("gives its reload control a name that cannot collide with another Refresh", async () => {
+    // R3 [F7, latent]: the control was named "Refresh the workflow list", and
+    // Playwright's getByRole matches an accessible name by SUBSTRING, so
+    // getByRole("button", { name: "Refresh" }) — used by
+    // e2e/console-raindrop.spec.ts, e2e/scientific-pipelines.spec.ts and
+    // e2e/live-backend.spec.ts — would also match this one as soon as a spec
+    // visits the Builder with the rail visible. It does not today only because
+    // the inactive surface is display:none.
+    mocks.listDagWorkflowDefinitions.mockResolvedValue([]);
+    render(<DagBuilderSurface projectId="project-a" />);
+
+    const reload = await screen.findByRole("button", { name: "Reload the workflow list" });
+    expect(reload).toBeInTheDocument();
+    expect(reload.textContent).not.toMatch(/refresh/i);
+    for (const button of screen.getAllByRole("button")) {
+      expect(button.getAttribute("aria-label") ?? button.textContent ?? "").not.toMatch(/refresh/i);
+    }
+    // And still not a second match for the picker's own label.
+    expect(screen.getByLabelText("SAVED WORKFLOW REVISION")).toBe(
+      screen.getByRole("combobox"),
+    );
+  });
+
   it("revalidates the saved-revision list on refresh and on reopening the rail", async () => {
     // R1 [medium]: the list was fetched once per page load while a comment
     // claimed the option list was authoritative. The canvas saves revisions in
@@ -208,7 +264,7 @@ describe("DagBuilderSurface", () => {
 
     // A workflow is saved in the canvas while the rail is open.
     mocks.listDagWorkflowDefinitions.mockResolvedValue([workflow("microscopy_qc", 4, "Microscopy QC")]);
-    await userEvent.click(screen.getByRole("button", { name: "Refresh the workflow list" }));
+    await userEvent.click(screen.getByRole("button", { name: "Reload the workflow list" }));
     await waitFor(() =>
       expect(screen.getByRole("option", { name: "Microscopy QC · rev 4" })).toBeInTheDocument(),
     );
