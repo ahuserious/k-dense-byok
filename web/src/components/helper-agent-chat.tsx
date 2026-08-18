@@ -47,11 +47,16 @@ function helperEmptyState(profile: HelperAgentProfile): {
   missingContext: string;
 } {
   if (profile === "dag-builder") {
+    // The DAG-BUILDING chat the owner asked for, and the only one: this copy has
+    // to say "I draft the graph with you" without a reader having to infer it
+    // from the profile name. The Raindrop analyst below is deliberately worded
+    // so it can never be mistaken for this helper again.
     return {
-      title: "Design with a separate Builder agent",
-      description: "Ask for a graph critique or a bounded proposal; applying changes remains explicit.",
+      title: "Build this workflow with a separate Builder agent",
+      description:
+        "Describe the pipeline you want; I draft the visual/YAML DAG, explain nodes and edges, and propose fixes for validation errors.",
       placeholder: "Ask about this workflow…",
-      missingContext: "Open a saved workflow in the Builder to ask the DAG Builder agent.",
+      missingContext: "Pick a saved workflow revision above to ask the DAG Builder agent.",
     };
   }
   if (profile === "workflow-rescue") {
@@ -62,11 +67,16 @@ function helperEmptyState(profile: HelperAgentProfile): {
       missingContext: "Select a stopped run to ask the Workflow Rescue helper.",
     };
   }
+  // A LOG ANALYST, never a DAG-building chat. The previous copy led with "DAG
+  // run", which read as the builder assistant and sent the owner looking for
+  // the pipeline chat here. Nothing in this profile's user-facing text now
+  // describes building a graph.
   return {
     title: "Analyze a saved log",
-    description: "Select a DAG run or ordinary chat session, then ask for a causal timeline.",
+    description:
+      "Pick a saved run or chat log on the left, then ask for a causal timeline of what happened.",
     placeholder: "Ask what failed and why…",
-    missingContext: "Select a saved DAG run or chat session to ask the Raindrop analyst.",
+    missingContext: "Pick a saved run or chat log on the left to ask the Raindrop analyst.",
   };
 }
 
@@ -74,10 +84,12 @@ function ScopedHelperAgentChat({
   projectId,
   profile,
   contextReference,
+  providerBlocked = false,
 }: {
   projectId: string;
   profile: HelperAgentProfile;
   contextReference?: HelperAgentContextReference;
+  providerBlocked?: boolean;
 }) {
   const agent = useAgent(projectId);
   const contextKind = contextReference?.kind;
@@ -160,12 +172,19 @@ function ScopedHelperAgentChat({
   const instanceId = useId();
   const blockedHintId = `${instanceId}-helper-blocked`;
   const connectionErrorId = `${instanceId}-helper-error`;
-  const blockedHint = !contextReady
-    ? emptyState.missingContext
-    : connection === "connecting"
-      ? `${helperLabel(profile)} is connecting…`
-      : null;
-  const blocked = connection !== "ready" || !contextReady;
+  // Precedence mirrors the chat composer's Submit hint (F5): a missing provider
+  // is the reason nothing at all can be sent, so it outranks the per-profile
+  // "pick a context" hint, and the caller is expected to pass it only once the
+  // provider check has SETTLED — an unsettled check would flash the amber block
+  // and shove the composer down on every Builder visit.
+  const blockedHint = providerBlocked
+    ? "Connect a provider in Settings to send"
+    : !contextReady
+      ? emptyState.missingContext
+      : connection === "connecting"
+        ? `${helperLabel(profile)} is connecting…`
+        : null;
+  const blocked = providerBlocked || connection !== "ready" || !contextReady;
   const blockedDescribedBy = connectionError
     ? connectionErrorId
     : blockedHint
@@ -175,7 +194,7 @@ function ScopedHelperAgentChat({
   const submit = async (event?: FormEvent) => {
     event?.preventDefault();
     const question = draft.trim();
-    if (!question || connection !== "ready" || running || !contextReady) return;
+    if (!question || blocked || running) return;
     setDraft("");
     // The browser sends only the question. The server reconstructs the bounded
     // projection from this helper session's authoritative typed binding.
@@ -308,6 +327,12 @@ export function HelperAgentChat(props: {
   projectId: string;
   profile: HelperAgentProfile;
   contextReference?: HelperAgentContextReference;
+  /**
+   * True when no model provider is connected, so no helper turn can be served.
+   * Optional and defaulted off: call sites that do not run the provider check
+   * behave exactly as before.
+   */
+  providerBlocked?: boolean;
 }) {
   // A source change must create a fresh useAgent instance. Otherwise the old
   // session id/transcript remains bound and untrusted source A can persist into

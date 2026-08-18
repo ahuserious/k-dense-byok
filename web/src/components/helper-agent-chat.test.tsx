@@ -128,7 +128,7 @@ describe("HelperAgentChat blocked composer states the reason", () => {
 
     const hint = screen.getByTestId("helper-agent-blocked-hint");
     expect(hint).toHaveTextContent(
-      "Select a saved DAG run or chat session to ask the Raindrop analyst.",
+      "Pick a saved run or chat log on the left to ask the Raindrop analyst.",
     );
     expect(send).toHaveAttribute("aria-describedby", hint.id);
     expect(textarea).toHaveAttribute("aria-describedby", hint.id);
@@ -169,8 +169,72 @@ describe("HelperAgentChat blocked composer states the reason", () => {
 
     render(<HelperAgentChat projectId="project-a" profile="dag-builder" />);
     expect(screen.getByTestId("helper-agent-blocked-hint")).toHaveTextContent(
-      "Open a saved workflow in the Builder to ask the DAG Builder agent.",
+      "Pick a saved workflow revision above to ask the DAG Builder agent.",
     );
+  });
+
+  it("keeps the DAG-building and log-analysis empty states unmistakably apart", () => {
+    const { unmount } = render(
+      <HelperAgentChat projectId="project-a" profile="dag-builder" />,
+    );
+    // O2: the Builder assistant says what it drafts, in the Builder's words.
+    expect(
+      screen.getByText("Build this workflow with a separate Builder agent"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Describe the pipeline you want; I draft the visual/YAML DAG, explain nodes and edges, and propose fixes for validation errors.",
+      ),
+    ).toBeInTheDocument();
+    unmount();
+
+    render(<HelperAgentChat projectId="project-a" profile="raindrop" />);
+    // O3: the analyst is a LOG reader. No DAG-building language anywhere in its
+    // empty state, its hint, or its placeholder — that copy is what the owner
+    // read as the misplaced pipeline chat.
+    expect(screen.getByText("Analyze a saved log")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Pick a saved run or chat log on the left, then ask for a causal timeline of what happened.",
+      ),
+    ).toBeInTheDocument();
+    for (const text of [
+      screen.getByText("Analyze a saved log").textContent ?? "",
+      screen.getByText(
+        "Pick a saved run or chat log on the left, then ask for a causal timeline of what happened.",
+      ).textContent ?? "",
+      screen.getByTestId("helper-agent-blocked-hint").textContent ?? "",
+      screen.getByRole("textbox", { name: "Message Raindrop analyst" })
+        .getAttribute("placeholder") ?? "",
+    ]) {
+      expect(text).not.toMatch(/\bbuild|\bdraft|\bdesign|\bDAG\b/i);
+    }
+  });
+
+  it("states the provider reason first and refuses to send without one", async () => {
+    render(
+      <HelperAgentChat
+        projectId="project-a"
+        profile="dag-builder"
+        contextReference={{ kind: "workflow", id: "microscopy_qc@4" }}
+        providerBlocked
+      />,
+    );
+
+    const hint = await screen.findByTestId("helper-agent-blocked-hint");
+    // Same wording and same visible-hint treatment as the chat composer's
+    // Submit, so one reason is learned once.
+    expect(hint).toHaveTextContent("Connect a provider in Settings to send");
+    const send = screen.getByRole("button", { name: "Send" });
+    const textarea = screen.getByRole("textbox", { name: "Message DAG Builder agent" });
+    expect(send).not.toBeDisabled();
+    expect(send).toHaveAttribute("aria-disabled", "true");
+    expect(send).toHaveAttribute("aria-describedby", hint.id);
+    expect(textarea).toHaveAttribute("aria-describedby", hint.id);
+
+    await userEvent.type(textarea, "Draft me a two-node graph.{Enter}");
+    await userEvent.click(send);
+    expect(mocks.send).not.toHaveBeenCalled();
   });
 
   it("drops the hint once the helper session is ready", async () => {

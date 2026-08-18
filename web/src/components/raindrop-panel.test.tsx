@@ -120,6 +120,25 @@ describe("RaindropPanel", () => {
     });
   });
 
+  it("presents itself as a log analyst, never as the DAG-building chat", async () => {
+    render(<RaindropPanel projectId="project-a" active={false} />);
+
+    // The first sentence is the one e2e/console-raindrop.spec.ts pins; the
+    // second is what stops the owner reading this tab as the pipeline chat.
+    expect(
+      screen.getByText(/Autosaved DAG runs and chat sessions with a separate no-tools Pi log analyst\./),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/It reconstructs what already happened; it never drafts or edits a workflow\./),
+    ).toBeInTheDocument();
+    // With nothing selected the panel asks for a LOG, and asks for a timeline —
+    // it never invites the user to build a DAG here.
+    const idle = await screen.findByText(
+      "Pick a saved run or chat log on the left, then ask for a causal timeline of what happened.",
+    );
+    expect(idle.textContent).not.toMatch(/\bbuild|\bdraft|\bdesign/i);
+  });
+
   it("autosaves open/resumed and stored chats beside DAG runs and loads validated context", async () => {
     window.localStorage.setItem(
       "kady:raindrop:project-a:v2",
