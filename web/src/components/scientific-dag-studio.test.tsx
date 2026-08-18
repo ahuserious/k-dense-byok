@@ -1,9 +1,12 @@
-import { lazy, type ReactNode } from "react";
+import { lazy, useState, type ComponentType, type ReactNode } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { ScientificDagStudioLauncher } from "./scientific-dag-studio";
+import {
+  ScientificDagStudio,
+  ScientificDagStudioLauncher,
+} from "./scientific-dag-studio";
 
 vi.mock("./canvasui/Liquid", () => ({
   Liquid: ({ children }: { children: ReactNode }) => children,
@@ -14,10 +17,34 @@ const loadRejectingCanvasSurfacesChunk = vi.fn(() =>
 );
 const RejectingCanvasSurfacesSection = lazy(loadRejectingCanvasSurfacesChunk);
 
+// RETIRED 2026-08-18: the product no longer ships a "Components studio" entry
+// point, so these specimens open the dialog through a test-local trigger that
+// stands in for the launcher the workspace header used to render. The dialog
+// itself is still exported and still has to behave.
+function StudioHarness({
+  canvasSurfacesComponent,
+}: {
+  canvasSurfacesComponent?: ComponentType;
+} = {}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button onClick={() => setOpen(true)} type="button">
+        Components studio
+      </button>
+      <ScientificDagStudio
+        canvasSurfacesComponent={canvasSurfacesComponent}
+        onClose={() => setOpen(false)}
+        open={open}
+      />
+    </>
+  );
+}
+
 describe("ScientificDagStudio", () => {
-  it("traps focus, closes with Escape, and restores launcher focus", async () => {
+  it("traps focus and releases it when Escape closes the dialog", async () => {
     const user = userEvent.setup();
-    render(<ScientificDagStudioLauncher />);
+    render(<StudioHarness />);
 
     const launcher = screen.getByRole("button", { name: "Components studio" });
     launcher.focus();
@@ -49,6 +76,13 @@ describe("ScientificDagStudio", () => {
 
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    // The retired launcher was a DialogTrigger, so Radix used to hand focus
+    // back to it. With no trigger left in the product there is nothing to
+    // return to: the assertion that still matters is that the closed dialog
+    // holds no focus and the surrounding page is interactive again.
+    expect(dialog).not.toBeInTheDocument();
+    expect(dialog).not.toContainElement(document.activeElement as HTMLElement);
+    launcher.focus();
     expect(launcher).toHaveFocus();
   });
 
@@ -60,7 +94,7 @@ describe("ScientificDagStudio", () => {
         <button onClick={outsideActivation} type="button">
           Outside control
         </button>
-        <ScientificDagStudioLauncher />
+        <StudioHarness />
       </>,
     );
 
@@ -92,7 +126,7 @@ describe("ScientificDagStudio", () => {
       expect(loadRejectingCanvasSurfacesChunk).not.toHaveBeenCalled();
 
       render(
-        <ScientificDagStudioLauncher
+        <StudioHarness
           canvasSurfacesComponent={RejectingCanvasSurfacesSection}
         />,
       );
@@ -117,5 +151,18 @@ describe("ScientificDagStudio", () => {
     } finally {
       consoleError.mockRestore();
     }
+  });
+
+  it("has no launcher left: the retired entry point renders nothing at all", () => {
+    // Owner, 2026-08-17: "there should be no components studio". The launcher
+    // is a no-op so every call site is unmounted, including the one in another
+    // lane's file that this lane may not edit.
+    const { container } = render(<ScientificDagStudioLauncher />);
+
+    expect(container).toBeEmptyDOMElement();
+    expect(
+      screen.queryByRole("button", { name: "Components studio" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });

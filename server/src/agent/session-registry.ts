@@ -140,16 +140,44 @@ const PROFILE_SESSION_NAMES: Record<Exclude<KadySessionProfile, "main">, string>
 };
 
 // WHAT THE DAG BUILDER PROMPT MAY PROMISE, and why this one no longer promises it:
-// there is no path from this helper's answer to the Builder canvas. Lane W3 owns
-// that bridge and it is not merged, so up to integration commit 8c3c1c0 this
-// prompt instructed the model to make a promise the product could not keep:
+// there is no path from this helper's answer to the Builder canvas. Up to
+// integration commit 8c3c1c0 this prompt instructed the model to make a promise
+// the product could not keep:
 //   "Return proposed changes for the visual Builder to validate and apply only
 //    after the user explicitly accepts them."
-// Lane S8B removed that sentence on top of 8c3c1c0. Restore it only once lane
-// W3's Builder apply bridge has actually merged, and restore the matching web/
-// copy in the same change (web/src/components/helper-agent-chat.tsx and
-// dag-builder-surface.tsx, which lane W1 already scoped down to match). Until
-// then the honest contract is: the assistant proposes, the USER saves.
+// Lane S8B removed that sentence on top of 8c3c1c0 and left a note here telling
+// the next reader to restore it "once lane W3's Builder apply bridge has
+// actually merged". THAT INSTRUCTION WAS WRONG, and this paragraph replaces it
+// rather than deleting it, because the reason it was wrong is the fact worth
+// keeping.
+//
+// Lane W3's bridge merged at c0fe2c0 (round 6, the M3 reconciliation). It is a
+// HOST bridge, not an assistant bridge, and it did not unlock the sentence:
+//   * What it carries onto the canvas is a `WorkflowGraphDocument` the HOST
+//     loaded — from the typed store (`readDagWorkflowDefinition`) or built from
+//     a library template (`createDagWorkflowTemplateGraph`) — and pushed as
+//     `builder.loadGraph` (web/src/components/dag-builder-surface.tsx
+//     `loadSource`/`publishDocument`). This helper's transcript is not an input
+//     to any of that. Its answer is still text the user copies or saves.
+//   * The one wire message that could carry a hand-authored document,
+//     `builder.documentReplaced`, has a receiving handler and NO PRODUCER
+//     anywhere in the tree (web/src/lib/builder-bridge.ts:57-66), because the
+//     vendored YAML/Split view is a one-way serializer into a `<pre>`
+//     (YamlCodeView.tsx). So there is no route from any text — this helper's or
+//     the user's own — onto the canvas.
+// The condition that would ACTUALLY justify restoring the sentence is therefore
+// not "W3 merged". It is: a producer for `builder.documentReplaced` (or an
+// equivalent host route) exists, something can hand this helper's output to it,
+// and the user's explicit acceptance gates the write. Restore the matching web/
+// copy in the same change (web/src/components/helper-agent-chat.tsx, whose
+// "Nothing I write reaches the canvas: it has no YAML import, and I cannot edit
+// it." is the load-bearing half, and dag-builder-surface.tsx). Until all three
+// hold, the honest contract is unchanged: the assistant proposes, the USER
+// saves. The reciprocal assertions are server/test/raindrop-context.test.ts
+// (this prompt makes no apply-to-canvas promise) and
+// web/src/components/helper-agent-chat.test.tsx (the web copy neither claims
+// chat output reaches the canvas nor denies that the canvas can produce a
+// listable typed revision, which it can — see the same file's r3 F1 note).
 // The schema this prompt names is server/src/workflows/schema.ts
 // (WorkflowGraphDocumentSchema, WorkflowNodeSchema, WorkflowEdgeSchema); keep
 // the two in step whenever the schema changes. WorkflowNodeSchema is a UNION of

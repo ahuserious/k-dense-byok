@@ -277,8 +277,14 @@ export function RaindropPanel({
             <BracesIcon className="size-4 text-primary" />
             <h1 id="raindrop-title" className="text-sm font-semibold">Raindrop</h1>
           </div>
+          {/* The first sentence is asserted verbatim by e2e/console-raindrop.spec.ts
+              (:281, :283); the second is what stops this tab from reading as the
+              DAG-building chat, which is what sent the owner looking for the
+              Builder assistant here. The Builder's own assistant lives in
+              dag-builder-surface.tsx. */}
           <p className="mt-1 text-[11px] text-muted-foreground">
             Autosaved DAG runs and chat sessions with a separate no-tools Pi log analyst.
+            It reconstructs what already happened; it never drafts or edits a workflow.
           </p>
         </div>
         <button
@@ -371,7 +377,7 @@ export function RaindropPanel({
         <div className="flex min-h-0 min-w-0 flex-col">
           <div className="shrink-0 border-b bg-muted/10 px-3 py-1.5 text-[10px] text-muted-foreground">
             {!selectedReference
-              ? "Select a saved chat session or DAG run."
+              ? "Pick a saved run or chat log on the left, then ask for a causal timeline of what happened."
               : contextLoading
                 ? "Validating and bounding the selected project log…"
                 : contextTruncated

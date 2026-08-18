@@ -9,7 +9,6 @@ import { SettingsDialog } from "@/components/settings-dialog";
 import { WorkflowsPanel } from "@/components/workflows-panel";
 import { DagWorkflowConsole } from "@/components/dag-workflow-console";
 import { DagWorkflowsPanel } from "@/components/dag-workflows-panel";
-import { ChatRail } from "@/components/chat-rail";
 import { ConsolePanel } from "@/components/console/console-panel";
 import { DagBuilderSurface } from "@/components/dag-builder-surface";
 import { RaindropPanel } from "@/components/raindrop-panel";
@@ -26,7 +25,6 @@ import { ProjectSwitcher } from "@/components/project-switcher";
 import { ProjectView } from "@/components/project-view";
 import { SessionCostPill } from "@/components/session-cost-pill";
 import { ResourceMonitor } from "@/components/resource-monitor";
-import { ScientificDagStudioLauncher } from "@/components/scientific-dag-studio";
 import { useSessionCost } from "@/lib/use-session-cost";
 import { useProjectCost } from "@/lib/use-project-cost";
 import { useProjectActivities } from "@/lib/use-project-activities";
@@ -49,7 +47,6 @@ import {
 } from "@/lib/modal-jobs";
 import { isJunkFilePath } from "@/lib/utils";
 import { runPipeline } from "@/lib/pipelines";
-import { isScientificDagStudioEnabled } from "@/lib/studio-design-tokens";
 import type { VendoredPipelineEditTarget } from "@/lib/scientific-pipeline-registry";
 import {
   PanelLeftIcon,
@@ -344,7 +341,6 @@ function WorkspacePage({
   const { skills: allSkills, loading: skillsLoading } = useSkills();
   const { projects: projectDirectory } = useProjects();
   const { resolvedTheme, setTheme } = useTheme();
-  const studioEnabled = isScientificDagStudioEnabled();
   const [mounted, setMounted] = useState(false);
   const [sandboxOpen, setSandboxOpen] = useState(
     () => initialState?.sandboxOpen ?? true,
@@ -391,8 +387,6 @@ function WorkspacePage({
   useEffect(() => {
     setPipelineEditTarget(null);
   }, [projectId]);
-  // The Builder chat rail (collapsible far-right pipeline-compose chat).
-  const [railOpen, setRailOpen] = useState(false);
   const [tabWorkspaceStates, setTabWorkspaceStates] = useState<
     Record<string, ChatWorkspaceState>
   >(() =>
@@ -1097,7 +1091,6 @@ function WorkspacePage({
             </InfoTooltip>
             </div>
           ) : null}
-          {studioEnabled ? <ScientificDagStudioLauncher /> : null}
           <InfoTooltip
             content={
               <>
@@ -1307,6 +1300,7 @@ function WorkspacePage({
             ),
             "dag-builder": (
               <DagBuilderSurface
+                projectId={projectId}
                 editTarget={pipelineEditTarget?.projectId === projectId
                   ? pipelineEditTarget
                   : undefined}
@@ -1337,28 +1331,10 @@ function WorkspacePage({
           }}
         />
 
-        {/* Collapsible chat rail — scoped to the Builder view. Mounted on
-            first builder visit and kept mounted (hidden when away) so the rail's
-            chat session/stream survives leaving and returning to the view. */}
-        {mountedWorkspaceViews.has("dag-builder") && (
-          <ChatRail
-            visible={view === "dag-builder"}
-            open={railOpen}
-            onToggle={setRailOpen}
-            projectId={projectId}
-            allFiles={allFiles}
-            sandboxReady={sandbox.tree !== null}
-            uploadFiles={sandbox.uploadFiles}
-            onSandboxRefresh={handleSandboxRefresh}
-            onTurnComplete={handleTurnComplete}
-            allSkills={allSkills}
-            skillsReady={!skillsLoading}
-            budgetState={projectCost.budget.state}
-            budgetTotalUsd={projectCost.budget.totalUsd}
-            budgetLimitUsd={projectCost.budget.limitUsd}
-            onMetaChange={handleMetaChange}
-          />
-        )}
+        {/* The Builder's far-right rail is no longer the MAIN Kady chat: it is
+            the dedicated DAG-builder assistant, mounted inside
+            dag-builder-surface.tsx so its collapsed/open state and its separate
+            helper session live with the surface that owns them. */}
       </div>
 
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />

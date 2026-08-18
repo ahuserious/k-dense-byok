@@ -34,7 +34,49 @@ function helperLabel(profile: HelperAgentProfile): string {
   return "Raindrop analyst";
 }
 
-function helperEmptyState(profile: HelperAgentProfile): {
+/**
+ * Which of the five context states the caller is in. The empty state and the
+ * blocked hint have to differ across all of them: the copy that describes what
+ * the helper does is a lie in the state where it can do nothing, and "pick one
+ * above" is a lie when the picker has nothing to offer — or nothing YET.
+ */
+type HelperContextState =
+  /** A context reference is bound; the helper can actually answer. */
+  | "selected"
+  /** Selectable contexts exist, the user has not chosen one. */
+  | "unselected"
+  /** The picker is empty — nothing in this project can be selected yet. */
+  | "unavailable"
+  /**
+   * The picker's first fetch has not come back, so nothing is selectable YET
+   * and the helper does not know what this project holds. Distinct from
+   * "unselected" on purpose (r4 review R2): that state tells the user to choose
+   * a revision above, and at this instant the picker's only option is
+   * "Loading saved workflows…". The state is transient and self-correcting, but
+   * every user passes through it on the way in, and the rule for this rail is
+   * that a sentence names a route the user can walk AT THE MOMENT it is on
+   * screen. Ranked below "selected" so a reload that follows a selection never
+   * pulls the rail back out of the state it earned.
+   */
+  | "loading"
+  /**
+   * The picker's list could not be READ, so the helper does not KNOW what this
+   * project has. Distinct from "unavailable" on purpose (r3 review F8): an
+   * errored list left the rail asserting "No saved workflow to work on yet" and
+   * then telling the user to go create a workflow they may already own.
+   *
+   * Two causes reach it, which is why the copy says "could not be read" rather
+   * than r4's "did not load": the fetch rejecting, and a 200 whose body is not
+   * a usable list at all (r4 review R3). In the second case the list DID load,
+   * so "did not load" would have been the state's own sentence saying something
+   * untrue — the exact failure mode of rounds 1 and 3.
+   */
+  | "unlistable";
+
+function helperEmptyState(
+  profile: HelperAgentProfile,
+  contextState: HelperContextState,
+): {
   title: string;
   description: string;
   placeholder: string;
@@ -47,11 +89,126 @@ function helperEmptyState(profile: HelperAgentProfile): {
   missingContext: string;
 } {
   if (profile === "dag-builder") {
+    // The DAG-BUILDING chat the owner asked for, and the only one. EVERY
+    // sentence below names a route a user can walk end to end; rounds 1 and 3
+    // both failed here, and both failures were the same shape — copy describing
+    // a capability the product does not have:
+    //
+    //   * r1: "I draft the VISUAL DAG" promised an apply path into the canvas.
+    //   * r3 F1: "Save a workflow in the canvas on the left" named a route that
+    //     cannot produce a revision THIS picker lists — TRUE WHEN WRITTEN, and
+    //     no longer true of the whole product. The engine-native path is
+    //     unchanged: the canvas's own Save writes to the vendored engine's store
+    //     (PUT /api/workflows/<name> on the iframe's origin) and this picker
+    //     lists Kady's typed store (GET /dag-workflows), which still never shows
+    //     those rows. What lane W3 added is a SECOND path through the same
+    //     canvas: "Load workflow" above it lists the Workflows library, loading
+    //     a template publishes a typed `WorkflowGraphDocument` the host owns,
+    //     and the host's own "Save workflow" validates it and PUTs it to
+    //     /dag-workflows with `If-None-Match: *` (dag-builder-surface.tsx
+    //     `loadSource`/`saveDocument`; pinned by "saves a library draft as a
+    //     create" in e2e/builder-typed.spec.ts). That produces exactly the
+    //     revision this picker lists. So the r6 defect was the MIRROR of r3's:
+    //     copy denying a route the user could by then walk. Both routes are
+    //     named now, shortest first.
+    //   * r3 F2: "draft YAML you can copy into the canvas" named a paste target
+    //     that does not exist. The engine's YAML surface is a <pre> that is
+    //     read-only in both YAML and Split modes; the "Read-only YAML preview"
+    //     header that says so renders in full YAML mode ONLY
+    //     (YamlCodeView.tsx:183-187 gates it on `mode === 'full'`), so in Split
+    //     mode the surface still refuses edits and simply does not announce it
+    //     (r4 review R6). There is no YAML import anywhere in the vendored app
+    //     or in Kady's web app, and
+    //     /dag-workflow-imports/* — a server-side PREVIEW route that translates
+    //     legacy Pipeline YAML and writes nothing — has no caller in web/src.
+    //     The draft is text in THIS chat and nothing more, so that is what the
+    //     copy says. W3's bridge did NOT change this and could not: it carries a
+    //     document the HOST loaded from the typed store or built from a library
+    //     template, never chat output, and `builder.documentReplaced` — the one
+    //     message that could carry a hand-authored document — has a handler and
+    //     no producer anywhere in the tree (web/src/lib/builder-bridge.ts:57-66).
+    //     The "Nothing I write reaches the canvas" sentence below is therefore
+    //     still exactly true and must not be softened.
+    //     ONE YAML CLAIM, TOLD TWO WAYS — and the two are about different
+    //     objects, which is why they read as a contradiction and are not one.
+    //     The dag-builder profile prompt (server/src/agent/session-registry.ts,
+    //     "Kady's one YAML surface is a preview-only importer for the legacy
+    //     Pipeline format") names the SERVER route above, which really does
+    //     translate YAML into a WorkflowGraphDocument and really does write
+    //     nothing. This bullet names the BUILDER's YAML/Split view, which is a
+    //     one-way serializer and not an importer at all. Both are accurate;
+    //     neither names the other's referent, so a reader meeting both is owed
+    //     this sentence. The prompt's word "one" is the only thing that does not
+    //     survive the merge — there are two YAML surfaces, one input-side and
+    //     one output-side — and correcting it is outside this round's grant on
+    //     that file (r6 report, Item 4).
+    //   * r3 F3: "then pick its revision above" was false at the moment the user
+    //     followed it — PersistentWorkspaceSurfaces keeps this rail mounted, so
+    //     returning to the Builder does not refetch. The Reload control is the
+    //     trigger the rail actually owns, so the copy names it.
+    //
+    // A word ban cannot police this (neither r3 sentence used a banned word).
+    // Be exact about what the ban does cover, because r4's report was not
+    // (r4 review R4). Three assertions between them reach every FIXED string
+    // the Builder rail can render:
+    //   * this function's 19 — title/description/placeholder/hint for each of
+    //     the four blocked states, title/description/placeholder for the
+    //     selected one — walked state by state in helper-agent-chat.test.tsx;
+    //   * this component's own chrome (label, header statuses, composer
+    //     labels, Send/Stop, the three blocked hints), swept from the rendered
+    //     DOM in the same file;
+    //   * the 17 strings dag-builder-surface.tsx renders around it — the three
+    //     strip lines, the four picker options and the rail's labels — swept
+    //     the same way in dag-builder-surface.test.tsx. That file is where the
+    //     strip line r3's F2 was actually about lives, and it was in NEITHER
+    //     ban until this round.
+    // Three strings stay unpinnable because they are supplied at runtime: the
+    // list error, the helper session error, and the `{name} · rev {revision}`
+    // option label. The walk-throughs in the lane report are what pin the
+    // routes.
+    if (contextState === "loading") {
+      return {
+        title: "Checking this project's saved workflows",
+        description:
+          "The list above is still loading. Once it settles, pick a revision and I explain its nodes and edges, draft YAML here in the chat, and propose fixes for validation errors.",
+        placeholder: "Waiting for the saved workflow list…",
+        missingContext: "The saved workflow list above is still loading.",
+      };
+    }
+    if (contextState === "unlistable") {
+      return {
+        title: "Saved workflows could not be listed",
+        description:
+          "The list above could not be read, so I do not know which revisions this project has. Press Reload above to try again.",
+        placeholder: "Reload the list above, then ask…",
+        missingContext: "Saved workflows could not be listed. Press Reload above to try again.",
+      };
+    }
+    if (contextState === "unavailable") {
+      return {
+        title: "No saved workflow to work on yet",
+        description:
+          "I work on typed workflow revisions, and this project has none yet. Quickest: in the builder toolbar press Load workflow, start from a Workflows library template, then press Save workflow — that writes a typed revision. Scientific Pipelines → New typed workflow produces one too. Either way, press Reload above and pick it.",
+        placeholder: "Save a typed workflow first, then ask about it…",
+        missingContext:
+          "Save a Workflows library template from the builder toolbar, or create one in Scientific Pipelines, then press Reload above and pick its revision.",
+      };
+    }
+    if (contextState === "unselected") {
+      return {
+        title: "Pick a saved workflow revision to start",
+        description:
+          "Choose a saved revision above. I then explain its nodes and edges, draft YAML here in the chat, and propose fixes for validation errors. Nothing I write reaches the canvas: it has no YAML import, and I cannot edit it.",
+        placeholder: "Pick a saved revision above, then ask…",
+        missingContext: "Pick a saved workflow revision above to ask the DAG Builder agent.",
+      };
+    }
     return {
-      title: "Design with a separate Builder agent",
-      description: "Ask for a graph critique or a bounded proposal; applying changes remains explicit.",
+      title: "Build on this saved workflow revision",
+      description:
+        "I explain the nodes and edges of the revision above, draft YAML here in the chat, and propose fixes for validation errors. Nothing I write reaches the canvas: it has no YAML import, and I cannot edit it.",
       placeholder: "Ask about this workflow…",
-      missingContext: "Open a saved workflow in the Builder to ask the DAG Builder agent.",
+      missingContext: "Pick a saved workflow revision above to ask the DAG Builder agent.",
     };
   }
   if (profile === "workflow-rescue") {
@@ -62,11 +219,16 @@ function helperEmptyState(profile: HelperAgentProfile): {
       missingContext: "Select a stopped run to ask the Workflow Rescue helper.",
     };
   }
+  // A LOG ANALYST, never a DAG-building chat. The previous copy led with "DAG
+  // run", which read as the builder assistant and sent the owner looking for
+  // the pipeline chat here. Nothing in this profile's user-facing text now
+  // describes building a graph.
   return {
     title: "Analyze a saved log",
-    description: "Select a DAG run or ordinary chat session, then ask for a causal timeline.",
+    description:
+      "Pick a saved run or chat log on the left, then ask for a causal timeline of what happened.",
     placeholder: "Ask what failed and why…",
-    missingContext: "Select a saved DAG run or chat session to ask the Raindrop analyst.",
+    missingContext: "Pick a saved run or chat log on the left to ask the Raindrop analyst.",
   };
 }
 
@@ -74,10 +236,18 @@ function ScopedHelperAgentChat({
   projectId,
   profile,
   contextReference,
+  hasSelectableContext = true,
+  contextListFailed = false,
+  contextListLoading = false,
+  providerBlocked = false,
 }: {
   projectId: string;
   profile: HelperAgentProfile;
   contextReference?: HelperAgentContextReference;
+  hasSelectableContext?: boolean;
+  contextListFailed?: boolean;
+  contextListLoading?: boolean;
+  providerBlocked?: boolean;
 }) {
   const agent = useAgent(projectId);
   const contextKind = contextReference?.kind;
@@ -147,8 +317,30 @@ function ScopedHelperAgentChat({
   }, [contextId, contextKind, profile, projectId]);
 
   const running = agent.status === "submitted" || agent.status === "streaming";
-  const emptyState = helperEmptyState(profile);
   const contextReady = Boolean(contextKind && contextId);
+  // `hasSelectableContext` defaults to true, so a call site that does not know
+  // whether its picker is empty keeps the previous two-state behaviour.
+  // "loading" ranks directly below "selected" and ABOVE everything else: a list
+  // that has not come back is not evidence of anything, so neither "choose a
+  // revision above" (there is nothing to choose yet) nor "this project has
+  // none" (unknown) may be said. It ranks below "selected" so a reload behind
+  // an existing selection never pulls the rail back to a waiting state.
+  // "unlistable" ranks BELOW "unselected": a caller whose list failed but whose
+  // previous snapshot still holds options can still pick one, and the picker's
+  // own role=alert already reports the failure. It ranks ABOVE "unavailable"
+  // because a failed fetch is not evidence that the project is empty.
+  const emptyState = helperEmptyState(
+    profile,
+    contextReady
+      ? "selected"
+      : contextListLoading
+        ? "loading"
+        : hasSelectableContext
+          ? "unselected"
+          : contextListFailed
+            ? "unlistable"
+            : "unavailable",
+  );
 
   // The composer used to be a bare native `disabled` on both the textarea and
   // Send: unfocusable, so a keyboard or screen-reader user could neither land
@@ -160,22 +352,52 @@ function ScopedHelperAgentChat({
   const instanceId = useId();
   const blockedHintId = `${instanceId}-helper-blocked`;
   const connectionErrorId = `${instanceId}-helper-error`;
-  const blockedHint = !contextReady
-    ? emptyState.missingContext
-    : connection === "connecting"
-      ? `${helperLabel(profile)} is connecting…`
-      : null;
-  const blocked = connection !== "ready" || !contextReady;
-  const blockedDescribedBy = connectionError
-    ? connectionErrorId
-    : blockedHint
-      ? blockedHintId
-      : undefined;
+  // Precedence mirrors the chat composer's Submit hint (F5): a missing provider
+  // is the reason nothing at all can be sent, so it outranks the per-profile
+  // "pick a context" hint, and the caller is expected to pass it only once the
+  // provider check has SETTLED — an unsettled check would flash the amber block
+  // and shove the composer down on every Builder visit.
+  //
+  // Written as an if-chain rather than one more nested ternary because the last
+  // rung is the one that used to be missing (r4 review R1): `connection ===
+  // "error"` fell off the end of the ladder, so a helper session that failed to
+  // start left `blockedHint` null while `blocked` was true. The user then read
+  // the full capability copy, typed into the composer, and the field silently
+  // refused — the only explanation being a 10px destructive line at the top of
+  // the rail. Nothing false was asserted, which is why it was a follow-up and
+  // not a failure, but a control that refuses input has to say so where the
+  // input is being attempted.
+  let blockedHint: string | null = null;
+  if (providerBlocked) {
+    blockedHint = "Connect a provider in Settings to send";
+  } else if (!contextReady) {
+    blockedHint = emptyState.missingContext;
+  } else if (connection === "connecting") {
+    blockedHint = `${helperLabel(profile)} is connecting…`;
+  } else if (connection === "error") {
+    // "The reason is above" is only said when there IS one above. `connection`
+    // and `connectionError` are set together in the same catch today, so the
+    // second branch is unreachable — it is here so that decoupling them later
+    // degrades to a true sentence instead of pointing at nothing.
+    blockedHint = connectionError
+      ? `${helperLabel(profile)} could not start, so this box cannot send. The reason is above.`
+      : `${helperLabel(profile)} could not start, so this box cannot send.`;
+  }
+  const blocked = providerBlocked || connection !== "ready" || !contextReady;
+  // Both, when both are on screen, error first: the alert carries the SERVER's
+  // reason and the hint carries the consequence for this control. Previously
+  // the error SUPPRESSED the hint id, which was fine while the error state
+  // produced no hint; now that it produces one, dropping it would hide from
+  // screen-reader users the one sentence sighted users just gained.
+  const blockedDescribedBy =
+    [connectionError ? connectionErrorId : null, blockedHint ? blockedHintId : null]
+      .filter((id): id is string => id !== null)
+      .join(" ") || undefined;
 
   const submit = async (event?: FormEvent) => {
     event?.preventDefault();
     const question = draft.trim();
-    if (!question || connection !== "ready" || running || !contextReady) return;
+    if (!question || blocked || running) return;
     setDraft("");
     // The browser sends only the question. The server reconstructs the bounded
     // projection from this helper session's authoritative typed binding.
@@ -308,6 +530,34 @@ export function HelperAgentChat(props: {
   projectId: string;
   profile: HelperAgentProfile;
   contextReference?: HelperAgentContextReference;
+  /**
+   * False when the caller's picker has nothing to offer at all — a project with
+   * no saved workflow, say. The empty state and the blocked hint then name the
+   * way out instead of telling the user to pick from an empty list. Optional
+   * and defaulted true: call sites that cannot tell keep the previous copy.
+   */
+  hasSelectableContext?: boolean;
+  /**
+   * True when the caller's picker could not FETCH its list, which is a different
+   * thing from fetching an empty one. Without this the rail told a user whose
+   * list request failed that no saved workflow exists, and then sent them off to
+   * create one they may already have (r3 review F8). Optional and defaulted off.
+   */
+  contextListFailed?: boolean;
+  /**
+   * True while the caller's picker has not yet received its FIRST list. Neither
+   * "choose one above" nor "this project has none" is true during that instant,
+   * so the helper says it is still waiting instead (r4 review R2). Optional and
+   * defaulted off: a call site that does not track its first fetch keeps the
+   * previous behaviour.
+   */
+  contextListLoading?: boolean;
+  /**
+   * True when no model provider is connected, so no helper turn can be served.
+   * Optional and defaulted off: call sites that do not run the provider check
+   * behave exactly as before.
+   */
+  providerBlocked?: boolean;
 }) {
   // A source change must create a fresh useAgent instance. Otherwise the old
   // session id/transcript remains bound and untrusted source A can persist into

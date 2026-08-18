@@ -1,5 +1,14 @@
 "use client";
 
+// RETIRED 2026-08-18 by owner direction: "there should be no components studio".
+// The Components Studio has no user-facing entry point any more.
+// ScientificDagStudioLauncher below is a retired no-op that renders nothing, so
+// every remaining call site (web/src/components/project-view.tsx is the last one,
+// and belongs to another lane) is unmounted without that lane having to change.
+// The dialog itself — ScientificDagStudio and the specimen sections — stays
+// exported and covered so the design reference is not lost; it is simply not
+// reachable from the product.
+
 import {
   Component,
   lazy,
@@ -14,7 +23,6 @@ import {
   DialogContent,
   DialogDescription,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 
 import { ButtonsCtasSection } from "./scientific-dag-studio-buttons-ctas";
@@ -142,26 +150,11 @@ function ScientificDagStudioContent({
   );
 }
 
-export function ScientificDagStudioLauncher({
-  canvasSurfacesComponent,
-}: Pick<ScientificDagStudioProps, "canvasSurfacesComponent"> = {}) {
-  return (
-    <Dialog>
-      <DialogTrigger asChild>
-        <button
-          className="scientific-dag-studio-launcher"
-          data-scientific-dag-studio-theme
-          style={{ position: "static", inset: "auto", zIndex: "auto", boxShadow: "none" }}
-          type="button"
-        >
-          Components studio
-        </button>
-      </DialogTrigger>
-      <ScientificDagStudioContent
-        canvasSurfacesComponent={canvasSurfacesComponent}
-      />
-    </Dialog>
-  );
+// RETIRED 2026-08-18: renders nothing. Kept as an export so the remaining call
+// site in another lane's file keeps compiling; delete both once that lane drops
+// its `{studioEnabled ? <ScientificDagStudioLauncher /> : null}` line.
+export function ScientificDagStudioLauncher() {
+  return null;
 }
 
 export { ButtonsCtasSection } from "./scientific-dag-studio-buttons-ctas";

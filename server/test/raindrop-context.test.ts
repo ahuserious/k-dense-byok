@@ -866,8 +866,21 @@ describe("Raindrop bounded log context", () => {
 
   it("promises no canvas apply in the DAG Builder prompt but still specifies the graph shape", () => {
     const prompt = PROFILE_SYSTEM_PROMPTS["dag-builder"];
-    // Lane W3 owns the Builder apply bridge and it is not merged, so the model
-    // must not be told to hand changes over for the canvas to apply.
+    // Lane W3's Builder bridge HAS now merged (c0fe2c0), and this assertion is
+    // unchanged, because that bridge is the HOST's and not this helper's: it
+    // carries a WorkflowGraphDocument the host loaded from the typed store or
+    // built from a library template, and `builder.documentReplaced` — the only
+    // message that could carry a hand-authored document — has a handler and no
+    // producer (web/src/lib/builder-bridge.ts:57-66). So the model still must
+    // not be told to hand changes over for the canvas to apply. The condition
+    // that would justify relaxing this is written out at
+    // server/src/agent/session-registry.ts:142-181.
+    //
+    // The RECIPROCAL lives in web/src/components/helper-agent-chat.test.tsx:
+    // "never claims what the assistant writes reaches the canvas" guards this
+    // same direction in the web copy, and "never tells the user the canvas
+    // cannot produce a revision this picker lists" guards the OTHER direction,
+    // which was unguarded until round 6 and had gone false.
     expect(prompt).not.toMatch(/\bappl(y|ies|ied)\b/i);
     expect(prompt).not.toMatch(/\bvisual\b/i);
     expect(prompt).not.toContain("Return proposed changes for the visual Builder");
@@ -878,8 +891,12 @@ describe("Raindrop bounded log context", () => {
     // WorkflowGraphDocument shape from server/src/workflows/schema.ts.
     expect(prompt).toContain("WorkflowGraphDocument");
     expect(prompt).toContain("server/src/workflows/schema.ts");
-    // YAML is a preview-only importer for a different, legacy format, so the
-    // prompt must not sell it as a second way to save this document.
+    // The one YAML surface that takes YAML as INPUT is the server's
+    // /dag-workflow-imports/legacy-pipeline/preview route: it translates a
+    // different, legacy format, writes nothing, and has no caller in web/src.
+    // (The builder's own YAML/Split view is the opposite — a one-way serializer
+    // into a <pre>, so it is not an importer at all.) Either way YAML is not a
+    // way to save this document, and the prompt must not sell it as one.
     expect(prompt).not.toContain("in YAML");
     expect(prompt).not.toContain("the field names are identical either way");
     expect(prompt).toContain("JSON is the only format");
