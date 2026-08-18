@@ -125,6 +125,23 @@ describe("promote-to-DAG dialog", () => {
     expect(screen.getByText(/sha-promoted/)).toBeInTheDocument();
   });
 
+  it("sends the reader to the surface the promoted workflow is actually in", async () => {
+    const user = userEvent.setup();
+    renderDialog();
+    const dialog = await screen.findByTestId("promote-dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Create workflow" }));
+
+    const result = await screen.findByLabelText("Promotion result");
+    // Scientific Pipelines → Workflow registry → `Details & run` — the labels
+    // dag-workflows-panel.tsx actually renders.
+    expect(result).toHaveTextContent("Scientific Pipelines");
+    expect(result).toHaveTextContent("Workflow registry");
+    expect(result).toHaveTextContent("Details & run");
+    // NOT the workspace tab called "Builder": that is the vendored
+    // pipeline-engine iframe and it cannot open a typed WorkflowGraphDocument.
+    expect(result).not.toHaveTextContent(/Builder/);
+  });
+
   it("renders the validator's own issue list verbatim when the route refuses", async () => {
     vi.mocked(dagApi.saveDagWorkflowDefinition).mockRejectedValue(
       new dagApi.DagWorkflowApiError(
@@ -139,7 +156,8 @@ describe("promote-to-DAG dialog", () => {
     await user.click(within(dialog).getByRole("button", { name: "Create workflow" }));
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("The typed route rejected this document");
+    expect(alert).toHaveTextContent("The typed route rejected the create of");
+    expect(alert).toHaveTextContent("chat-session-a");
     expect(alert).toHaveTextContent("HTTP 400");
     expect(alert).toHaveTextContent("INVALID_DEFINITION");
     expect(alert).toHaveTextContent("/nodes/0/prompt");
@@ -147,6 +165,125 @@ describe("promote-to-DAG dialog", () => {
     expect(alert).toHaveTextContent("Nothing was created");
     // No success claim anywhere on the surface.
     expect(screen.queryByText(/accepted it/i)).toBeNull();
+  });
+
+  it("stays usable after a refusal: the reader can change the id and create again", async () => {
+    // The exact 409 the store returns for a create against an id that exists.
+    vi.mocked(dagApi.saveDagWorkflowDefinition).mockRejectedValueOnce(
+      new dagApi.DagWorkflowApiError(
+        409,
+        "Workflow chat-session-a already exists at revision 1; create requires absence.",
+        "CONFLICT",
+      ),
+    );
+    const user = userEvent.setup();
+    renderDialog();
+    const dialog = await screen.findByTestId("promote-dialog");
+    const create = within(dialog).getByRole("button", { name: "Create workflow" });
+
+    await user.click(create);
+    expect(await screen.findByRole("alert")).toHaveTextContent("already exists at revision 1");
+
+    // The refusal asked for a different id. The button that sends it must work.
+    expect(create).toBeEnabled();
+    const idInput = within(dialog).getByLabelText("Workflow id");
+    await user.clear(idInput);
+    await user.type(idInput, "chat-session-a-2");
+    expect(create).toBeEnabled();
+
+    await user.click(create);
+    await waitFor(() => {
+      expect(dagApi.saveDagWorkflowDefinition).toHaveBeenCalledTimes(2);
+    });
+    const [, retriedId, , retriedIntent] = vi.mocked(dagApi.saveDagWorkflowDefinition).mock
+      .calls[1];
+    expect(retriedId).toBe("chat-session-a-2");
+    // Still a create, never an update smuggled in by the retry.
+    expect(retriedIntent).toEqual({ kind: "create" });
+    expect(await screen.findByText(/The typed route accepted it/i)).toBeInTheDocument();
+  });
+
+  it("does not claim nothing was created when the route never answered", async () => {
+    // A transport failure is not a refusal. The write may or may not have
+    // reached the store, so the surface must not assert either way — and it
+    // must say why retrying is nevertheless safe.
+    vi.mocked(dagApi.saveDagWorkflowDefinition).mockRejectedValueOnce(
+      new TypeError("Failed to fetch"),
+    );
+    const user = userEvent.setup();
+    renderDialog();
+    const dialog = await screen.findByTestId("promote-dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Create workflow" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("failed before the typed route answered");
+    expect(alert).toHaveTextContent("cannot say whether anything was written");
+    expect(alert).toHaveTextContent("Failed to fetch");
+    // The claim the HTTP branch is entitled to make and this one is not.
+    expect(alert).not.toHaveTextContent("Nothing was created");
+    // No invented status code.
+    expect(alert).not.toHaveTextContent(/HTTP/);
+    // And it is still a retryable surface.
+    expect(within(dialog).getByRole("button", { name: "Create workflow" })).toBeEnabled();
+  });
+
+  it("keeps a refusal true after the reader retypes, by naming the id it was refused for", async () => {
+    vi.mocked(dagApi.saveDagWorkflowDefinition).mockRejectedValue(
+      new dagApi.DagWorkflowApiError(
+        409,
+        "Workflow chat-session-a already exists at revision 1; create requires absence.",
+        "CONFLICT",
+      ),
+    );
+    const user = userEvent.setup();
+    renderDialog();
+    const dialog = await screen.findByTestId("promote-dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Create workflow" }));
+    await screen.findByRole("alert");
+
+    const idInput = within(dialog).getByLabelText("Workflow id");
+    await user.clear(idInput);
+    await user.type(idInput, "chat-session-a-2");
+
+    // The banner still refers to the attempt that happened, not to whatever is
+    // in the input now — the message never becomes a claim about the new id.
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("chat-session-a already exists");
+    expect(alert.textContent).not.toMatch(/rejected the create of\s*chat-session-a-2/);
+  });
+
+  it("disables create only while a write is actually in flight", async () => {
+    let release: (() => void) | undefined;
+    vi.mocked(dagApi.saveDagWorkflowDefinition).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        release = () => resolve({
+          outcome: "created",
+          definition: {
+            storageVersion: 1,
+            id: "chat-session-a",
+            revision: 1,
+            createdAt: 0,
+            updatedAt: 0,
+            graphSha256: "sha-promoted",
+            graph: {} as dagApi.WorkflowGraphDocument,
+          },
+          etag: '"1"',
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    renderDialog();
+    const dialog = await screen.findByTestId("promote-dialog");
+    const create = within(dialog).getByRole("button", { name: "Create workflow" });
+
+    await user.click(create);
+    const creating = await within(dialog).findByRole("button", { name: "Creating…" });
+    expect(creating).toBeDisabled();
+
+    release?.();
+    expect(await screen.findByText(/The typed route accepted it/i)).toBeInTheDocument();
+    // Exactly one write, never a second from a double press.
+    expect(dagApi.saveDagWorkflowDefinition).toHaveBeenCalledTimes(1);
   });
 
   it("refuses to send an id the server's own syntax rejects", async () => {

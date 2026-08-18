@@ -401,6 +401,11 @@ test.describe("w4-console-promote", () => {
 
     await expect(dialog).toContainText(/The typed route accepted it/i);
     await expect(dialog).toContainText(`chat-${SESSION_ID}`);
+    // It names the surface the workflow is really in. The workspace tab called
+    // "Builder" is the vendored pipeline-engine iframe and cannot open a typed
+    // WorkflowGraphDocument, so the banner must not send the reader there.
+    await expect(dialog).toContainText("Workflow registry");
+    await expect(dialog).not.toContainText(/Builder/);
 
     expect(writes).toHaveLength(1);
     expect(writes[0].url).toContain(`/dag-workflows/chat-${SESSION_ID}`);
@@ -438,10 +443,22 @@ test.describe("w4-console-promote", () => {
     await dialog.getByRole("button", { name: "Create workflow" }).click();
 
     const alert = dialog.getByRole("alert");
-    await expect(alert).toContainText("The typed route rejected this document");
+    await expect(alert).toContainText("The typed route rejected the create of");
+    // The id it was refused for, named on the message so it stays true if the
+    // reader retypes.
+    await expect(alert).toContainText(`chat-${SESSION_ID}`);
     await expect(alert).toContainText("MALFORMED_SAVE_RESPONSE");
     await expect(alert).toContainText("Nothing was created");
     await expect(dialog).not.toContainText(/accepted it/i);
+
+    // A refusal is not a dead end: the reader can type the different id the
+    // message is asking for and send it. Asserted here rather than as a new
+    // item so the suite's inventory pins do not move.
+    const create = dialog.getByRole("button", { name: "Create workflow" });
+    await expect(create).toBeEnabled();
+    const idInput = dialog.getByLabel("Workflow id");
+    await idInput.fill(`chat-${SESSION_ID}-2`);
+    await expect(create).toBeEnabled();
   });
 });
 

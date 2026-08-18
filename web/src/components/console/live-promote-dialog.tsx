@@ -18,6 +18,13 @@
 // because a promote that silently produced an unusable workflow would be worse
 // than no promote at all.
 //
+// A refusal is not a dead end. The create button is gated on whether a create
+// is POSSIBLE — a syntactically valid id, a document to send, and no write in
+// flight — never on whether an earlier attempt happened. A 409 telling the
+// reader to pick another id would be worthless if it also disabled the button
+// that sends the new one. The refusal message names the id it was refused for,
+// so it stays true after the reader retypes.
+//
 // Nothing here touches the source session or its run.
 
 "use client";
@@ -54,7 +61,14 @@ type PromoteOutcome =
   | { phase: "preview" }
   | { phase: "saving" }
   | { phase: "saved"; saved: SavedDagWorkflowDefinition }
-  | { phase: "failed"; status: number | null; detail: string; code?: string };
+  | {
+      phase: "failed";
+      /** The id this attempt was refused for — not necessarily the one in the input now. */
+      workflowId: string;
+      status: number | null;
+      detail: string;
+      code?: string;
+    };
 
 function PlanSummary({ plan }: { plan: SessionPromotionPlan }) {
   return (
@@ -114,7 +128,10 @@ export function LivePromoteDialog({
   );
 
   const idValid = isPromotableWorkflowId(workflowId);
-  const canCreate = idValid && plan.document !== null && outcome.phase === "preview";
+  // Deliberately NOT `outcome.phase === "preview"`. A refusal must leave the
+  // surface usable: the only state that may disable this button is a write
+  // already in flight. (`saved` renders its own branch, so it never gets here.)
+  const canCreate = idValid && plan.document !== null && outcome.phase !== "saving";
 
   const create = useCallback(async () => {
     if (!plan.document) return;
@@ -131,6 +148,7 @@ export function LivePromoteDialog({
       if (error instanceof DagWorkflowApiError) {
         setOutcome({
           phase: "failed",
+          workflowId: plan.workflowId,
           status: error.status,
           detail: error.detail,
           ...(error.code !== undefined ? { code: error.code } : {}),
@@ -139,6 +157,7 @@ export function LivePromoteDialog({
       }
       setOutcome({
         phase: "failed",
+        workflowId: plan.workflowId,
         status: null,
         detail: error instanceof Error ? error.message : "The workflow write failed.",
       });
@@ -172,8 +191,8 @@ export function LivePromoteDialog({
               <span>
                 The typed route accepted it: <code>{outcome.saved.outcome}</code> workflow{" "}
                 <code>{outcome.saved.definition.id}</code> at revision{" "}
-                <code>{outcome.saved.definition.revision}</code>. Open it in the Builder to
-                edit or run it.
+                <code>{outcome.saved.definition.revision}</code>. Open it under Scientific
+                Pipelines → Workflow registry → Details &amp; run to review it and run it.
               </span>
             </p>
             <p className="font-mono text-[10px] text-muted-foreground">
@@ -196,10 +215,20 @@ export function LivePromoteDialog({
               >
                 <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden />
                 <span className="min-w-0">
-                  The typed route rejected this document
-                  {outcome.status === null ? "" : ` (HTTP ${outcome.status}`}
-                  {outcome.code ? `, ${outcome.code}` : ""}
-                  {outcome.status === null ? "" : ")"}. Nothing was created.
+                  {outcome.status === null ? (
+                    <>
+                      The create of <code>{outcome.workflowId}</code> failed before the
+                      typed route answered, so this surface cannot say whether anything
+                      was written. Retrying is safe: the write carries the create
+                      precondition, so it cannot overwrite an existing workflow.
+                    </>
+                  ) : (
+                    <>
+                      The typed route rejected the create of{" "}
+                      <code>{outcome.workflowId}</code> (HTTP {outcome.status}
+                      {outcome.code ? `, ${outcome.code}` : ""}). Nothing was created.
+                    </>
+                  )}
                   <span className="mt-1 block whitespace-pre-wrap break-words font-mono text-[10px]">
                     {outcome.detail}
                   </span>

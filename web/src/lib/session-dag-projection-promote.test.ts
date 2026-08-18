@@ -329,6 +329,41 @@ describe("planSessionPromotion", () => {
     expect(plan.nodes[0].observedWork).toEqual(["bash"]);
   });
 
+  it("does not claim a delegated subagent's name survives the promotion, because it does not", () => {
+    // The projector hangs a subagent under the `subagent` TOOL node, not under
+    // the turn, so `childrenOf(turn)` never sees it and its name reaches
+    // neither `observedWork` nor the created document. The reason shown to the
+    // reader has to say that rather than the tool sentence's "name is kept".
+    const { projection, frames } = fold([
+      { seq: 1, type: "run_start", runId: "run-a" },
+      { seq: 2, type: "turn_start" },
+      { seq: 3, type: "message_start", role: "user", content: "Review the model." },
+      {
+        seq: 4,
+        type: "tool_start",
+        toolCallId: "c1",
+        toolName: "subagent",
+        args: { agent: "statistical-reviewer" },
+      },
+      { seq: 5, type: "tool_end", toolCallId: "c1", toolName: "subagent", isError: false },
+      { seq: 6, type: "turn_end" },
+      { seq: 7, type: "done" },
+    ]);
+    const plan = planSessionPromotion(projection, frames, OPTIONS);
+
+    const subagent = plan.unrepresented.find((part) => part.kind === "subagent");
+    expect(subagent?.label).toBe("statistical-reviewer");
+    // The claim the round-3 review caught: the old reason promised retention.
+    expect(subagent?.reason).not.toMatch(/name is kept/);
+    expect(subagent?.reason).toMatch(/not this agent's name/);
+
+    // And the document proves the reason right: the delegation is recorded,
+    // the agent's name is nowhere in it.
+    expect(plan.nodes[0].observedWork).toEqual(["subagent"]);
+    expect(plan.document?.nodes[0].description).toContain("subagent");
+    expect(JSON.stringify(plan.document)).not.toContain("statistical-reviewer");
+  });
+
   it("reports a delegated typed run rather than copying it", () => {
     const projection = projectSessionGraph(
       emptySessionGraph("session-a"),

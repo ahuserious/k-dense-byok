@@ -6,8 +6,8 @@
 // Round 1 and round 2 delivered the view. This is the conversion: a chat
 // session's folded graph plus its retained frames become a real
 // `WorkflowGraphDocument` that `PUT /dag-workflows/:id` accepts under its CAS
-// contract — the same typed document the Builder edits and the runner executes,
-// not a console-local lookalike.
+// contract — the same typed document the workflow registry lists and the runner
+// executes, not a console-local lookalike.
 //
 // Three rules govern everything below.
 //
@@ -30,8 +30,15 @@
 //
 // The document is deliberately conservative: read-only workspaces, Kady Current
 // as the model, and a straight chain of `agent` nodes in conversation order.
-// That is a faithful, runnable first draft of the conversation — the Builder is
-// where it becomes something else.
+// That is a faithful, runnable first draft of the conversation.
+//
+// Where it lands, as this build ships: Scientific Pipelines → Workflow registry,
+// whose `Details & run` surface reviews it and runs it. The workspace tab called
+// "Builder" is the vendored pipeline-engine iframe and cannot open a typed
+// `WorkflowGraphDocument`; nothing in this repo can edit one yet, so no copy here
+// may send a reader there. (Lane W3 is building the typed authoring path. When it
+// lands, this comment and the dialog's success banner are the two places that
+// need rewording.)
 
 "use client";
 
@@ -128,7 +135,7 @@ export const PROMOTED_MODEL_REQUEST: WorkflowModelRequest = {
 /**
  * Limits sized to the promoted shape: one model call and one iteration per
  * agent node, which is exactly what `deriveWorkflowNodeDemand` charges an
- * `agent` node, plus headroom the Builder can lower. The dialog prints them.
+ * `agent` node, plus the subagent slot such a node needs. The dialog prints them.
  */
 export function promotedWorkflowLimits(nodeCount: number): WorkflowLimits {
   const nodes = Math.max(1, nodeCount);
@@ -194,8 +201,12 @@ function promptForTurn(
 const UNREPRESENTABLE_REASON: Record<string, string> = {
   tool:
     "A tool call is not a typed node kind — the union has no member for it. Its name is kept on the turn's node description.",
+  // Deliberately not the `tool` sentence. The projector hangs a subagent under
+  // the `subagent` TOOL call, not under the turn (session-dag-projection.ts:
+  // `parentId: node.id`), so it is a grandchild of the turn and never reaches
+  // `observedWork` below. The delegation is recorded; this agent's name is not.
   subagent:
-    "A delegated subagent is not a typed node kind. Its name is kept on the turn's node description.",
+    "A delegated subagent is not a typed node kind. The turn's node description records the `subagent` call that ran it, but not this agent's name — the created document does not carry it.",
   group:
     "These tool calls were already collapsed by the live graph's per-turn width bound, so their identities are not in the projection.",
   dag:
@@ -337,7 +348,7 @@ export function planSessionPromotion(
       terminal: node.terminal,
       // A promoted draft is a reading of a conversation, not a licence to
       // write: nothing about this document should be able to touch the project
-      // until a person opens it in the Builder and grants it a write path.
+      // until someone edits the saved definition and grants it a write path.
       workspace: { isolation: "read-only" as const, writePaths: [] },
       prompt: node.prompt,
     })),
