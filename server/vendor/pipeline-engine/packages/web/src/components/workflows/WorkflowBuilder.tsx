@@ -224,13 +224,37 @@ function WorkflowBuilderInner(): React.ReactElement {
   const { fitView } = useReactFlow();
 
   const validationIssues = useBuilderValidation(workflowName, workflowDescription, nodes, edges);
+  // The host's TYPED-validator issues, in the same Problems panel as the
+  // builder's own client-side ones.
+  //
+  // Without this the host fed `builder.setIssues` into a state nothing read: an
+  // author whose save was refused saw the reason in the Kady status line above
+  // the canvas and had nothing on the canvas to act on. `nodeId` — which the
+  // host resolves from the validator's array-index pointer, because only it
+  // holds the document — is what makes this panel's focus chip appear, and the
+  // chip is the one affordance that takes an author from a message to the node.
+  const hostIssues = useMemo(
+    (): ValidationIssue[] =>
+      host.issues.map(issue => ({
+        severity: issue.severity,
+        // The validator's own words, unedited. The host renders the location
+        // beside them in its own list; here the node chip IS the location.
+        message: issue.message,
+        ...(issue.nodeId !== undefined ? { nodeId: issue.nodeId } : {}),
+      })),
+    [host.issues]
+  );
+
+  // The status-bar badge counts what the Problems panel lists, host issues
+  // included. Outside host mode `host.issues` is always empty, so the count
+  // standalone is unchanged.
   const errorCount = useMemo(
-    () => validationIssues.filter(i => i.severity === 'error').length,
-    [validationIssues]
+    () => [...hostIssues, ...validationIssues].filter(i => i.severity === 'error').length,
+    [hostIssues, validationIssues]
   );
   const warningCount = useMemo(
-    () => validationIssues.filter(i => i.severity === 'warning').length,
-    [validationIssues]
+    () => [...hostIssues, ...validationIssues].filter(i => i.severity === 'warning').length,
+    [hostIssues, validationIssues]
   );
 
   const markDirty = useCallback((): void => {
@@ -496,9 +520,10 @@ function WorkflowBuilderInner(): React.ReactElement {
   const toolbarValidationErrors = useMemo(
     (): string[] => [
       ...validationErrors,
+      ...hostIssues.filter(i => i.severity === 'error').map(i => i.message),
       ...validationIssues.filter(i => i.severity === 'error').map(i => i.message),
     ],
-    [validationErrors, validationIssues]
+    [validationErrors, hostIssues, validationIssues]
   );
 
   // Convert validation issues for the panel (merge server-side errors with client-side)
@@ -507,8 +532,28 @@ function WorkflowBuilderInner(): React.ReactElement {
       severity: 'error' as const,
       message: msg,
     }));
-    return [...serverIssues, ...validationIssues];
-  }, [validationErrors, validationIssues]);
+    return [...serverIssues, ...hostIssues, ...validationIssues];
+  }, [validationErrors, hostIssues, validationIssues]);
+
+  /**
+   * Take the author from an issue to the node it names.
+   *
+   * `setSelectedNodeId` alone opens the right-hand inspector and leaves the
+   * CANVAS looking untouched, which is no help when the offending node is one
+   * of many. Marking the node `selected` is what React Flow renders as a ring
+   * (`DagNodeRender`), so the node the issue names is the node the author sees.
+   *
+   * Selection is presentational and safe to write into node state: the host's
+   * `diffToDeltas` compares ids, positions, names, harnesses and edges only, so
+   * this produces no delta, marks nothing dirty, and pushes no snapshot.
+   */
+  const handleFocusNode = useCallback(
+    (nodeId: string): void => {
+      setSelectedNodeId(nodeId);
+      setNodes(current => current.map(node => ({ ...node, selected: node.id === nodeId })));
+    },
+    [setNodes]
+  );
 
   // Keyboard shortcuts — stabilize actions object to avoid re-registering handler on every render
   const keyboardActions = useMemo(
@@ -697,7 +742,7 @@ function WorkflowBuilderInner(): React.ReactElement {
         issues={allValidationIssues}
         isOpen={validationPanelOpen}
         onToggle={handleToggleValidationPanel}
-        onFocusNode={setSelectedNodeId}
+        onFocusNode={handleFocusNode}
       />
 
       {/* Status Bar */}

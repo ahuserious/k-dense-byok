@@ -18,20 +18,48 @@ function issue(overrides: Partial<BuilderIssue> = {}): BuilderIssue {
 }
 
 describe("issueLocation", () => {
-  it("prefers the node id, which is what an author can find on the canvas", () => {
-    expect(issueLocation(issue({ nodeId: "analyze" }))).toBe("node analyze");
+  it("leads with the node id, which is what an author can find on the canvas", () => {
+    // "/nodes/1" is an index the canvas never renders. The route resolves it to
+    // the id, and the id is what goes first.
+    expect(issueLocation(issue({ nodeId: "analyze" }))).toBe("node analyze (/name)");
   });
 
-  it("prefers the edge id over the JSON pointer", () => {
-    expect(issueLocation(issue({ edgeId: "research-to-report" }))).toBe(
-      "edge research-to-report",
+  it("leads with the edge id", () => {
+    expect(
+      issueLocation(issue({ path: "/edges/0/to", edgeId: "research-to-report" })),
+    ).toBe("edge research-to-report (/to)");
+  });
+
+  it("keeps the field the id cannot say, so naming the node costs nothing", () => {
+    // The shape an author reaches by mis-picking in a dropdown. Replacing the
+    // pointer outright would trade "which field" for "which node"; this keeps
+    // both.
+    expect(
+      issueLocation(
+        issue({ path: "/nodes/1/workspace/isolation", nodeId: "review-council" }),
+      ),
+    ).toBe("node review-council (/workspace/isolation)");
+  });
+
+  it("is the bare id when the issue points at the whole node", () => {
+    expect(issueLocation(issue({ path: "/nodes/1", nodeId: "review-council" }))).toBe(
+      "node review-council",
     );
   });
 
-  it("falls back to the JSON pointer when the validator names no node or edge", () => {
-    // The typed validate route emits no nodeId/edgeId today, so this is the
-    // path a real blocked save actually takes.
+  it("keeps an unrecognised pointer whole beside the id rather than dropping it", () => {
+    // Defensive: every id this tree produces comes with a matching
+    // "/nodes/<i>" prefix, but a pointer that does not match must not lose its
+    // field to the strip.
+    expect(issueLocation(issue({ path: "/artifacts/0/writerNodeId", nodeId: "analyze" })))
+      .toBe("node analyze (/artifacts/0/writerNodeId)");
+  });
+
+  it("falls back to the JSON pointer when the issue names no node or edge", () => {
+    // "/entryNodeId" and "/nodes" point at no single entity, so the route sends
+    // no id and the pointer is the whole location.
     expect(issueLocation(issue())).toBe("/nodes/1/name");
+    expect(issueLocation(issue({ path: "/entryNodeId" }))).toBe("/entryNodeId");
   });
 
   it("treats a document-root pointer as no location rather than printing '/'", () => {
@@ -42,9 +70,9 @@ describe("issueLocation", () => {
 
 describe("issueLine", () => {
   it("puts the location in front of the validator's own message", () => {
-    expect(issueLine(issue({ nodeId: "analyze", message: "must have a name" }))).toBe(
-      "node analyze: must have a name",
-    );
+    expect(
+      issueLine(issue({ path: "/nodes/0", nodeId: "analyze", message: "must have a name" })),
+    ).toBe("node analyze: must have a name");
   });
 
   it("is the bare message when there is nowhere to point", () => {
@@ -67,9 +95,9 @@ describe("blockedSaveStatus", () => {
   it("headlines the first problem and counts the rest, so the line stays one line", () => {
     expect(
       blockedSaveStatus([
-        issue({ nodeId: "a", message: "first" }),
-        issue({ nodeId: "b", message: "second" }),
-        issue({ nodeId: "c", message: "third" }),
+        issue({ path: "/nodes/0", nodeId: "a", message: "first" }),
+        issue({ path: "/nodes/1", nodeId: "b", message: "second" }),
+        issue({ path: "/nodes/2", nodeId: "c", message: "third" }),
       ]),
     ).toBe("Cannot save — node a: first (+2 more)");
   });
@@ -80,8 +108,13 @@ describe("blockedSaveStatus", () => {
     // warning headlining a refused save would be wrong.
     expect(
       blockedSaveStatus([
-        issue({ severity: "warning", nodeId: "a", message: "consider a shorter name" }),
-        issue({ severity: "error", nodeId: "b", message: "must have a name" }),
+        issue({
+          severity: "warning",
+          path: "/nodes/0",
+          nodeId: "a",
+          message: "consider a shorter name",
+        }),
+        issue({ severity: "error", path: "/nodes/1", nodeId: "b", message: "must have a name" }),
       ]),
     ).toBe("Cannot save — node b: must have a name (+1 more)");
   });

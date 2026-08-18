@@ -111,7 +111,16 @@ export interface HostIssue {
   severity: 'error' | 'warning';
   path: string;
   message: string;
+  /**
+   * The node or edge the issue points at. The host resolves these from the
+   * validator's JSON pointer before sending (`issueEntityIds` in
+   * server/src/api/dag-workflows-validate.ts) because only it holds the
+   * document; the canvas renders no array indices, so without them the Problems
+   * panel could not offer a node to focus. Absent for an issue that points at
+   * no single entity.
+   */
   nodeId?: string;
+  edgeId?: string;
 }
 
 export type HostCanvasDeltaOp =

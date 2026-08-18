@@ -140,6 +140,116 @@ describe("POST /dag-workflows/validate", () => {
     expect(body).not.toHaveProperty("document");
   });
 
+  it("names the node an issue points at, instead of handing the author an array index", async () => {
+    // The shape an author reaches by mis-picking in a dropdown. The validator
+    // answers `/nodes/1/workspace/isolation`, and the canvas renders no node
+    // indices — so without the id the author has to count nodes to find it.
+    const response = await validate({
+      document: graph({
+        nodes: [
+          {
+            id: "start",
+            name: "Start",
+            kind: "agent",
+            terminal: false,
+            workspace: { isolation: "read-only", writePaths: [] },
+            prompt: "Return one bounded result.",
+          },
+          {
+            id: "review-council",
+            name: "Review council",
+            kind: "agent",
+            terminal: true,
+            workspace: { isolation: "not-an-isolation", writePaths: [] },
+            prompt: "Review the result.",
+          },
+        ],
+        edges: [{ id: "start-to-review", from: "start", to: "review-council" }],
+      } as Partial<WorkflowGraphDocument>),
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.ok).toBe(false);
+    const nodeIssues = body.issues.filter((issue: { path: string }) =>
+      issue.path.startsWith("/nodes/1"),
+    );
+    expect(nodeIssues.length).toBeGreaterThan(0);
+    for (const issue of nodeIssues) {
+      expect(issue.nodeId).toBe("review-council");
+      expect(issue.edgeId).toBeUndefined();
+    }
+  });
+
+  it("names the edge an issue points at", async () => {
+    const response = await validate({
+      document: graph({
+        nodes: [
+          {
+            id: "start",
+            name: "Start",
+            kind: "agent",
+            terminal: true,
+            workspace: { isolation: "read-only", writePaths: [] },
+            prompt: "Return one bounded result.",
+          },
+        ],
+        edges: [{ id: "start-to-ghost", from: "start", to: "ghost" }],
+      } as Partial<WorkflowGraphDocument>),
+    });
+
+    const body = response.json();
+    expect(body.ok).toBe(false);
+    const edgeIssues = body.issues.filter((issue: { path: string }) =>
+      issue.path.startsWith("/edges/0"),
+    );
+    expect(edgeIssues.length).toBeGreaterThan(0);
+    for (const issue of edgeIssues) {
+      expect(issue.edgeId).toBe("start-to-ghost");
+      expect(issue.nodeId).toBeUndefined();
+    }
+  });
+
+  it("leaves both ids absent when the path points at no single node or edge", async () => {
+    // `/entryNodeId` and `/nodes` (the array itself) name no entity. Reporting
+    // an id for them would be a guess, and the client falls back to the pointer.
+    const entry = await validate({ document: graph({ entryNodeId: "missing-node" }) });
+    for (const issue of entry.json().issues) {
+      if (/^\/(nodes|edges)\/\d+/.test(issue.path)) continue;
+      expect(issue.nodeId).toBeUndefined();
+      expect(issue.edgeId).toBeUndefined();
+    }
+
+    const emptied = await validate({
+      document: graph({ nodes: [] } as Partial<WorkflowGraphDocument>),
+    });
+    const arrayIssue = emptied
+      .json()
+      .issues.find((issue: { path: string }) => issue.path === "/nodes");
+    expect(arrayIssue).toBeDefined();
+    expect(arrayIssue.nodeId).toBeUndefined();
+    expect(arrayIssue.edgeId).toBeUndefined();
+  });
+
+  it("reports no id rather than throwing when the document is malformed enough to have none", async () => {
+    // The id lookup runs over the document the client SUBMITTED, which is known
+    // to be invalid by the time issues are mapped. A node that is not an object,
+    // or one whose `id` is missing, must still answer 200 {ok:false, issues}.
+    const response = await validate({
+      document: {
+        ...graph(),
+        nodes: [{ name: "No id at all", kind: "agent" }, "not even an object"],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.ok).toBe(false);
+    for (const issue of body.issues) {
+      expect(issue.nodeId).toBeUndefined();
+    }
+  });
+
   it("is hash-stable under key reordering", async () => {
     const document = graph();
     const reordered = Object.fromEntries(

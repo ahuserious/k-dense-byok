@@ -11,18 +11,46 @@ import type { BuilderIssue } from "@/lib/builder-bridge";
  */
 
 /**
+ * The `/nodes/<i>` or `/edges/<i>` prefix an entity id already accounts for.
+ *
+ * Kept as a prefix strip rather than a full parse so a pointer this does not
+ * recognise survives whole: naming the node must never cost the author the
+ * field, which is the half of the pointer the id cannot replace.
+ */
+function fieldPointer(path: string): string | null {
+  if (!path || path === "/") return null;
+  const withoutEntity = path.replace(/^\/(?:nodes|edges)\/\d+/, "");
+  if (withoutEntity === "") return null;
+  return withoutEntity;
+}
+
+/**
  * Where an issue points, in the author's terms.
  *
  * The validator's `path` is a JSON pointer into the document ("/nodes/1/name"),
- * which is precise and unreadable. A node or edge id is what the author can
- * actually find on the canvas, so it wins when the validator supplies one; the
- * pointer is the fallback rather than the headline.
+ * whose array INDEX the canvas never renders — an author handed one has to
+ * count nodes. `POST /dag-workflows/validate` resolves that index back to the
+ * id (`issueEntityIds` in server/src/api/dag-workflows-validate.ts), and the id
+ * is what the author can actually find on the canvas, so it leads.
+ *
+ * It does not REPLACE the pointer, it absorbs the part of it the id says
+ * better: "/nodes/1/workspace/isolation" with nodeId "review-council" reads
+ * `node review-council (/workspace/isolation)` — which node AND which field.
+ * An issue that names no entity (`/entryNodeId`, `/nodes` itself) keeps the
+ * bare pointer, and a document-root `/` has no location at all.
  */
 export function issueLocation(issue: BuilderIssue): string | null {
-  if (issue.nodeId) return `node ${issue.nodeId}`;
-  if (issue.edgeId) return `edge ${issue.edgeId}`;
-  if (issue.path && issue.path !== "/") return issue.path;
-  return null;
+  const entity = issue.nodeId
+    ? `node ${issue.nodeId}`
+    : issue.edgeId
+      ? `edge ${issue.edgeId}`
+      : null;
+  if (entity === null) {
+    if (issue.path && issue.path !== "/") return issue.path;
+    return null;
+  }
+  const field = fieldPointer(issue.path);
+  return field === null ? entity : `${entity} (${field})`;
 }
 
 /** One issue as a single line, for the status region and the pill tooltip. */

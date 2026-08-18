@@ -613,6 +613,18 @@ export const ScientificWorkflowPreconditionsSchema = Type.Object(
  * an inert field buys a rollback constraint and nothing else. It is dropped
  * rather than left declared.
  *
+ * The ROLL-FORWARD direction, which round 2 did not record: a definition
+ * written by a round-1 build carries `ui.viewport`, which this schema now
+ * rejects — `parseStoredDefinition` (store.ts) raises CORRUPT and the read is a
+ * 500, and because `GET /dag-workflows` validates every definition in the
+ * project, one such file hides every OTHER workflow the author has. No merged
+ * revision ever carried `ui`, so this can only bite someone who ran an R1
+ * preview against a PERSISTENT projects root; they need to clear it. The
+ * list-wide amplification is pre-existing behaviour — ANY corrupt definition
+ * file does it, not just this one — and is owned where it lives: the CORRUPT
+ * itself in `store.ts` (S5) and the whole-list 500 in `GET /dag-workflows`
+ * (`server/src/api/dag-workflows.ts`, S4). Not this lane's to change.
+ *
  * Node LAYOUT never belonged here anyway: `CommonNodeProperties.position`
  * already carries it per node, and a second `ui.positions` map would be a
  * second source of truth for the same coordinate. Layout therefore still

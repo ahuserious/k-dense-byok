@@ -7,7 +7,7 @@
 // tests here are the direct regression for that: a non-empty, searchable
 // source list, and a Kady typed workflow actually rendered on the canvas.
 
-import type { Page, Request, Route } from "@playwright/test";
+import type { Locator, Page, Request, Route } from "@playwright/test";
 
 import { expect, selectWorkspaceTab, test } from "./fixtures";
 
@@ -22,6 +22,15 @@ interface TypedValidationIssue {
   severity: "error" | "warning";
   path: string;
   message: string;
+  /**
+   * As the real route sends them: it resolves the pointer's array index back to
+   * the id (`issueEntityIds` in server/src/api/dag-workflows-validate.ts), and
+   * leaves both absent for a path that names no single entity. The resolution
+   * itself is pinned server-side in `dag-workflows-validate.test.ts`; what the
+   * items below cover is what the two consumers do with the result.
+   */
+  nodeId?: string;
+  edgeId?: string;
 }
 
 // Derived, never hard-coded: `e2e/fixtures.ts` resolves the mocked backend
@@ -147,6 +156,61 @@ function parseNodeTranslate(transform: string): { x: number; y: number } | null 
   const match = /translate\(\s*(-?[\d.]+)px\s*,\s*(-?[\d.]+)px\s*\)/.exec(transform);
   if (!match) return null;
   return { x: Number(match[1]), y: Number(match[2]) };
+}
+
+/**
+ * Press the mouse on a canvas node, only once the browser agrees it is there.
+ *
+ * `page.mouse.move()` returns as soon as Chromium has DISPATCHED the move; it
+ * does not wait for the hit test behind it. On a canvas that has just run
+ * React Flow's 200 ms `fitView` animation, a press issued in that window is
+ * hit-tested against the pre-animation layer tree and lands on the PANE
+ * instead of the node — d3-zoom then pans the viewport (visibly, by the offset
+ * between the two positions) while the node's own transform never moves. That
+ * is the whole of the intermittent failure this helper removes: it was one run
+ * in four, and always on the precondition poll, because the drag simply never
+ * happened.
+ *
+ * `element.matches(":hover")` is the browser's OWN answer to "is the pointer
+ * over this element", so polling it — re-issuing the move each time, which is
+ * what makes Chromium re-hit-test — waits for the precondition itself rather
+ * than for a duration. The node must not already be selected: the card
+ * suppresses its hover hairline when it is, but `:hover` is a browser state and
+ * unaffected either way.
+ */
+async function pressCanvasNode(page: Page, node: Locator): Promise<{ x: number; y: number }> {
+  // The fit animation moves the node under the cursor; reading a box mid-flight
+  // gives coordinates the press then misses. Two equal readings mean it landed.
+  let previous: string | null = null;
+  await expect
+    .poll(
+      async () => {
+        const box = await node.boundingBox();
+        const reading = box === null ? "" : `${box.x},${box.y},${box.width},${box.height}`;
+        const settled = reading !== "" && reading === previous;
+        previous = reading;
+        return settled;
+      },
+      { message: "The canvas node must stop moving before it can be dragged." },
+    )
+    .toBe(true);
+
+  const box = await node.boundingBox();
+  expect(box, "The loaded node must be laid out before it can be dragged.").not.toBeNull();
+  const centre = { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2 };
+
+  await expect
+    .poll(
+      async () => {
+        await page.mouse.move(centre.x, centre.y);
+        return node.evaluate((element) => element.matches(":hover"));
+      },
+      { message: "The browser must hit-test the pointer onto the node before the press." },
+    )
+    .toBe(true);
+
+  await page.mouse.down();
+  return centre;
 }
 
 async function loadE2eWorkflow(page: Page) {
@@ -313,17 +377,20 @@ test.describe("typed builder load and save", () => {
     );
 
     const node = frame.locator(".react-flow__node").first();
-    await node.hover();
-    const box = await node.boundingBox();
-    expect(box, "The loaded node must be laid out before it can be dragged.").not.toBeNull();
     // React Flow writes the node's CANVAS position into its transform. Unlike a
     // bounding box it does not move when the page around the iframe reflows, so
     // it distinguishes "the drag registered" from "the layout shifted".
     const transformBeforeDrag = await node.evaluate((element) => element.style.transform);
-    await workspacePage.mouse.down();
-    await workspacePage.mouse.move(box!.x + box!.width / 2 + 160, box!.y + box!.height / 2 + 90, {
-      steps: 12,
-    });
+    const centre = await pressCanvasNode(workspacePage, node);
+
+    // React Flow marks a node it is dragging. Asserting it here means a press
+    // that missed fails HERE, naming what went wrong, instead of ten seconds
+    // later on a transform poll that only says the node did not move.
+    await workspacePage.mouse.move(centre.x + 8, centre.y + 6);
+    await expect(node, "The press must grab the node, not the pane beneath it.")
+      .toHaveClass(/\bdragging\b/);
+
+    await workspacePage.mouse.move(centre.x + 160, centre.y + 90, { steps: 12 });
     await workspacePage.mouse.up();
 
     await expect
@@ -421,12 +488,16 @@ test.describe("typed builder load and save", () => {
           code: "workflow/invalid-document",
           severity: "error",
           path: "/nodes/0/name",
+          // "analyze" is the id of the E2E document's only node, which is what
+          // the real route resolves "/nodes/0" to.
+          nodeId: "analyze",
           message: "must NOT have fewer than 1 characters",
         },
         {
           code: "workflow/invalid-document",
           severity: "error",
           path: "/edges/0/to",
+          edgeId: "analyze-to-ghost",
           message: "must reference a node that exists",
         },
       ],
@@ -439,7 +510,11 @@ test.describe("typed builder load and save", () => {
 
     const status = workspacePage.getByTestId("builder-host-status");
     await expect(status).toContainText("must NOT have fewer than 1 characters");
-    await expect(status).toContainText("/nodes/0/name");
+    // The node the author can find on the canvas, AND the field — "/nodes/0" is
+    // an array index the canvas never renders, and dropping "/name" for the id
+    // would trade one half of the location for the other.
+    await expect(status).toContainText("node analyze (/name)");
+    await expect(status).not.toContainText("/nodes/0/name");
     // A tally is what this item exists to prevent coming back.
     await expect(status).not.toContainText("issue(s) block this save");
 
@@ -447,11 +522,61 @@ test.describe("typed builder load and save", () => {
     const issues = workspacePage.getByTestId("builder-issue-list");
     await expect(issues.getByRole("listitem")).toHaveCount(2);
     await expect(issues).toContainText("must reference a node that exists");
-    await expect(issues).toContainText("/edges/0/to");
+    await expect(issues).toContainText("edge analyze-to-ghost (/to)");
 
     // The refusal must not be the kind that also loses the edit or writes.
     expect(log.writes).toHaveLength(0);
     await expect(workspacePage.getByTestId("loaded-workflow-name")).toHaveText("E2E Workflow");
+  });
+
+  test("takes the author from a refused save to the offending node on the canvas", async ({
+    workspacePage,
+  }) => {
+    // The other half of naming the node. `nodeId` on the wire is worth nothing
+    // if nothing consumes it: before this, the host forwarded issues to the
+    // iframe over `builder.setIssues` and the iframe dropped them into a state
+    // no component read, so the canvas showed no sign that one of its nodes was
+    // the problem. Now the Problems panel lists the server's issues and its
+    // node chip selects that node, which React Flow renders as a ring.
+    await installTypedRoutes(workspacePage, {
+      validationIssues: [
+        {
+          code: "workflow/invalid-document",
+          severity: "error",
+          path: "/nodes/0/workspace/isolation",
+          nodeId: "analyze",
+          message: "must be equal to constant",
+        },
+      ],
+    });
+    const frame = await openTypedBuilder(workspacePage);
+    await expectCanvasLinked(workspacePage);
+    await loadE2eWorkflow(workspacePage);
+
+    const node = frame.locator(".react-flow__node").first();
+    await expect(node).not.toHaveClass(/\bselected\b/);
+
+    await workspacePage.getByRole("button", { name: "Save workflow" }).click();
+    await expect(workspacePage.getByTestId("builder-host-status")).toContainText(
+      "must be equal to constant",
+    );
+
+    // The iframe's own status bar counts what its Problems panel lists — the
+    // server's issue included, which is the state that was previously dropped.
+    // The exact number is not the claim (the builder adds its own client-side
+    // checks); that the server's issue reaches the panel at all is.
+    await frame.getByRole("button", { name: /\d+ errors/ }).click();
+    // Scoped to OUR row: the builder runs its own client-side checks too, and
+    // more than one row can carry a chip for the same node. The chip is the
+    // message's next sibling, so this is the chip belonging to the server's
+    // issue and no other.
+    const serverIssueRow = frame.getByText("must be equal to constant", { exact: true });
+    await expect(serverIssueRow).toBeVisible();
+    await serverIssueRow.locator("xpath=following-sibling::button").click();
+
+    // Selecting is what the author SEES: `DagNodeRender` rings a selected node.
+    // Opening the inspector alone would leave the canvas looking untouched.
+    await expect(node).toHaveClass(/\bselected\b/);
   });
 
   // The two CAS-conflict paths are covered by

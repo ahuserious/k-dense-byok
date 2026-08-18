@@ -33,12 +33,59 @@ export interface DagWorkflowValidationIssue {
   severity: "error" | "warning";
   path: string;
   message: string;
+  /**
+   * The id of the node or edge the issue points at, resolved from `path`.
+   *
+   * The typed validator reports a JSON pointer with an ARRAY INDEX
+   * (`/nodes/1/kind`), and the canvas renders no indices — so an author handed
+   * one has to count nodes to find the offending one. This route holds the
+   * submitted document, so it is the only place that can turn the index back
+   * into the id the author sees on the canvas, and `issueEntityIds` below does
+   * exactly that and nothing else. It is presentational: neither field
+   * participates in `graphSha256`, and `validate.ts` is unchanged (its handoff
+   * at docs/OWNERSHIP.md:115 forbids a semantic change).
+   *
+   * ABSENT is a real answer, not a gap: an issue at `/`, `/entryNodeId`, or
+   * `/nodes` itself points at no single entity, and a document malformed enough
+   * that `nodes[i].id` is missing or not a string has no id to report. Both
+   * cases leave the pointer as the location, which is what
+   * `web/src/components/builder/issue-text.ts` falls back to.
+   */
   nodeId?: string;
   edgeId?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * `/nodes/<i>/…` -> `document.nodes[i].id`, `/edges/<i>/…` -> `document.edges[i].id`.
+ *
+ * Defensive at every step on purpose: this runs over the document the client
+ * SUBMITTED, which by the time we are mapping issues is known to be invalid. It
+ * may not be an object, `nodes` may not be an array, the element may not be a
+ * record and its `id` may be missing, empty or the wrong type. Every one of
+ * those answers `undefined` rather than throwing — an id lookup must never turn
+ * a 200 `{ok:false, issues}` into a 500.
+ */
+export function issueEntityIds(
+  document: unknown,
+  issuePath: string,
+): { nodeId?: string; edgeId?: string } {
+  const match = /^\/(nodes|edges)\/(\d+)(?:\/|$)/.exec(issuePath);
+  if (!match) return {};
+  const collectionName = match[1];
+  const index = Number(match[2]);
+  if (!Number.isSafeInteger(index)) return {};
+  if (!isRecord(document)) return {};
+  const collection = document[collectionName];
+  if (!Array.isArray(collection)) return {};
+  const entry: unknown = collection[index];
+  if (!isRecord(entry)) return {};
+  const id = entry.id;
+  if (typeof id !== "string" || id.length === 0) return {};
+  return collectionName === "nodes" ? { nodeId: id } : { edgeId: id };
 }
 
 /**
@@ -129,6 +176,7 @@ export function registerDagWorkflowValidateRoute(app: FastifyInstance): void {
             severity: "error" as const,
             path: issue.path,
             message: issue.message,
+            ...issueEntityIds(document, issue.path),
           })),
         };
       }

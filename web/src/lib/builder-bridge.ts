@@ -107,6 +107,14 @@ export interface BuilderIssue {
   severity: "error" | "warning";
   path: string;
   message: string;
+  /**
+   * The node or edge the issue points at, forwarded verbatim from
+   * `POST /dag-workflows/validate`, which resolves the pointer's array index
+   * back to the id (`issueEntityIds` there). ABSENT when the issue points at no
+   * single entity — `/`, `/entryNodeId`, `/nodes` itself — and the consumers
+   * (`issueLocation` here, the iframe's Problems panel) fall back to the
+   * pointer.
+   */
   nodeId?: string;
   edgeId?: string;
 }
