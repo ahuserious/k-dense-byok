@@ -200,6 +200,11 @@ describe("credential env cross-writer lock", () => {
     }
   });
 
+  // 50 iterations x 4 concurrent writers = 200 real credential writes, each taking the on-disk lock
+  // and renaming the env file. The duration scales with how busy the machine is, not with whether
+  // the behaviour is correct, so this timed out at the default 5 s on a host running many parallel
+  // suites while passing in isolation. The iteration count IS the assertion here — lowering it would
+  // weaken what the test proves about concurrent same-length writes — so the budget moves instead.
   it("loses no accepted update across concurrent same-length mutations", async () => {
     const iterations = 50;
     const writers = [
@@ -242,7 +247,7 @@ describe("credential env cross-writer lock", () => {
     } finally {
       await app.close();
     }
-  });
+  }, 60_000);
 
   it("recovers a lock abandoned by a provably dead process within the bound", async () => {
     // Spawn-and-reap a child so its pid is provably dead (kill(pid, 0) → ESRCH).
@@ -302,7 +307,9 @@ describe("credential env cross-writer lock", () => {
     } finally {
       await app.close();
     }
-  }, 10_000);
+  // The live-owner path deliberately waits out the lock-acquisition bound, so its 10 s budget was
+  // exactly its expected duration and left no headroom on a loaded machine.
+  }, 30_000);
 
   it("releases the lock and leaves no temp files when the rename itself fails", async () => {
     fs.writeFileSync(envPath, "EXA_API_KEY=existing-exa-key\n", { mode: 0o600 });
