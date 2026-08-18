@@ -98,11 +98,19 @@ export function aggregateByFile(records) {
   return [...byFile.values()].sort((left, right) => right.totalMs - left.totalMs);
 }
 
+// The wall clock alone does not establish that the budget fired. E2E_SUITE_ELAPSED_SECONDS is
+// stamped across the two runner step transitions bracketing the suite, so it runs a second or two
+// ahead of the step's own clock: a suite that passed at 34m59s can read as 35m00s here. And the
+// step outcome alone does not establish it either, because Actions reports a step stopped by
+// `timeout-minutes` as `failure`, the same value ordinary test failures produce. So this reports
+// the two facts it has and names what they do and do not distinguish, rather than asserting a
+// cause it never checked.
 function budgetLines(environment) {
   const lines = [];
   const budgetMinutes = Number(environment.E2E_SUITE_TIMEOUT_MINUTES);
   const elapsedSeconds = Number(environment.E2E_SUITE_ELAPSED_SECONDS);
-  const outcome = environment.E2E_SUITE_OUTCOME ?? "not recorded";
+  const recordedOutcome = environment.E2E_SUITE_OUTCOME;
+  const outcome = recordedOutcome === undefined || recordedOutcome === "" ? "not recorded" : recordedOutcome;
 
   if (Number.isFinite(elapsedSeconds) && elapsedSeconds >= 0 && Number.isFinite(budgetMinutes) && budgetMinutes > 0) {
     const budgetMs = budgetMinutes * 60_000;
@@ -110,12 +118,22 @@ function budgetLines(environment) {
     const usedPercent = Math.round((elapsedMs / budgetMs) * 100);
     lines.push(
       `- Suite budget: ${formatDuration(budgetMs)}; suite wall clock: ${formatDuration(elapsedMs)} (${String(usedPercent)}% of budget)`,
+      `- Suite step outcome: ${outcome}`,
     );
-    if (elapsedMs >= budgetMs) {
+    if (elapsedMs >= budgetMs && outcome === "success") {
       lines.push(
-        "- **The suite exceeded its own budget and was stopped by the suite step's `timeout-minutes`.**",
-        "  The job was not cancelled, so the suite counts and the hosted evidence manifest were still",
-        "  written, and whatever timings the suite produced before it was stopped are below.",
+        "- **The suite used its whole budget but the step still succeeded.** The wall clock above is",
+        "  measured across the step boundaries, so it reads slightly ahead of the step's own clock;",
+        "  the budget did not fire. There is no headroom left, so treat this as the last clean run.",
+      );
+    } else if (elapsedMs >= budgetMs) {
+      lines.push(
+        "- **The suite reached its budget and the step did not succeed.** That is consistent with the",
+        "  suite step's `timeout-minutes` stopping it, but a step stopped by its budget and a step",
+        "  whose tests failed both report `failure`, so this does not distinguish them -- read the",
+        "  suite counts above. Either way it was a step budget and not the job ceiling: the counts,",
+        "  the suite outcome, and the hosted evidence manifest all ran before this summary, and",
+        "  whatever timings the suite produced before it stopped are below.",
       );
     }
   } else {

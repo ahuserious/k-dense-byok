@@ -35,19 +35,32 @@ jobs:
     # Derived from the measured phases of run 32006038040 (a clean 24m10s job) rather than rounded
     # up from the previous 45:
     #   pre-suite steps excluding the browser install   119s measured, x1.5 runner variance =  3m
-    #   browser install                                 its own 8m budget + 3m for the fallback = 11m
-    #   the suite                                       its own budget, E2E_SUITE_TIMEOUT_MINUTES = 35m
-    #   post-suite steps (counts, manifest, scan, upload) 120s measured, x1.5 variance         =  3m
-    #   runner scheduling slop                                                                 =  1m
-    # 53m sits one minute above that 52m sum, which is the property that matters: every component
+    #   browser install, Stably                         its own budget                      =  8m
+    #   browser install, Playwright fallback            its own budget                      =  3m
+    #   the suite                                       its own budget                      = 35m
+    #   post-suite steps (counts, manifest, scan, upload) 119s measured, x1.5 variance      =  3m
+    #   runner scheduling slop                                                              =  1m
+    #                                                                              phase total 53m
+    # 54m sits one minute above that 53m sum, which is the property that matters: every component
     # now has a tighter budget of its own, so this ceiling should never be the thing that fires.
     # When it does fire, that is itself the finding -- something outside every budgeted phase.
-    timeout-minutes: 53
+    #
+    # `env` is not available in the job-level context, so this cannot be an expression the way the
+    # step budgets below are; it has to be a literal. `Check job timeout budget` is what keeps the
+    # literal and the budgets honest -- it reads this number back out of this file, sums the phase
+    # variables, and fails in the first seconds of the job if the margin is gone. Change either the
+    # ceiling or a phase budget alone and that step says so.
+    timeout-minutes: 54
     env:
-      # Single source of truth for the two budgets below and for the figure the job summary
-      # compares the observed suite wall clock against.
+      # Single source of truth for each phase: the step budgets below, the figure the job summary
+      # compares the observed suite wall clock against, and the sum the ceiling is checked against.
+      # The three with no step of their own are the measured phases, padded for runner variance.
+      E2E_PRE_SUITE_BUDGET_MINUTES: "3"
       E2E_SUITE_TIMEOUT_MINUTES: "35"
       E2E_BROWSER_INSTALL_TIMEOUT_MINUTES: "8"
+      E2E_BROWSER_FALLBACK_TIMEOUT_MINUTES: "3"
+      E2E_POST_SUITE_BUDGET_MINUTES: "3"
+      E2E_RUNNER_SLOP_MINUTES: "1"
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -61,6 +74,11 @@ jobs:
             package-lock.json
             server/package-lock.json
             web/package-lock.json
+
+      # Before anything expensive, so a budget that no longer fits is a ten-second failure with a
+      # printed table rather than something discovered 40 minutes in.
+      - name: Check job timeout budget
+        run: node e2e/check-job-timeout-budget.mjs
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -102,9 +120,18 @@ jobs:
         timeout-minutes: ${{ fromJSON(env.E2E_BROWSER_INSTALL_TIMEOUT_MINUTES) }}
         run: npx --yes stably@4.12.28 install --with-deps > stably-install.log 2>&1
 
+      # This is the one step that runs only when the mirror has already misbehaved, so leaving it
+      # unbounded would reintroduce the failure the cap above removes -- and leaving it fatal would
+      # be worse than that failure. Without `continue-on-error` a slow pool, a stale dpkg lock left
+      # by the capped install, or a CDN hiccup ends the job here, before the preview, the suite, the
+      # manifest or the upload: a red job with no evidence at all. With it, a missing browser
+      # instead fails the suite step, `Record browser installation method` records that neither
+      # installer succeeded, and every `if: always()` step below still writes its evidence.
       - name: Install Chromium with Playwright fallback
         id: playwright-browser-install
         if: steps.stably-browser-install.outcome == 'failure'
+        continue-on-error: true
+        timeout-minutes: ${{ fromJSON(env.E2E_BROWSER_FALLBACK_TIMEOUT_MINUTES) }}
         run: npx playwright install --with-deps chromium > playwright-install.log 2>&1
 
       - name: Record browser installation method
@@ -114,10 +141,16 @@ jobs:
           STABLY_INSTALL_OUTCOME: ${{ steps.stably-browser-install.outcome }}
           PLAYWRIGHT_INSTALL_OUTCOME: ${{ steps.playwright-browser-install.outcome }}
         run: |
+          # Three states, not two. The fallback can now fail without ending the job, so recording
+          # "playwright-fallback" whenever Stably did not succeed would name an installer that may
+          # itself have failed -- and the evidence would assert a browser was installed by a path
+          # that did not install one.
           if [[ "$STABLY_INSTALL_OUTCOME" == "success" ]]; then
             install_method="stably"
-          else
+          elif [[ "$PLAYWRIGHT_INSTALL_OUTCOME" == "success" ]]; then
             install_method="playwright-fallback"
+          else
+            install_method="none"
           fi
           {
             echo "selected=$install_method"
