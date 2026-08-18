@@ -123,7 +123,8 @@
       "server/src/workflows/supervisor/protocol.ts",
       "server/src/workflows/supervisor/runtime.ts",
       "server/src/workflows/supervisor/server.ts",
-      "server/src/api/raindrop.ts"
+      "server/src/api/raindrop.ts",
+      "server/test/kady-node-executor.test.ts"
     ],
     "S6": [
       "server/src/workflows/prompt-opt*.ts",
@@ -1122,6 +1123,13 @@
       "date": "2026-08-18",
       "path": "server/src/index.ts",
       "scope": "registerRoutes onRequest hook: a project-repository containment refusal must re-throw, not silently redirect the request (writes included) into the default project"
+    },
+    {
+      "from": "S4",
+      "to": "S5",
+      "date": "2026-08-18",
+      "path": "server/src/agent/workflow-delegation-session.ts",
+      "scope": "restore a harness dispatch decision reachable from the supervised transport (N-A7/#55)"
     }
   ]
 }
