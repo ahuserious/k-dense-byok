@@ -32,13 +32,16 @@ export default defineConfig({
   reporter: stablyCredentialsPresent
     ? [
         ["./e2e/item-count-reporter.ts"],
+        // Streams one line per finished test to .stably/e2e-spec-timings.ndjson so a slowdown can
+        // be attributed to a spec. It writes no terminal output and asserts nothing.
+        ["./e2e/spec-timing-reporter.ts"],
         ["list"],
         // Reporter 2.1.16 resolves credentials from process.env and accepts
         // suiteName as a non-secret option (dist/index-D8lS6VkX.mjs:9438-9441).
         // Credentials in this object leak through FullConfig.reporter.
         stablyReporter({ suiteName: process.env.E2E_SUITE_NAME }),
       ]
-    : [["./e2e/item-count-reporter.ts"], ["list"]],
+    : [["./e2e/item-count-reporter.ts"], ["./e2e/spec-timing-reporter.ts"], ["list"]],
   use: {
     baseURL: process.env.KADY_E2E_BASE_URL ?? "http://127.0.0.1:13000",
     trace: "on",

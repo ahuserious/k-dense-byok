@@ -32,7 +32,35 @@ jobs:
   github-runner:
     name: GitHub-hosted runner
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Derived from the measured phases of run 32006038040 (a clean 24m10s job) rather than rounded
+    # up from the previous 45:
+    #   pre-suite steps excluding the browser install   119s measured, x1.5 runner variance =  3m
+    #   browser install, Stably                         its own budget                      =  8m
+    #   browser install, Playwright fallback            its own budget                      =  3m
+    #   the suite                                       its own budget                      = 35m
+    #   post-suite steps (counts, manifest, scan, upload) 119s measured, x1.5 variance      =  3m
+    #   runner scheduling slop                                                              =  1m
+    #                                                                              phase total 53m
+    # 54m sits one minute above that 53m sum, which is the property that matters: every component
+    # now has a tighter budget of its own, so this ceiling should never be the thing that fires.
+    # When it does fire, that is itself the finding -- something outside every budgeted phase.
+    #
+    # `env` is not available in the job-level context, so this cannot be an expression the way the
+    # step budgets below are; it has to be a literal. `Check job timeout budget` is what keeps the
+    # literal and the budgets honest -- it reads this number back out of this file, sums the phase
+    # variables, and fails in the first seconds of the job if the margin is gone. Change either the
+    # ceiling or a phase budget alone and that step says so.
+    timeout-minutes: 54
+    env:
+      # Single source of truth for each phase: the step budgets below, the figure the job summary
+      # compares the observed suite wall clock against, and the sum the ceiling is checked against.
+      # The three with no step of their own are the measured phases, padded for runner variance.
+      E2E_PRE_SUITE_BUDGET_MINUTES: "3"
+      E2E_SUITE_TIMEOUT_MINUTES: "35"
+      E2E_BROWSER_INSTALL_TIMEOUT_MINUTES: "8"
+      E2E_BROWSER_FALLBACK_TIMEOUT_MINUTES: "3"
+      E2E_POST_SUITE_BUDGET_MINUTES: "3"
+      E2E_RUNNER_SLOP_MINUTES: "1"
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -46,6 +74,11 @@ jobs:
             package-lock.json
             server/package-lock.json
             web/package-lock.json
+
+      # Before anything expensive, so a budget that no longer fits is a ten-second failure with a
+      # printed table rather than something discovered 40 minutes in.
+      - name: Check job timeout budget
+        run: node e2e/check-job-timeout-budget.mjs
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -73,14 +106,32 @@ jobs:
       - name: Check vendored builder dist
         run: npm run check:vendored-dist
 
+      # `--with-deps` pulls 114 MB of apt archives (the full browser dependency set, not just
+      # Chromium's). Run 32006038040 fetched them in 3s at 33.5 MB/s; run 32094043747 fetched the
+      # identical 114 MB in 40m21s at 47.2 kB/s from a degraded azure.archive.ubuntu.com mirror and
+      # consumed the whole job budget before the suite could start. This cap is 10x the measured
+      # cost and 5x below that pathology. A timeout sets this step's `outcome` to failure, which is
+      # what the fallback below keys on -- and the fallback only needs Chromium's own dependencies,
+      # which the runner image already ships at the required versions, so it downloads almost
+      # nothing even when the mirror is degraded.
       - name: Install Chromium with Stably
         id: stably-browser-install
         continue-on-error: true
+        timeout-minutes: ${{ fromJSON(env.E2E_BROWSER_INSTALL_TIMEOUT_MINUTES) }}
         run: npx --yes stably@4.12.28 install --with-deps > stably-install.log 2>&1
 
+      # This is the one step that runs only when the mirror has already misbehaved, so leaving it
+      # unbounded would reintroduce the failure the cap above removes -- and leaving it fatal would
+      # be worse than that failure. Without `continue-on-error` a slow pool, a stale dpkg lock left
+      # by the capped install, or a CDN hiccup ends the job here, before the preview, the suite, the
+      # manifest or the upload: a red job with no evidence at all. With it, a missing browser
+      # instead fails the suite step, `Record browser installation method` records that neither
+      # installer succeeded, and every `if: always()` step below still writes its evidence.
       - name: Install Chromium with Playwright fallback
         id: playwright-browser-install
         if: steps.stably-browser-install.outcome == 'failure'
+        continue-on-error: true
+        timeout-minutes: ${{ fromJSON(env.E2E_BROWSER_FALLBACK_TIMEOUT_MINUTES) }}
         run: npx playwright install --with-deps chromium > playwright-install.log 2>&1
 
       - name: Record browser installation method
@@ -90,10 +141,16 @@ jobs:
           STABLY_INSTALL_OUTCOME: ${{ steps.stably-browser-install.outcome }}
           PLAYWRIGHT_INSTALL_OUTCOME: ${{ steps.playwright-browser-install.outcome }}
         run: |
+          # Three states, not two. The fallback can now fail without ending the job, so recording
+          # "playwright-fallback" whenever Stably did not succeed would name an installer that may
+          # itself have failed -- and the evidence would assert a browser was installed by a path
+          # that did not install one.
           if [[ "$STABLY_INSTALL_OUTCOME" == "success" ]]; then
             install_method="stably"
-          else
+          elif [[ "$PLAYWRIGHT_INSTALL_OUTCOME" == "success" ]]; then
             install_method="playwright-fallback"
+          else
+            install_method="none"
           fi
           {
             echo "selected=$install_method"
@@ -209,9 +266,14 @@ jobs:
             echo "E2E_SUITE_NAME=sds-outer-loop-ci-${GITHUB_RUN_NUMBER}"
           } >> "$GITHUB_ENV"
 
+      # A step budget, not a job budget. When `timeout-minutes` on the job fires, the job is
+      # cancelled: no counts, no manifest, and a "cancelled" conclusion that reads like a person
+      # pressed a button. When it fires here the step merely fails, every `if: always()` step below
+      # still runs, and the summary records that the suite exceeded its budget.
       - name: Run complete Playwright suite
         id: suite-all
         if: inputs.grep == ''
+        timeout-minutes: ${{ fromJSON(env.E2E_SUITE_TIMEOUT_MINUTES) }}
         env:
           CI: "1"
           KADY_E2E_BASE_URL: http://127.0.0.1:13000
@@ -224,6 +286,7 @@ jobs:
       - name: Run filtered Playwright suite
         id: suite-grep
         if: inputs.grep != ''
+        timeout-minutes: ${{ fromJSON(env.E2E_SUITE_TIMEOUT_MINUTES) }}
         env:
           CI: "1"
           KADY_E2E_BASE_URL: http://127.0.0.1:13000
@@ -233,6 +296,25 @@ jobs:
           STABLY_PROJECT_ID: ${{ secrets.STABLY_PROJECT_ID }}
           INPUT_GREP: ${{ inputs.grep }}
         run: npx playwright test --workers="$E2E_WORKERS" --grep "$INPUT_GREP" --trace on > stably-test.log 2>&1
+
+      # Stamped here rather than inferred later, so the elapsed figure covers the suite step and
+      # nothing else, whichever of the two suite steps above ran.
+      - name: Stamp suite elapsed time
+        if: always()
+        run: |
+          if [[ -z "${E2E_RUN_STARTED_AT:-}" ]]; then
+            echo "suite start was never stamped; elapsed suite time is not recoverable" >&2
+            exit 0
+          fi
+          suite_ended_at="$(node -e 'process.stdout.write(String(Date.now()))')"
+          echo "E2E_SUITE_ELAPSED_SECONDS=$(( (suite_ended_at - E2E_RUN_STARTED_AT) / 1000 ))" >> "$GITHUB_ENV"
+
+      # A step stopped by `timeout-minutes` leaves the Playwright process tree behind, exactly as
+      # the cancelled run 32094043747 did, and those orphans keep writing into and deleting from the
+      # artifact directory the evidence scan walks. The script explains the failure it prevents.
+      - name: Quiesce leftover suite processes
+        if: always()
+        run: node e2e/quiesce-suite-processes.mjs
 
       - name: Enforce hosted evidence log size limit
         id: evidence-log-cap
@@ -285,6 +367,12 @@ jobs:
             echo "- Failed: $E2E_FAILED"
             echo "- Skipped/fixme: $E2E_SKIPPED"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # Reads the NDJSON streamed by e2e/spec-timing-reporter.ts. It is written per finished test,
+      # so a suite stopped by its budget still reports timings for the part that did run.
+      - name: Summarise per-spec timings
+        if: always()
+        run: node e2e/spec-timing-summary.mjs --top 10
 
       - name: Write GitHub-runner evidence summary
         if: always()
