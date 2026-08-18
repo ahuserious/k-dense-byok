@@ -485,6 +485,45 @@ describe("live-graph console shell", () => {
     });
   });
 
+  it("polls a selected run's events at the idle cadence unless the run is actually live", async () => {
+    // Nothing pinned this before, so both of the reverts it costs 5x the
+    // requests to make were free:
+    //   * `running: true` — round 5's code — polls a QUEUED run every second;
+    //   * `running: source.status === "running"` — round 6's — polls a PAUSED
+    //     run every second, because `runStatusToSourceStatus` folds `paused`
+    //     (and `waiting`, and `blocked`) into `"running"`.
+    // SELECTED_IDLE_POLL_MS is 5 s and SELECTED_RUNNING_POLL_MS is 1 s, so
+    // across a window shorter than one idle period a run at the idle cadence
+    // is polled exactly once and a live one is polled three times. The window
+    // is also shorter than LIST_POLL_MS (3 s), so no discovery sweep lands
+    // inside it to restart the poller.
+    const OBSERVATION_MS = 2_500;
+
+    async function eventPollsWhileSelected(
+      status: dagApi.WorkflowRunStatus,
+    ): Promise<number> {
+      vi.mocked(dagApi.listDagWorkflowRuns).mockResolvedValue([runSummary("wrun_1", status)]);
+      vi.mocked(dagApi.pageDagWorkflowRunEvents).mockClear();
+      window.history.replaceState(null, "", "/?run=wrun_1");
+      const view = render(
+        <LiveGraphConsole projectId="default" runsConsole={<div>typed run console</div>} />,
+      );
+      await screen.findByRole("region", { name: "DAG run graph" });
+      await waitFor(() => {
+        expect(dagApi.pageDagWorkflowRunEvents).toHaveBeenCalled();
+      });
+      await new Promise((resolve) => setTimeout(resolve, OBSERVATION_MS));
+      const polls = vi.mocked(dagApi.pageDagWorkflowRunEvents).mock.calls.length;
+      view.unmount();
+      window.history.replaceState(null, "", "/");
+      return polls;
+    }
+
+    expect(await eventPollsWhileSelected("queued")).toBe(1);
+    expect(await eventPollsWhileSelected("paused")).toBe(1);
+    expect(await eventPollsWhileSelected("running")).toBeGreaterThanOrEqual(3);
+  }, 30_000);
+
   it("includes an open chat tab from another project when all projects are on", async () => {
     window.localStorage.setItem(
       WORKSPACE_STORAGE_KEY,

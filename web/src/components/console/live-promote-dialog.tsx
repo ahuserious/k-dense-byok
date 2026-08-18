@@ -28,7 +28,8 @@
 // answer the client can read arrives at all. Only the 4xx ending entitles this
 // surface to say that nothing was created — see `failedCreateClaim` below.
 //
-// That list is complete only because the dialog cannot be dismissed while the
+// That list is complete for every ending this surface is still mounted for,
+// and it is complete only because the dialog cannot be dismissed while the
 // write is in flight. It used to be dismissable, and then there was a sixth
 // ending, the worst one: Cancel, Escape, the overlay or the header's close
 // control unmounted this component while `create()` was still awaiting, the
@@ -37,10 +38,26 @@
 // — not in a banner, not in an alert, not on reopen. Nothing here can abort
 // the request (`saveDagWorkflowDefinition` takes no `AbortSignal`), so the fix
 // is the other side of it: a create cannot outlive the surface that has to
-// account for it. See `canDismiss`. The one path that leaves is the console
-// unmounting the whole session view underneath an open dialog — discovery
-// dropping the session, the Console tab going away — which no control on this
-// dialog can cause.
+// account for it. See `canDismiss`.
+//
+// What that gate does NOT reach is anything that tears this tree down from
+// outside the dialog, and there are exactly two. Neither is a control on it:
+//   * the console dropping the session view underneath an open dialog. One
+//     failing `GET /sessions` makes the sweep skip that project
+//     (console-live-sources.ts:751-761), its session leaves `liveSources`,
+//     `selected` goes null (live-graph-console.tsx:503-507), and
+//     `SessionGraphView` unmounts with this dialog inside it (`:627`, `:728`).
+//   * the browser leaving the page — a reload, or a Back that exits the app,
+//     because the workspace writes its deep links with `replaceState` and so
+//     keeps a single history entry. This is the one a reader actually reaches
+//     for, and it is why `beforeunload` is registered below: that cannot stop
+//     a write already on the wire, but it stops the exit being silent.
+// Switching to another workspace surface is NOT one of them, though an earlier
+// version of this comment said it was: `usePersistentWorkspaceView` only ever
+// adds to `mountedViews` (persistent-workspace-surfaces.tsx:31-40),
+// `ConsolePanel` hides its feeds with CSS rather than unmounting
+// (console-panel.tsx:83-86), and `DialogContent` is portalled to
+// `document.body` besides, so hiding the surface would not even hide this.
 //
 // A refusal is not a dead end. The create button is gated on whether a create
 // is POSSIBLE — a syntactically valid id, a document to send, and no write in
@@ -53,7 +70,7 @@
 
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertTriangleIcon, CheckIcon, GitBranchIcon } from "lucide-react";
 
 import {
@@ -211,6 +228,27 @@ function FailedCreateAlert({
   );
 }
 
+/**
+ * The envelope check this client runs on a save answer
+ * (`isSavedDefinitionEnvelope`, lib/dag-workflows.ts:501-516) validates
+ * `outcome`, `id` and `revision` and deliberately trusts every other stored
+ * field, so `graphSha256` arrives typed but unread. This surface PRINTS it,
+ * which makes it a claim this surface makes: rendering an absent value under
+ * the words "graph sha256" states a digest nothing checked. Widening the
+ * validator is not this lane's to do — `web/src/lib/dag-workflows.ts` is S1's
+ * file — so the check that belongs here is the one at the point of use.
+ *
+ * It deliberately checks READABILITY and not FORMAT. The store emits a 64-hex
+ * digest today, but asserting that here would make this surface refuse a
+ * perfectly good digest in some other shape and say the answer carried none —
+ * a false claim in the other direction, and one no validator on this side
+ * backs. "The answer carried a digest we can show you" is the whole of what
+ * the banner is entitled to say.
+ */
+function isReadableGraphSha(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 export function LivePromoteDialog({
   open,
   onOpenChange,
@@ -256,6 +294,27 @@ export function LivePromoteDialog({
   // nothing" true is to make Cancel unpressable while a write is in flight.
   // This gates Cancel, Escape, the overlay and the header's close control.
   const canDismiss = outcome.phase !== "saving";
+
+  // `canDismiss` closes every exit the reader can take ON THIS DIALOG. It has
+  // no reach over the two the browser owns — a reload, and a Back that leaves
+  // the app — which destroy the whole document with the PUT still on the wire
+  // and leave a workflow nothing ever named. Nothing here can recall that
+  // write, so this does the only honest thing left: it makes the reader
+  // confirm the exit rather than take it silently, which was the part that
+  // was silent. Registered only while the write is in flight, so it never
+  // stands between a reader and a page they are done with.
+  useEffect(() => {
+    if (canDismiss || typeof window === "undefined") return;
+    const confirmExit = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      // Legacy half of the contract: Safari and older Chromium only raise the
+      // prompt when `returnValue` is set. Browsers show their own wording, so
+      // the string itself is never read.
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", confirmExit);
+    return () => window.removeEventListener("beforeunload", confirmExit);
+  }, [canDismiss]);
 
   const create = useCallback(async () => {
     if (!plan.document) return;
@@ -330,7 +389,9 @@ export function LivePromoteDialog({
               </span>
             </p>
             <p className="font-mono text-[10px] text-muted-foreground">
-              graph sha256 {outcome.saved.definition.graphSha256}
+              {isReadableGraphSha(outcome.saved.definition.graphSha256)
+                ? `graph sha256 ${outcome.saved.definition.graphSha256}`
+                : "the answer carried no readable graph sha256"}
             </p>
             <button
               type="button"

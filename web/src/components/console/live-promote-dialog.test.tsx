@@ -391,6 +391,111 @@ describe("promote-to-DAG dialog", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
+  it("makes the browser's own exits confirm while a create is in flight, and only then", async () => {
+    // `canDismiss` reaches every exit on this dialog and none of the two the
+    // browser owns: a reload, and a Back that leaves the app (the workspace
+    // writes its deep links with `replaceState`, so there is one history
+    // entry to go back past). Both destroy the document with the PUT still on
+    // the wire, and the workflow that commits is named on no surface. Nothing
+    // here can recall that write, so the guard does the one thing left — it
+    // makes the exit ask instead of happening silently. A cancelled
+    // `beforeunload` is exactly what the browser reads as "prompt the reader".
+    const exitWouldPrompt = () =>
+      !window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+
+    let release: (() => void) | undefined;
+    vi.mocked(dagApi.saveDagWorkflowDefinition).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        release = () => resolve({
+          outcome: "created",
+          definition: {
+            storageVersion: 1,
+            id: "chat-session-a",
+            revision: 1,
+            createdAt: 0,
+            updatedAt: 0,
+            graphSha256: "sha-promoted",
+            graph: {} as dagApi.WorkflowGraphDocument,
+          },
+          etag: '"1"',
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    renderDialog();
+    const dialog = await screen.findByTestId("promote-dialog");
+    // Reviewing a plan is not a write; there is nothing to stand in front of.
+    expect(exitWouldPrompt()).toBe(false);
+
+    await user.click(within(dialog).getByRole("button", { name: "Create workflow" }));
+    await within(dialog).findByRole("button", { name: "Creating…" });
+    expect(exitWouldPrompt()).toBe(true);
+
+    release?.();
+    expect(await screen.findByText(/The typed route accepted it/i)).toBeInTheDocument();
+    // The route has answered and the surface has reported it, so the reader is
+    // no longer walking away from an unreported write. The guard is removed
+    // rather than left armed over a page they are done with.
+    await waitFor(() => {
+      expect(exitWouldPrompt()).toBe(false);
+    });
+  });
+
+  it("does not print a graph digest the save answer never carried", async () => {
+    // `isSavedDefinitionEnvelope` validates `outcome`, `id` and `revision` and
+    // trusts the rest, so `graphSha256` reaches this banner unread. Printing it
+    // is a claim, and "graph sha256 " followed by nothing is a claim about a
+    // digest nobody checked. The route is accepted either way — this is about
+    // what the surface then says it knows.
+    vi.mocked(dagApi.saveDagWorkflowDefinition).mockResolvedValue({
+      outcome: "created",
+      definition: {
+        storageVersion: 1,
+        id: "chat-session-a",
+        revision: 1,
+        createdAt: 0,
+        updatedAt: 0,
+        graphSha256: undefined as unknown as string,
+        graph: {} as dagApi.WorkflowGraphDocument,
+      },
+      etag: '"1"',
+    });
+    const user = userEvent.setup();
+    renderDialog();
+    const dialog = await screen.findByTestId("promote-dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Create workflow" }));
+
+    const result = await screen.findByLabelText("Promotion result");
+    // The create itself is still reported — the answer named an id and a
+    // revision, and those were validated.
+    expect(result).toHaveTextContent(/The typed route accepted it/i);
+    expect(result).toHaveTextContent(/no readable graph sha256/i);
+    expect(result).not.toHaveTextContent(/graph sha256 [0-9a-f]/i);
+  });
+
+  it("prints the graph digest when the answer carried a readable one", async () => {
+    vi.mocked(dagApi.saveDagWorkflowDefinition).mockResolvedValue({
+      outcome: "created",
+      definition: {
+        storageVersion: 1,
+        id: "chat-session-a",
+        revision: 1,
+        createdAt: 0,
+        updatedAt: 0,
+        graphSha256: "a".repeat(64),
+        graph: {} as dagApi.WorkflowGraphDocument,
+      },
+      etag: '"1"',
+    });
+    const user = userEvent.setup();
+    renderDialog();
+    const dialog = await screen.findByTestId("promote-dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Create workflow" }));
+
+    const result = await screen.findByLabelText("Promotion result");
+    expect(result).toHaveTextContent(`graph sha256 ${"a".repeat(64)}`);
+  });
+
   it("refuses to send an id the server's own syntax rejects", async () => {
     const user = userEvent.setup();
     renderDialog();

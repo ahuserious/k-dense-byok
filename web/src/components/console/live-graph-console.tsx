@@ -317,12 +317,24 @@ function useRunEvents(source: LiveSource | null, active: boolean): WorkflowRunEv
   const projectId = source?.projectId ?? "";
   // Read off the source rather than assumed: a selected run that is queued,
   // paused or finished is not running, and polling it at the running cadence
-  // is 5x the requests for a stream that is not moving. It is a dependency of
-  // the effect because the status changes underneath a selected run — without
-  // it a run selected while queued would keep the idle cadence for its whole
-  // execution. Restarting is cheap and lossless: the re-paged events merge back
-  // into the same run's page by `seq`.
-  const runStatus = source?.status ?? null;
+  // is 5x the requests for a stream that is not moving.
+  //
+  // `live` is the read and `status` is NOT, which round 6 got wrong. Every
+  // `dag-run` source sets `live` straight from the wire status
+  // (`run.status === "running"`, console-live-sources.ts:248; the same test on
+  // a clicked `dag` node, `:548` here), whereas `runStatusToSourceStatus`
+  // (console-live-sources.ts:183-190) folds `waiting`, `blocked` AND `paused`
+  // into `"running"`. Reading `status` therefore called a paused run running
+  // and polled it at 1 s — which is half the finding this line exists to
+  // close. Reading `live` makes the sentence above true for all three of the
+  // states it names, and idles `waiting` and `blocked` too, which are equally
+  // not moving.
+  //
+  // It is a dependency of the effect because liveness changes underneath a
+  // selected run — without it a run selected while queued would keep the idle
+  // cadence for its whole execution. Restarting is cheap and lossless: the
+  // re-paged events merge back into the same run's page by `seq`.
+  const runIsLive = source?.live === true;
   useEffect(() => {
     if (!active || !runId) return;
     let cancelled = false;
@@ -338,7 +350,7 @@ function useRunEvents(source: LiveSource | null, active: boolean): WorkflowRunEv
       if (cancelled) return;
       const delay = nextPollDelayMs({
         selected: true,
-        running: runStatus === "running",
+        running: runIsLive,
         rank: 0,
         consecutiveErrors,
         documentHidden: typeof document !== "undefined" && document.hidden,
@@ -382,7 +394,7 @@ function useRunEvents(source: LiveSource | null, active: boolean): WorkflowRunEv
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [active, projectId, runId, runStatus]);
+  }, [active, projectId, runId, runIsLive]);
   return page.runId === runId ? page.events : [];
 }
 
