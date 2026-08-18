@@ -459,7 +459,7 @@ test.describe("w4-console-promote", () => {
     await expect(alert).not.toContainText("Nothing was created");
     // Nor is it success — no definition came back, so the surface must not
     // send the reader to a workflow it never saw.
-    await expect(dialog).not.toContainText(/accepted it:/i);
+    await expect(dialog).not.toContainText(/accepted it/i);
     await expect(dialog.getByRole("button", { name: "Done" })).toHaveCount(0);
 
     // An unknown outcome is not a dead end either: the reader can type a

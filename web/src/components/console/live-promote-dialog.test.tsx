@@ -93,7 +93,7 @@ describe("promote-to-DAG dialog", () => {
     expect(dialog).toHaveTextContent(/cannot become a node/i);
   });
 
-  it("cancels without writing anything", async () => {
+  it("cancels without writing anything before a create is pressed", async () => {
     const user = userEvent.setup();
     const onOpenChange = renderDialog();
     const dialog = await screen.findByTestId("promote-dialog");
@@ -339,6 +339,56 @@ describe("promote-to-DAG dialog", () => {
     expect(await screen.findByText(/The typed route accepted it/i)).toBeInTheDocument();
     // Exactly one write, never a second from a double press.
     expect(dagApi.saveDagWorkflowDefinition).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses every exit while a create is in flight, so no write can outlive the dialog", async () => {
+    // The write cannot be recalled once sent — `saveDagWorkflowDefinition`
+    // takes no AbortSignal — so a dialog that could be dismissed mid-flight
+    // would let a create commit into an unmounted tree, where the `setOutcome`
+    // reporting it is discarded and no surface ever names the workflow. Every
+    // exit is therefore gated on the same phase Create is.
+    let release: (() => void) | undefined;
+    vi.mocked(dagApi.saveDagWorkflowDefinition).mockImplementationOnce(
+      () => new Promise((resolve) => {
+        release = () => resolve({
+          outcome: "created",
+          definition: {
+            storageVersion: 1,
+            id: "chat-session-a",
+            revision: 1,
+            createdAt: 0,
+            updatedAt: 0,
+            graphSha256: "sha-promoted",
+            graph: {} as dagApi.WorkflowGraphDocument,
+          },
+          etag: '"1"',
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    const onOpenChange = renderDialog();
+    const dialog = await screen.findByTestId("promote-dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Create workflow" }));
+    await within(dialog).findByRole("button", { name: "Creating…" });
+
+    const cancel = within(dialog).getByRole("button", { name: "Cancel" });
+    expect(cancel).toBeDisabled();
+    await user.click(cancel);
+    // The header's close control is removed rather than left inert, and
+    // Escape — which Radix routes through the same onOpenChange — is ignored.
+    expect(within(dialog).queryByRole("button", { name: "Close" })).toBeNull();
+    await user.keyboard("{Escape}");
+    expect(onOpenChange).not.toHaveBeenCalled();
+    // It says why the exit is closed instead of looking broken.
+    expect(dialog).toHaveTextContent(/cannot be recalled/i);
+
+    release?.();
+    expect(await screen.findByText(/The typed route accepted it/i)).toBeInTheDocument();
+    // One write, and the surface is dismissable again the moment the route
+    // has answered — the gate is on the flight, not on the dialog.
+    expect(dagApi.saveDagWorkflowDefinition).toHaveBeenCalledTimes(1);
+    await user.click(within(dialog).getByRole("button", { name: "Done" }));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
   it("refuses to send an id the server's own syntax rejects", async () => {

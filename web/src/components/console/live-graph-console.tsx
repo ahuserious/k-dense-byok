@@ -315,6 +315,14 @@ function useRunEvents(source: LiveSource | null, active: boolean): WorkflowRunEv
   });
   const runId = source?.kind === "dag-run" ? source.id : null;
   const projectId = source?.projectId ?? "";
+  // Read off the source rather than assumed: a selected run that is queued,
+  // paused or finished is not running, and polling it at the running cadence
+  // is 5x the requests for a stream that is not moving. It is a dependency of
+  // the effect because the status changes underneath a selected run — without
+  // it a run selected while queued would keep the idle cadence for its whole
+  // execution. Restarting is cheap and lossless: the re-paged events merge back
+  // into the same run's page by `seq`.
+  const runStatus = source?.status ?? null;
   useEffect(() => {
     if (!active || !runId) return;
     let cancelled = false;
@@ -330,7 +338,7 @@ function useRunEvents(source: LiveSource | null, active: boolean): WorkflowRunEv
       if (cancelled) return;
       const delay = nextPollDelayMs({
         selected: true,
-        running: true,
+        running: runStatus === "running",
         rank: 0,
         consecutiveErrors,
         documentHidden: typeof document !== "undefined" && document.hidden,
@@ -374,7 +382,7 @@ function useRunEvents(source: LiveSource | null, active: boolean): WorkflowRunEv
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [active, projectId, runId]);
+  }, [active, projectId, runId, runStatus]);
   return page.runId === runId ? page.events : [];
 }
 

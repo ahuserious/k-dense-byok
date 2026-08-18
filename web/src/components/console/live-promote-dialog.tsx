@@ -11,7 +11,9 @@
 //   * everything in the session it CANNOT represent, with the reason for each
 //   * the model, workspace isolation, and limits the draft will carry
 //
-// Cancel abandons it and writes nothing. Create issues exactly one
+// Cancel abandons it and writes nothing — and it can only be pressed while
+// that is true, because every way out of this dialog is gated on the same
+// phase the Create button is. Create issues exactly one
 // `PUT /dag-workflows/:id` with `If-None-Match: *` — the typed route's create
 // half of its CAS contract — and reports what the server said. A rejected
 // document is shown verbatim, including the validator's `path: message` list,
@@ -25,6 +27,20 @@
 // MALFORMED_SAVE_RESPONSE); the route fails rather than decides (5xx); or no
 // answer the client can read arrives at all. Only the 4xx ending entitles this
 // surface to say that nothing was created — see `failedCreateClaim` below.
+//
+// That list is complete only because the dialog cannot be dismissed while the
+// write is in flight. It used to be dismissable, and then there was a sixth
+// ending, the worst one: Cancel, Escape, the overlay or the header's close
+// control unmounted this component while `create()` was still awaiting, the
+// write went on to commit, and the `setOutcome` that would have reported it
+// was discarded by React. A workflow existed that this surface never mentioned
+// — not in a banner, not in an alert, not on reopen. Nothing here can abort
+// the request (`saveDagWorkflowDefinition` takes no `AbortSignal`), so the fix
+// is the other side of it: a create cannot outlive the surface that has to
+// account for it. See `canDismiss`. The one path that leaves is the console
+// unmounting the whole session view underneath an open dialog — discovery
+// dropping the session, the Console tab going away — which no control on this
+// dialog can cause.
 //
 // A refusal is not a dead end. The create button is gated on whether a create
 // is POSSIBLE — a syntactically valid id, a document to send, and no write in
@@ -118,11 +134,14 @@ function PlanSummary({ plan }: { plan: SessionPromotionPlan }) {
  * intermediary's 502/504 can arrive after the origin already wrote). Anything
  * that is not a 4xx therefore leaves the outcome unknown, and the surface says so.
  *
- * `status === null` is every error that is not a `DagWorkflowApiError`, which
- * includes both a request that never left and a response whose body died while
- * `parseResponse` was reading it. The second one did reach a status — this
- * surface just never holds it — so the copy claims only what it has: no answer
- * it could read.
+ * `status === null` is every error that is not a `DagWorkflowApiError`. Three
+ * different things land here, and only the first of them is a request that
+ * never reached the store: a request that never left (offline, DNS, refused,
+ * CORS); a connection that died after the request was sent and before any
+ * response header arrived, where the origin may well have committed; and a
+ * response whose body died while `parseResponse` was reading it, which did
+ * reach a status this surface never holds. The copy therefore says nothing
+ * about where the failure happened — only that no answer it could read arrived.
  *
  * Every retry this dialog can issue is a create (`If-None-Match: *`), so none of
  * the unknown cases can be made worse by pressing Create again: the write cannot
@@ -230,6 +249,13 @@ export function LivePromoteDialog({
   // surface usable: the only state that may disable this button is a write
   // already in flight. (`saved` renders its own branch, so it never gets here.)
   const canCreate = idValid && plan.document !== null && outcome.phase !== "saving";
+  // The same phase gates every exit. A create that outlives this component
+  // finishes into a `setOutcome` on an unmounted tree, which React discards —
+  // so the write commits and nothing on this surface ever says so. The request
+  // cannot be recalled once sent, so the only way to keep "Cancel writes
+  // nothing" true is to make Cancel unpressable while a write is in flight.
+  // This gates Cancel, Escape, the overlay and the header's close control.
+  const canDismiss = outcome.phase !== "saving";
 
   const create = useCallback(async () => {
     if (!plan.document) return;
@@ -268,8 +294,18 @@ export function LivePromoteDialog({
   }, [onOpenChange]);
 
   return (
-    <Dialog open={open} onOpenChange={(next) => (next ? onOpenChange(true) : close())}>
-      <DialogContent className="max-h-[85vh] gap-3 overflow-y-auto sm:max-w-2xl" data-testid="promote-dialog">
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (next) onOpenChange(true);
+        else if (canDismiss) close();
+      }}
+    >
+      <DialogContent
+        className="max-h-[85vh] gap-3 overflow-y-auto sm:max-w-2xl"
+        data-testid="promote-dialog"
+        showCloseButton={canDismiss}
+      >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-sm">
             <GitBranchIcon className="size-4 text-cyan-500" aria-hidden />
@@ -416,11 +452,12 @@ export function LivePromoteDialog({
               </pre>
             </details>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 onClick={close}
-                className="rounded-md border border-border/70 px-3 py-1 text-[11px] transition-colors hover:bg-foreground/5"
+                disabled={!canDismiss}
+                className="rounded-md border border-border/70 px-3 py-1 text-[11px] transition-colors hover:bg-foreground/5 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Cancel
               </button>
@@ -432,6 +469,13 @@ export function LivePromoteDialog({
               >
                 {outcome.phase === "saving" ? "Creating…" : "Create workflow"}
               </button>
+              {outcome.phase === "saving" ? (
+                <span className="text-[10px] leading-relaxed text-muted-foreground">
+                  The write has already been sent and cannot be recalled, so this dialog
+                  stays until the typed route answers — leaving now would create a workflow
+                  nothing here could tell you about.
+                </span>
+              ) : null}
             </div>
           </>
         )}
