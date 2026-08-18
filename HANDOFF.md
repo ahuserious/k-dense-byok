@@ -129,9 +129,12 @@ dropped the usage) versus post-fix `SUPERVISOR_BUSY` — the actual bug.
   the test's temp root. This wasted an hour of log hunting.
 - **`server/tsconfig.json` only includes `src`** — test files are never
   typechecked. Type errors in tests surface at runtime or not at all.
-- Gate ladder: rung 1 (openrouter-fusion) is `bad-key`/401 and dead; rung 2
-  `sol` → `gpt-5.6-sol` @ `xhigh` is live-probed OK. Re-probe with
-  `CODEX_EFFORT=xhigh CONFIG_SEATS=sol bash ~/.claude/skills/relentless-inception/scripts/check_prereqs.sh`
+- Gate ladder: **superseded 2026-08-18.** What follows describes the pre-ruling arrangement — rung 1
+  (openrouter-fusion) `bad-key`/401 and dead, rung 2 `sol` → `gpt-5.6-sol` @ `xhigh` live-probed OK. Since
+  the owner's 2026-08-16 ruling, coding lanes and confirming reviews both run as Claude Code Opus 5 at
+  effort high in standalone clones, and fusion-drive uses profile `claude-only-oauth`; see the note under
+  GOAL.md's "Adversarial gate". Kept as history, not as an instruction — do not re-probe the ladder
+  expecting it to be the live path.
 
 ## Evidence bar (unchanged, from GOAL.md)
 

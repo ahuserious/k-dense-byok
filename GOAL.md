@@ -101,6 +101,17 @@ U3 and U4 are independent follow-ups.
 
 ## Adversarial gate
 
+> **Superseded 2026-08-18 — read this before following the seat table below.** The owner's ruling of
+> 2026-08-16 replaced the Codex/`sol` review seat for this project's work: fusion-drive runs on profile
+> `claude-only-oauth` (fuser Opus 4.8 high; panel Opus 5 + Fable 5 high; judge Opus 5 high; approval gates
+> Opus 5 ×2), and both coding lanes and confirming reviews run as Claude Code Opus 5 at effort high, in
+> standalone clones, with the reviewer given `--disallowedTools Edit,MultiEdit,NotebookEdit`. Reports land in
+> `dfg-evidence-20260807-135127/s11/claude-lanes/*.report.md`. The rung ladder, the `sol` seat, the
+> `bad-key` rung-1 note and `adversarial_review.sh` below describe the pre-ruling arrangement and are kept
+> only as history — do not run them expecting the ladder to be live. The unchanged part is the rule that
+> matters: a `fail` verdict feeds its blocking issues back as new work, no unit ships on a `fail`, and no
+> verdict is discarded because it is inconvenient.
+
 Every unit passes through a Codex adversarial review before it counts as done.
 
 - Runtime: `~/.claude/skills/relentless-inception/scripts/adversarial_review.sh`
