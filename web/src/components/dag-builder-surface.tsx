@@ -4,8 +4,9 @@
 // the full-bleed builder iframe, and a collapsible DAG-BUILDER ASSISTANT rail.
 //
 // The rail used to host the MAIN Kady chat (chat-rail.tsx, "Ask Kady anything…"
-// + "Add to pipeline"). That was the same session the user talks to everywhere
-// else, so the Builder had no chat of its own. It now hosts the dedicated
+// + "Add to pipeline"; both files deleted 2026-08-18 once nothing referenced
+// them). That was the same session the user talks to everywhere else, so the
+// Builder had no chat of its own. It now hosts the dedicated
 // `dag-builder` helper profile instead: a SEPARATE Pi session with its own
 // session id, its own transcript, and no tools.
 //

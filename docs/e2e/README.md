@@ -29,7 +29,7 @@ node scripts/preview-down.mjs
 `playwright.config.ts` defaults to `http://127.0.0.1:13000`. Override it with `KADY_E2E_BASE_URL` only when intentionally targeting another preview. `e2e/service-origins.ts` derives the backend and engine origins from the loopback app origin plus the default `18000`/`13091` ports, so a preview started on non-default service ports also needs `KADY_PORT` and `KADY_PIPELINE_ENGINE_PORT`; otherwise the `@live` origin assertions and the global-setup service probes still name the default ports. Run the tiers separately with:
 
 ```bash
-# Deterministic UI tier: 246 mocked items.
+# Deterministic UI tier: 224 mocked items.
 KADY_E2E_BASE_URL=http://127.0.0.1:13000 npx playwright test --grep-invert @live
 
 # Server-truth tier: 3 unmocked items.
@@ -76,13 +76,15 @@ Orchestrator evidence at 01d9eb9 (2026-08-16, outside the Codex sandbox, this ma
 
 Orchestrator evidence at 6c7054c (2026-08-17, lane V1 verification fixes merged: +3 Scientific Pipelines items, +9 Workspace items, all substantive): cold fresh-preview `npx playwright test --workers 4` → 261 collected (225 substantive + 36 thin, 4 fixme), 257 passed / 0 failed / 4 skipped in 2.2 m including the three `@live` items; the per-file pins in `e2e/item-count-reporter.ts` were raised in the same change. Logs: `dfg-evidence-20260807-135127/s11/lane-gates/tip/int-v1-*` (outside this repository).
 
+Lane W1 evidence at 2026-08-18 (owner direction “there should be no components studio”): the Components Studio entry point was retired and `e2e/studio.spec.ts` was deleted with it, removing 34 items — 33 substantive and 1 fixme. `npx playwright test --list` now reports `E2E inventory verified: 227 total = 192 executing-substantive + 35 thin; 3 fixme + 0 skip.`, and the per-file pins in `e2e/item-count-reporter.ts` no longer carry a `studio.spec.ts` row. No other spec gained or lost an item.
+
 To prove consecutive cleanup, run the complete up/curl/down sequence three times. A later `preview-up.mjs` must not encounter occupied ports or reuse state from an earlier cycle.
 
 The orchestrator's 2026-08-12 live proof completed three consecutive cycles: every service was healthy at roughly 24 seconds, every teardown removed the isolated state, and no listener or child process survived.
 
 ## Test inventory
 
-Playwright expands the parameterized declarations into 261 independent test items. A local reporter
+Playwright expands the parameterized declarations into 227 independent test items. A local reporter
 fails collection if any per-file count or the substantive/thin split changes without an intentional update:
 
 | Surface | Items |
@@ -92,11 +94,10 @@ fails collection if any per-file count or the substantive/thin split changes wit
 | Chat lifecycle and live Scientific DAG | 28 |
 | DAG Builder, node cards, and every NodeSpec field | 60 |
 | Console and Raindrop | 33 |
-| Scientific DAG Studio popup | 34 |
 | Unmocked backend and engine contracts | 3 |
-| **Total** | **261** |
+| **Total** | **227** |
 
-Of those 261 items, 225 are substantive behavior checks and 36 are explicitly labelled thin inventory
+Of those 227 items, 192 are substantive behavior checks and 35 are explicitly labelled thin inventory
 or documented-product-gap items. All three `@live` items are substantive because each asserts exact values returned by a real service and a corresponding browser-visible consequence. The split is checked at collection time as well as the per-file totals.
 
 Each item establishes the state required by its surface. Builder items open a named draft before using the canvas; live Scientific DAG items submit a run before expecting a projection; typed-pipeline items create and open their stored definition; Console and Raindrop items wait for durable records. Assertions use Playwright's signal-based locator waits and do not contain fixed sleeps.
@@ -120,7 +121,7 @@ KADY_E2E_BASE_URL=https://public-preview.example \
 npx playwright test --config playwright.cloud.config.ts
 ```
 
-`playwright.cloud.config.ts` excludes `@live`: that topology deliberately exposes the frontend and vendored engine but not the real Kady backend. Its cloud-safe global setup fetches only the web root, so collection contains the 246 mocked items without pretending that a project page was warmed. The mocked-only tier can also be selected explicitly:
+`playwright.cloud.config.ts` excludes `@live`: that topology deliberately exposes the frontend and vendored engine but not the real Kady backend. Its cloud-safe global setup fetches only the web root, so collection contains the 224 mocked items without pretending that a project page was warmed. The mocked-only tier can also be selected explicitly:
 
 ```bash
 KADY_E2E_BASE_URL=https://public-preview.example \
@@ -137,7 +138,7 @@ The real remote path is the `github-runner` job in [`.github/workflows/stably-cl
 
 - the exact test command and relevant environment (`CI`, `KADY_E2E_BASE_URL`, workers, and `KADY_E2E_WORKERS` when set), with `STABLY_API_KEY` and `STABLY_PROJECT_ID` recorded only as variable names;
 - the tested commit SHA and GitHub run ID;
-- `E2E inventory verified: 261 total = 225 executing-substantive + 36 thin; 4 fixme + 0 skip.`;
+- `E2E inventory verified: 227 total = 192 executing-substantive + 35 thin; 3 fixme + 0 skip.`;
 - the final Playwright summary line and suite outcome;
 - the embedded runner fingerprint, including runner image/identity fields available to the job; and
 - the Stably run ID and URL when the conditional reporter attached.

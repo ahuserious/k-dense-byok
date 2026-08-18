@@ -16,12 +16,6 @@ vi.mock("@/components/pipeline-builder-panel", () => ({
   },
 }));
 
-// The rail must not fall back to the MAIN Kady chat: if this ever renders the
-// Builder is sharing the user's ordinary session again.
-vi.mock("@/components/chat-rail", () => ({
-  ChatRail: () => <div data-testid="main-kady-chat-rail" />,
-}));
-
 vi.mock("@/components/helper-agent-chat", () => ({
   HelperAgentChat: (props: {
     profile: string;
@@ -100,7 +94,14 @@ describe("DagBuilderSurface", () => {
     expect(assistant.className).toContain("flex");
     expect(assistant.className).not.toContain("hidden");
     expect(screen.getByTestId("builder-assistant")).toHaveTextContent("dag-builder:no-context");
-    expect(screen.queryByTestId("main-kady-chat-rail")).not.toBeInTheDocument();
+    // The rail must not fall back to the MAIN Kady chat. chat-rail.tsx was
+    // deleted in round 2, so the guarantee is now structural; this asserts the
+    // user-visible half of it — the main chat composer's placeholder and its
+    // "Add to pipeline" control are nowhere in the Builder.
+    expect(screen.queryByPlaceholderText(/Ask Kady anything/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Add to pipeline/i }),
+    ).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Hide builder assistant" }),
     ).toHaveAttribute("aria-pressed", "true");
