@@ -11,6 +11,11 @@
     "web/src/components/helper-agent-chat.tsx",
     "web/src/components/helper-agent-chat.test.tsx",
     "web/src/components/raindrop-panel.tsx",
-    "web/src/components/raindrop-panel.test.tsx"
+    "web/src/components/raindrop-panel.test.tsx",
+    "web/src/components/dag-compose-popover.tsx",
+    "e2e/studio.spec.ts",
+    "e2e/item-count-reporter.ts",
+    "web/src/components/chat-rail.tsx",
+    "docs/e2e/README.md"
   ]
 }
