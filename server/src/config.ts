@@ -117,9 +117,17 @@ export const PIPELINE_ENGINE_DISABLED =
  * debugger, an external sibling checkout — NOT vendored). Only the
  * /raindrop/health probe reads this; when nothing listens there the Raindrop
  * view simply keeps its native session-trace panel.
+ *
+ * No default. A `http://localhost:5899` fallback meant an install that had
+ * never been pointed at a Workshop still reached out to whatever happened to
+ * listen on that port of the backend's host — an unrelated dev server's traces
+ * reported back to the UI as a healthy Workshop. Unset therefore means "the
+ * feature is off": /raindrop/health answers without any outbound fetch at all.
+ * The web side dropped the same default from RAINDROP_URL
+ * (web/src/lib/embed-config.ts); this is the server half of that fix.
  */
-export const RAINDROP_BASE_URL =
-  process.env.RAINDROP_BASE_URL ?? "http://localhost:5899";
+export const RAINDROP_BASE_URL: string | undefined =
+  process.env.RAINDROP_BASE_URL?.trim() || undefined;
 
 /**
  * Local OpenAI-compatible model server (LM Studio, vLLM, text-generation-webui,
