@@ -25,7 +25,6 @@ import type {
 import {
   typedToView,
   type GraphViewModel,
-  type GraphViewViewport,
   type TypedToViewOptions,
 } from "@/lib/typed-graph-view";
 
@@ -65,8 +64,7 @@ export type CanvasDeltaOp =
       to: string;
       condition?: WorkflowGraphEdge["condition"];
     }
-  | { op: "removeEdge"; edgeId: string }
-  | { op: "setViewport"; viewport: GraphViewViewport };
+  | { op: "removeEdge"; edgeId: string };
 
 export type CanvasDeltaRejectionCode =
   | "delta/unknown-op"
@@ -340,22 +338,6 @@ export function applyDelta(
         }
         edgeIds.delete(operation.edgeId);
         next.edges = next.edges.filter((edge) => edge.id !== operation.edgeId);
-        applied.push(operation);
-        break;
-      }
-      case "setViewport": {
-        const { viewport } = operation;
-        if (
-          !isValidCoordinate(viewport?.x)
-          || !isValidCoordinate(viewport?.y)
-          || typeof viewport?.zoom !== "number"
-          || !Number.isFinite(viewport.zoom)
-          || viewport.zoom <= 0
-        ) {
-          reject(rejected, operation, "delta/invalid-value", "Viewport must carry finite x/y and a positive zoom.");
-          break;
-        }
-        next.ui = { ...next.ui, viewport: { x: viewport.x, y: viewport.y, zoom: viewport.zoom } };
         applied.push(operation);
         break;
       }

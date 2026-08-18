@@ -90,12 +90,6 @@ export interface GraphViewEdge {
   condition?: WorkflowGraphEdge["condition"];
 }
 
-export interface GraphViewViewport {
-  x: number;
-  y: number;
-  zoom: number;
-}
-
 export interface GraphViewModel {
   version: typeof GRAPH_VIEW_MODEL_VERSION;
   documentId: string;
@@ -108,7 +102,6 @@ export interface GraphViewModel {
   mode: "typed" | "engine";
   nodes: GraphViewNode[];
   edges: GraphViewEdge[];
-  viewport?: GraphViewViewport;
 }
 
 export interface TypedToViewOptions {
@@ -116,7 +109,6 @@ export interface TypedToViewOptions {
   mode?: GraphViewModel["mode"];
   /** W4 run overlay: status per node id. */
   statusByNodeId?: Readonly<Record<string, GraphViewNodeStatus>>;
-  viewport?: GraphViewViewport;
 }
 
 /**
@@ -209,9 +201,6 @@ export function typedToView(
       to: edge.to,
       ...(edge.condition ? { condition: edge.condition } : {}),
     })),
-    ...(options.viewport ?? document.ui?.viewport
-      ? { viewport: options.viewport ?? document.ui?.viewport }
-      : {}),
   };
 }
 

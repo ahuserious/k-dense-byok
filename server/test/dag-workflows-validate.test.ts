@@ -185,19 +185,36 @@ describe("POST /dag-workflows/validate", () => {
     expect(saved.json().definition.graphSha256).toBe(GRAPH_HASH_PARITY_SHA256);
   });
 
-  it("accepts the additive optional ui / provenance / meta fields and preserves them", async () => {
+  it("accepts the additive optional provenance / meta fields and preserves them", async () => {
     const response = await validate({
       document: GRAPH_HASH_PARITY_DOCUMENT as unknown as WorkflowGraphDocument,
     });
 
     const body = response.json();
     expect(body.ok).toBe(true);
-    expect(body.document.ui).toEqual({ viewport: { x: -120, y: 40, zoom: 0.75 } });
     expect(body.document.provenance).toMatchObject({ source: "library-template" });
     expect(body.document.nodes[0].settings).toEqual({ harness: "codex" });
     expect(body.document.nodes[1].meta).toMatchObject({
       compositeOf: { kind: "dag-workflow", sourceId: "reporting-tail" },
     });
+  });
+
+  // Round 1 carried a document-level `ui.viewport`. It was stored and never
+  // read, so it bought a rollback constraint and no behaviour and was dropped.
+  // This pins the removal: a schema that quietly re-accepted `ui` would let the
+  // inert field back into every persisted document without anyone noticing.
+  it("rejects a document-level ui object, which no longer exists in the schema", async () => {
+    const response = await validate({
+      document: {
+        ...(GRAPH_HASH_PARITY_DOCUMENT as unknown as WorkflowGraphDocument),
+        ui: { viewport: { x: -120, y: 40, zoom: 0.75 } },
+      } as unknown as WorkflowGraphDocument,
+    });
+
+    const body = response.json();
+    expect(response.statusCode).toBe(200);
+    expect(body.ok).toBe(false);
+    expect(JSON.stringify(body.issues)).toContain("additional properties");
   });
 
   it("writes nothing", async () => {

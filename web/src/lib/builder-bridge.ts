@@ -57,6 +57,15 @@ export const FRAME_TO_HOST_TYPES = [
   // entry cannot reach the host, and the host — not the iframe — is the only
   // side that can read a typed workflow or a library template.
   "builder.requestSource",
+  // RESERVED, WITH NO PRODUCER IN THIS TREE. The host implements the receiving
+  // half (`applyDocumentReplacement` in dag-builder-surface.tsx: validate one
+  // whole document server-side, apply it as one undoable change), but nothing
+  // sends it and nothing can yet: the vendored builder's YAML/Split view is a
+  // one-way serializer (`YamlCodeView.tsx` renders into a `<pre>`), so there is
+  // no hand-edit for a producer to carry. A YAML or hand-edited document does
+  // NOT reach the canvas today. Wiring a producer means an editable YAML
+  // surface plus an engine-YAML → typed-document import, which is the import
+  // work a later round owns.
   "builder.documentReplaced",
   // The canvas is no longer showing the view the host pushed (the author loaded
   // an engine pipeline into it). Without this the host would diff the engine

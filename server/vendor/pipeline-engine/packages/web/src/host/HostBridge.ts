@@ -33,6 +33,16 @@ const POSITION_EPSILON = 0.5;
 /** React Flow reports a position per pointer move; deltas are batched instead. */
 const DELTA_DEBOUNCE_MS = 250;
 
+/*
+ * Frame → host messages this file PRODUCES: `builder.ready`,
+ * `builder.requestSource`, `builder.requestSave`, `builder.canvasDetached`,
+ * `builder.delta`. The protocol also declares `builder.documentReplaced`,
+ * `builder.selection` and `builder.requestRun`, and this side sends NONE of
+ * those three. `documentReplaced` in particular has a working handler on the
+ * host and no sender here, because the builder's YAML/Split view is a one-way
+ * serializer with nothing to hand-edit — so a YAML document does not reach the
+ * typed canvas. Do not read the host's handler as evidence that it does.
+ */
 const HOST_TO_FRAME_TYPES = new Set([
   'builder.init',
   'builder.loadGraph',

@@ -21,7 +21,16 @@ import { AlertTriangleIcon, ChevronDownIcon, ChevronUpIcon, SaveIcon } from "luc
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { BuilderHostProvider } from "@/components/builder/builder-host-context";
-import { casConflictActions, copyWorkflowId } from "@/components/builder/cas-conflict";
+import {
+  casConflictActions,
+  copyWorkflowId,
+  copyWorkflowName,
+} from "@/components/builder/cas-conflict";
+import {
+  blockedSaveStatus,
+  issueLine,
+  issueLocation,
+} from "@/components/builder/issue-text";
 import { SourcePicker } from "@/components/builder/source-picker";
 import { PipelineBuilderPanel } from "@/components/pipeline-builder-panel";
 import {
@@ -333,7 +342,7 @@ export function DagBuilderSurface({
         if (!validation.ok) {
           // Save is gated on a clean validation: only valid documents persist.
           setIssues(validation.issues);
-          setStatus(`${validation.issues.length} issue(s) block this save.`);
+          setStatus(blockedSaveStatus(validation.issues));
           bridgeRef.current?.post("builder.setIssues", { issues: validation.issues });
           return;
         }
@@ -409,8 +418,12 @@ export function DagBuilderSurface({
     const current = loadedRef.current;
     if (!current) return;
     const copyId = copyWorkflowId(current.document.id);
+    // The NAME travels with the id. Every picker row renders `name`, so a copy
+    // that kept the original's name is a second row nobody can tell from the
+    // first.
+    const copyName = copyWorkflowName(current.document.name);
     void saveDocument(
-      { ...current, document: { ...current.document, id: copyId } },
+      { ...current, document: { ...current.document, id: copyId, name: copyName } },
       { kind: "create" },
       copyId,
     );
@@ -434,9 +447,16 @@ export function DagBuilderSurface({
     async (payload: unknown) => {
       const current = loadedRef.current;
       if (!current || !isRecord(payload) || !isRecord(payload.document)) return;
-      // A YAML/Split hand-edit arrives as ONE whole document, so it is
+      // A whole-document replacement arrives as ONE document, so it is
       // validated server-side and applied as ONE undoable change rather than
       // being reconstructed from canvas ops.
+      //
+      // NOTHING SENDS THIS YET. The vendored builder has no editable YAML or
+      // Split surface — `YamlCodeView.tsx` serializes into a `<pre>` — so no
+      // hand-edited document reaches the canvas in this tree. The handler is
+      // the receiving half of a protocol message whose producer lands with the
+      // import work; it is kept, and documented as unreachable, rather than
+      // being described as a working path.
       const candidate = payload.document as unknown as WorkflowGraphDocument;
       const validation = await validateDagWorkflowDocument(projectId, candidate).catch(() => null);
       if (validation === null) {
@@ -445,6 +465,7 @@ export function DagBuilderSurface({
       }
       if (!validation.ok) {
         setIssues(validation.issues);
+        setStatus(blockedSaveStatus(validation.issues));
         bridgeRef.current?.post("builder.setIssues", { issues: validation.issues });
         return;
       }
@@ -512,6 +533,8 @@ export function DagBuilderSurface({
           return;
         }
         case "builder.documentReplaced": {
+          // Unreachable in this tree: no producer exists. See
+          // `applyDocumentReplacement` above.
           void applyDocumentReplacement(envelope.payload);
           return;
         }
@@ -589,9 +612,14 @@ export function DagBuilderSurface({
           )}
 
           <div className="ml-auto flex shrink-0 items-center gap-2">
-            {errorCount > 0 && (
-              <span className="rounded border border-destructive/50 px-1.5 text-[10px] text-destructive">
-                {errorCount} issue{errorCount === 1 ? "" : "s"}
+            {issues.length > 0 && (
+              <span
+                className="rounded border border-destructive/50 px-1.5 text-[10px] text-destructive"
+                title={issues.map(issueLine).join("\n")}
+              >
+                {errorCount > 0
+                  ? `${errorCount} issue${errorCount === 1 ? "" : "s"}`
+                  : `${issues.length} warning${issues.length === 1 ? "" : "s"}`}
               </span>
             )}
             <span
@@ -639,6 +667,38 @@ export function DagBuilderSurface({
           </p>
         )}
 
+        {issues.length > 0 && (
+          // The validator's own words, not a tally. Every issue is listed with
+          // the node or edge it points at, so an author whose save was refused
+          // can go and fix the thing rather than undoing edits until it passes.
+          <ul
+            data-testid="builder-issue-list"
+            className="max-h-24 overflow-y-auto border-t bg-destructive/5 px-2.5 py-1 text-[11px]"
+          >
+            {issues.map((issue, index) => (
+              <li
+                key={`${issue.code}:${issue.path}:${String(index)}`}
+                className="flex gap-1.5 py-px"
+              >
+                <span
+                  className={cn(
+                    "shrink-0 font-medium",
+                    issue.severity === "error" ? "text-destructive" : "text-amber-600",
+                  )}
+                >
+                  {issue.severity === "error" ? "Error" : "Warning"}
+                </span>
+                {issueLocation(issue) !== null && (
+                  <span className="shrink-0 font-mono text-muted-foreground">
+                    {issueLocation(issue)}
+                  </span>
+                )}
+                <span className="min-w-0">{issue.message}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+
         {conflict && (
           <div className="flex flex-wrap items-center gap-2 border-t bg-muted/40 px-2.5 py-1.5 text-[11px]">
             <span>{conflict.detail}</span>
@@ -662,6 +722,7 @@ export function DagBuilderSurface({
 
         <p
           aria-live="polite"
+          title={status}
           className="truncate px-2.5 py-0.5 text-[11px] text-muted-foreground"
           data-testid="builder-host-status"
         >

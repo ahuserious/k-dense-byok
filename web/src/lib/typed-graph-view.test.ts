@@ -47,7 +47,6 @@ function secretBearingDocument(): WorkflowGraphDocument {
       requireArtifactReferences: false,
       onUnsupportedOutput: "fail",
     },
-    ui: { viewport: { x: 12, y: -8, zoom: 0.9 } },
     nodes: [
       {
         id: "research",
@@ -81,7 +80,7 @@ function secretBearingDocument(): WorkflowGraphDocument {
 }
 
 describe("typedToView", () => {
-  it("projects nodes, edges, and the viewport the canvas needs", () => {
+  it("projects the nodes and edges the canvas needs", () => {
     const view = typedToView(secretBearingDocument(), { graphSha256: "abc123" });
 
     expect(view.version).toBe(GRAPH_VIEW_MODEL_VERSION);
@@ -101,7 +100,6 @@ describe("typedToView", () => {
     expect(view.edges).toEqual([
       { id: "research-to-report", from: "research", to: "report", condition: "always" },
     ]);
-    expect(view.viewport).toEqual({ x: 12, y: -8, zoom: 0.9 });
   });
 
   it("carries no credential, skill, database, subagent, autonomy, or prompt field across the origin", () => {

@@ -16,7 +16,32 @@ interface TypedRequestLog {
   writes: Array<{ workflowId: string; ifMatch?: string; ifNoneMatch?: string; body: unknown }>;
 }
 
-const BACKEND = /^http:\/\/(?:127\.0\.0\.1|localhost):18000\//;
+/** One issue as `POST /dag-workflows/validate` returns it on a refused save. */
+interface TypedValidationIssue {
+  code: string;
+  severity: "error" | "warning";
+  path: string;
+  message: string;
+}
+
+// Derived, never hard-coded: `e2e/fixtures.ts` resolves the mocked backend
+// origin from the preview's own ports (N-10), and a spec that pinned :18000
+// would silently stop intercepting on any lane preview — driving whatever
+// really answers on 18000 instead. Kept in step with that derivation; the
+// fixture's own copy is not exported.
+const BACKEND_PORT = process.env.KADY_PORT ?? "18000";
+const BACKEND_ORIGINS = [
+  `http://127.0.0.1:${BACKEND_PORT}`,
+  `http://localhost:${BACKEND_PORT}`,
+  ...(process.env.NEXT_PUBLIC_ADK_API_URL
+    ? [new URL(process.env.NEXT_PUBLIC_ADK_API_URL).origin]
+    : []),
+];
+const BACKEND = new RegExp(
+  `^(?:${[...new Set(BACKEND_ORIGINS)]
+    .map((origin) => origin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|")})/`,
+);
 
 function backendPath(request: Request): string | null {
   const url = request.url();
@@ -40,7 +65,10 @@ async function routeJson(route: Route, body: unknown, status = 200, headers: Rec
  * refuses `If-Match` on a definition write (it only models a create), and has
  * no validate route at all.
  */
-async function installTypedRoutes(page: Page): Promise<TypedRequestLog> {
+async function installTypedRoutes(
+  page: Page,
+  options: { validationIssues?: TypedValidationIssue[] } = {},
+): Promise<TypedRequestLog> {
   const log: TypedRequestLog = { validated: [], writes: [] };
 
   await page.route(BACKEND, async (route, request) => {
@@ -50,6 +78,9 @@ async function installTypedRoutes(page: Page): Promise<TypedRequestLog> {
     if (path === "/dag-workflows/validate" && method === "POST") {
       const body = JSON.parse(request.postData() ?? "{}") as { document?: unknown };
       log.validated.push(body.document);
+      if (options.validationIssues) {
+        return routeJson(route, { ok: false, issues: options.validationIssues });
+      }
       return routeJson(route, {
         ok: true,
         document: body.document,
@@ -104,6 +135,18 @@ async function expectCanvasLinked(page: Page) {
   await expect(page.getByTestId("builder-bridge-status")).toHaveText("canvas linked", {
     timeout: 20_000,
   });
+}
+
+/**
+ * The node position React Flow wrote into a canvas node's transform.
+ *
+ * This is the node's position in CANVAS coordinates — the same number the typed
+ * document stores — so it can be compared against what the save actually wrote.
+ */
+function parseNodeTranslate(transform: string): { x: number; y: number } | null {
+  const match = /translate\(\s*(-?[\d.]+)px\s*,\s*(-?[\d.]+)px\s*\)/.exec(transform);
+  if (!match) return null;
+  return { x: Number(match[1]), y: Number(match[2]) };
 }
 
 async function loadE2eWorkflow(page: Page) {
@@ -287,12 +330,128 @@ test.describe("typed builder load and save", () => {
       .poll(async () => node.evaluate((element) => element.style.transform))
       .not.toBe(transformBeforeDrag);
 
+    // Read the dragged coordinate BEFORE saving. The save response carries a
+    // new `graphSha256`, which re-applies the saved document to the canvas — so
+    // a transform read afterwards is whatever was written and comparing the two
+    // proves nothing.
+    const positionBeforeDrag = parseNodeTranslate(transformBeforeDrag);
+    const draggedPosition = parseNodeTranslate(
+      await node.evaluate((element) => element.style.transform),
+    );
+    expect(positionBeforeDrag, "React Flow must expose the node position as a transform.")
+      .not.toBeNull();
+    expect(draggedPosition, "React Flow must expose the node position as a transform.")
+      .not.toBeNull();
+
     await expect(workspacePage.getByLabel("Unsaved changes")).toBeVisible();
     await workspacePage.getByRole("button", { name: "Save workflow" }).click();
     await expect(workspacePage.getByTestId("builder-host-status")).toContainText("Saved");
 
-    const written = log.writes[0].body as { nodes: Array<{ id: string; position?: { x: number } }> };
-    expect(written.nodes[0].position, "The drag must reach the typed document.").toBeTruthy();
+    const written = log.writes[0].body as {
+      nodes: Array<{ id: string; position?: { x: number; y: number } }>;
+    };
+    const savedPosition = written.nodes[0].position;
+    expect(savedPosition, "The saved node must carry a position.").toBeDefined();
+    // Asserting the position is merely PRESENT does not distinguish "the drag
+    // reached the typed document" from "some position reached it". What has to
+    // hold is that the coordinate WRITTEN is the coordinate the author dragged
+    // to, and that it is not where the node started.
+    expect(savedPosition!.x, "The saved x must be the dragged x.").toBeCloseTo(
+      draggedPosition!.x,
+      0,
+    );
+    expect(savedPosition!.y, "The saved y must be the dragged y.").toBeCloseTo(
+      draggedPosition!.y,
+      0,
+    );
+    expect(
+      Math.hypot(
+        savedPosition!.x - positionBeforeDrag!.x,
+        savedPosition!.y - positionBeforeDrag!.y,
+      ),
+      "The drag must move the coordinate the save writes.",
+    ).toBeGreaterThan(20);
+  });
+
+  test("detaches the canvas when an engine pipeline is loaded over a typed workflow", async ({
+    workspacePage,
+  }) => {
+    // The regression for the round's most consequential fix: before it, loading
+    // an engine-native pipeline onto a canvas that was projecting a typed
+    // document let the host diff the ENGINE graph against its TYPED document
+    // and "apply" the difference — silently overwriting one workflow with an
+    // unrelated one on the next save.
+    const log = await installTypedRoutes(workspacePage);
+    await openTypedBuilder(workspacePage);
+    await expectCanvasLinked(workspacePage);
+    await loadE2eWorkflow(workspacePage);
+
+    await workspacePage.getByRole("button", { name: "Load workflow" }).click();
+    await workspacePage.getByLabel("Search workflow sources").fill("e2e-vendored");
+    await workspacePage
+      .getByTestId("source-picker-list")
+      .getByRole("option", { name: /E2E Workflow/ })
+      .click();
+
+    // The host must let the typed document go, not keep a Save button pointed
+    // at a workflow nobody is looking at.
+    await expect(workspacePage.getByTestId("builder-host-status")).toContainText(
+      "The canvas left the typed workflow",
+    );
+    await expect(workspacePage.getByTestId("loaded-workflow-name")).toHaveText(
+      "No workflow loaded",
+    );
+    await expect(workspacePage.getByRole("button", { name: "Save workflow" })).toBeDisabled();
+    // And nothing was written on the way out.
+    expect(log.writes).toHaveLength(0);
+  });
+
+  test("names what is wrong when validation refuses the save", async ({ workspacePage }) => {
+    // The author's first encounter with an invalid workflow. Before this, the
+    // save path fetched the validator's full issues, stored them, forwarded
+    // them to the iframe — and rendered a tally: "2 issue(s) block this save."
+    // Nothing on either side ever put the validator's words on the screen, so
+    // the only way forward was undoing edits at random.
+    //
+    // `ok: false` is an HTTP 200 here, as the real route returns it, so this
+    // item produces no console error for the `runtimeErrors` fixture to catch.
+    const log = await installTypedRoutes(workspacePage, {
+      validationIssues: [
+        {
+          code: "workflow/invalid-document",
+          severity: "error",
+          path: "/nodes/0/name",
+          message: "must NOT have fewer than 1 characters",
+        },
+        {
+          code: "workflow/invalid-document",
+          severity: "error",
+          path: "/edges/0/to",
+          message: "must reference a node that exists",
+        },
+      ],
+    });
+    await openTypedBuilder(workspacePage);
+    await expectCanvasLinked(workspacePage);
+    await loadE2eWorkflow(workspacePage);
+
+    await workspacePage.getByRole("button", { name: "Save workflow" }).click();
+
+    const status = workspacePage.getByTestId("builder-host-status");
+    await expect(status).toContainText("must NOT have fewer than 1 characters");
+    await expect(status).toContainText("/nodes/0/name");
+    // A tally is what this item exists to prevent coming back.
+    await expect(status).not.toContainText("issue(s) block this save");
+
+    // Every issue is reachable, not only the one in the status line.
+    const issues = workspacePage.getByTestId("builder-issue-list");
+    await expect(issues.getByRole("listitem")).toHaveCount(2);
+    await expect(issues).toContainText("must reference a node that exists");
+    await expect(issues).toContainText("/edges/0/to");
+
+    // The refusal must not be the kind that also loses the edit or writes.
+    expect(log.writes).toHaveLength(0);
+    await expect(workspacePage.getByTestId("loaded-workflow-name")).toHaveText("E2E Workflow");
   });
 
   // The two CAS-conflict paths are covered by

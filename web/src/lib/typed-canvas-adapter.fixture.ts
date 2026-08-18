@@ -16,8 +16,8 @@
 // The document is already NORMALIZED (rescue defaults present, `artifacts`
 // present, every edge carrying an explicit `condition`, `candidateCount`
 // resolved), because normalization is what the server hashes. It deliberately
-// exercises the additive optional fields — `ui`, document/node `provenance`,
-// node `meta.compositeOf`, `settings.harness`, and per-node `position` — so a
+// exercises the additive optional fields — document/node `provenance`, node
+// `meta.compositeOf`, `settings.harness`, and per-node `position` — so a
 // canonicalizer that skipped one of them would not match.
 //
 // If you change the document, recompute the digest; do not hand-edit it.
@@ -69,7 +69,6 @@ export const GRAPH_HASH_PARITY_DOCUMENT = {
     id: "reproducible-data-analysis",
     sha256: "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92",
   },
-  ui: { viewport: { x: -120, y: 40, zoom: 0.75 } },
   nodes: [
     {
       id: "research",
@@ -107,4 +106,4 @@ export const GRAPH_HASH_PARITY_DOCUMENT = {
 
 /** SHA-256 of the canonical JSON of the document above. */
 export const GRAPH_HASH_PARITY_SHA256 =
-  "30499cde19ce76d56d5f905fcbf0b5689bca3b2964a17bd01f74918a304ce6af";
+  "a037d175a745542a3b538df28c42d184ead0c5426c31d48dc57c1c28c2067387";

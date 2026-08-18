@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { casConflictActions, copyWorkflowId } from "@/components/builder/cas-conflict";
+import {
+  casConflictActions,
+  copyWorkflowId,
+  copyWorkflowName,
+} from "@/components/builder/cas-conflict";
 import {
   DagWorkflowApiError,
   saveDagWorkflowDefinition,
@@ -111,5 +115,23 @@ describe("copyWorkflowId", () => {
     const long = "a".repeat(64);
     expect(copyWorkflowId(long)).toHaveLength(64);
     expect(copyWorkflowId(long).endsWith("-copy")).toBe(true);
+  });
+});
+
+describe("copyWorkflowName", () => {
+  it("marks the copy so the two picker rows are not identical", () => {
+    // Every list renders `name`, so a copy that kept the original name is a
+    // second row an author cannot tell from the first.
+    expect(copyWorkflowName("Review Loop")).toBe("Review Loop (copy)");
+  });
+
+  it("does not stack the suffix when a copy is copied", () => {
+    expect(copyWorkflowName("Review Loop (copy)")).toBe("Review Loop (copy)");
+  });
+
+  it("keeps the result inside the schema's 256-char name limit", () => {
+    const long = "n".repeat(256);
+    expect(copyWorkflowName(long)).toHaveLength(256);
+    expect(copyWorkflowName(long).endsWith(" (copy)")).toBe(true);
   });
 });

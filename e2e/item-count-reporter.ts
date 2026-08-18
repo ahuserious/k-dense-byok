@@ -3,7 +3,7 @@ import path from "node:path";
 import type { FullConfig, Reporter, Suite } from "@playwright/test/reporter";
 
 const EXPECTED_ITEMS_BY_FILE = new Map([
-  ["builder-typed.spec.ts", 11],
+  ["builder-typed.spec.ts", 13],
   ["builder.spec.ts", 60],
   ["chat.spec.ts", 28],
   ["console-raindrop.spec.ts", 33],
@@ -12,7 +12,7 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   ["studio.spec.ts", 34],
   ["workspace.spec.ts", 46],
 ]);
-const EXPECTED_SUBSTANTIVE_ITEMS = 236;
+const EXPECTED_SUBSTANTIVE_ITEMS = 238;
 const EXPECTED_THIN_ITEMS = 36;
 const EXPECTED_FIXME_ITEMS = 4;
 const EXPECTED_SKIP_ITEMS = 0;

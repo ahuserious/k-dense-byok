@@ -40,3 +40,25 @@ export function copyWorkflowId(workflowId: string): string {
   const suffixed = `${workflowId}-copy`;
   return suffixed.length <= 64 ? suffixed : `${workflowId.slice(0, 59)}-copy`;
 }
+
+/** The schema's `ShortTextSchema` bound on a workflow `name`. */
+const WORKFLOW_NAME_MAX_LENGTH = 256;
+const COPY_NAME_SUFFIX = " (copy)";
+
+/**
+ * The workflow NAME a "save as copy" writes.
+ *
+ * The id alone is not enough: every list in the product — the Kady picker, the
+ * builder's own select — renders `name`, so a copy that kept its name produced
+ * two rows an author could not tell apart, on the one path where they are
+ * already confused about which document they are editing.
+ *
+ * Kept inside the schema's 256-char `name` bound, and idempotent: copying a
+ * copy yields "X (copy)", not "X (copy) (copy)".
+ */
+export function copyWorkflowName(workflowName: string): string {
+  if (workflowName.endsWith(COPY_NAME_SUFFIX)) return workflowName;
+  const suffixed = `${workflowName}${COPY_NAME_SUFFIX}`;
+  if (suffixed.length <= WORKFLOW_NAME_MAX_LENGTH) return suffixed;
+  return `${workflowName.slice(0, WORKFLOW_NAME_MAX_LENGTH - COPY_NAME_SUFFIX.length)}${COPY_NAME_SUFFIX}`;
+}

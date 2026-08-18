@@ -155,7 +155,6 @@ describe("applyDelta", () => {
       { op: "removeEdge", edgeId: "no-such-edge" },
       { op: "moveNode", nodeId: "research", position: { x: Number.NaN, y: 0 } },
       { op: "setHarness", nodeId: "research", harness: "gpt-cli" as never },
-      { op: "setViewport", viewport: { x: 0, y: 0, zoom: 0 } },
     ]);
 
     expect(result.applied).toEqual([]);
@@ -166,7 +165,6 @@ describe("applyDelta", () => {
       "delta/invalid-id",
       "delta/edge-endpoint-missing",
       "delta/unknown-edge",
-      "delta/invalid-value",
       "delta/invalid-value",
       "delta/invalid-value",
     ]);
@@ -186,16 +184,6 @@ describe("applyDelta", () => {
     ]);
   });
 
-  it("stores the viewport under ui without disturbing the graph", () => {
-    const before = document();
-    const { document: after } = applyDelta(before, [
-      { op: "setViewport", viewport: { x: -10, y: 20, zoom: 1.25 } },
-    ]);
-
-    expect(after.ui).toEqual({ viewport: { x: -10, y: 20, zoom: 1.25 } });
-    expect(after.nodes).toEqual(before.nodes);
-    expect(after.edges).toEqual(before.edges);
-  });
 });
 
 describe("rejectStaleDeltas", () => {

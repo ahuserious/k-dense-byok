@@ -602,35 +602,27 @@ export const ScientificWorkflowPreconditionsSchema = Type.Object(
   { additionalProperties: false },
 );
 
-/**
- * Canvas presentation state.
+/*
+ * There is deliberately NO document-level `ui` object.
  *
- * Node LAYOUT does not live here: `CommonNodeProperties.position` already
- * carries it per node, and adding a second `ui.positions` map would create two
- * sources of truth for the same coordinate. `ui` therefore carries only the
- * viewport, which has no per-node home.
+ * Round 1 carried `ui.viewport` here. It was persisted and round-tripped but
+ * never read and never written: nothing emitted a viewport, and nothing applied
+ * one to the canvas. A stored field with no behaviour is not free — every
+ * optional field added under `additionalProperties: false` is a document an
+ * older server can no longer read (it validates on read and raises CORRUPT), so
+ * an inert field buys a rollback constraint and nothing else. It is dropped
+ * rather than left declared.
  *
- * Note that `ui` — like the per-node `position` that predates it — DOES
- * participate in `graphSha256`. That is not a free choice: the store treats an
- * identical hash as "unchanged" and skips the write
- * (store.ts saveDefinitionWithIntent), so a hash that ignored layout would make
- * a layout-only save a silent no-op that never persists.
+ * Node LAYOUT never belonged here anyway: `CommonNodeProperties.position`
+ * already carries it per node, and a second `ui.positions` map would be a
+ * second source of truth for the same coordinate. Layout therefore still
+ * participates in `graphSha256` through `position`, so a layout-only save is a
+ * real hash change and not the silent no-op the store skips
+ * (store.ts saveDefinitionWithIntent).
+ *
+ * If pan/zoom is ever remembered, it needs an emitter and an applier landing in
+ * the same change as the field.
  */
-const WorkflowDocumentUiSchema = Type.Object(
-  {
-    viewport: Type.Optional(
-      Type.Object(
-        {
-          x: Type.Number({ minimum: -1_000_000, maximum: 1_000_000 }),
-          y: Type.Number({ minimum: -1_000_000, maximum: 1_000_000 }),
-          zoom: Type.Number({ minimum: 0.01, maximum: 100 }),
-        },
-        { additionalProperties: false },
-      ),
-    ),
-  },
-  { additionalProperties: false },
-);
 
 export const WorkflowGraphDocumentSchema = Type.Object(
   {
@@ -653,14 +645,12 @@ export const WorkflowGraphDocumentSchema = Type.Object(
       maxItems: MAX_WORKFLOW_NODES,
     }),
     edges: Type.Array(WorkflowEdgeSchema, { maxItems: MAX_WORKFLOW_EDGES }),
-    ui: Type.Optional(WorkflowDocumentUiSchema),
     provenance: Type.Optional(WorkflowProvenanceSchema),
   },
   { additionalProperties: false },
 );
 
 export type WorkflowLimits = Static<typeof WorkflowLimitsSchema>;
-export type WorkflowDocumentUi = Static<typeof WorkflowDocumentUiSchema>;
 export type WorkflowProvenance = Static<typeof WorkflowProvenanceSchema>;
 export type WorkflowNodeMeta = Static<typeof WorkflowNodeMetaSchema>;
 export type NodeLimits = Static<typeof NodeLimitsSchema>;

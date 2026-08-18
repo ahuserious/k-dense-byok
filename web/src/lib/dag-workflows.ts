@@ -138,11 +138,6 @@ export interface WorkflowNodeMeta {
   compositeOf?: WorkflowNodeCompositeOrigin;
 }
 
-/** Canvas presentation state. Excluded from validation semantics. */
-export interface WorkflowDocumentUi {
-  viewport?: { x: number; y: number; zoom: number };
-}
-
 interface CommonWorkflowNode {
   id: string;
   name: string;
@@ -292,7 +287,6 @@ export interface WorkflowGraphDocument {
   preconditions?: ScientificWorkflowPreconditions;
   nodes: WorkflowGraphNode[];
   edges: WorkflowGraphEdge[];
-  ui?: WorkflowDocumentUi;
   provenance?: WorkflowProvenance;
 }
 
