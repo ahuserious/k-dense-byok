@@ -105,6 +105,7 @@ A handoff lets the recipient lane edit a path another lane owns, for the stated 
 | S7 | S8B | `server/src/agent/session-registry.ts` | dag-builder profile prompt must stop instructing the model to return changes 'for the visual Builder to validate and apply' until lane W3's bridge lands |
 | S7 | C5 | `server/src/index.ts` | `registerRoutes` onRequest hook: a project-repository containment refusal must re-throw, not silently redirect the request — writes included — into the default project (N-30 follow-up) |
 | S2 | S5 | `start.mjs` | the launcher's own hardcoded Ollama probe at `:299` and the `.env` materialisation that re-arms it (#64) — this scope only |
+| S1 | S1b | `web/src/lib/dag-workflows.ts` | row-level validation of the saved-workflow list at the source, beside `isSavedDefinitionEnvelope` (#62/N1) — this scope only |
 | S4 | S5 | `server/src/agent/workflow-delegation-session.ts` | restore a harness dispatch decision reachable from the supervised transport (N-A7/#55) |
 | C4 | S8B | `server/test/raindrop-context.test.ts` | regressions for the no-workflow dag-builder context |
 | S11 | W1 | `e2e/studio.spec.ts` | retire the Components Studio spec together with the header entry (owner: 'there should be no components studio'); DELETED in W1 r2 |

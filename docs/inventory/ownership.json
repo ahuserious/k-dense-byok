@@ -1149,6 +1149,13 @@
       "date": "2026-08-18",
       "path": "start.mjs",
       "scope": "the launcher's own hardcoded Ollama probe at :299 and the .env materialisation that re-arms it (#64) \u2014 this scope only"
+    },
+    {
+      "from": "S1",
+      "to": "S1b",
+      "date": "2026-08-18",
+      "path": "web/src/lib/dag-workflows.ts",
+      "scope": "row-level validation of the saved-workflow list at the source, beside isSavedDefinitionEnvelope (#62/N1) \u2014 this scope only"
     }
   ]
 }
