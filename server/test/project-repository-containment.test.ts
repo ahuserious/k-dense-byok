@@ -17,9 +17,11 @@
  * Every case builds real temporary repositories; nothing about Git is mocked.
  */
 import { execFileSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_PROJECT_ID, PROJECTS_ROOT } from "../src/config.ts";
 import { buildApp } from "../src/index.ts";
@@ -29,10 +31,54 @@ import {
   ensureProjectRepository,
   getProject,
   GIT_LOCAL_ENVIRONMENT_KEYS_FALLBACK,
+  PROJECT_GIT_SUBCOMMANDS,
+  projectGitEnvironment,
   ProjectRepositoryContainmentError,
   RELOCATING_GIT_ENVIRONMENT_KEYS,
   resolvePaths,
 } from "../src/projects.ts";
+
+const PROJECTS_MODULE_PATH = fileURLToPath(new URL("../src/projects.ts", import.meta.url));
+const TSX_BINARY = fileURLToPath(new URL("../node_modules/.bin/tsx", import.meta.url));
+
+/**
+ * Run a script against the real module in a child process with a doctored
+ * `PATH`. The interesting failures here are at the process boundary — which
+ * argv Git is handed, and what happens when Git itself misbehaves — and neither
+ * is observable from inside the test process.
+ */
+function runInChildProcess(
+  root: string,
+  source: string,
+  environment: Record<string, string>,
+): string {
+  const scriptPath = path.join(root, `child-${crypto.randomUUID()}.mts`);
+  fs.writeFileSync(scriptPath, source, "utf-8");
+  return execFileSync(TSX_BINARY, [scriptPath], {
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, ...environment },
+    timeout: 120_000,
+  });
+}
+
+/**
+ * A directory holding a `git` that runs `body` and then hands off to the real
+ * Git, placed at the front of a child process's PATH.
+ */
+function makeGitShim(root: string, body: string): string {
+  const directory = path.join(root, "shim-bin");
+  fs.mkdirSync(directory, { recursive: true });
+  const realGit = execFileSync("/bin/sh", ["-c", "command -v git"], {
+    encoding: "utf-8",
+  }).trim();
+  fs.writeFileSync(
+    path.join(directory, "git"),
+    `#!/bin/sh\n${body}\nexec ${JSON.stringify(realGit)} "$@"\n`,
+    { mode: 0o755 },
+  );
+  return directory;
+}
 
 const temporaryRoots: string[] = [];
 
@@ -352,6 +398,10 @@ describe("project repository containment", () => {
     expect(named.length).toBeGreaterThan(0);
     expect(named).toContain("GIT_CONFIG");
     for (const key of named) {
+      // The rule is a prefix. This is the one thing that could make a prefix
+      // insufficient: a repository-binding variable git names that is not
+      // called GIT_something.
+      expect(key.startsWith("GIT_")).toBe(true);
       expect(RELOCATING_GIT_ENVIRONMENT_KEYS).toContain(key);
       expect(GIT_LOCAL_ENVIRONMENT_KEYS_FALLBACK).toContain(key);
     }
@@ -442,10 +492,11 @@ describe("project repository containment", () => {
   });
 
   it("re-proves ownership when the .git directory it proved is changed underneath it", () => {
-    // Ownership is proven once per sandbox and then remembered, because this
-    // runs on every request. The memo is fingerprinted on the identity and the
-    // timestamps of `<sandbox>/.git`, so a repository that stops being the
-    // sandbox's own is caught on the very next call rather than trusted.
+    // Ownership is proven on every call, never remembered: a repository that
+    // stops being the sandbox's own between one request and the next is caught
+    // on the next one. This shape — a `commondir` file appearing in a `.git`
+    // that was already proven — is the cheap half of that; the in-place
+    // `.git/config` rewrite below is the half a cache cannot see.
     const root = makeTemporaryRoot();
     const sandbox = path.join(root, "proved-sandbox");
     makeSandboxWithFile(sandbox);
@@ -475,6 +526,64 @@ describe("project repository containment", () => {
       "sandbox_git_common_dir_is_foreign",
     );
     expect(fingerprintCheckout(victim)).toEqual(victimBefore);
+  });
+
+  it("refuses a sandbox whose repository was repointed by an in-place rewrite of its own .git/config", () => {
+    // Round 16 cached the proven verdict against five `stat` fields of
+    // `<sandbox>/.git`. A directory's mtime/ctime/size move when an entry is
+    // created, removed or renamed — not when a file already inside it is
+    // overwritten in place — and `.git/config` always exists after `git init`.
+    // Two ordinary writes from inside the sandbox therefore changed what the
+    // proof would answer while leaving the fingerprint identical, and the stale
+    // "owned" verdict read a foreign checkout's file contents into a snapshot.
+    const root = makeTemporaryRoot();
+    const victim = makeCheckoutWithHistory(root, "repointed-victim");
+    fs.writeFileSync(path.join(victim, "AGENTS.md"), "victim agents\n", "utf-8");
+    git(victim, ["add", "AGENTS.md"]);
+    git(victim, ["commit", "--quiet", "-m", "victim content"]);
+
+    const sandbox = path.join(root, "repointed-sandbox");
+    makeSandboxWithFile(sandbox);
+    // Prove it repeatedly first: whatever a cache would have recorded, it is
+    // recorded by now.
+    ensureProjectRepository(sandbox);
+    ensureProjectRepository(sandbox);
+    ensureProjectRepository(sandbox);
+
+    const fingerprint = (): string => {
+      const sandboxEntry = fs.lstatSync(sandbox);
+      const gitEntry = fs.lstatSync(path.join(sandbox, ".git"));
+      return [
+        sandboxEntry.dev, sandboxEntry.ino, gitEntry.dev, gitEntry.ino,
+        gitEntry.size, gitEntry.mtimeMs, gitEntry.ctimeMs,
+      ].join(":");
+    };
+    const before = fingerprint();
+
+    const configPath = path.join(sandbox, ".git", "config");
+    const repointed = fs
+      .readFileSync(configPath, "utf-8")
+      .replace(/\[core\]\n/, `[core]\n\tworktree = ${victim}\n`);
+    const descriptor = fs.openSync(configPath, "r+");
+    fs.writeSync(descriptor, repointed, 0, "utf-8");
+    fs.ftruncateSync(descriptor, Buffer.byteLength(repointed));
+    fs.closeSync(descriptor);
+
+    // The mutation is invisible to any fingerprint of the directory itself...
+    expect(fingerprint()).toBe(before);
+    // ...and it really did repoint the repository.
+    expect(git(sandbox, ["rev-parse", "--show-toplevel"])).toBe(victim);
+
+    let thrown: unknown;
+    try {
+      ensureProjectRepository(sandbox);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(ProjectRepositoryContainmentError);
+    expect((thrown as ProjectRepositoryContainmentError).invariant).toBe(
+      "sandbox_is_not_repository_toplevel",
+    );
   });
 });
 
@@ -751,6 +860,321 @@ describe("request scoping refuses a containment violation instead of redirecting
     expect(response.statusCode).toBe(200);
     expect(response.json()).toBeInstanceOf(Array);
   });
+});
+
+/**
+ * N-30 follow-up: the sandbox owns its repository, and that is exactly the
+ * problem. `<sandbox>/.git` is inside the sandbox, and the agent runs with
+ * `cwd` set to the sandbox — so the repository's config, its `.git/hooks`
+ * directory, its `.git/info/attributes` and its in-tree `.gitattributes` are
+ * all writable by whatever runs in it, and Git executes what they name, as the
+ * server. A containment proof cannot catch this: nothing about the ownership is
+ * wrong. It reproduced both halves of the 2026-08-17 incident against the
+ * hardened build.
+ */
+describe("git runs no code the project sandbox supplied", () => {
+  afterAll(() => {
+    fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
+    fs.mkdirSync(PROJECTS_ROOT, { recursive: true });
+  });
+
+  /** A script that records that it ran and then rewrites the victim checkout. */
+  function writeIncidentPayload(scriptPath: string, marker: string, victim: string): void {
+    fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+    fs.writeFileSync(
+      scriptPath,
+      [
+        "#!/bin/sh",
+        `echo executed >> ${JSON.stringify(marker)}`,
+        `git -C ${JSON.stringify(victim)} config user.name Kady`,
+        `git -C ${JSON.stringify(victim)} config user.email kady@localhost`,
+        `fabricated=$(git -C ${JSON.stringify(victim)} commit-tree ` +
+          `$(git -C ${JSON.stringify(victim)} hash-object -t tree /dev/null) -m fabricated)`,
+        `git -C ${JSON.stringify(victim)} update-ref refs/heads/main "$fabricated"`,
+        "exit 0",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+  }
+
+  it("runs no hook the sandbox's own repository installs or relocates", () => {
+    const root = makeTemporaryRoot();
+    const victim = makeCheckoutWithHistory(root, "hook-victim");
+    const before = fingerprintCheckout(victim);
+    const sandbox = ensureProjectExists("hooked-study").sandbox;
+
+    // Both hook locations, because relocating is only half of it: the default
+    // `<sandbox>/.git/hooks` is as writable as any config key.
+    const defaultHookMarker = path.join(root, "default-hook-ran.txt");
+    writeIncidentPayload(
+      path.join(sandbox, ".git", "hooks", "reference-transaction"),
+      defaultHookMarker,
+      victim,
+    );
+    const relocatedHookMarker = path.join(root, "relocated-hook-ran.txt");
+    writeIncidentPayload(
+      path.join(sandbox, ".kady-hooks", "reference-transaction"),
+      relocatedHookMarker,
+      victim,
+    );
+    // ...and `core.fsmonitor`, the other key that executes during this
+    // module's invocation set.
+    const fsmonitorMarker = path.join(root, "fsmonitor-ran.txt");
+    writeIncidentPayload(path.join(sandbox, "fsmonitor.sh"), fsmonitorMarker, victim);
+    fs.appendFileSync(
+      path.join(sandbox, ".git", "config"),
+      `[core]\n\thooksPath = ${path.join(sandbox, ".kady-hooks")}\n` +
+        `\tfsmonitor = ${path.join(sandbox, "fsmonitor.sh")}\n`,
+      "utf-8",
+    );
+
+    const snapshot = createProjectRunSnapshot("hooked-study", "hook-run");
+
+    expect(fs.existsSync(defaultHookMarker)).toBe(false);
+    expect(fs.existsSync(relocatedHookMarker)).toBe(false);
+    expect(fs.existsSync(fsmonitorMarker)).toBe(false);
+    // Both halves of the incident, asserted on the checkout itself.
+    expect(fingerprintCheckout(victim)).toEqual(before);
+    expect(git(victim, ["config", "--local", "user.name"])).toBe("Outer Developer");
+    expect(git(victim, ["rev-parse", "refs/heads/main"])).toBe(before.head);
+    // The snapshot itself still worked.
+    expect(git(sandbox, ["ls-tree", "-r", "--name-only", snapshot])).toContain("AGENTS.md");
+  });
+
+  it("runs no clean filter the sandbox's own repository configures, from either attribute source", () => {
+    // `filter.<driver>.clean` is the same class as `core.hooksPath` and cannot
+    // be answered the same way: the driver name is the attacker's, so there is
+    // no fixed key for `-c` to override. The staging path has to not consult
+    // the attribute stack at all.
+    for (const attributeSource of ["gitattributes", "info-attributes"] as const) {
+      fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
+      fs.mkdirSync(PROJECTS_ROOT, { recursive: true });
+      const root = makeTemporaryRoot();
+      const projectId = `filtered-${attributeSource}`;
+      const sandbox = ensureProjectExists(projectId).sandbox;
+
+      const marker = path.join(root, "filter-ran.txt");
+      const payload = path.join(sandbox, "payload.sh");
+      fs.writeFileSync(
+        payload,
+        `#!/bin/sh\necho executed >> ${JSON.stringify(marker)}\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      fs.appendFileSync(
+        path.join(sandbox, ".git", "config"),
+        `[filter "evil"]\n\tclean = ${payload}\n`,
+        "utf-8",
+      );
+      const attributes = "* filter=evil\n";
+      if (attributeSource === "gitattributes") {
+        fs.writeFileSync(path.join(sandbox, ".gitattributes"), attributes, "utf-8");
+      } else {
+        fs.mkdirSync(path.join(sandbox, ".git", "info"), { recursive: true });
+        fs.writeFileSync(path.join(sandbox, ".git", "info", "attributes"), attributes, "utf-8");
+      }
+      fs.writeFileSync(path.join(sandbox, "AGENTS.md"), "# real sandbox content\n", "utf-8");
+
+      const snapshot = createProjectRunSnapshot(projectId, `filter-run-${attributeSource}`);
+
+      expect(fs.existsSync(marker)).toBe(false);
+      // A clean filter that ran would have replaced the content with nothing.
+      expect(git(sandbox, ["show", `${snapshot}:AGENTS.md`])).toBe("# real sandbox content");
+    }
+  });
+
+  it("stages executable bits, symlinks and awkward names the way git add did", () => {
+    // The staging path stopped using `git add`, so the tree it produces has to
+    // be the same tree for everything a sandbox can legitimately contain.
+    const sandbox = ensureProjectExists("staging-study").sandbox;
+    fs.writeFileSync(path.join(sandbox, "script.sh"), "#!/bin/sh\necho hi\n", { mode: 0o755 });
+    fs.writeFileSync(path.join(sandbox, "plain.txt"), "plain\n", "utf-8");
+    fs.writeFileSync(path.join(sandbox, "awkward\nname.txt"), "awkward\n", "utf-8");
+    fs.mkdirSync(path.join(sandbox, "nested"), { recursive: true });
+    fs.writeFileSync(path.join(sandbox, "nested", "deep.txt"), "deep\n", "utf-8");
+    fs.symlinkSync("plain.txt", path.join(sandbox, "link.txt"));
+
+    const snapshot = createProjectRunSnapshot("staging-study", "staging-run");
+    const entries = git(sandbox, ["ls-tree", "-r", snapshot]).split("\n");
+
+    expect(entries.find((line) => line.endsWith("script.sh"))).toContain("100755");
+    expect(entries.find((line) => line.endsWith("link.txt"))).toContain("120000");
+    expect(entries.find((line) => line.endsWith("plain.txt"))).toContain("100644");
+    expect(git(sandbox, ["show", `${snapshot}:link.txt`])).toBe("plain.txt");
+    expect(git(sandbox, ["show", `${snapshot}:nested/deep.txt`])).toBe("deep");
+    expect(git(sandbox, ["show", `${snapshot}:awkward\nname.txt`])).toBe("awkward");
+  });
+
+  it("hands git the same overrides and --local on every invocation, and runs no other subcommand", () => {
+    // `--local` and the `-c` overrides are belt-and-braces whose whole point is
+    // to hold under a *future* change, so nothing about today's behaviour pins
+    // them. The argv Git is handed does. The subcommand list is pinned with
+    // them because the reasoning for which config keys are unreachable — no
+    // diff, no network transport, no interactive command, no upload-pack — is
+    // only true of this set.
+    const root = makeTemporaryRoot();
+    const record = path.join(root, "git-argv.log");
+    const shim = makeGitShim(
+      root,
+      `{ for a in "$@"; do printf '%s\u001f' "$a"; done; printf '\\n'; } >> ${JSON.stringify(record)}`,
+    );
+    const projectsRoot = path.join(root, "child-projects");
+    runInChildProcess(
+      root,
+      [
+        `process.env.KADY_PROJECTS_ROOT = ${JSON.stringify(projectsRoot)};`,
+        `const projects = await import(${JSON.stringify(PROJECTS_MODULE_PATH)});`,
+        `projects.ensureProjectExists("argv-study");`,
+        `projects.createProjectRunSnapshot("argv-study", "argv-run");`,
+        "",
+      ].join("\n"),
+      { PATH: `${shim}${path.delimiter}${process.env.PATH ?? ""}` },
+    );
+
+    const invocations = fs
+      .readFileSync(record, "utf-8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => line.split("\u001f").filter(Boolean));
+    expect(invocations.length).toBeGreaterThan(0);
+
+    const subcommands = new Set<string>();
+    for (const argv of invocations) {
+      // Every invocation neutralises the config keys that make Git execute
+      // something, whatever the sandbox's own config says.
+      expect(argv).toContain(`core.hooksPath=${os.devNull}`);
+      expect(argv).toContain("core.fsmonitor=false");
+      expect(argv).toContain("--no-pager");
+      const subcommand = argv.find(
+        (argument, index) =>
+          !argument.startsWith("-") && argv[index - 1] !== "-c" && argv[index - 1] !== "-C",
+      );
+      expect(subcommand).toBeDefined();
+      subcommands.add(subcommand!);
+      // The identity write names the file it writes: without `--local`,
+      // `git config` writes wherever GIT_CONFIG points.
+      if (subcommand === "config") expect(argv).toContain("--local");
+    }
+    for (const subcommand of subcommands) {
+      expect(PROJECT_GIT_SUBCOMMANDS).toContain(subcommand);
+    }
+    // `git add` is specifically gone: it is the invocation that ran filters.
+    expect(subcommands.has("add")).toBe(false);
+    expect(subcommands.has("config")).toBe(true);
+    expect(subcommands.has("update-ref")).toBe(true);
+  }, 120_000);
+});
+
+describe("inherited git environment", () => {
+  afterAll(() => {
+    fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
+  });
+
+  it("scrubs every inherited GIT_ variable, whatever its name", () => {
+    // A list was wrong twice: round 14's hand-written one missed GIT_CONFIG,
+    // round 15's derivation from `--local-env-vars` missed GIT_TRACE, which is
+    // not repository-binding and so is not on that list. The rule is the fix;
+    // these names are only samples of the families a list keeps missing.
+    const injected = {
+      GIT_TRACE: "/tmp/kady-should-not-be-written",
+      GIT_TRACE2_EVENT: "/tmp/kady-should-not-be-written",
+      GIT_EXEC_PATH: "/tmp/kady-hostile-exec-path",
+      GIT_TEMPLATE_DIR: "/tmp/kady-hostile-template",
+      GIT_ATTR_SOURCE: "HEAD",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "core.hooksPath",
+      GIT_CONFIG_VALUE_0: "/tmp/kady-hostile-hooks",
+      GIT_A_VARIABLE_GIT_DOES_NOT_HAVE_YET: "1",
+    };
+    const inherited: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(injected)) {
+      inherited[key] = process.env[key];
+      process.env[key] = value;
+    }
+    let scrubbed: NodeJS.ProcessEnv;
+    try {
+      scrubbed = projectGitEnvironment({ GIT_INDEX_FILE: "/tmp/kady-index" });
+    } finally {
+      for (const key of Object.keys(injected)) {
+        if (inherited[key] === undefined) delete process.env[key];
+        else process.env[key] = inherited[key];
+      }
+    }
+
+    for (const key of Object.keys(injected)) expect(scrubbed[key]).toBeUndefined();
+    expect(Object.keys(scrubbed).filter((key) => key.startsWith("GIT_"))).toEqual([
+      "GIT_INDEX_FILE",
+    ]);
+    // Non-Git variables are left alone: PATH still has to reach git.
+    expect(scrubbed.PATH).toBe(process.env.PATH);
+  });
+
+  it("ignores an inherited GIT_TRACE instead of appending git trace output to the file it names", () => {
+    // GIT_TRACE is not repository-binding, so `--local-env-vars` does not name
+    // it and the derived list did not cover it. It names a file every git
+    // invocation appends to: one unauthenticated request was enough to append
+    // trace output into a checkout's `.git/config` until git could no longer
+    // read the repository at all.
+    const root = makeTemporaryRoot();
+    const victim = makeCheckoutWithHistory(root, "traced-checkout");
+    const sandbox = path.join(root, "project", "sandbox");
+    makeSandboxWithFile(sandbox);
+    const before = fingerprintCheckout(victim);
+
+    const inheritedTrace = process.env.GIT_TRACE;
+    process.env.GIT_TRACE = path.join(victim, ".git", "config");
+    try {
+      ensureProjectRepository(sandbox);
+    } finally {
+      if (inheritedTrace === undefined) delete process.env.GIT_TRACE;
+      else process.env.GIT_TRACE = inheritedTrace;
+    }
+
+    expect(fingerprintCheckout(victim)).toEqual(before);
+    // Still a readable repository, which is what the trace output destroyed.
+    expect(git(victim, ["rev-list", "--count", "--all"])).toBe("1");
+    expect(git(sandbox, ["log", "-1", "--format=%s"])).toBe("Initialize Kady project");
+  });
+
+  it("falls back to the pinned key list when git cannot answer within the discovery timeout", () => {
+    // Discovery runs synchronously while the module initialises, so an
+    // unbounded one turns a slow or wedged git on PATH into a server that never
+    // starts. This is also the only way to prove the fallback is live code.
+    const root = makeTemporaryRoot();
+    const shim = makeGitShim(
+      root,
+      'if printf "%s\\n" "$@" | grep -q -- "--local-env-vars"; then sleep 30; fi',
+    );
+    const started = Date.now();
+    const printed = runInChildProcess(
+      root,
+      [
+        `const projects = await import(${JSON.stringify(PROJECTS_MODULE_PATH)});`,
+        "console.log(JSON.stringify(projects.RELOCATING_GIT_ENVIRONMENT_KEYS));",
+        "",
+      ].join("\n"),
+      { PATH: `${shim}${path.delimiter}${process.env.PATH ?? ""}` },
+    );
+    const elapsed = Date.now() - started;
+
+    // Bounded: the module loaded rather than waiting out the 30 s sleep.
+    expect(elapsed).toBeLessThan(20_000);
+    // ...and it loaded with exactly the pinned fallback, which is what the
+    // fallback exists for.
+    expect(JSON.parse(printed)).toEqual(
+      [
+        ...new Set([
+          ...GIT_LOCAL_ENVIRONMENT_KEYS_FALLBACK,
+          "GIT_CEILING_DIRECTORIES",
+          "GIT_NAMESPACE",
+        ]),
+      ].sort(),
+    );
+  }, 120_000);
 });
 
 describe("project commits carry their own authoring identity", () => {

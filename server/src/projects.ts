@@ -22,6 +22,7 @@
 import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { DEFAULT_PROJECT_ID, PROJECTS_ROOT } from "./config.ts";
 import { LEGACY_ENGINE_DATA_DIRECTORY } from "./legacy-engine-data.ts";
@@ -302,6 +303,34 @@ export const GIT_LOCAL_ENVIRONMENT_KEYS_FALLBACK: readonly string[] = [
 ];
 
 /**
+ * Inherited Git state is removed by a RULE, not by a list: every environment
+ * variable whose name begins with `GIT_` goes, and this module re-supplies the
+ * handful it needs itself as explicit per-invocation overrides.
+ *
+ * A list was tried twice and was wrong twice. Round 14's hand-written list
+ * missed `GIT_CONFIG`, which redirected an identity write into a developer's
+ * checkout. Round 15's derivation from `git rev-parse --local-env-vars` missed
+ * `GIT_TRACE`, which is not repository-binding and so is not on that list, but
+ * names a file Git appends to — one unauthenticated request was enough to
+ * destroy a checkout's `.git/config` with it. The installed git binary
+ * references 236 distinct `GIT_*` names against the 15 `--local-env-vars`
+ * prints; the gap is not closable by enumeration, and the next `GIT_*` variable
+ * Git gains is covered by a prefix and not by any list.
+ *
+ * Nothing this module runs needs an inherited `GIT_*` variable: identity, index
+ * location and pathspec handling are all passed per invocation.
+ */
+const INHERITED_GIT_ENVIRONMENT_PREFIX = "GIT_";
+
+function withoutInheritedGitEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = { ...source };
+  for (const key of Object.keys(environment)) {
+    if (key.startsWith(INHERITED_GIT_ENVIRONMENT_PREFIX)) delete environment[key];
+  }
+  return environment;
+}
+
+/**
  * Variables Git omits from `--local-env-vars` because they steer repository
  * *discovery* rather than bind an already-chosen one, and that still have to
  * go: a ceiling directory changes which enclosing repository a sandbox resolves
@@ -313,21 +342,94 @@ const DISCOVERY_STEERING_GIT_ENVIRONMENT_KEYS: readonly string[] = [
 ];
 
 /**
- * `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` carry the settings
- * `GIT_CONFIG_COUNT` counts. Their names are not fixed, so Git cannot list
- * them and neither can a constant; scrubbing the count disarms them, and
- * removing them too keeps a later caller's own count from re-arming them.
+ * Configuration a project repository is not allowed to supply, forced on every
+ * Git invocation this module makes.
+ *
+ * A project sandbox is writable by whatever runs in it — the agent is launched
+ * with `cwd` set to it — and `<sandbox>/.git` is inside the sandbox. So the
+ * repository's own `config`, its `.git/hooks` directory, its
+ * `.git/info/attributes` and its in-tree `.gitattributes` are all attacker
+ * controlled, and Git runs what they name, as the server. Nothing about
+ * ownership is wrong in that case: the sandbox really does own its repository.
+ * It is Git executing sandbox-supplied code on the server's behalf, and it
+ * reproduces the 2026-08-17 incident (an identity rewritten and a branch ref
+ * moved in a developer's checkout) against a correct containment proof.
+ *
+ * `-c` is the mechanism because it outranks every configuration file and cannot
+ * itself be injected: this module scrubs `GIT_*` from the environment, so
+ * `GIT_CONFIG_COUNT`/`GIT_CONFIG_PARAMETERS` cannot re-arm what these disable.
+ * An environment variable would be scrubbed by that same rule.
+ *
+ * Measured against the exact invocation set below (git 2.54.0), the keys that
+ * actually execute something are `core.hooksPath` — which also relocates hooks
+ * away from the sandbox's own `.git/hooks`, the default location, which is
+ * equally writable — and `core.fsmonitor`. The rest are unreachable only
+ * because this module runs no diff, no network transport, no interactive
+ * command and no `upload-pack`; they are pinned here so that stays true by
+ * construction rather than by argument, and `projectGitSubcommands` pins the
+ * invocation set that reasoning rests on.
+ *
+ * `os.devNull` is the inert value: it cannot be made into a directory holding a
+ * hook, and it cannot be executed.
  */
-const NUMBERED_GIT_CONFIG_ENVIRONMENT_PATTERN = /^GIT_CONFIG_(?:KEY|VALUE)_\d+$/;
+const PROJECT_GIT_CONFIG_OVERRIDES: readonly string[] = [
+  "--no-pager",
+  "-c", `core.hooksPath=${os.devNull}`,
+  "-c", "core.fsmonitor=false",
+  "-c", `core.sshCommand=${os.devNull}`,
+  "-c", `core.editor=${os.devNull}`,
+  "-c", `sequence.editor=${os.devNull}`,
+  "-c", "credential.helper=",
+  "-c", "uploadpack.packObjectsHook=",
+  "-c", "core.alternateRefsCommand=",
+  "-c", "diff.external=",
+  "-c", "commit.gpgsign=false",
+];
+
+/**
+ * Every Git subcommand this module is allowed to run. The class analysis above
+ * — "a hostile `diff.<driver>.textconv` cannot reach us because we never diff"
+ * — is only true of this set, so the set is named here and asserted by the
+ * containment tests: adding an invocation forces the analysis to be redone
+ * rather than silently invalidated.
+ */
+export const PROJECT_GIT_SUBCOMMANDS: readonly string[] = [
+  "commit-tree",
+  "config",
+  "for-each-ref",
+  "hash-object",
+  "init",
+  "ls-files",
+  "read-tree",
+  "rev-parse",
+  "update-index",
+  "update-ref",
+  "write-tree",
+];
+
+/** Every Git invocation this module makes, with the overrides prepended. */
+function projectGitArguments(args: string[]): string[] {
+  return [...PROJECT_GIT_CONFIG_OVERRIDES, ...args];
+}
+
+/**
+ * A slow or wedged `git` on PATH must not be able to hold up server start:
+ * discovery runs synchronously while this module initialises, so it is bounded
+ * and falls through to the pinned fallback when the bound is hit.
+ */
+const GIT_DISCOVERY_TIMEOUT_MS = 2_000;
 
 function discoverGitLocalEnvironmentKeys(): string[] | null {
-  const environment: NodeJS.ProcessEnv = { ...process.env };
-  for (const key of GIT_LOCAL_ENVIRONMENT_KEYS_FALLBACK) delete environment[key];
+  // Discovery itself runs with the inherited Git environment already gone, so
+  // an inherited GIT_DIR cannot steer the answer it is asked for.
+  const environment: NodeJS.ProcessEnv = withoutInheritedGitEnvironment(process.env);
   try {
-    const printed = execFileSync("git", ["rev-parse", "--local-env-vars"], {
+    const printed = execFileSync("git", projectGitArguments(["rev-parse", "--local-env-vars"]), {
       env: environment,
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],
+      timeout: GIT_DISCOVERY_TIMEOUT_MS,
+      killSignal: "SIGKILL",
     });
     const keys = printed.split("\n").map((line) => line.trim()).filter(Boolean);
     return keys.length > 0 ? keys : null;
@@ -345,9 +447,16 @@ function discoverGitLocalEnvironmentKeys(): string[] | null {
  * bootstrap once wrote an identity into a real checkout and moved its branch
  * ref.
  *
+ * Since round 17 this is the *second* pass: the prefix rule in
+ * `withoutInheritedGitEnvironment` already removes every `GIT_*` name, and this
+ * list would only add something if Git ever named a repository-binding variable
+ * that is not called `GIT_something`. It is kept because it is the derivation
+ * that proves the prefix rule is not weaker than Git's own answer, and a
+ * containment test fails if the two ever disagree.
+ *
  * Derived from Git, not from this file: resolved once per process, falling back
- * to `GIT_LOCAL_ENVIRONMENT_KEYS_FALLBACK` only if `git rev-parse` cannot be
- * run at all.
+ * to `GIT_LOCAL_ENVIRONMENT_KEYS_FALLBACK` if `git rev-parse` cannot be run at
+ * all, prints nothing, or does not answer inside `GIT_DISCOVERY_TIMEOUT_MS`.
  */
 export const RELOCATING_GIT_ENVIRONMENT_KEYS: readonly string[] = [
   ...new Set([
@@ -357,14 +466,22 @@ export const RELOCATING_GIT_ENVIRONMENT_KEYS: readonly string[] = [
   ]),
 ].sort();
 
-function projectGitEnvironment(
+/**
+ * The environment for every project-repository Git invocation.
+ *
+ * The prefix rule does the work. `RELOCATING_GIT_ENVIRONMENT_KEYS` is applied
+ * on top of it as a second pass that costs nothing and would matter for exactly
+ * one thing: a repository-binding variable Git names that does *not* begin with
+ * `GIT_`. There is none today, and a containment test fails if one appears.
+ *
+ * Exported so the rule itself is testable — the previous two scrubs each had a
+ * correct-looking mechanism whose gap only showed up in behaviour.
+ */
+export function projectGitEnvironment(
   overrides: Record<string, string> = {},
 ): NodeJS.ProcessEnv {
-  const environment: NodeJS.ProcessEnv = { ...process.env };
+  const environment = withoutInheritedGitEnvironment(process.env);
   for (const key of RELOCATING_GIT_ENVIRONMENT_KEYS) delete environment[key];
-  for (const key of Object.keys(environment)) {
-    if (NUMBERED_GIT_CONFIG_ENVIRONMENT_PATTERN.test(key)) delete environment[key];
-  }
   return Object.assign(environment, overrides);
 }
 
@@ -450,13 +567,41 @@ type ProjectRepositoryOwnership = "absent" | "own-empty" | "own-with-history";
 
 function gitOutputOrNull(workingDirectory: string, args: string[]): string | null {
   try {
-    return execFileSync("git", ["-C", workingDirectory, ...args], {
+    return execFileSync("git", projectGitArguments(["-C", workingDirectory, ...args]), {
       env: projectGitEnvironment(),
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
   } catch {
     return null;
+  }
+}
+
+/**
+ * Git's stdout together with whether it succeeded, because the ownership proof
+ * asks one invocation two questions at once: where the repository is, which is
+ * always answerable, and whether HEAD resolves, whose legitimate "no" — a
+ * repository with no commits yet — is reported as a non-zero exit *after* the
+ * first answer has already been printed.
+ */
+function gitOutputAndStatus(
+  workingDirectory: string,
+  args: string[],
+): { lines: string[]; ok: boolean } {
+  const split = (output: string): string[] => {
+    const trimmed = output.trim();
+    return trimmed.length > 0 ? trimmed.split("\n") : [];
+  };
+  try {
+    const output = execFileSync("git", projectGitArguments(["-C", workingDirectory, ...args]), {
+      env: projectGitEnvironment(),
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return { lines: split(output), ok: true };
+  } catch (error) {
+    const stdout = (error as { stdout?: string | Buffer | null }).stdout;
+    return { lines: typeof stdout === "string" ? split(stdout) : [], ok: false };
   }
 }
 
@@ -521,51 +666,37 @@ function repositoryHasTrackedContent(toplevel: string): boolean {
   return trackedFiles !== null && trackedFiles.length > 0;
 }
 
-/**
- * Sandboxes already proven to own a repository that holds history, keyed by
- * their resolved path and fingerprinted so the proof cannot outlive what it
- * proved.
+/*
+ * There is deliberately no memo here.
  *
- * `ensureProjectExists` runs on every HTTP request and the proof costs two
- * `git` subprocesses, which is the difference between a per-request cost of
- * microseconds and of milliseconds. The fingerprint is what makes skipping it
- * honest: it pins the identity (`dev`/`ino`) of both the sandbox and its `.git`
- * directory, and the timestamps and size of `.git`, so replacing either
- * directory, or writing anything at all inside `.git` — a `commondir` file, a
- * new `config` — invalidates the entry and the proof runs again.
+ * Round 16 cached the `own-with-history` verdict against a fingerprint of five
+ * `stat` fields of `<sandbox>/.git`. That is unsound, and the boundary is
+ * exact: a directory's `mtime`/`ctime`/`size` move when an entry is created,
+ * removed or renamed, and not when a file already inside it is overwritten in
+ * place. `.git/config` always exists after `git init`, so rewriting it with
+ * `open(…, "r+")` — two ordinary writes, both available to code running in the
+ * sandbox — changed what the proof would answer while leaving the fingerprint
+ * identical, and the stale "owned" verdict pulled a foreign checkout's file
+ * contents into a project run snapshot.
  *
- * Only `own-with-history` is ever recorded: it is the state in which
- * `ensureProjectRepository` does nothing, so the cached answer can never
- * authorise a write.
+ * Hashing `.git/config` instead of stat-ing it does not fix it either, because
+ * the bytes of that file are not the check's read set. `extensions.worktreeConfig`
+ * makes Git also read `.git/config.worktree`, and `core.worktree` set *there*
+ * redirects `--show-toplevel` exactly as it does from `.git/config` — measured
+ * against git 2.54.0. Turning the extension on and creating that file both
+ * invalidate any fingerprint, and then rewriting it in place invalidates
+ * neither: `.git/config` is byte-identical and `.git` stats identical, while
+ * the answer has changed. Every candidate fingerprint is a hand-maintained
+ * list of the files Git happened to consult, which is the same kind of list
+ * that was wrong in rounds 14 and 15 — and the only way to learn the real list
+ * is to run the check.
+ *
+ * The proof therefore runs on every call. Deleting the memo alone costs
+ * ~20.1 ms per `ensureProjectExists` against ~5.1 ms before containment
+ * existed; the invocation below gets that back to ~10.7 ms by asking one
+ * `rev-parse` for both halves of ownership and for HEAD, which is a subprocess
+ * fewer rather than an answer remembered.
  */
-const provenSandboxRepositories = new Map<string, string>();
-const PROVEN_SANDBOX_REPOSITORY_LIMIT = 256;
-
-function sandboxRepositoryFingerprint(sandbox: string): string | null {
-  try {
-    const sandboxEntry = fs.lstatSync(sandbox);
-    const gitEntry = fs.lstatSync(path.join(sandbox, ".git"));
-    if (!sandboxEntry.isDirectory() || !gitEntry.isDirectory()) return null;
-    return [
-      sandboxEntry.dev,
-      sandboxEntry.ino,
-      gitEntry.dev,
-      gitEntry.ino,
-      gitEntry.size,
-      gitEntry.mtimeMs,
-      gitEntry.ctimeMs,
-    ].join(":");
-  } catch {
-    return null;
-  }
-}
-
-function recordProvenSandboxRepository(memoKey: string, fingerprint: string): void {
-  if (provenSandboxRepositories.size >= PROVEN_SANDBOX_REPOSITORY_LIMIT) {
-    provenSandboxRepositories.clear();
-  }
-  provenSandboxRepositories.set(memoKey, fingerprint);
-}
 
 /**
  * Prove which repository — if any — owns `sandbox`, refusing every arrangement
@@ -581,13 +712,6 @@ function recordProvenSandboxRepository(memoKey: string, fingerprint: string): vo
  * before it creates anything.
  */
 function inspectProjectRepositoryOwnership(sandbox: string): ProjectRepositoryOwnership {
-  const memoKey = path.resolve(sandbox);
-  const fingerprint = sandboxRepositoryFingerprint(sandbox);
-  if (fingerprint !== null && provenSandboxRepositories.get(memoKey) === fingerprint) {
-    return "own-with-history";
-  }
-  provenSandboxRepositories.delete(memoKey);
-
   const resolvedSandbox = resolveRealPath(sandbox);
   let gitEntry: fs.Stats | null = null;
   try {
@@ -607,18 +731,26 @@ function inspectProjectRepositoryOwnership(sandbox: string): ProjectRepositoryOw
   }
 
   if (gitEntry !== null) {
-    // One invocation answers both halves of ownership: which repository claims
-    // this directory as its toplevel, and whose refs and objects that claim
-    // actually resolves to. They differ whenever the `.git` directory holds a
-    // `commondir` file — `--show-toplevel` still answers "the sandbox" while
-    // every ref written lands in the repository `commondir` names.
-    const located = gitOutputOrNull(sandbox, [
+    // One invocation answers both halves of ownership and whether the
+    // repository holds history. The two halves of ownership are which
+    // repository claims this directory as its toplevel, and whose refs and
+    // objects that claim actually resolves to: they differ whenever the `.git`
+    // directory holds a `commondir` file — `--show-toplevel` still answers "the
+    // sandbox" while every ref written lands in the repository `commondir`
+    // names. `--verify --quiet HEAD` appends a third line when HEAD resolves
+    // and exits non-zero without one when it does not, having already printed
+    // the first two.
+    const located = gitOutputAndStatus(sandbox, [
       "rev-parse",
       "--path-format=absolute",
       "--show-toplevel",
       "--git-common-dir",
-    ])?.split("\n") ?? [];
-    const resolvedToplevel = located.length === 2 ? resolveRealPath(located[0]) : null;
+      "--verify",
+      "--quiet",
+      "HEAD",
+    ]);
+    const resolvedToplevel =
+      located.lines.length >= 2 ? resolveRealPath(located.lines[0]) : null;
     if (resolvedToplevel === null || !isSamePath(resolvedToplevel, resolvedSandbox)) {
       throw new ProjectRepositoryContainmentError(
         resolvedSandbox,
@@ -626,7 +758,7 @@ function inspectProjectRepositoryOwnership(sandbox: string): ProjectRepositoryOw
         "sandbox_is_not_repository_toplevel",
       );
     }
-    const resolvedCommonDirectory = resolveRealPath(located[1]);
+    const resolvedCommonDirectory = resolveRealPath(located.lines[1]);
     const ownGitDirectory = resolveRealPath(path.join(sandbox, ".git"));
     if (!isSamePath(resolvedCommonDirectory, ownGitDirectory)) {
       throw new ProjectRepositoryContainmentError(
@@ -635,10 +767,7 @@ function inspectProjectRepositoryOwnership(sandbox: string): ProjectRepositoryOw
         "sandbox_git_common_dir_is_foreign",
       );
     }
-    if (gitOutputOrNull(sandbox, ["rev-parse", "--verify", "HEAD"]) !== null) {
-      if (fingerprint !== null) recordProvenSandboxRepository(memoKey, fingerprint);
-      return "own-with-history";
-    }
+    if (located.ok && located.lines.length === 3) return "own-with-history";
     // An unborn HEAD is not proof of an empty repository: HEAD can point at a
     // branch that does not exist yet while the history lives on other refs.
     // Only a repository with no refs at all is one this call may commit into.
@@ -648,7 +777,6 @@ function inspectProjectRepositoryOwnership(sandbox: string): ProjectRepositoryOw
       "--format=%(refname)",
     ]);
     if (anyRef === null || anyRef.length === 0) return "own-empty";
-    if (fingerprint !== null) recordProvenSandboxRepository(memoKey, fingerprint);
     return "own-with-history";
   }
 
@@ -756,6 +884,111 @@ function privacySafeProjectSnapshotPaths(sandbox: string): string[] {
   return permittedPaths;
 }
 
+
+/**
+ * Stage `permittedPaths` into the temporary index without letting the sandbox's
+ * own repository choose what code runs.
+ *
+ * `git add` resolves every path through the attribute stack — the sandbox's
+ * in-tree `.gitattributes` *and* its `.git/info/attributes`, both writable by
+ * whatever runs in the sandbox — and executes the `filter.<driver>.clean`
+ * named there, as the server, once per staged file. Unlike `core.hooksPath`
+ * this cannot be turned off with `-c`: the driver name is chosen by the
+ * attacker, so there is no fixed key to override.
+ *
+ * Hashing the bytes here removes the machinery instead of configuring it.
+ * `hash-object --no-filters` consults no attributes and runs no filter, and
+ * `update-index --index-info` records the object names it is handed. Verified
+ * to produce a byte-identical tree to `git add --force` for regular files,
+ * executable files, symlinks, and paths containing a newline.
+ *
+ * The one deliberate behaviour change: content is recorded exactly as it is on
+ * disk, so a `text`/`eol` attribute no longer rewrites line endings on the way
+ * in — which is what a snapshot of the sandbox's inputs should do anyway.
+ */
+function stageProjectSnapshotPaths(
+  sandbox: string,
+  gitEnvironment: NodeJS.ProcessEnv,
+  permittedPaths: string[],
+): void {
+  if (permittedPaths.length === 0) return;
+
+  const modeForPath = new Map<string, string>();
+  const objectNameForPath = new Map<string, string>();
+  const batchedPaths: string[] = [];
+  const individuallyHashedPaths: string[] = [];
+
+  for (const relativePath of permittedPaths) {
+    const entry = fs.lstatSync(path.join(sandbox, relativePath));
+    if (entry.isSymbolicLink()) {
+      modeForPath.set(relativePath, "120000");
+      individuallyHashedPaths.push(relativePath);
+      continue;
+    }
+    modeForPath.set(relativePath, (entry.mode & 0o111) !== 0 ? "100755" : "100644");
+    // `--stdin-paths` is newline-delimited, so a path containing one cannot go
+    // through the batch and is hashed from its bytes instead.
+    if (/[\n\r]/.test(relativePath)) individuallyHashedPaths.push(relativePath);
+    else batchedPaths.push(relativePath);
+  }
+
+  if (batchedPaths.length > 0) {
+    const objectNames = execFileSync(
+      "git",
+      projectGitArguments(["-C", sandbox, "hash-object", "--no-filters", "-w", "--stdin-paths"]),
+      {
+        env: gitEnvironment,
+        input: batchedPaths.join("\n") + "\n",
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    )
+      .trim()
+      .split("\n");
+    if (objectNames.length !== batchedPaths.length) {
+      throw new Error(
+        `git hash-object returned ${objectNames.length} object names for ` +
+          `${batchedPaths.length} paths in ${sandbox}`,
+      );
+    }
+    batchedPaths.forEach((relativePath, index) => {
+      objectNameForPath.set(relativePath, objectNames[index]);
+    });
+  }
+
+  for (const relativePath of individuallyHashedPaths) {
+    const absolutePath = path.join(sandbox, relativePath);
+    // A symlink is stored as a blob holding its target, which is what Git does
+    // and what keeps the link from being followed out of the sandbox.
+    const content =
+      modeForPath.get(relativePath) === "120000"
+        ? Buffer.from(fs.readlinkSync(absolutePath))
+        : fs.readFileSync(absolutePath);
+    objectNameForPath.set(
+      relativePath,
+      execFileSync(
+        "git",
+        projectGitArguments(["-C", sandbox, "hash-object", "--no-filters", "-w", "--stdin"]),
+        { env: gitEnvironment, input: content, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
+      ).trim(),
+    );
+  }
+
+  // NUL-terminated records, so a path containing a newline or a tab still
+  // names exactly one entry.
+  const indexRecords = permittedPaths
+    .map(
+      (relativePath) =>
+        `${modeForPath.get(relativePath)} ${objectNameForPath.get(relativePath)}\t${relativePath}\0`,
+    )
+    .join("");
+  execFileSync(
+    "git",
+    projectGitArguments(["-C", sandbox, "update-index", "-z", "--index-info"]),
+    { env: gitEnvironment, input: indexRecords, stdio: ["pipe", "ignore", "pipe"] },
+  );
+}
+
 /**
  * Create the sandbox's very first commit from a temporary index. Only ever
  * called for a repository the sandbox owns and whose HEAD is unborn.
@@ -769,26 +1002,19 @@ function writeProjectBaselineCommit(sandbox: string): void {
     GIT_LITERAL_PATHSPECS: "1",
   });
   try {
-    execFileSync("git", ["-C", sandbox, "read-tree", "--empty"], {
+    execFileSync("git", projectGitArguments(["-C", sandbox, "read-tree", "--empty"]), {
       env: gitEnvironment,
       stdio: "ignore",
     });
-    const permittedPaths = privacySafeProjectSnapshotPaths(sandbox);
-    if (permittedPaths.length > 0) {
-      execFileSync(
-        "git",
-        ["-C", sandbox, "add", "--force", "--", ...permittedPaths],
-        { env: gitEnvironment, stdio: "ignore" },
-      );
-    }
-    const tree = execFileSync("git", ["-C", sandbox, "write-tree"], {
+    stageProjectSnapshotPaths(sandbox, gitEnvironment, privacySafeProjectSnapshotPaths(sandbox));
+    const tree = execFileSync("git", projectGitArguments(["-C", sandbox, "write-tree"]), {
       env: gitEnvironment,
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
     const commit = execFileSync(
       "git",
-      ["-C", sandbox, "commit-tree", tree, "-m", "Initialize Kady project"],
+      projectGitArguments(["-C", sandbox, "commit-tree", tree, "-m", "Initialize Kady project"]),
       {
         env: gitEnvironment,
         encoding: "utf-8",
@@ -798,7 +1024,7 @@ function writeProjectBaselineCommit(sandbox: string): void {
     // The empty old-value makes Git itself refuse the update unless the ref is
     // still unborn: a history that appeared since the check above is never
     // overwritten, even under a lock this process does not hold.
-    execFileSync("git", ["-C", sandbox, "update-ref", "HEAD", commit, ""], {
+    execFileSync("git", projectGitArguments(["-C", sandbox, "update-ref", "HEAD", commit, ""]), {
       env: projectGitEnvironment(),
       stdio: "ignore",
     });
@@ -824,7 +1050,7 @@ export function ensureProjectRepository(sandbox: string): void {
     let ownership = inspectProjectRepositoryOwnership(sandbox);
     if (ownership === "own-with-history") return;
     if (ownership === "absent") {
-      execFileSync("git", ["init", "--quiet", sandbox], {
+      execFileSync("git", projectGitArguments(["init", "--quiet", sandbox]), {
         env: projectGitEnvironment(),
         stdio: "ignore",
       });
@@ -846,12 +1072,16 @@ export function ensureProjectRepository(sandbox: string): void {
         // error here instead of a silent write into somebody's checkout.
         execFileSync(
           "git",
-          ["-C", sandbox, "config", "--local", "user.name", PROJECT_REPOSITORY_AUTHOR_NAME],
+          projectGitArguments([
+            "-C", sandbox, "config", "--local", "user.name", PROJECT_REPOSITORY_AUTHOR_NAME,
+          ]),
           { env: projectGitEnvironment(), stdio: "ignore" },
         );
         execFileSync(
           "git",
-          ["-C", sandbox, "config", "--local", "user.email", PROJECT_REPOSITORY_AUTHOR_EMAIL],
+          projectGitArguments([
+            "-C", sandbox, "config", "--local", "user.email", PROJECT_REPOSITORY_AUTHOR_EMAIL,
+          ]),
           { env: projectGitEnvironment(), stdio: "ignore" },
         );
       }
@@ -881,31 +1111,30 @@ export function createProjectRunSnapshot(projectId: string, runIdentity: string)
     GIT_LITERAL_PATHSPECS: "1",
   });
   try {
-    execFileSync("git", ["-C", paths.sandbox, "read-tree", "--empty"], {
+    execFileSync("git", projectGitArguments(["-C", paths.sandbox, "read-tree", "--empty"]), {
       env: gitEnvironment,
       stdio: "ignore",
     });
-    const permittedPaths = privacySafeProjectSnapshotPaths(paths.sandbox);
-    if (permittedPaths.length > 0) {
-      execFileSync(
-        "git",
-        ["-C", paths.sandbox, "add", "--force", "--", ...permittedPaths],
-        { env: gitEnvironment, stdio: "ignore" },
-      );
-    }
-    const tree = execFileSync("git", ["-C", paths.sandbox, "write-tree"], {
+    stageProjectSnapshotPaths(
+      paths.sandbox,
+      gitEnvironment,
+      privacySafeProjectSnapshotPaths(paths.sandbox),
+    );
+    const tree = execFileSync("git", projectGitArguments(["-C", paths.sandbox, "write-tree"]), {
       env: gitEnvironment,
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
-    const parent = execFileSync("git", ["-C", paths.sandbox, "rev-parse", "HEAD"], {
+    const parent = execFileSync("git", projectGitArguments(["-C", paths.sandbox, "rev-parse", "HEAD"]), {
       env: projectGitEnvironment(),
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
     const snapshot = execFileSync(
       "git",
-      ["-C", paths.sandbox, "commit-tree", tree, "-p", parent, "-m", `Kady run snapshot ${runIdentity}`],
+      projectGitArguments([
+        "-C", paths.sandbox, "commit-tree", tree, "-p", parent, "-m", `Kady run snapshot ${runIdentity}`,
+      ]),
       {
         env: gitEnvironment,
         encoding: "utf-8",
@@ -915,7 +1144,9 @@ export function createProjectRunSnapshot(projectId: string, runIdentity: string)
     const snapshotRef = crypto.createHash("sha256").update(runIdentity).digest("hex");
     execFileSync(
       "git",
-      ["-C", paths.sandbox, "update-ref", `refs/kady/run-snapshots/${snapshotRef}`, snapshot],
+      projectGitArguments([
+        "-C", paths.sandbox, "update-ref", `refs/kady/run-snapshots/${snapshotRef}`, snapshot,
+      ]),
       { env: projectGitEnvironment(), stdio: "ignore" },
     );
     return snapshot;
