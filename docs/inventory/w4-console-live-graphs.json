@@ -8,7 +8,8 @@
     "web/src/components/chat-live-graph.tsx",
     "web/src/components/console/console-panel.tsx",
     "web/src/components/console/kady-console.tsx",
-    "web/src/components/dag-workflow-console.tsx"
+    "web/src/components/dag-workflow-console.tsx",
+    "web/src/app/page.tsx"
   ],
   "new_file_globs": [
     "docs/inventory/run-state-v1-*.md",

@@ -93,6 +93,7 @@ A handoff lets the recipient lane edit a path another lane owns, for the stated 
 | S11 | W4 | `e2e/item-count-reporter.ts` | inventory pins for the new console-live.spec.ts items |
 | S11 | W3 | `e2e/builder-typed.spec.ts` | new Playwright items for the typed builder path (load/import/stitch/harness) |
 | S11 | W4 | `e2e/console-live.spec.ts` | new Playwright items for the live-graph console |
+| S1 | W4 | `web/src/app/page.tsx` | thread the Console view-visibility predicate (isActive && view === 'console') into ConsolePanel so the live console polls only while visible — one prop, no other change |
 | S11 | W2 | `e2e/builder.spec.ts` | rewrite the seven node-card assertions to the explicit expand/collapse contract and the 'CLI harness: …' badge title; no items added or removed |
 | S11 | W1 | `e2e/studio.spec.ts` | retire the Components Studio spec together with the header entry (owner: 'there should be no components studio'); items removed, pins updated |
 | S11 | W1 | `e2e/item-count-reporter.ts` | inventory pins after retiring studio.spec.ts and enabling nothing else |
