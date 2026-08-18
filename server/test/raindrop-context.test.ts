@@ -6,6 +6,8 @@ import { MAX_RAINDROP_CONTEXT_BYTES } from "../src/agent/raindrop-context.ts";
 import {
   createSession,
   disposeProjectSessions,
+  PROFILE_SYSTEM_PROMPTS,
+  readSessionProfileBinding,
 } from "../src/agent/session-registry.ts";
 import { findSessionFile } from "../src/agent/session-export.ts";
 import { PROJECTS_ROOT } from "../src/config.ts";
@@ -479,5 +481,209 @@ describe("Raindrop bounded log context", () => {
       payload: { kind: "session", id: foreignSessionId },
     });
     expect(foreign.statusCode).toBe(404);
+  });
+
+  it("opens a DAG Builder session on a project with no saved workflow and says so", async () => {
+    const noWorkflows = await app.inject({
+      method: "GET",
+      url: "/dag-workflows",
+      headers: headers(),
+    });
+    expect(noWorkflows.statusCode).toBe(200);
+    expect(noWorkflows.json().workflows).toEqual([]);
+
+    // The first-run case: nothing to point at, because the user opened the chat
+    // precisely to build their first workflow.
+    const context = await app.inject({
+      method: "POST",
+      url: "/helper-sessions/dag-builder/context",
+      headers: headers(),
+      payload: {},
+    });
+    expect(context.statusCode).toBe(200);
+    expect(context.json()).toMatchObject({
+      source: null,
+      truncated: false,
+      observedEntries: 0,
+      totalEntries: 0,
+    });
+    const projection = context.json().context as string;
+    expect(Buffer.byteLength(projection, "utf8")).toBeLessThanOrEqual(MAX_RAINDROP_CONTEXT_BYTES);
+    // The absence has to be stated, not implied by an omitted key.
+    expect(projection).toContain("KADY_DAG_BUILDER_NO_WORKFLOW_CONTEXT_V1");
+    expect(projection).toContain("source=none");
+    expect(projection).toContain("No saved workflow revision is bound to this helper session");
+    expect(projection).toContain("An absent workflow is not an empty workflow");
+    expect(projection).toContain('"savedWorkflowCount": 0');
+    expect(projection).toContain('"savedWorkflows": []');
+    // No fabricated empty workflow: the graph keys must be absent entirely.
+    expect(projection).not.toContain('"definition"');
+    expect(projection).not.toContain('"nodes"');
+    expect(projection).not.toContain('"edges"');
+    expect(projection).not.toContain('"entryNodeId"');
+
+    const session = await app.inject({
+      method: "POST",
+      url: "/helper-sessions/dag-builder",
+      headers: headers(),
+      payload: {},
+    });
+    expect(session.statusCode).toBe(200);
+    expect(session.json()).toMatchObject({
+      profile: "dag-builder",
+      source: null,
+      name: "Kady DAG Builder",
+      readOnlyTools: [],
+    });
+    const sessionId = session.json().id as string;
+    expect(readSessionProfileBinding(ensureProjectExists("default"), sessionId))
+      .toMatchObject({ profile: "dag-builder", source: null });
+
+    // The pointer-free session is one session, not a new one per request.
+    const reopened = await app.inject({
+      method: "POST",
+      url: "/helper-sessions/dag-builder",
+      headers: headers(),
+      payload: {},
+    });
+    expect(reopened.json().id).toBe(sessionId);
+
+    // Every other helper profile still requires its exact typed pointer.
+    for (const profile of ["raindrop", "workflow-rescue"]) {
+      const rejected = await app.inject({
+        method: "POST",
+        url: `/helper-sessions/${profile}/context`,
+        headers: headers(),
+        payload: {},
+      });
+      expect(rejected.statusCode).toBe(400);
+      expect(rejected.json()).toMatchObject({ code: "INVALID_REFERENCE" });
+    }
+  });
+
+  it("keeps a pointed DAG Builder session bound to its exact saved revision", async () => {
+    workflowStore.saveDefinition("default", "builder-compound", compoundGraph());
+    const context = await app.inject({
+      method: "POST",
+      url: "/helper-sessions/dag-builder/context",
+      headers: headers(),
+      payload: { kind: "workflow", id: "builder-compound@1" },
+    });
+    expect(context.statusCode).toBe(200);
+    expect(context.json()).toMatchObject({
+      source: { kind: "workflow", id: "builder-compound@1" },
+      truncated: false,
+      observedEntries: 1,
+      totalEntries: 1,
+    });
+    const projection = context.json().context as string;
+    expect(projection).toContain("KADY_DAG_BUILDER_CONTEXT_V1");
+    expect(projection).toContain("source.id=builder-compound@1");
+    expect(projection).toContain('"mode": "kady-panel"');
+    expect(projection).not.toContain("KADY_DAG_BUILDER_NO_WORKFLOW_CONTEXT_V1");
+
+    const pointed = await app.inject({
+      method: "POST",
+      url: "/helper-sessions/dag-builder",
+      headers: headers(),
+      payload: { kind: "workflow", id: "builder-compound@1" },
+    });
+    expect(pointed.statusCode).toBe(200);
+    expect(pointed.json()).toMatchObject({
+      source: { kind: "workflow", id: "builder-compound@1" },
+    });
+
+    // A pointer-free session is a DIFFERENT session from a pointed one, and it
+    // lists what the project has without disclosing any graph contents.
+    const pointerFree = await app.inject({
+      method: "POST",
+      url: "/helper-sessions/dag-builder",
+      headers: headers(),
+      payload: {},
+    });
+    expect(pointerFree.statusCode).toBe(200);
+    expect(pointerFree.json().id).not.toBe(pointed.json().id);
+    const listing = await app.inject({
+      method: "POST",
+      url: "/helper-sessions/dag-builder/context",
+      headers: headers(),
+      payload: {},
+    });
+    expect(listing.json()).toMatchObject({ observedEntries: 1, totalEntries: 1 });
+    expect(listing.json().context).toContain('"id": "builder-compound"');
+    expect(listing.json().context).toContain('"revision": 1');
+    expect(listing.json().context).not.toContain('"mode": "kady-panel"');
+
+    // A stale pointer is still a conflict, and a bad one is still a 400.
+    workflowStore.saveDefinition(
+      "default",
+      "builder-compound",
+      { ...compoundGraph(), name: "Revision two" },
+      { expectedRevision: 1 },
+    );
+    const stale = await app.inject({
+      method: "POST",
+      url: "/helper-sessions/dag-builder/context",
+      headers: headers(),
+      payload: { kind: "workflow", id: "builder-compound@1" },
+    });
+    expect(stale.statusCode).toBe(409);
+    const malformed = await app.inject({
+      method: "POST",
+      url: "/helper-sessions/dag-builder/context",
+      headers: headers(),
+      payload: { kind: "workflow", id: "builder-compound" },
+    });
+    expect(malformed.statusCode).toBe(400);
+    const pathInput = await app.inject({
+      method: "POST",
+      url: "/helper-sessions/dag-builder/context",
+      headers: headers(),
+      payload: { kind: "workflow", id: "builder-compound@2", path: "/tmp/foreign.yaml" },
+    });
+    expect(pathInput.statusCode).toBe(400);
+  });
+
+  it("promises no canvas apply in the DAG Builder prompt but still specifies the graph shape", () => {
+    const prompt = PROFILE_SYSTEM_PROMPTS["dag-builder"];
+    // Lane W3 owns the Builder apply bridge and it is not merged, so the model
+    // must not be told to hand changes over for the canvas to apply.
+    expect(prompt).not.toMatch(/\bappl(y|ies|ied)\b/i);
+    expect(prompt).not.toMatch(/\bvisual\b/i);
+    expect(prompt).not.toContain("Return proposed changes for the visual Builder");
+    expect(prompt).toContain("nothing you produce reaches it by");
+    expect(prompt).toContain("the user copies or saves for themselves");
+
+    // Honest is not the same as useless: the prompt must still pin the exact
+    // WorkflowGraphDocument shape from server/src/workflows/schema.ts.
+    expect(prompt).toContain("WorkflowGraphDocument");
+    expect(prompt).toContain("server/src/workflows/schema.ts");
+    for (const requiredField of [
+      "schemaVersion",
+      "entryNodeId",
+      "maxIterations",
+      "maxCostUsd",
+      "minimumIndependentSources",
+      "onUnsupportedOutput",
+      "terminal",
+      "workspace",
+    ]) {
+      expect(prompt).toContain(requiredField);
+    }
+    for (const nodeKind of [
+      "agent",
+      "research-until-goal",
+      "council",
+      "fusion",
+      "best-of-n",
+      "prompt-optimization",
+      "evidence-gate",
+      "lean4",
+    ]) {
+      expect(prompt).toContain(nodeKind);
+    }
+    // Both context envelopes must be named so the model can tell them apart.
+    expect(prompt).toContain("KADY_DAG_BUILDER_CONTEXT_V1");
+    expect(prompt).toContain("KADY_DAG_BUILDER_NO_WORKFLOW_CONTEXT_V1");
   });
 });

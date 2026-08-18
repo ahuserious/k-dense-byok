@@ -40,7 +40,7 @@ import {
   buildRaindropLogContext,
   buildWorkflowRescueContext,
   RaindropContextError,
-  type DagBuilderContextReference,
+  type DagBuilderContextSource,
   type RaindropLogReference,
   type TrustedHelperContext,
   type WorkflowRescueContextReference,
@@ -191,7 +191,15 @@ function isHelperProfile(value: string): value is HelperProfile {
   return value === "dag-builder" || value === "raindrop" || value === "workflow-rescue";
 }
 
-function parseHelperSource(profile: HelperProfile, body: unknown): HelperSessionSource {
+function parseHelperSource(profile: HelperProfile, body: unknown): HelperSessionSource | null {
+  // A DAG Builder session is valid with no pointer at all: on a project with no
+  // saved workflow there is nothing to point at, and that is exactly the case
+  // the owner asked the Builder chat to serve. An omitted or empty body means
+  // "no revision selected"; every other profile still requires a typed one.
+  const bodyIsAbsent = body === null || body === undefined ||
+    (typeof body === "object" && !Array.isArray(body) &&
+      Object.keys(body as Record<string, unknown>).length === 0);
+  if (profile === "dag-builder" && bodyIsAbsent) return null;
   if (body === null || typeof body !== "object" || Array.isArray(body)) {
     throw new RaindropContextError("INVALID_REFERENCE", "A typed helper context reference is required.");
   }
@@ -224,10 +232,16 @@ async function selectedHelperContext(
   profile: HelperProfile,
   projectId: string,
   paths: ReturnType<typeof activePaths>,
-  source: HelperSessionSource,
+  source: HelperSessionSource | null,
 ): Promise<TrustedHelperContext> {
   if (profile === "dag-builder") {
-    return buildDagBuilderContext(projectId, source as DagBuilderContextReference);
+    return buildDagBuilderContext(projectId, source as DagBuilderContextSource);
+  }
+  if (source === null) {
+    throw new RaindropContextError(
+      "INVALID_REFERENCE",
+      `Helper profile ${profile} requires a typed context reference.`,
+    );
   }
   if (profile === "workflow-rescue") {
     return buildWorkflowRescueContext(projectId, source as WorkflowRescueContextReference);
@@ -249,7 +263,8 @@ async function promptForSessionBinding(
   question: string,
 ): Promise<string> {
   if (binding.profile === "main") return question;
-  if (!binding.source) {
+  // Only the DAG Builder may be bound to nothing; see parseHelperSource above.
+  if (!binding.source && binding.profile !== "dag-builder") {
     throw new SessionProfileBindingError("MISMATCH", "A helper session is missing its authoritative source.");
   }
   const projection = await selectedHelperContext(
