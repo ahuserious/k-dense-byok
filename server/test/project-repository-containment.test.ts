@@ -1920,6 +1920,147 @@ describe("the repository is re-proven at the moment it is written through", () =
   }, 120_000);
 });
 
+describe("a snapshot survives the sandbox changing under it", () => {
+  /**
+   * Round 20's review, finding 1. Round 20 typed every failure of the
+   * *repository*-side walk and left the *sandbox*-side one raw: a snapshot
+   * enumerates the sandbox and then stats and reads what it enumerated, and
+   * anything that went away in between raised a bare Node error —
+   * `ENOENT: no such file or directory, lstat '<sandbox>/churn16.txt'` — that
+   * escaped both classifiers and reached the caller as an unclassified 500
+   * carrying a server-side path.
+   *
+   * The thing that moves those files is not an attacker. It is the agent doing
+   * its job: a build writing and deleting temporary files, a test run, an
+   * install. The review measured 77 of 80 run snapshots failing that way under
+   * ordinary churn, and 4 of 80 at one transient file every 61 ms. So the fix
+   * is not to refuse — a file that has gone is genuinely not part of the
+   * snapshot, and `git add` skips it too — and only a read that fails for some
+   * *other* reason is an error, typed and carrying no path.
+   */
+  afterAll(() => {
+    fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
+    fs.mkdirSync(PROJECTS_ROOT, { recursive: true });
+  });
+
+  function snapshotFailure(projectId: string, runIdentity: string): unknown {
+    let thrown: unknown;
+    try {
+      createProjectRunSnapshot(projectId, runIdentity);
+    } catch (error) {
+      thrown = error;
+    }
+    return thrown;
+  }
+
+  it("skips a sandbox file that vanished between the enumeration and the staging", () => {
+    // The race made deterministic. The only thing between the enumeration and
+    // the first `lstat` of what it enumerated is one `git config --get
+    // core.fileMode`, so a shim matched on that key removes the file in exactly
+    // the window the agent's own tools hit by luck — no earlier check could
+    // have seen it gone, and no later one could have put it back.
+    const root = makeTemporaryRoot();
+    const projectsRoot = path.join(root, "child-projects");
+    const sandbox = path.join(projectsRoot, "vanish-study", "sandbox");
+    const record = path.join(root, "outcome.log");
+    const shim = makeGitShim(
+      root,
+      `case " $* " in *"core.fileMode"*) ` +
+        `rm -f ${JSON.stringify(path.join(sandbox, "vanishing.txt"))};; esac`,
+    );
+
+    runInChildProcess(
+      root,
+      [
+        `process.env.KADY_PROJECTS_ROOT = ${JSON.stringify(projectsRoot)};`,
+        'const fs = await import("node:fs");',
+        `const projects = await import(${JSON.stringify(PROJECTS_MODULE_PATH)});`,
+        "projects.ensureProjectExists('vanish-study');",
+        `fs.writeFileSync(${JSON.stringify(path.join(sandbox, "stays.txt"))}, "stays\\n", "utf-8");`,
+        `fs.writeFileSync(${JSON.stringify(path.join(sandbox, "vanishing.txt"))}, "gone\\n", "utf-8");`,
+        "let outcome;",
+        "try {",
+        "  outcome = `ok|${projects.createProjectRunSnapshot('vanish-study', 'vanish-run')}`;",
+        "} catch (error) {",
+        "  outcome = `threw|${error?.code ?? '(unclassified)'}|${error?.message ?? error}`;",
+        "}",
+        `fs.writeFileSync(${JSON.stringify(record)}, outcome, "utf-8");`,
+        "",
+      ].join("\n"),
+      { PATH: `${shim}${path.delimiter}${process.env.PATH ?? ""}` },
+    );
+
+    const outcome = fs.readFileSync(record, "utf-8");
+    // No raw filesystem error, and no failure at all: the snapshot is taken.
+    expect(outcome).not.toContain("ENOENT");
+    expect(outcome.split("|", 1)[0]).toBe("ok");
+    const snapshot = outcome.split("|")[1];
+    // The file that was still there is recorded; the one that went is simply
+    // absent, which is what it means for it not to be part of the snapshot.
+    const recorded = git(sandbox, ["ls-tree", "-r", "--name-only", snapshot]).split("\n");
+    expect(recorded).toContain("stays.txt");
+    expect(recorded).not.toContain("vanishing.txt");
+    expect(fs.existsSync(path.join(sandbox, "vanishing.txt"))).toBe(false);
+  }, 120_000);
+
+  it("refuses with a typed error, naming no path, when a sandbox entry cannot be read", () => {
+    // The other side of the same branch. A directory the enumeration can list
+    // but whose entries it cannot `lstat` — read without search permission — is
+    // not a file that went away, so it must not be silently dropped from the
+    // snapshot. Deterministic here; the racing form is an EIO or an EACCES on
+    // the same call.
+    ensureProjectExists("unstattable-study");
+    const sandbox = resolvePaths("unstattable-study").sandbox;
+    const listable = path.join(sandbox, "listable");
+    fs.mkdirSync(listable);
+    fs.writeFileSync(path.join(listable, "entry.txt"), "x\n", "utf-8");
+    fs.chmodSync(listable, 0o444);
+    let thrown: unknown;
+    try {
+      thrown = snapshotFailure("unstattable-study", "unstattable-run");
+    } finally {
+      fs.chmodSync(listable, 0o700);
+    }
+
+    expect((thrown as { code?: unknown })?.code).toBe("project_snapshot_failed");
+    expect((thrown as { operation?: unknown })?.operation).toBe("stat");
+    expect((thrown as { errno?: unknown })?.errno).toBe("EACCES");
+    // Not the raw Node error, and nothing a caller could read a server-side
+    // path out of: not the sandbox, not the entry, not the `lstat` token.
+    const message = (thrown as Error).message;
+    expect(message).not.toContain("lstat");
+    expect(message).not.toContain(sandbox);
+    expect(message).not.toContain("entry.txt");
+    expect(message).not.toContain(path.sep + "listable");
+  });
+
+  it("refuses rather than recording an empty snapshot when the sandbox itself cannot be listed", () => {
+    // A sandbox subdirectory that cannot be listed is skipped, because the
+    // agent removing a directory tree is the same ordinary event as it removing
+    // a file. The sandbox *root* is not that: answering with an empty file list
+    // would record the project as having lost every file it has, and that
+    // commit would then be the parent of every later one.
+    ensureProjectExists("unlistable-study");
+    const sandbox = resolvePaths("unlistable-study").sandbox;
+    fs.chmodSync(sandbox, 0o111);
+    let thrown: unknown;
+    try {
+      thrown = snapshotFailure("unlistable-study", "unlistable-run");
+    } finally {
+      fs.chmodSync(sandbox, 0o700);
+    }
+
+    expect((thrown as { code?: unknown })?.code).toBe("project_snapshot_failed");
+    expect((thrown as { operation?: unknown })?.operation).toBe("enumerate");
+    expect((thrown as Error).message).not.toContain(sandbox);
+    expect((thrown as Error).message).not.toContain("scandir");
+  });
+});
+
 describe("project commits carry their own authoring identity", () => {
   afterAll(() => {
     fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });

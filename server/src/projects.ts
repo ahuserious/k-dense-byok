@@ -454,6 +454,74 @@ function projectGitFailure(operation: string, sandbox: string, error: unknown): 
   return new ProjectGitWriteError(operation, sandbox, status ?? null);
 }
 
+/**
+ * A sandbox read that failed while a run snapshot was being assembled, for a
+ * reason other than the entry having simply gone away.
+ *
+ * The entry going away is not this error: a snapshot enumerates the sandbox and
+ * then stats and reads what it enumerated, and an agent doing ordinary work in
+ * its own sandbox — a build writing and deleting temporary files, a test run, an
+ * install — moves files between those two steps constantly. A file that is no
+ * longer there is genuinely not part of the snapshot, so it is skipped, which is
+ * what `git add` does with the same race. Only a read that fails for some other
+ * reason reaches here.
+ *
+ * Unlike `ProjectGitWriteError`, this message names **no path at all**, not even
+ * the sandbox. The raw Node error this replaces named the offending entry —
+ * `ENOENT: no such file or directory, lstat '<sandbox>/churn16.txt'` — and that
+ * is a path the caller never asked about, produced by an internal walk, arriving
+ * as an unclassified 500 on the pipeline-run route. The sandbox is kept on a
+ * field so an operator with the process can still correlate it; nothing about
+ * which entry failed is put where an HTTP client can read it.
+ */
+export class ProjectSnapshotError extends Error {
+  readonly code = "project_snapshot_failed";
+  readonly operation: string;
+  readonly sandbox: string;
+  readonly errno: string | null;
+
+  constructor(operation: string, sandbox: string, errno: string | null) {
+    super(
+      `Project snapshot ${operation} failed under the project sandbox` +
+        (errno ? `: ${errno}` : ""),
+    );
+    this.name = "ProjectSnapshotError";
+    this.operation = operation;
+    this.sandbox = sandbox;
+    this.errno = errno;
+  }
+}
+
+/**
+ * The errno codes that mean "the path this walk enumerated no longer names
+ * anything", and nothing more alarming than that.
+ *
+ * `ENOENT` is the entry itself being removed. `ENOTDIR` is a directory
+ * component of it being replaced by a file, which is the same event seen from
+ * one level up. Everything else — `EACCES`, `EIO`, `ELOOP`, `EPERM` — is a read
+ * this module could not complete for a reason the enumeration cannot explain
+ * away, and is raised rather than silently dropping the entry from the snapshot.
+ */
+const VANISHED_SANDBOX_ENTRY_CODES = new Set(["ENOENT", "ENOTDIR"]);
+
+function sandboxEntryVanished(error: unknown): boolean {
+  const errno = (error as NodeJS.ErrnoException | null)?.code;
+  return typeof errno === "string" && VANISHED_SANDBOX_ENTRY_CODES.has(errno);
+}
+
+function projectSnapshotFailure(
+  operation: string,
+  sandbox: string,
+  error: unknown,
+): ProjectSnapshotError {
+  const errno = (error as NodeJS.ErrnoException | null)?.code;
+  return new ProjectSnapshotError(
+    operation,
+    sandbox,
+    typeof errno === "string" ? errno : null,
+  );
+}
+
 const GIT_DISCOVERY_TIMEOUT_MS = 2_000;
 
 function discoverGitLocalEnvironmentKeys(): string[] | null {
@@ -1294,14 +1362,29 @@ function proveProjectRepositoryBeforeWriting(sandbox: string): void {
  * What remains is a TOCTOU window, and it is *winnable*. Do not read the
  * per-invocation proof as closing it. Measured, on this build:
  *
- *  - **~3% of run snapshots** are stolen by a *blind* competing writer with no
- *    timing signal and no knowledge of this module — a plain on/off duty cycle
- *    replacing one entry the write goes through with a symbolic link, i.e.
- *    `ln -s` and `rm` in the agent's own shell. 600 rounds across three duty
- *    cycles planted 15–18 Kady-authored refs in a repository this module does
- *    not own: 2.5%–3.0% per run snapshot, 95% binomial CI roughly 1.8%–4.7%,
- *    and up to 4.5% at the most favourable duty cycle. Two independent harnesses
- *    (this lane's and round 19's review's) agree on the figure.
+ *  - **A few percent of run snapshots averaged across duty cycles, and as often
+ *    as one in eleven at the worst cycle measured**, are stolen by a *blind*
+ *    competing writer with no timing signal and no knowledge of this module — a
+ *    plain on/off duty cycle replacing one entry the write goes through with a
+ *    symbolic link, i.e. `ln -s` and `rm` in the agent's own shell.
+ *
+ *    Sweeps over three duty cycles planted 15 Kady-authored refs in 600 rounds
+ *    (2.5%), 25 in 600 (4.2%) and 46 in 1,200 (3.8%) in a repository this module
+ *    does not own — 95% binomial intervals spanning roughly 1.8%–6.1%.
+ *
+ *    Quote that average only with the duty cycle attached, because averaging
+ *    over cycles hides the peak, and the peak is what a maintainer plans
+ *    against. At the worst cycle measured, `on=2 ms off=10 ms`, three
+ *    measurements of this build give 5.0% (10/200, round-19 review), 7.1%
+ *    (57/800, round-20 review) and 6.0% (119/2,000, this lane, ten independent
+ *    200-round runs spanning 3.0%–9.0%). Pooled: 186 in 3,000 rounds = 6.2%,
+ *    95% CI 5.4%–7.1%, with no contributing measurement's own interval reaching
+ *    above 9.1%. **Plan against 5%–9% per run snapshot at the peak.** An earlier
+ *    revision of this comment said "up to 4.5% at the most favourable duty
+ *    cycle", generalised from a single 9-in-200 row; every measurement taken
+ *    since has come out above it, which is the direction that matters. If this
+ *    figure is re-measured, move it towards the top of the interval, not the
+ *    middle.
  *  - **Every time**, for an attacker with an oracle for the window — a `git`
  *    shim on `PATH` that plants the redirect after both checks have returned.
  *    There is nothing probabilistic about the defect; the duty cycle only sets
@@ -1343,9 +1426,10 @@ function proveProjectRepositoryBeforeWriting(sandbox: string): void {
  *
  * Until one of those lands, the honest statement of this module's property is:
  * a redirect that is *stable* is refused, on every write, by both halves of the
- * proof; a redirect that is *raced against a specific write* lands about one
- * time in twenty to one in a hundred, and lands silently. See
- * `projectRepositoryDirectory`.
+ * proof; a redirect that is *raced against a specific write* lands somewhere
+ * between about one time in eleven and one time in a hundred, depending on how
+ * the competing writer's period phases against this module's cadence, and lands
+ * silently. See `projectRepositoryDirectory`.
  */
 function projectGitWrite(
   sandbox: string,
@@ -1431,11 +1515,27 @@ function isBaselineCredentialName(name: string): boolean {
   );
 }
 
-/** Enumerate only privacy-safe regular files/symlinks for the bootstrap commit. */
+/**
+ * Enumerate only privacy-safe regular files/symlinks for the bootstrap commit.
+ *
+ * A directory removed between its parent being read and it being descended into
+ * is dropped rather than raised — see `ProjectSnapshotError` for why that is the
+ * ordinary case rather than the exceptional one. The sandbox root is not that
+ * case: if it cannot be read at all there is no snapshot to take, and answering
+ * with an empty file list would record a project as having lost every file it
+ * has. That is raised.
+ */
 function privacySafeProjectSnapshotPaths(sandbox: string): string[] {
   const permittedPaths: string[] = [];
   const visit = (absoluteDirectory: string, relativeDirectory: string): void => {
-    for (const entry of fs.readdirSync(absoluteDirectory, { withFileTypes: true })) {
+    let directoryEntries: fs.Dirent[];
+    try {
+      directoryEntries = fs.readdirSync(absoluteDirectory, { withFileTypes: true });
+    } catch (error) {
+      if (relativeDirectory !== "" && sandboxEntryVanished(error)) return;
+      throw projectSnapshotFailure("enumerate", sandbox, error);
+    }
+    for (const entry of directoryEntries) {
       const isAllowedEngineDataRoot =
         relativeDirectory === "" && entry.name === LEGACY_ENGINE_DATA_DIRECTORY;
       if (
@@ -1462,9 +1562,14 @@ function privacySafeProjectSnapshotPaths(sandbox: string): string[] {
 
 
 /**
- * Stage exactly `permittedPaths` into the temporary index, recording for each
- * one the mode and blob `git add --force` would record — for the blob content
- * policy this module pins, which is attribute-free.
+ * Stage `permittedPaths` into the temporary index, recording for each one the
+ * mode and blob `git add --force` would record — for the blob content policy
+ * this module pins, which is attribute-free.
+ *
+ * "Stage `permittedPaths`" is one qualifier short: an entry that has gone away
+ * since the enumeration produced that list is dropped here rather than failing
+ * the snapshot, so what is recorded is the sandbox as it was found, not as it
+ * was listed. `ProjectSnapshotError` says why.
  *
  * That qualifier is load-bearing and the divergence it names is deliberate. A
  * sandbox holding a `.gitattributes` makes the two trees differ: `* text=auto`
@@ -1522,34 +1627,84 @@ function stageProjectSnapshotPaths(
 
   const stageFromScratch = (relativePath: string, content: Buffer): void => {
     const scratchPath = path.join(scratchDirectory, `blob-${hashedPaths.length}`);
-    fs.writeFileSync(scratchPath, content);
+    try {
+      fs.writeFileSync(scratchPath, content);
+    } catch (error) {
+      throw projectSnapshotFailure("scratch write", sandbox, error);
+    }
     hashedPaths.push(scratchPath);
     pathForAnswer.push(relativePath);
   };
 
+  // The entries that were still there when this loop reached them, in
+  // enumeration order. Not `permittedPaths`: an agent working in its own
+  // sandbox removes files between the enumeration and this loop, and an entry
+  // that has gone is dropped from the snapshot rather than failing it.
+  const stagedPaths: string[] = [];
+
   for (const relativePath of permittedPaths) {
     const absolutePath = path.join(sandbox, relativePath);
-    const entry = fs.lstatSync(absolutePath);
+    let entry: fs.Stats;
+    try {
+      entry = fs.lstatSync(absolutePath);
+    } catch (error) {
+      if (sandboxEntryVanished(error)) continue;
+      throw projectSnapshotFailure("stat", sandbox, error);
+    }
     if (entry.isSymbolicLink()) {
       // A symlink is stored as a blob holding its target, which is what Git
       // does and what keeps the link from being followed out of the sandbox.
+      let linkTarget: string;
+      try {
+        linkTarget = fs.readlinkSync(absolutePath);
+      } catch (error) {
+        if (sandboxEntryVanished(error)) continue;
+        throw projectSnapshotFailure("readlink", sandbox, error);
+      }
       modeForPath.set(relativePath, "120000");
-      stageFromScratch(relativePath, Buffer.from(fs.readlinkSync(absolutePath)));
+      stagedPaths.push(relativePath);
+      stageFromScratch(relativePath, Buffer.from(linkTarget));
       continue;
     }
     // S_IXUSR, the bit Git reads — a file executable only by its group or by
     // others is a regular `100644` blob to Git, and to this.
     const isExecutable = executableBitIsRecorded && (entry.mode & 0o100) !== 0;
-    modeForPath.set(relativePath, isExecutable ? "100755" : "100644");
     // `--stdin-paths` is newline-delimited, so a path containing one is hashed
     // from its bytes instead of by name.
-    if (/[\n\r]/.test(relativePath)) stageFromScratch(relativePath, fs.readFileSync(absolutePath));
-    else {
+    if (/[\n\r]/.test(relativePath)) {
+      let content: Buffer;
+      try {
+        content = fs.readFileSync(absolutePath);
+      } catch (error) {
+        if (sandboxEntryVanished(error)) continue;
+        throw projectSnapshotFailure("read", sandbox, error);
+      }
+      modeForPath.set(relativePath, isExecutable ? "100755" : "100644");
+      stagedPaths.push(relativePath);
+      stageFromScratch(relativePath, content);
+    } else {
+      modeForPath.set(relativePath, isExecutable ? "100755" : "100644");
+      stagedPaths.push(relativePath);
       hashedPaths.push(relativePath);
       pathForAnswer.push(relativePath);
     }
   }
 
+  // Everything enumerated has gone since. There is nothing to hash and nothing
+  // to record, and `hash-object --stdin-paths` must not be handed a bare
+  // newline.
+  if (stagedPaths.length === 0) return;
+
+  // One sliver of the same race is left and is not closed here: an ordinary
+  // entry is named to `hash-object` rather than read by this process, so a file
+  // that survives the `lstat` above and goes before Git opens it fails the whole
+  // batch. That window is the width of the remaining loop plus one process
+  // spawn, against the whole enumeration for the window above it — 490 rounds
+  // of the churn probes that reproduced the `lstat` failure 77 times in 80 did
+  // not hit it once. It is bounded and typed rather than raw: `projectGitWrite`
+  // answers it as `ProjectGitWriteError`, operation `hash-object`. Closing it
+  // means reading every blob into scratch, which is a read and a write per file
+  // for every snapshot, and that is the wrong trade for a window this narrow.
   const objectNames = projectGitWrite(
     sandbox,
     ["hash-object", "--no-filters", "-w", "--stdin-paths"],
@@ -1567,7 +1722,7 @@ function stageProjectSnapshotPaths(
 
   // NUL-terminated records, so a path containing a newline or a tab still
   // names exactly one entry.
-  const indexRecords = permittedPaths
+  const indexRecords = stagedPaths
     .map(
       (relativePath) =>
         `${modeForPath.get(relativePath)} ${objectNameForPath.get(relativePath)}\t${relativePath}\0`,
