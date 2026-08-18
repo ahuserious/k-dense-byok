@@ -233,7 +233,33 @@
       "server/vendor/pipeline-engine/packages/web/src/components/workflows/BuilderToolbar.tsx",
       "server/vendor/pipeline-engine/packages/web/src/components/workflows/StatusBar.tsx",
       "server/vendor/pipeline-engine/packages/web/src/components/workflows/CanvasChatPopout.tsx",
-      "server/vendor/pipeline-engine/packages/web/src/index.css"
+      "server/vendor/pipeline-engine/packages/web/src/index.css",
+      "server/vendor/pipeline-engine/packages/web/src/components/workflows/WorkflowList.tsx",
+      "server/vendor/pipeline-engine/packages/web/src/experiments/console/components/AddProjectDialog.tsx"
+    ],
+    "W4": [
+      "docs/inventory/w4-console-live-graphs.json",
+      "docs/inventory/run-state-v1-*.md",
+      "web/src/lib/session-dag-projection*.ts",
+      "web/src/lib/dag-run-graph-projection*.ts",
+      "web/src/lib/console-live-sources*.ts",
+      "web/src/components/console/live-*.tsx"
+    ],
+    "W3": [
+      "docs/inventory/w3-authoring-path.json",
+      "server/src/api/dag-workflows-validate*.ts",
+      "server/src/api/dag-workflows-import*.ts",
+      "server/src/workflows/compose*.ts",
+      "server/src/workflows/import-library*.ts",
+      "server/test/dag-workflows-validate*.test.ts",
+      "server/test/dag-workflows-import*.test.ts",
+      "web/src/lib/typed-graph-view*.ts",
+      "web/src/lib/typed-canvas-adapter*.ts",
+      "web/src/lib/builder-bridge*.ts",
+      "web/src/lib/dag-helper-patch*.ts",
+      "web/src/lib/dag-compose*.ts",
+      "web/src/components/builder/**",
+      "server/vendor/pipeline-engine/packages/web/src/host/**"
     ]
   },
   "handoffs": [
@@ -767,7 +793,7 @@
       "to": "W2",
       "date": "2026-08-17",
       "path": "server/vendor/pipeline-engine/packages/web/src/components/workflows/NodeInspector.tsx",
-      "scope": "remove '.archon/mcp/github.json' and every archon-branded placeholder/label"
+      "scope": "remove the legacy-brand MCP config placeholder path and every legacy-brand label"
     },
     {
       "from": "S3",
@@ -788,7 +814,7 @@
       "to": "W2",
       "date": "2026-08-17",
       "path": "server/vendor/pipeline-engine/packages/web/src/components/workflows/QuickAddPicker.tsx",
-      "scope": "quick-add: harness pre-selection; no archon placeholders"
+      "scope": "quick-add: harness pre-selection; no legacy-brand placeholders"
     },
     {
       "from": "S3",
@@ -817,6 +843,195 @@
       "date": "2026-08-17",
       "path": "server/vendor/pipeline-engine/packages/web/src/components/workflows/NodeLibrary.tsx",
       "scope": "node library: harness pre-selection for quick nodes; slim chrome"
+    },
+    {
+      "from": "S1",
+      "to": "W4",
+      "date": "2026-08-17",
+      "path": "web/src/components/console/console-panel.tsx",
+      "scope": "mount the live-graph console (rail + main graph + event drawer) as the DAG Runs surface; keep the Agents & Loops sub-tab"
+    },
+    {
+      "from": "S8",
+      "to": "W4",
+      "date": "2026-08-17",
+      "path": "web/src/components/console/kady-console.tsx",
+      "scope": "route live-graph selections and deep links (?run=, ?session=)"
+    },
+    {
+      "from": "S1",
+      "to": "W4",
+      "date": "2026-08-17",
+      "path": "web/src/components/dag-workflow-console.tsx",
+      "scope": "reuse of the run list/event semantics inside the drawer; Workflow Rescue entry point from the run graph"
+    },
+    {
+      "from": "S8",
+      "to": "W4",
+      "date": "2026-08-17",
+      "path": "web/src/components/chat-live-graph.tsx",
+      "scope": "export reuse for session projections; additive exports only (RunStateV1 event union taxonomy)"
+    },
+    {
+      "from": "S8",
+      "to": "W4",
+      "date": "2026-08-17",
+      "path": "server/src/api/sessions.ts",
+      "scope": "additive: list active sessions across projects for the console (scope=all&active=1) if missing; no behaviour change to existing routes"
+    },
+    {
+      "from": "S11",
+      "to": "W4",
+      "date": "2026-08-17",
+      "path": "e2e/item-count-reporter.ts",
+      "scope": "inventory pins for the new console-live.spec.ts items"
+    },
+    {
+      "from": "S1",
+      "to": "W3",
+      "date": "2026-08-17",
+      "path": "web/src/components/dag-builder-surface.tsx",
+      "scope": "host-authoritative typed document, builder bridge, source picker above the iframe, helper context/patch hooks (W1 owns the rail placement)"
+    },
+    {
+      "from": "S2",
+      "to": "W3",
+      "date": "2026-08-17",
+      "path": "web/src/components/engine-iframe-panel.tsx",
+      "scope": "iframe host: bridge origin/targetOrigin, ready timeout banner, ?host=kady"
+    },
+    {
+      "from": "S5",
+      "to": "W3",
+      "date": "2026-08-17",
+      "path": "server/src/workflows/schema.ts",
+      "scope": "additive optional fields only: top-level ui {positions,viewport}, per-node meta.compositeOf, document/node provenance \u2014 excluded from validation semantics and graphSha256"
+    },
+    {
+      "from": "S5",
+      "to": "W3",
+      "date": "2026-08-17",
+      "path": "server/src/workflows/validate.ts",
+      "scope": "reuse for POST /dag-workflows/validate; no semantic change"
+    },
+    {
+      "from": "S4",
+      "to": "W3",
+      "date": "2026-08-17",
+      "path": "server/src/api/dag-workflows.ts",
+      "scope": "mount validate/import routes; run-document snapshot + graphSha256 + workflowId on GET /dag-workflow-runs/:id"
+    },
+    {
+      "from": "S4",
+      "to": "W3",
+      "date": "2026-08-17",
+      "path": "server/src/workflows/kady-node-executor.ts",
+      "scope": "harness switch: dispatch on nodeSpec.harness with per-harness adapters, harness_unavailable, no silent Pi fallback"
+    },
+    {
+      "from": "S4",
+      "to": "W3",
+      "date": "2026-08-17",
+      "path": "server/src/agent/workflow-delegation-session.ts",
+      "scope": "dispatchWorkflowHarness adapters (bounded)"
+    },
+    {
+      "from": "S1",
+      "to": "W3",
+      "date": "2026-08-17",
+      "path": "web/src/lib/dag-workflows.ts",
+      "scope": "client for validate/import + CAS save helpers"
+    },
+    {
+      "from": "S1b",
+      "to": "W3",
+      "date": "2026-08-17",
+      "path": "web/src/components/dag-workflows-panel.tsx",
+      "scope": "open-in-builder action \u2192 typed load"
+    },
+    {
+      "from": "S10",
+      "to": "W3",
+      "date": "2026-08-17",
+      "path": "web/src/lib/workflow-library-template-builder.ts",
+      "scope": "export reuse of createScientificWorkflowTemplateNodes for library \u2192 typed one/few-node DAG import"
+    },
+    {
+      "from": "S10",
+      "to": "W3",
+      "date": "2026-08-17",
+      "path": "web/src/lib/dag-workflow-templates.ts",
+      "scope": "export reuse of createDagWorkflowTemplateGraph / findDagWorkflowTemplate"
+    },
+    {
+      "from": "S10",
+      "to": "W3",
+      "date": "2026-08-17",
+      "path": "web/src/components/workflows-panel.tsx",
+      "scope": "'Open in builder' action on library cards \u2192 import"
+    },
+    {
+      "from": "W2",
+      "to": "W3",
+      "date": "2026-08-17",
+      "path": "server/vendor/pipeline-engine/packages/web/src/components/workflows/BuilderToolbar.tsx",
+      "scope": "host mode: route Validate/Save/Run through the bridge and render the host-fed source list (call-site edit only)"
+    },
+    {
+      "from": "S3",
+      "to": "W3",
+      "date": "2026-08-17",
+      "path": "server/vendor/pipeline-engine/packages/web/src/components/workflows/QuickAddPicker.tsx",
+      "scope": "mount HarnessPicker; stamp spec.harness on the dragged node (call-site edit only)"
+    },
+    {
+      "from": "S3",
+      "to": "W3",
+      "date": "2026-08-17",
+      "path": "server/vendor/pipeline-engine/packages/web/src/lib/api.ts",
+      "scope": "host-mode: skip engine list when host-fed"
+    },
+    {
+      "from": "S3",
+      "to": "W3",
+      "date": "2026-08-17",
+      "path": "server/vendor/pipeline-engine/packages/web/src/hooks/useBuilderValidation.ts",
+      "scope": "host mode: harness is not an inline error when the document is typed (typed route validates)"
+    },
+    {
+      "from": "W2",
+      "to": "W3",
+      "date": "2026-08-17",
+      "path": "server/vendor/pipeline-engine/packages/web/src/components/workflows/WorkflowBuilder.tsx",
+      "scope": "host mode wiring after W2 lands"
+    },
+    {
+      "from": "S11",
+      "to": "W3",
+      "date": "2026-08-17",
+      "path": "e2e/item-count-reporter.ts",
+      "scope": "inventory pins for the new builder-typed.spec.ts items"
+    },
+    {
+      "from": "S11",
+      "to": "W3",
+      "date": "2026-08-17",
+      "path": "e2e/builder-typed.spec.ts",
+      "scope": "new Playwright items for the typed builder path (load/import/stitch/harness)"
+    },
+    {
+      "from": "S11",
+      "to": "W4",
+      "date": "2026-08-17",
+      "path": "e2e/console-live.spec.ts",
+      "scope": "new Playwright items for the live-graph console"
+    },
+    {
+      "from": "S11",
+      "to": "W2",
+      "date": "2026-08-18",
+      "path": "e2e/builder.spec.ts",
+      "scope": "rewrite the seven node-card assertions to the explicit expand/collapse contract and the 'CLI harness: \u2026' badge title; no items added or removed"
     }
   ]
 }
