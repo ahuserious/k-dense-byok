@@ -82,7 +82,7 @@ Every row in `events` is a `WorkflowRunEventV1`:
 not exactly `lastSeq + 1`. So **`seq` is your ordering key, not `ts`**. Two
 events can share a `ts`; they cannot share a `seq`.
 
-### The 24 event types
+### The event types
 
 Run-level: `run_queued`, `run_started`, `run_waiting`, `run_blocked`,
 `run_paused`, `run_resumed`, `run_succeeded`, `run_failed`, `run_cancelled`,
@@ -277,7 +277,7 @@ Diagnostic codes produced by the reducer:
 | `event-after-terminal` | An event arrived after the run already ended. |
 | `invalid-node-transition` | e.g. `node_failed` on a non-running execution. |
 | `invalid-rescue-transition` | `rescue_started`/`rescue_finished` out of order. |
-| `unknown-event-type` | An event type outside the 24. |
+| `unknown-event-type` | An event type outside the list in §1. |
 | `event-log-repaired` | A torn tail was repaired (`fatal: false`). |
 
 `torn-event-tail` and `event-log-repaired` are the specific signature of *"the
@@ -342,7 +342,7 @@ the smallest scope reduction would be, and let the owner choose. If the code is
 ### 5.4 Validation failure on save
 
 Signature: no run-level failure at all, or a run that never left `queued`. The
-graph was rejected by `validateWorkflowGraph` before or at save, producing
+graph was rejected by `validateWorkflowGraphDocument` before or at save, producing
 `WorkflowValidationIssue` rows with a `code` and a JSON-pointer `path` such as
 `/nodes/2/settings/deliberation` or `/settings/…`.
 
