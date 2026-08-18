@@ -25,6 +25,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DEFAULT_PROJECT_ID, PROJECTS_ROOT } from "./config.ts";
 import { LEGACY_ENGINE_DATA_DIRECTORY } from "./legacy-engine-data.ts";
+import { isSamePath } from "./path-containment.ts";
 import { isWithin } from "./sandbox-fs.ts";
 import { currentProjectId } from "./scope.ts";
 import { seedSandboxFiles } from "./sandbox-seed.ts";
@@ -264,18 +265,221 @@ export interface CreateProjectInput {
   spendLimitUsd?: number | null;
 }
 
-function hasProjectRepositoryCommit(sandbox: string): boolean {
-  // Do not let Git walk upward into Kady's own checkout: the sandbox itself
-  // must own the repository used for engine worktree isolation.
-  if (!fs.existsSync(path.join(sandbox, ".git"))) return false;
-  try {
-    execFileSync("git", ["-C", sandbox, "rev-parse", "--verify", "HEAD"], {
-      stdio: "ignore",
-    });
-    return true;
-  } catch {
-    return false;
+// --- project repository containment --------------------------------------
+
+/**
+ * Git environment variables that relocate the repository a `git` invocation
+ * acts on. A backend started from inside a developer's checkout (or from a Git
+ * hook, alias, or rebase todo script) inherits them, and `git -C <sandbox>
+ * config` / `update-ref` would then operate on THAT repository while
+ * `rev-parse --show-toplevel` still reports the sandbox. That is how a project
+ * bootstrap once wrote an identity into a real checkout and moved its branch
+ * ref. Every project-repository call starts from a scrubbed environment.
+ */
+const RELOCATING_GIT_ENVIRONMENT_KEYS = [
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_CEILING_DIRECTORIES",
+  "GIT_COMMON_DIR",
+  "GIT_DIR",
+  "GIT_INDEX_FILE",
+  "GIT_NAMESPACE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_WORK_TREE",
+];
+
+function projectGitEnvironment(
+  overrides: Record<string, string> = {},
+): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of RELOCATING_GIT_ENVIRONMENT_KEYS) delete environment[key];
+  return Object.assign(environment, overrides);
+}
+
+const PROJECT_REPOSITORY_AUTHOR_NAME = "Kady";
+const PROJECT_REPOSITORY_AUTHOR_EMAIL = "kady@localhost";
+
+/**
+ * Authoring identity for the baseline commit, passed per-invocation. A
+ * repository this function did not create keeps whatever identity it has, so
+ * the commit cannot depend on `git config` having been written.
+ */
+const PROJECT_REPOSITORY_IDENTITY_ENVIRONMENT = {
+  GIT_AUTHOR_NAME: PROJECT_REPOSITORY_AUTHOR_NAME,
+  GIT_AUTHOR_EMAIL: PROJECT_REPOSITORY_AUTHOR_EMAIL,
+  GIT_COMMITTER_NAME: PROJECT_REPOSITORY_AUTHOR_NAME,
+  GIT_COMMITTER_EMAIL: PROJECT_REPOSITORY_AUTHOR_EMAIL,
+};
+
+/** Which containment invariant a sandbox violated, carried on the thrown error. */
+export type ProjectRepositoryInvariant =
+  | "sandbox_git_is_a_pointer_file"
+  | "sandbox_is_not_repository_toplevel"
+  | "sandbox_inside_tracked_repository";
+
+const PROJECT_REPOSITORY_INVARIANT_REASONS: Record<ProjectRepositoryInvariant, string> = {
+  sandbox_git_is_a_pointer_file:
+    "its .git entry is not a repository directory but a pointer (a linked worktree, a submodule, or a symlink), so the repository it names belongs to someone else",
+  sandbox_is_not_repository_toplevel:
+    "it is not the toplevel of the repository that owns it",
+  sandbox_inside_tracked_repository:
+    "it resolves inside an existing repository that already has tracked content",
+};
+
+/**
+ * A project sandbox is not, and must not become, part of a repository it does
+ * not own. Thrown instead of adopting one: no `git init` over it, no identity
+ * written into it, no ref of it moved.
+ *
+ * This is an operator misconfiguration (a projects root pointed at a source
+ * checkout), not bad user input — see the API-layer mapping in the route that
+ * catches it.
+ */
+export class ProjectRepositoryContainmentError extends Error {
+  readonly code = "project_repository_containment";
+  readonly sandbox: string;
+  readonly offendingToplevel: string | null;
+  readonly invariant: ProjectRepositoryInvariant;
+
+  constructor(
+    sandbox: string,
+    offendingToplevel: string | null,
+    invariant: ProjectRepositoryInvariant,
+  ) {
+    super(
+      `Refusing to initialize the project repository at ${sandbox}: ` +
+        `${PROJECT_REPOSITORY_INVARIANT_REASONS[invariant]} ` +
+        `(repository toplevel: ${offendingToplevel ?? "unresolved"}; ` +
+        `invariant: ${invariant}). A project sandbox must own its repository; ` +
+        `point the projects root at a directory that is not inside a Git checkout.`,
+    );
+    this.name = "ProjectRepositoryContainmentError";
+    this.sandbox = sandbox;
+    this.offendingToplevel = offendingToplevel;
+    this.invariant = invariant;
   }
+}
+
+/**
+ * What owns the sandbox, once proven:
+ *  - `absent`            no repository owns it; this call may create one
+ *  - `own-empty`         it is its own toplevel and holds no history at all
+ *  - `own-with-history`  it is its own toplevel and holds history; hands off
+ * Anything else throws ProjectRepositoryContainmentError.
+ */
+type ProjectRepositoryOwnership = "absent" | "own-empty" | "own-with-history";
+
+function gitOutputOrNull(workingDirectory: string, args: string[]): string | null {
+  try {
+    return execFileSync("git", ["-C", workingDirectory, ...args], {
+      env: projectGitEnvironment(),
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+function resolveRealPath(target: string): string {
+  try {
+    return fs.realpathSync(target);
+  } catch {
+    return path.resolve(target);
+  }
+}
+
+/**
+ * The repository a `.git` pointer file hands work to: the main worktree for a
+ * linked worktree, otherwise the common Git directory itself (a submodule's
+ * `.git/modules/<name>` has no toplevel of its own).
+ */
+function pointerRepositoryToplevel(sandbox: string): string | null {
+  const commonDirectory = gitOutputOrNull(sandbox, [
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-common-dir",
+  ]);
+  if (commonDirectory === null) return null;
+  const resolvedCommonDirectory = resolveRealPath(commonDirectory);
+  return path.basename(resolvedCommonDirectory) === ".git"
+    ? path.dirname(resolvedCommonDirectory)
+    : resolvedCommonDirectory;
+}
+
+/** True when a repository already holds content worth protecting. */
+function repositoryHasTrackedContent(toplevel: string): boolean {
+  if (gitOutputOrNull(toplevel, ["rev-parse", "--verify", "HEAD"]) !== null) return true;
+  const trackedFiles = gitOutputOrNull(toplevel, ["ls-files"]);
+  return trackedFiles !== null && trackedFiles.length > 0;
+}
+
+/**
+ * Prove which repository — if any — owns `sandbox`, refusing every arrangement
+ * in which writing to it would write to somebody else's repository.
+ *
+ * `fs.existsSync(<sandbox>/.git)` does not prove ownership: the entry can be a
+ * worktree/submodule pointer, and its absence does not stop Git from walking
+ * up into an enclosing checkout.
+ */
+function inspectProjectRepositoryOwnership(sandbox: string): ProjectRepositoryOwnership {
+  const resolvedSandbox = resolveRealPath(sandbox);
+  let gitEntry: fs.Stats | null = null;
+  try {
+    gitEntry = fs.lstatSync(path.join(sandbox, ".git"));
+  } catch {
+    gitEntry = null;
+  }
+
+  if (gitEntry !== null && !gitEntry.isDirectory()) {
+    // `--show-toplevel` would answer "the sandbox" for a linked worktree, which
+    // hides the repository actually at risk; the common Git directory names it.
+    throw new ProjectRepositoryContainmentError(
+      resolvedSandbox,
+      pointerRepositoryToplevel(sandbox),
+      "sandbox_git_is_a_pointer_file",
+    );
+  }
+
+  if (gitEntry !== null) {
+    const toplevel = gitOutputOrNull(sandbox, ["rev-parse", "--show-toplevel"]);
+    const resolvedToplevel = toplevel ? resolveRealPath(toplevel) : null;
+    if (resolvedToplevel === null || !isSamePath(resolvedToplevel, resolvedSandbox)) {
+      throw new ProjectRepositoryContainmentError(
+        resolvedSandbox,
+        resolvedToplevel,
+        "sandbox_is_not_repository_toplevel",
+      );
+    }
+    if (gitOutputOrNull(sandbox, ["rev-parse", "--verify", "HEAD"]) !== null) {
+      return "own-with-history";
+    }
+    // An unborn HEAD is not proof of an empty repository: HEAD can point at a
+    // branch that does not exist yet while the history lives on other refs.
+    // Only a repository with no refs at all is one this call may commit into.
+    const anyRef = gitOutputOrNull(sandbox, [
+      "for-each-ref",
+      "--count=1",
+      "--format=%(refname)",
+    ]);
+    return anyRef !== null && anyRef.length > 0 ? "own-with-history" : "own-empty";
+  }
+
+  // No repository of its own: Git would walk upward from here. An enclosing
+  // repository that already tracks content means the projects root was pointed
+  // at a source checkout — a configuration error, not something to initialize
+  // a nested repository inside.
+  const enclosingToplevel = gitOutputOrNull(sandbox, ["rev-parse", "--show-toplevel"]);
+  if (enclosingToplevel !== null) {
+    const resolvedEnclosing = resolveRealPath(enclosingToplevel);
+    if (repositoryHasTrackedContent(resolvedEnclosing)) {
+      throw new ProjectRepositoryContainmentError(
+        resolvedSandbox,
+        resolvedEnclosing,
+        "sandbox_inside_tracked_repository",
+      );
+    }
+  }
+  return "absent";
 }
 
 function processIsRunning(processId: number): boolean {
@@ -362,60 +566,104 @@ function privacySafeProjectSnapshotPaths(sandbox: string): string[] {
   return permittedPaths;
 }
 
-function ensureProjectRepository(sandbox: string): void {
-  if (hasProjectRepositoryCommit(sandbox)) return;
-  const releaseLock = acquireProjectRepositoryLock(sandbox);
+/**
+ * Create the sandbox's very first commit from a temporary index. Only ever
+ * called for a repository the sandbox owns and whose HEAD is unborn.
+ */
+function writeProjectBaselineCommit(sandbox: string): void {
+  const temporaryDirectory = fs.mkdtempSync(path.join(path.dirname(sandbox), ".git-baseline-"));
+  const temporaryIndex = path.join(temporaryDirectory, "index");
+  const gitEnvironment = projectGitEnvironment({
+    ...PROJECT_REPOSITORY_IDENTITY_ENVIRONMENT,
+    GIT_INDEX_FILE: temporaryIndex,
+    GIT_LITERAL_PATHSPECS: "1",
+  });
   try {
-    if (hasProjectRepositoryCommit(sandbox)) return;
-    if (!fs.existsSync(path.join(sandbox, ".git"))) {
-      execFileSync("git", ["init", "--quiet", sandbox], { stdio: "ignore" });
+    execFileSync("git", ["-C", sandbox, "read-tree", "--empty"], {
+      env: gitEnvironment,
+      stdio: "ignore",
+    });
+    const permittedPaths = privacySafeProjectSnapshotPaths(sandbox);
+    if (permittedPaths.length > 0) {
+      execFileSync(
+        "git",
+        ["-C", sandbox, "add", "--force", "--", ...permittedPaths],
+        { env: gitEnvironment, stdio: "ignore" },
+      );
     }
-    execFileSync("git", ["-C", sandbox, "config", "user.name", "Kady"], { stdio: "ignore" });
-    execFileSync(
+    const tree = execFileSync("git", ["-C", sandbox, "write-tree"], {
+      env: gitEnvironment,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    const commit = execFileSync(
       "git",
-      ["-C", sandbox, "config", "user.email", "kady@localhost"],
-      { stdio: "ignore" },
-    );
-    const temporaryDirectory = fs.mkdtempSync(path.join(path.dirname(sandbox), ".git-baseline-"));
-    const temporaryIndex = path.join(temporaryDirectory, "index");
-    const gitEnvironment = {
-      ...process.env,
-      GIT_INDEX_FILE: temporaryIndex,
-      GIT_LITERAL_PATHSPECS: "1",
-    };
-    try {
-      execFileSync("git", ["-C", sandbox, "read-tree", "--empty"], {
-        env: gitEnvironment,
-        stdio: "ignore",
-      });
-      const permittedPaths = privacySafeProjectSnapshotPaths(sandbox);
-      if (permittedPaths.length > 0) {
-        execFileSync(
-          "git",
-          ["-C", sandbox, "add", "--force", "--", ...permittedPaths],
-          { env: gitEnvironment, stdio: "ignore" },
-        );
-      }
-      const tree = execFileSync("git", ["-C", sandbox, "write-tree"], {
+      ["-C", sandbox, "commit-tree", tree, "-m", "Initialize Kady project"],
+      {
         env: gitEnvironment,
         encoding: "utf-8",
         stdio: ["ignore", "pipe", "pipe"],
-      }).trim();
-      const commit = execFileSync(
-        "git",
-        ["-C", sandbox, "commit-tree", tree, "-m", "Initialize Kady project"],
-        {
-          env: gitEnvironment,
-          encoding: "utf-8",
-          stdio: ["ignore", "pipe", "pipe"],
-        },
-      ).trim();
-      execFileSync("git", ["-C", sandbox, "update-ref", "HEAD", commit], {
+      },
+    ).trim();
+    // The empty old-value makes Git itself refuse the update unless the ref is
+    // still unborn: a history that appeared since the check above is never
+    // overwritten, even under a lock this process does not hold.
+    execFileSync("git", ["-C", sandbox, "update-ref", "HEAD", commit, ""], {
+      env: projectGitEnvironment(),
+      stdio: "ignore",
+    });
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Give the sandbox a repository of its own with one baseline commit.
+ *
+ * Exported for the containment regression tests, which need to point it at
+ * hostile directory layouts a projects root would never produce on purpose.
+ *
+ * Refuses — loudly, with ProjectRepositoryContainmentError — rather than
+ * touching a repository it did not create. Ownership is proven before the lock
+ * is taken so a refusal leaves no lock file behind in someone's checkout.
+ */
+export function ensureProjectRepository(sandbox: string): void {
+  if (inspectProjectRepositoryOwnership(sandbox) === "own-with-history") return;
+  const releaseLock = acquireProjectRepositoryLock(sandbox);
+  try {
+    let ownership = inspectProjectRepositoryOwnership(sandbox);
+    if (ownership === "own-with-history") return;
+    if (ownership === "absent") {
+      execFileSync("git", ["init", "--quiet", sandbox], {
+        env: projectGitEnvironment(),
         stdio: "ignore",
       });
-    } finally {
-      fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+      // Re-prove ownership: only a repository this call brought into existence
+      // may be given an identity.
+      ownership = inspectProjectRepositoryOwnership(sandbox);
+      if (ownership === "absent") {
+        throw new ProjectRepositoryContainmentError(
+          resolveRealPath(sandbox),
+          null,
+          "sandbox_is_not_repository_toplevel",
+        );
+      }
+      if (ownership === "own-empty") {
+        execFileSync(
+          "git",
+          ["-C", sandbox, "config", "user.name", PROJECT_REPOSITORY_AUTHOR_NAME],
+          { env: projectGitEnvironment(), stdio: "ignore" },
+        );
+        execFileSync(
+          "git",
+          ["-C", sandbox, "config", "user.email", PROJECT_REPOSITORY_AUTHOR_EMAIL],
+          { env: projectGitEnvironment(), stdio: "ignore" },
+        );
+      }
     }
+    // An existing repository keeps its identity and its history: the baseline
+    // commit is only ever the first commit of a repository that has none.
+    if (ownership === "own-empty") writeProjectBaselineCommit(sandbox);
   } finally {
     releaseLock();
   }
@@ -432,11 +680,10 @@ export function createProjectRunSnapshot(projectId: string, runIdentity: string)
   const paths = ensureProjectExists(projectId);
   const temporaryDirectory = fs.mkdtempSync(path.join(paths.root, ".run-snapshot-"));
   const temporaryIndex = path.join(temporaryDirectory, "index");
-  const gitEnvironment = {
-    ...process.env,
+  const gitEnvironment = projectGitEnvironment({
     GIT_INDEX_FILE: temporaryIndex,
     GIT_LITERAL_PATHSPECS: "1",
-  };
+  });
   try {
     execFileSync("git", ["-C", paths.sandbox, "read-tree", "--empty"], {
       env: gitEnvironment,
@@ -456,6 +703,7 @@ export function createProjectRunSnapshot(projectId: string, runIdentity: string)
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
     const parent = execFileSync("git", ["-C", paths.sandbox, "rev-parse", "HEAD"], {
+      env: projectGitEnvironment(),
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
@@ -472,7 +720,7 @@ export function createProjectRunSnapshot(projectId: string, runIdentity: string)
     execFileSync(
       "git",
       ["-C", paths.sandbox, "update-ref", `refs/kady/run-snapshots/${snapshotRef}`, snapshot],
-      { stdio: "ignore" },
+      { env: projectGitEnvironment(), stdio: "ignore" },
     );
     return snapshot;
   } finally {
