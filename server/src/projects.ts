@@ -418,20 +418,40 @@ function projectGitArguments(args: string[]): string[] {
  * and falls through to the pinned fallback when the bound is hit.
  */
 /**
- * What a failed project Git invocation is allowed to say.
+ * A project Git invocation that failed for a reason this module cannot pin on
+ * containment.
  *
- * `execFileSync` puts the whole argv in its message, and for this module that
- * argv is the overrides-laden project Git command line — which then reaches the
- * client as the detail of an unclassified 500. Every one of these failures is
- * either a bug here or the sandbox breaking its own repository underneath a
- * write; neither is worth handing back the command line. Name the operation and
- * the sandbox, keep the exit status, drop the rest.
+ * Typed rather than a bare `Error` because of what the round-19 review found in
+ * its contention tallies: these arrive at the caller as an *unclassified* 500,
+ * indistinguishable from a crash, when in fact they are a known and bounded
+ * outcome — either a bug here or the sandbox breaking its own repository
+ * underneath a write. A caller that wants to tell those apart from an internal
+ * fault can now do it on `code` instead of on the message text.
+ *
+ * The message stays deliberately thin. `execFileSync` puts the whole argv in
+ * its own message, and for this module that argv is the overrides-laden project
+ * Git command line naming every pinned config key and the absolute paths of the
+ * repository and the sandbox. Name the operation and the sandbox, keep the exit
+ * status, drop the rest.
  */
+export class ProjectGitWriteError extends Error {
+  readonly code = "project_git_invocation_failed";
+  readonly operation: string;
+  readonly sandbox: string;
+  readonly status: number | null;
+
+  constructor(operation: string, sandbox: string, status: number | null) {
+    super(`Project git ${operation} failed for ${sandbox}: exited ${status ?? "abnormally"}`);
+    this.name = "ProjectGitWriteError";
+    this.operation = operation;
+    this.sandbox = sandbox;
+    this.status = status;
+  }
+}
+
 function projectGitFailure(operation: string, sandbox: string, error: unknown): Error {
   const status = (error as { status?: number | null }).status;
-  return new Error(
-    `Project git ${operation} failed for ${sandbox}: exited ${status ?? "abnormally"}`,
-  );
+  return new ProjectGitWriteError(operation, sandbox, status ?? null);
 }
 
 const GIT_DISCOVERY_TIMEOUT_MS = 2_000;
@@ -554,7 +574,8 @@ export type ProjectRepositoryInvariant =
   | "sandbox_is_not_repository_toplevel"
   | "sandbox_inside_tracked_repository"
   | "sandbox_git_directory_shadows_project_repository"
-  | "project_repository_holds_a_symlink";
+  | "project_repository_holds_a_symlink"
+  | "project_repository_changed_under_the_scan";
 
 const PROJECT_REPOSITORY_INVARIANT_REASONS: Record<ProjectRepositoryInvariant, string> = {
   sandbox_git_is_a_pointer_file:
@@ -569,6 +590,8 @@ const PROJECT_REPOSITORY_INVARIANT_REASONS: Record<ProjectRepositoryInvariant, s
     "a second repository was created inside it while the project's own repository already sits beside it, and which of the two owns the sandbox is not this module's to guess",
   project_repository_holds_a_symlink:
     "the repository directory holds a symbolic link, so the objects and refs written through it would land wherever that link leads rather than in the repository",
+  project_repository_changed_under_the_scan:
+    "the repository directory changed while the scan that proves it holds no redirect was reading it, so what the scan answered about is not what the write would have opened",
 };
 
 /**
@@ -833,12 +856,59 @@ function gitDirectoryPointerTarget(sandbox: string): string | null {
  * above one would refuse a repository that an ordinary `git clone --local`
  * elsewhere on the machine had hard-linked objects out of. Bind mounts are in
  * the same category and cannot be distinguished from a directory at all.
+ *
+ * A filesystem error raised while walking is a refusal, not a crash. Under a
+ * sandbox that is rewriting the directory concurrently, `lstat` and `readdir`
+ * see entries that vanish or change type between the parent listing and the
+ * recursive visit, and the round-19 review measured what that produced: a raw
+ * `ENOENT: … scandir '<repository path>'` escaping this module as an
+ * unclassified 500 carrying a server-side absolute path. Structurally it is the
+ * same event the scan exists to catch — the directory it is proving is not the
+ * directory the write would open — so it answers with the same typed refusal.
+ *
+ * The walk's cost is a function of the object store, and nothing here bounds
+ * it. Measured on this build, medians of ten, one walk and one whole snapshot:
+ *
+ *     repository entries    walk      snapshot
+ *                     49    0.29 ms     79.6 ms
+ *                  2,338    4.72 ms    102.7 ms
+ *                 22,378   14.04 ms    167.6 ms
+ *                222,418  113.15 ms    819.5 ms
+ *
+ * Linear in the entry count, five walks per snapshot — at 222k entries the
+ * walks are roughly 570 ms of that 820 ms — and the store only grows: this
+ * module never runs `gc`, `gc` is not in `PROJECT_GIT_SUBCOMMANDS`, and none of
+ * the pinned subcommands trigger git's auto-gc, so loose objects and retained
+ * `refs/kady/run-snapshots/*` accumulate for the life of the project. Every
+ * snapshot pays for every object every previous snapshot left behind, so the
+ * practical ceiling is set by retention rather than by the walk: a project at a
+ * few thousand runs is in the tens of milliseconds, one that never gets
+ * collected reaches a second per snapshot.
+ *
+ * No bound is imposed *here* on purpose. A walk that stops early, samples, or
+ * skips a subtree is a check with a hole in it — the incomplete-list shape that
+ * failed rounds 14–16 — and the sandbox picks which directory the hole lands
+ * in. The bound belongs where the growth is: retention and a safe `gc`, tracked
+ * at `TODO(#33-hardening)` in `createProjectRunSnapshot`.
  */
 function refuseRepositoryDirectoryHoldingSymlink(
   resolvedSandbox: string,
   repositoryDirectory: string,
 ): void {
-  if (!fs.lstatSync(repositoryDirectory).isDirectory()) {
+  const refuseChangedUnderTheScan = (offendingPath: string): never => {
+    throw new ProjectRepositoryContainmentError(
+      resolvedSandbox,
+      resolveRealPath(offendingPath),
+      "project_repository_changed_under_the_scan",
+    );
+  };
+  let repositoryEntry: fs.Stats;
+  try {
+    repositoryEntry = fs.lstatSync(repositoryDirectory);
+  } catch {
+    return refuseChangedUnderTheScan(repositoryDirectory);
+  }
+  if (!repositoryEntry.isDirectory()) {
     // The directory itself, not only what is under it: a symlink here
     // redirects every write without holding a symlink inside.
     throw new ProjectRepositoryContainmentError(
@@ -848,7 +918,13 @@ function refuseRepositoryDirectoryHoldingSymlink(
     );
   }
   const visit = (directory: string): void => {
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(directory, { withFileTypes: true });
+    } catch {
+      return void refuseChangedUnderTheScan(directory);
+    }
+    for (const entry of entries) {
       const child = path.join(directory, entry.name);
       if (entry.isSymbolicLink()) {
         throw new ProjectRepositoryContainmentError(
@@ -1213,13 +1289,63 @@ function proveProjectRepositoryBeforeWriting(sandbox: string): void {
  * Proving per invocation rather than once per batch is the point. A snapshot
  * spends tens of milliseconds across seven processes, and `update-ref` — the
  * process whose write is worth stealing — is the last of them; a single check at
- * the top of the batch would leave the whole batch as the window. What remains
- * is the window between these checks returning and the child process opening
- * the path, which is not closable from inside this process: Git addresses its
+ * the top of the batch would leave the whole batch as the window.
+ *
+ * What remains is a TOCTOU window, and it is *winnable*. Do not read the
+ * per-invocation proof as closing it. Measured, on this build:
+ *
+ *  - **~3% of run snapshots** are stolen by a *blind* competing writer with no
+ *    timing signal and no knowledge of this module — a plain on/off duty cycle
+ *    replacing one entry the write goes through with a symbolic link, i.e.
+ *    `ln -s` and `rm` in the agent's own shell. 600 rounds across three duty
+ *    cycles planted 15–18 Kady-authored refs in a repository this module does
+ *    not own: 2.5%–3.0% per run snapshot, 95% binomial CI roughly 1.8%–4.7%,
+ *    and up to 4.5% at the most favourable duty cycle. Two independent harnesses
+ *    (this lane's and round 19's review's) agree on the figure.
+ *  - **Every time**, for an attacker with an oracle for the window — a `git`
+ *    shim on `PATH` that plants the redirect after both checks have returned.
+ *    There is nothing probabilistic about the defect; the duty cycle only sets
+ *    how often a blind attacker happens to land in it.
+ *  - The window is **~3–5 ms** for `update-ref`, most of which is git's process
+ *    startup and repository setup, and **wider** for an entry the subtree walk
+ *    visits early: the walk is a recursive `readdir` — 0.3 ms on a fresh
+ *    repository, 4.7 ms at 2,338 entries, 113 ms at 222k (see
+ *    `refuseRepositoryDirectoryHoldingSymlink`) — so an entry it has already
+ *    passed can be replaced while the rest of it is still running, and on a
+ *    large object store that is the dominant term. The window is not only
+ *    "after both checks return", and it grows with the repository.
+ *  - A stolen write **returns success**. Nothing after the spawn re-examines the
+ *    repository, so the snapshot answers with an object name as if it had landed
+ *    where it was meant to. Silence is the property that made the 2026-08-17
+ *    incident what it was, and this module does not remove it.
+ *
+ * Round 19's own race harness reported "0 wins in 200 rounds"; that measured
+ * something else and is corrected in `c5-r19.report.md`. Its attacker renamed
+ * `<repo>/refs` away wholesale, and git's `is_git_directory()` requires
+ * `$GIT_DIR/refs` to exist — so `rev-parse --show-toplevel` failed and every
+ * round was refused by `proveProjectRepositoryBeforeWriting` before the subtree
+ * scan or the write was reached. It measured this module noticing a *broken*
+ * repository, not a *redirected* one.
+ *
+ * None of this is closable from inside this process. Git addresses its
  * repository by path, so any check this module makes is a check about a path
- * whose meaning the sandbox can change afterwards. Closing that needs the
- * agent's own tools to stop reaching the path at all, which is not this
- * module's to write — see `projectRepositoryDirectory`.
+ * whose meaning the sandbox can change afterwards, and no amount of re-checking
+ * changes that — it only narrows the interval. Closing it needs one of three
+ * things, none of them this module's to write, all tracked as task #70:
+ *
+ *  1. a path filter on the agent's own tools, so the sandbox cannot name
+ *     `<sandbox>.git` at all — the smallest of the three, and the one the other
+ *     two depend on a repository location for;
+ *  2. OS-level confinement of the agent's processes to the sandbox subtree
+ *     (mount namespace, `sandbox-exec`, or equivalent);
+ *  3. running Git as a different uid from the one the agent's shell runs as, so
+ *     the sandbox has no write permission on the repository directory.
+ *
+ * Until one of those lands, the honest statement of this module's property is:
+ * a redirect that is *stable* is refused, on every write, by both halves of the
+ * proof; a redirect that is *raced against a specific write* lands about one
+ * time in twenty to one in a hundred, and lands silently. See
+ * `projectRepositoryDirectory`.
  */
 function projectGitWrite(
   sandbox: string,
@@ -1244,9 +1370,49 @@ function projectGitWrite(
       ],
     });
   } catch (error) {
-    throw projectGitFailure(args[0], sandbox, error);
+    // A write that failed *because* the sandbox redirected the repository
+    // underneath it says so, rather than answering with a bare exit status. The
+    // round-19 review's contention runs produced 31 `Project git update-ref
+    // failed … exited 128` rows out of 600, every one of them the sandbox
+    // breaking its own repository mid-write, and reported as if git had simply
+    // misbehaved. Re-proving costs one subprocess and one walk on a path that
+    // has already failed, and the answer is only substituted when it is a
+    // containment refusal — a genuine git failure is still a git failure.
+    //
+    // It answers for a redirect that is still there, which is the case worth
+    // naming, and not for one already withdrawn: an attacker toggling the entry
+    // on a duty cycle can have removed it before this runs, and then the module
+    // genuinely cannot prove why git failed. Those keep the `ProjectGitWriteError`
+    // answer rather than being reported as containment on a guess — the failure
+    // is typed and the caller can tell it from an internal fault, which is what
+    // was actually missing.
+    throw containmentCauseOfFailedWrite(sandbox) ?? projectGitFailure(args[0], sandbox, error);
   }
   return options.capture === true ? output.trim() : "";
+}
+
+/**
+ * Which containment invariant, if any, a failed write broke — asked after the
+ * failure, on the same two halves that were asked before it.
+ *
+ * Returns `null` when the repository is still intact, which is the ordinary
+ * case: a write can fail for reasons that have nothing to do with containment
+ * (a full disk, a broken `git` on `PATH`), and those must keep their own
+ * message. Anything the re-proof throws that is *not* a containment refusal is
+ * discarded rather than raised: this runs on an error path, and a second error
+ * raised while classifying the first would lose it.
+ */
+function containmentCauseOfFailedWrite(sandbox: string): ProjectRepositoryContainmentError | null {
+  try {
+    proveProjectRepositoryBeforeWriting(sandbox);
+    refuseRepositoryDirectoryHoldingSymlink(
+      resolveRealPath(sandbox),
+      projectRepositoryDirectory(sandbox),
+    );
+  } catch (error) {
+    if (error instanceof ProjectRepositoryContainmentError) return error;
+  }
+  return null;
 }
 
 const BASELINE_EXCLUDED_DIRECTORIES = new Set([
@@ -1297,7 +1463,22 @@ function privacySafeProjectSnapshotPaths(sandbox: string): string[] {
 
 /**
  * Stage exactly `permittedPaths` into the temporary index, recording for each
- * one the mode and blob `git add --force` would record.
+ * one the mode and blob `git add --force` would record — for the blob content
+ * policy this module pins, which is attribute-free.
+ *
+ * That qualifier is load-bearing and the divergence it names is deliberate. A
+ * sandbox holding a `.gitattributes` makes the two trees differ: `* text=auto`
+ * alone is enough to change a CRLF file's blob under `git add` and not here,
+ * because `--no-filters` is exactly what stops an attacker-supplied
+ * `filter.<name>.clean` from running as the server. Parity is with what `git
+ * add --force` records *when no attribute applies*, not with whatever the
+ * sandbox's own `.gitattributes` asks for; a snapshot is meant to record the
+ * bytes on disk, and a reader comparing the two trees on a project that has a
+ * `.gitattributes` should expect them to differ there. The attribute file is
+ * not itself in either tree — `privacySafeProjectSnapshotPaths` drops every
+ * dotfile — so the divergence shows up only in the blobs it would have applied
+ * to, which is the confusing way round to find it: hence the qualifier, here,
+ * in writing.
  *
  * Every blob is hashed by one `hash-object --stdin-paths`, including the two
  * kinds of entry that cannot be named on that stream as they stand: a symbolic

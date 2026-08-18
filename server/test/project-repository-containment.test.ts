@@ -1805,6 +1805,86 @@ describe("the repository is re-proven at the moment it is written through", () =
     expect(fingerprintCheckout(victim)).toEqual(before);
   });
 
+  it("refuses rather than raising a raw filesystem error when the scan cannot read the directory", () => {
+    // Round 19's review measured this under contention: a sandbox rewriting the
+    // repository while the scan walks it made `readdir` fail, and the raw
+    // `ENOENT: … scandir '<repository path>'` escaped as an unclassified 500
+    // carrying a server-side absolute path. A directory the scan cannot read is
+    // structurally the thing the scan exists to catch — it cannot prove that
+    // directory holds no redirect — so it is a typed refusal. Reproduced here
+    // deterministically with a mode the walk cannot get past; the racing
+    // version is the same `readdirSync` call.
+    ensureProjectExists("unreadable-subtree-study");
+    const paths = resolvePaths("unreadable-subtree-study");
+    // A directory git itself never opens, so the ownership proof still passes
+    // and the refusal can only have come from the subtree scan.
+    const unreadable = path.join(projectRepositoryDirectoryFor(paths.sandbox), "unreadable");
+    fs.mkdirSync(unreadable);
+    fs.chmodSync(unreadable, 0o000);
+    let thrown: unknown;
+    try {
+      thrown = refusalFromSnapshot("unreadable-subtree-study", "unreadable-run");
+    } finally {
+      fs.chmodSync(unreadable, 0o700);
+    }
+
+    expect(thrown).toBeInstanceOf(ProjectRepositoryContainmentError);
+    expect((thrown as ProjectRepositoryContainmentError).invariant).toBe(
+      "project_repository_changed_under_the_scan",
+    );
+    // Not a raw Node error: no `ENOENT`/`EACCES` code and no `scandir` in it.
+    expect((thrown as { code?: unknown }).code).toBe("project_repository_containment");
+    expect((thrown as Error).message).not.toContain("scandir");
+  });
+
+  it("names the containment cause when a write fails because the repository was redirected under it", () => {
+    // The other half of round 19's unclassified rows: 31 of 600 contention
+    // rounds answered `Project git update-ref failed … exited 128`, which is
+    // sanitised but says nothing about *why* — and the why was the sandbox
+    // redirecting the repository mid-write, which is the one thing a caller
+    // needs told. The shim plants the link inside the very invocation that then
+    // fails, so no earlier check could have seen it: any containment refusal
+    // here came from the failure path, not from a pre-write check.
+    const root = makeTemporaryRoot();
+    const projectsRoot = path.join(root, "child-projects");
+    const repository = path.join(projectsRoot, "failed-write-study", "sandbox.git");
+    const record = path.join(root, "outcome.log");
+    const shim = makeGitShim(
+      root,
+      // Matched on the snapshot's own ref so the plant lands in the invocation
+      // that writes it, rather than in an earlier one a later check would catch.
+      `case " $* " in *"update-ref refs/kady/"*) ` +
+        `rm -rf ${JSON.stringify(path.join(repository, "refs", "kady"))}; ` +
+        // A link to a path whose parents do not exist: `update-ref` cannot
+        // create the leading directories through it and exits 128.
+        `ln -s ${JSON.stringify(path.join(root, "absent", "deeper", "kady"))} ` +
+        `${JSON.stringify(path.join(repository, "refs", "kady"))};; esac`,
+    );
+
+    runInChildProcess(
+      root,
+      [
+        `process.env.KADY_PROJECTS_ROOT = ${JSON.stringify(projectsRoot)};`,
+        'const fs = await import("node:fs");',
+        `const projects = await import(${JSON.stringify(PROJECTS_MODULE_PATH)});`,
+        "let outcome = '(accepted)';",
+        "try {",
+        "  projects.ensureProjectExists('failed-write-study');",
+        "  projects.createProjectRunSnapshot('failed-write-study', 'failed-write-run');",
+        "} catch (error) {",
+        "  outcome = `${error?.invariant ?? '(unclassified)'}|${error?.message ?? error}`;",
+        "}",
+        `fs.writeFileSync(${JSON.stringify(record)}, outcome, "utf-8");`,
+        "",
+      ].join("\n"),
+      { PATH: `${shim}${path.delimiter}${process.env.PATH ?? ""}` },
+    );
+
+    const outcome = fs.readFileSync(record, "utf-8");
+    expect(outcome.split("|", 1)[0]).toBe("project_repository_holds_a_symlink");
+    expect(outcome).not.toContain("Project git update-ref failed");
+  }, 120_000);
+
   it("reports a failing git invocation without handing back the command line", () => {
     // The overrides-laden project Git command line reached the client as the
     // detail of an unclassified 500. It names every config key this module
