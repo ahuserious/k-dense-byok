@@ -3,6 +3,11 @@ Scientific DAG Studio publication is blocked pending explicit owner approval.
 This marker is enforced by the Phase R repository guard. Do not remove it as
 part of release preparation without separate publication authorization.
 
+What that guard actually does, stated plainly so nobody over-trusts it:
+`server/test/guards/publication-block.test.ts` asserts only that this FILE EXISTS. It does not
+inspect refs, remotes, or pushes, and it cannot stop one. The restriction below is a policy an
+agent obeys by reading it — there is no mechanism behind it.
+
 Status note, 2026-08-18: the owner authorized publication of ONE ref only —
 `integration/dfg-20260807-135127` pushed to the fork `ahuserious/k-dense-byok`, no force, fork `main`
 untouched (recorded 2026-08-15, exercised on 2026-08-16/17/18). That authorization does not extend to
