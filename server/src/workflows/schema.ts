@@ -320,6 +320,46 @@ export const WorkflowNodePositionSchema = Type.Object(
   { additionalProperties: false },
 );
 
+/**
+ * Where a node or a document came from.
+ *
+ * Additive, optional, and deliberately outside validation semantics: nothing
+ * in validate.ts branches on it, and it exists so an imported or stitched-in
+ * node can name its source without the executor ever consulting it.
+ *
+ * Module-local. This schema and the three below it are composed into
+ * `WorkflowGraphDocumentSchema` and nothing else consumes them, so they stay
+ * off the runtime's public export surface — `test/guards/typed-workflow-exports.test.ts`
+ * pins that surface, and widening it is a reviewed decision this lane has no
+ * reason to force.
+ */
+const WorkflowProvenanceSchema = Type.Object(
+  {
+    source: Type.String({ minLength: 1, maxLength: 64 }),
+    id: Type.String({ minLength: 1, maxLength: 256 }),
+    sha256: Type.Optional(Type.String({ minLength: 64, maxLength: 64, pattern: "^[0-9a-f]{64}$" })),
+  },
+  { additionalProperties: false },
+);
+
+/** Flatten provenance for a node that arrived as part of a stitched subgraph. */
+const WorkflowNodeCompositeOriginSchema = Type.Object(
+  {
+    kind: Type.String({ minLength: 1, maxLength: 64 }),
+    sourceId: Type.String({ minLength: 1, maxLength: 256 }),
+    sourceGraphSha256: Type.Optional(
+      Type.String({ minLength: 64, maxLength: 64, pattern: "^[0-9a-f]{64}$" }),
+    ),
+    label: Type.Optional(ShortTextSchema),
+  },
+  { additionalProperties: false },
+);
+
+const WorkflowNodeMetaSchema = Type.Object(
+  { compositeOf: Type.Optional(WorkflowNodeCompositeOriginSchema) },
+  { additionalProperties: false },
+);
+
 const CommonNodeProperties = {
   id: IdentifierSchema,
   name: ShortTextSchema,
@@ -331,6 +371,8 @@ const CommonNodeProperties = {
   rescue: Type.Optional(RescuePolicySchema),
   evidence: Type.Optional(EvidencePolicySchema),
   settings: Type.Optional(NodeSpecV1Schema),
+  meta: Type.Optional(WorkflowNodeMetaSchema),
+  provenance: Type.Optional(WorkflowProvenanceSchema),
 };
 
 const ModelDrivenNodeProperties = {
@@ -560,6 +602,40 @@ export const ScientificWorkflowPreconditionsSchema = Type.Object(
   { additionalProperties: false },
 );
 
+/*
+ * There is deliberately NO document-level `ui` object.
+ *
+ * Round 1 carried `ui.viewport` here. It was persisted and round-tripped but
+ * never read and never written: nothing emitted a viewport, and nothing applied
+ * one to the canvas. A stored field with no behaviour is not free — every
+ * optional field added under `additionalProperties: false` is a document an
+ * older server can no longer read (it validates on read and raises CORRUPT), so
+ * an inert field buys a rollback constraint and nothing else. It is dropped
+ * rather than left declared.
+ *
+ * The ROLL-FORWARD direction, which round 2 did not record: a definition
+ * written by a round-1 build carries `ui.viewport`, which this schema now
+ * rejects — `parseStoredDefinition` (store.ts) raises CORRUPT and the read is a
+ * 500, and because `GET /dag-workflows` validates every definition in the
+ * project, one such file hides every OTHER workflow the author has. No merged
+ * revision ever carried `ui`, so this can only bite someone who ran an R1
+ * preview against a PERSISTENT projects root; they need to clear it. The
+ * list-wide amplification is pre-existing behaviour — ANY corrupt definition
+ * file does it, not just this one — and is owned where it lives: the CORRUPT
+ * itself in `store.ts` (S5) and the whole-list 500 in `GET /dag-workflows`
+ * (`server/src/api/dag-workflows.ts`, S4). Not this lane's to change.
+ *
+ * Node LAYOUT never belonged here anyway: `CommonNodeProperties.position`
+ * already carries it per node, and a second `ui.positions` map would be a
+ * second source of truth for the same coordinate. Layout therefore still
+ * participates in `graphSha256` through `position`, so a layout-only save is a
+ * real hash change and not the silent no-op the store skips
+ * (store.ts saveDefinitionWithIntent).
+ *
+ * If pan/zoom is ever remembered, it needs an emitter and an applier landing in
+ * the same change as the field.
+ */
+
 export const WorkflowGraphDocumentSchema = Type.Object(
   {
     schemaVersion: Type.Literal(WORKFLOW_GRAPH_SCHEMA_VERSION),
@@ -581,11 +657,14 @@ export const WorkflowGraphDocumentSchema = Type.Object(
       maxItems: MAX_WORKFLOW_NODES,
     }),
     edges: Type.Array(WorkflowEdgeSchema, { maxItems: MAX_WORKFLOW_EDGES }),
+    provenance: Type.Optional(WorkflowProvenanceSchema),
   },
   { additionalProperties: false },
 );
 
 export type WorkflowLimits = Static<typeof WorkflowLimitsSchema>;
+export type WorkflowProvenance = Static<typeof WorkflowProvenanceSchema>;
+export type WorkflowNodeMeta = Static<typeof WorkflowNodeMetaSchema>;
 export type NodeLimits = Static<typeof NodeLimitsSchema>;
 export type RequestedModel = Static<typeof RequestedModelSchema>;
 export type ModelRequest = Static<typeof ModelRequestSchema>;

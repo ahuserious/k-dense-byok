@@ -6,6 +6,7 @@ import { cn } from '@/lib/utils';
 import { listWorkflows } from '@/lib/api';
 import { useProject } from '@/contexts/ProjectContext';
 import { useProviders } from '@/hooks/useProviders';
+import { hostSourceValue, parseHostSourceValue, type HostSourceGroup } from '@/host/HostBridge';
 
 export type ViewMode = 'hidden' | 'split' | 'full';
 
@@ -27,6 +28,9 @@ export interface BuilderToolbarProps {
   saveDisabledReason?: string;
   onRun: () => void;
   onLoadWorkflow: (name: string) => void;
+  /** Host-fed workflow sources, rendered above the engine's own list. */
+  hostSourceGroups?: HostSourceGroup[];
+  onLoadHostSource?: (groupId: string, entryId: string) => void;
 }
 
 const VIEW_MODE_LABELS: readonly { value: ViewMode; label: string }[] = [
@@ -53,6 +57,8 @@ export function BuilderToolbar({
   saveDisabledReason,
   onRun,
   onLoadWorkflow,
+  hostSourceGroups,
+  onLoadHostSource,
 }: BuilderToolbarProps): React.ReactElement {
   const navigate = useNavigate();
   const { codebases, selectedProjectId } = useProject();
@@ -78,7 +84,18 @@ export function BuilderToolbar({
           <select
             value=""
             onChange={(e): void => {
-              if (e.target.value) onLoadWorkflow(e.target.value);
+              const value = e.target.value;
+              if (!value) return;
+              // Host-fed entries carry a `host:` prefix so they can never be
+              // mistaken for an engine workflow id on disk.
+              const hostSource = value.startsWith('host:')
+                ? parseHostSourceValue(value.slice('host:'.length))
+                : null;
+              if (hostSource && onLoadHostSource) {
+                onLoadHostSource(hostSource.groupId, hostSource.entryId);
+                return;
+              }
+              onLoadWorkflow(value);
             }}
             className="h-7 w-[92px] shrink-0 rounded border border-border bg-surface px-1.5 font-mono text-[11px] text-text-secondary focus:outline-none focus:ring-1 focus:ring-accent-bright"
             title={
@@ -88,6 +105,15 @@ export function BuilderToolbar({
             }
           >
             <option value="">{workflowsError ? 'Load failed' : 'Load pipeline…'}</option>
+            {(hostSourceGroups ?? []).map(group => (
+              <optgroup key={group.id} label={group.label}>
+                {group.entries.map(entry => (
+                  <option key={entry.id} value={`host:${hostSourceValue(group.id, entry.id)}`}>
+                    {entry.label}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
             {(workflows ?? []).map(entry => (
               <option key={entry.workflowId} value={entry.workflowId}>
                 {entry.workflow.name}
