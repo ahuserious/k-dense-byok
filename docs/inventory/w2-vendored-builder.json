@@ -1,6 +1,6 @@
 {
   "lane": "W2",
-  "purpose": "Owner punch-list 2026-08-17 (vendored builder side): balanced zoom/fitView, explicit expand/collapse (no hover expansion), no background effects, no archon-branded text/placeholders, quick nodes pick the CLI harness before drag, working zoom controls, slim chrome",
+  "purpose": "Owner punch-list 2026-08-17 (vendored builder side): balanced zoom/fitView, explicit expand/collapse (no hover expansion), no background effects, no legacy-brand text/placeholders, quick nodes pick the CLI harness before drag, working zoom controls, slim chrome",
   "files": [
     "docs/inventory/w2-vendored-builder.json",
     "server/vendor/pipeline-engine/packages/web/src/components/workflows/DagNodeComponent.tsx",

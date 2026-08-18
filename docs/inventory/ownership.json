@@ -767,7 +767,7 @@
       "to": "W2",
       "date": "2026-08-17",
       "path": "server/vendor/pipeline-engine/packages/web/src/components/workflows/NodeInspector.tsx",
-      "scope": "remove '.archon/mcp/github.json' and every archon-branded placeholder/label"
+      "scope": "remove the legacy-brand MCP config placeholder path and every legacy-brand label"
     },
     {
       "from": "S3",
@@ -788,7 +788,7 @@
       "to": "W2",
       "date": "2026-08-17",
       "path": "server/vendor/pipeline-engine/packages/web/src/components/workflows/QuickAddPicker.tsx",
-      "scope": "quick-add: harness pre-selection; no archon placeholders"
+      "scope": "quick-add: harness pre-selection; no legacy-brand placeholders"
     },
     {
       "from": "S3",
