@@ -18,6 +18,14 @@
 // because a promote that silently produced an unusable workflow would be worse
 // than no promote at all.
 //
+// What it reports is bounded by what it can know. A create ends in one of five
+// ways: the route accepts it and returns a readable definition; the route
+// refuses it (4xx, decided before the store writes); the route accepts the
+// write but answers with an envelope the client cannot read (2xx,
+// MALFORMED_SAVE_RESPONSE); the route fails rather than decides (5xx); or no
+// answer the client can read arrives at all. Only the 4xx ending entitles this
+// surface to say that nothing was created — see `failedCreateClaim` below.
+//
 // A refusal is not a dead end. The create button is gated on whether a create
 // is POSSIBLE — a syntactically valid id, a document to send, and no write in
 // flight — never on whether an earlier attempt happened. A 409 telling the
@@ -91,6 +99,96 @@ function PlanSummary({ plan }: { plan: SessionPromotionPlan }) {
         conversation order, {plan.edges.length} edge{plan.edges.length === 1 ? "" : "s"}
       </dd>
     </dl>
+  );
+}
+
+/**
+ * The failure copy, split by what the route actually did — because only one of
+ * these four endings entitles this surface to say "Nothing was created".
+ *
+ * `saveDagWorkflowDefinition` raises `DagWorkflowApiError` from two different
+ * places, and only one of them is a refusal:
+ *   * `parseResponse` throws for `!response.ok`, so a 4xx status is the store's
+ *     own decision about the request, taken before it writes anything;
+ *   * the envelope check throws `MALFORMED_SAVE_RESPONSE` *after* `parseResponse`
+ *     has already let the response through, so that error is reachable only on a
+ *     2xx — the store accepted the write and the client could not read the answer.
+ * A 5xx is not a decision either: the route failed rather than refused, and
+ * nothing in that answer says which side of the commit it failed on (an
+ * intermediary's 502/504 can arrive after the origin already wrote). Anything
+ * that is not a 4xx therefore leaves the outcome unknown, and the surface says so.
+ *
+ * `status === null` is every error that is not a `DagWorkflowApiError`, which
+ * includes both a request that never left and a response whose body died while
+ * `parseResponse` was reading it. The second one did reach a status — this
+ * surface just never holds it — so the copy claims only what it has: no answer
+ * it could read.
+ *
+ * Every retry this dialog can issue is a create (`If-None-Match: *`), so none of
+ * the unknown cases can be made worse by pressing Create again: the write cannot
+ * overwrite a workflow that does exist. A retry of the same id that comes back
+ * 409 is how the reader finds out that it does.
+ */
+function failedCreateClaim(
+  status: number | null,
+): "no-answer" | "accepted-but-unreadable" | "refused" | "no-decision" {
+  if (status === null) return "no-answer";
+  if (status >= 200 && status < 300) return "accepted-but-unreadable";
+  if (status >= 400 && status < 500) return "refused";
+  return "no-decision";
+}
+
+function FailedCreateAlert({
+  outcome,
+}: {
+  outcome: Extract<PromoteOutcome, { phase: "failed" }>;
+}) {
+  const httpAnswer = `HTTP ${outcome.status}${outcome.code ? `, ${outcome.code}` : ""}`;
+  const claim = failedCreateClaim(outcome.status);
+  return (
+    <p
+      role="alert"
+      className="flex items-start gap-2 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-[11px] text-destructive"
+    >
+      <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+      <span className="min-w-0">
+        {claim === "no-answer" ? (
+          <>
+            The create of <code>{outcome.workflowId}</code> ended without an
+            answer this surface could read, so it cannot say whether anything
+            was written. Retrying is safe: the write carries the create
+            precondition, so it cannot overwrite an existing workflow.
+          </>
+        ) : claim === "accepted-but-unreadable" ? (
+          <>
+            The typed route accepted the create of{" "}
+            <code>{outcome.workflowId}</code> ({httpAnswer}) but answered with
+            something this surface could not read, so it cannot say whether the
+            workflow now exists. Retrying is safe: the write carries the create
+            precondition, so it cannot overwrite an existing workflow — a retry
+            of the same id that comes back 409 is how to tell that it was
+            created.
+          </>
+        ) : claim === "refused" ? (
+          <>
+            The typed route rejected the create of{" "}
+            <code>{outcome.workflowId}</code> ({httpAnswer}). Nothing was
+            created.
+          </>
+        ) : (
+          <>
+            The typed route failed on the create of{" "}
+            <code>{outcome.workflowId}</code> ({httpAnswer}) rather than
+            refusing it, so this surface cannot say whether the workflow was
+            created. Retrying is safe: the write carries the create
+            precondition, so it cannot overwrite an existing workflow.
+          </>
+        )}
+        <span className="mt-1 block whitespace-pre-wrap break-words font-mono text-[10px]">
+          {outcome.detail}
+        </span>
+      </span>
+    </p>
   );
 }
 
@@ -208,33 +306,7 @@ export function LivePromoteDialog({
           </section>
         ) : (
           <>
-            {outcome.phase === "failed" ? (
-              <p
-                role="alert"
-                className="flex items-start gap-2 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-[11px] text-destructive"
-              >
-                <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-                <span className="min-w-0">
-                  {outcome.status === null ? (
-                    <>
-                      The create of <code>{outcome.workflowId}</code> failed before the
-                      typed route answered, so this surface cannot say whether anything
-                      was written. Retrying is safe: the write carries the create
-                      precondition, so it cannot overwrite an existing workflow.
-                    </>
-                  ) : (
-                    <>
-                      The typed route rejected the create of{" "}
-                      <code>{outcome.workflowId}</code> (HTTP {outcome.status}
-                      {outcome.code ? `, ${outcome.code}` : ""}). Nothing was created.
-                    </>
-                  )}
-                  <span className="mt-1 block whitespace-pre-wrap break-words font-mono text-[10px]">
-                    {outcome.detail}
-                  </span>
-                </span>
-              </p>
-            ) : null}
+            {outcome.phase === "failed" ? <FailedCreateAlert outcome={outcome} /> : null}
 
             <label className="block space-y-1">
               <span className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">

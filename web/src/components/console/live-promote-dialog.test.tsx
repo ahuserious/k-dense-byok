@@ -206,7 +206,9 @@ describe("promote-to-DAG dialog", () => {
   it("does not claim nothing was created when the route never answered", async () => {
     // A transport failure is not a refusal. The write may or may not have
     // reached the store, so the surface must not assert either way — and it
-    // must say why retrying is nevertheless safe.
+    // must say why retrying is nevertheless safe. It also does not claim the
+    // route never answered: this branch is every non-DagWorkflowApiError, and a
+    // body that dies mid-read got a status this surface never holds.
     vi.mocked(dagApi.saveDagWorkflowDefinition).mockRejectedValueOnce(
       new TypeError("Failed to fetch"),
     );
@@ -216,7 +218,7 @@ describe("promote-to-DAG dialog", () => {
     await user.click(within(dialog).getByRole("button", { name: "Create workflow" }));
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("failed before the typed route answered");
+    expect(alert).toHaveTextContent("ended without an answer this surface could read");
     expect(alert).toHaveTextContent("cannot say whether anything was written");
     expect(alert).toHaveTextContent("Failed to fetch");
     // The claim the HTTP branch is entitled to make and this one is not.
@@ -224,6 +226,59 @@ describe("promote-to-DAG dialog", () => {
     // No invented status code.
     expect(alert).not.toHaveTextContent(/HTTP/);
     // And it is still a retryable surface.
+    expect(within(dialog).getByRole("button", { name: "Create workflow" })).toBeEnabled();
+  });
+
+  it("does not call an accepted write a refusal when the answer was unreadable", async () => {
+    // MALFORMED_SAVE_RESPONSE is thrown AFTER parseResponse has let the response
+    // through, so it is reachable only on a 2xx: the store took the write and
+    // the client could not read what it said back. "Nothing was created" would
+    // be false — the workflow may well exist at revision 1.
+    vi.mocked(dagApi.saveDagWorkflowDefinition).mockRejectedValueOnce(
+      new dagApi.DagWorkflowApiError(
+        201,
+        "The workflow definition write returned no valid {outcome, definition} envelope.",
+        "MALFORMED_SAVE_RESPONSE",
+      ),
+    );
+    const user = userEvent.setup();
+    renderDialog();
+    const dialog = await screen.findByTestId("promote-dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Create workflow" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("accepted the create of");
+    expect(alert).toHaveTextContent("cannot say whether the workflow now exists");
+    expect(alert).toHaveTextContent("HTTP 201");
+    expect(alert).toHaveTextContent("MALFORMED_SAVE_RESPONSE");
+    // The two claims a 2xx cannot support.
+    expect(alert).not.toHaveTextContent("rejected");
+    expect(alert).not.toHaveTextContent("Nothing was created");
+    // Nor is it success: no definition came back, so nothing may point the
+    // reader at a workflow as if it were there.
+    expect(screen.queryByText(/accepted it/i)).toBeNull();
+    // And it is still a retryable surface.
+    expect(within(dialog).getByRole("button", { name: "Create workflow" })).toBeEnabled();
+  });
+
+  it("does not call a route failure a refusal", async () => {
+    // A 5xx is not a decision. It can arrive from an intermediary after the
+    // origin already committed the write, so which side of the commit it
+    // failed on is not something this surface can read off the status.
+    vi.mocked(dagApi.saveDagWorkflowDefinition).mockRejectedValueOnce(
+      new dagApi.DagWorkflowApiError(502, "Bad gateway"),
+    );
+    const user = userEvent.setup();
+    renderDialog();
+    const dialog = await screen.findByTestId("promote-dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Create workflow" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("failed on the create of");
+    expect(alert).toHaveTextContent("cannot say whether the workflow was created");
+    expect(alert).toHaveTextContent("HTTP 502");
+    expect(alert).not.toHaveTextContent("rejected");
+    expect(alert).not.toHaveTextContent("Nothing was created");
     expect(within(dialog).getByRole("button", { name: "Create workflow" })).toBeEnabled();
   });
 

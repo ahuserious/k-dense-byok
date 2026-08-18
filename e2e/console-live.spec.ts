@@ -424,11 +424,15 @@ test.describe("w4-console-promote", () => {
     expect(document.nodes[0].prompt).toContain("Cluster the RNA-seq counts.");
   });
 
-  test("reports a refused write instead of claiming success", async ({ workspacePage }) => {
+  test("reports an unreadable answer as unknown, not as a refusal", async ({ workspacePage }) => {
     // A malformed-but-2xx envelope, for the same reason w4-console-empty uses
     // one: an intentional HTTP 4xx is a browser console error, and this suite
-    // fails on those. The verbatim rendering of the validator's own
-    // `path: message` list is covered by live-promote-dialog.test.tsx.
+    // fails on those. That constraint also makes this the ONLY write ending
+    // this suite can drive, and it is the ending the surface must not call a
+    // refusal: MALFORMED_SAVE_RESPONSE is raised after the response was
+    // accepted, so the store may well hold the workflow. The 4xx refusal copy
+    // and the verbatim `path: message` list are covered by
+    // live-promote-dialog.test.tsx.
     await workspacePage.route(/\/dag-workflows\/[^/]+$/, async (route: Route) => {
       if (route.request().method() !== "PUT") return route.fallback();
       await route.fulfill({
@@ -443,17 +447,24 @@ test.describe("w4-console-promote", () => {
     await dialog.getByRole("button", { name: "Create workflow" }).click();
 
     const alert = dialog.getByRole("alert");
-    await expect(alert).toContainText("The typed route rejected the create of");
-    // The id it was refused for, named on the message so it stays true if the
-    // reader retypes.
+    await expect(alert).toContainText("The typed route accepted the create of");
+    await expect(alert).toContainText("cannot say whether the workflow now exists");
+    // The id this attempt was made for, named on the message so it stays true
+    // if the reader retypes.
     await expect(alert).toContainText(`chat-${SESSION_ID}`);
     await expect(alert).toContainText("MALFORMED_SAVE_RESPONSE");
-    await expect(alert).toContainText("Nothing was created");
-    await expect(dialog).not.toContainText(/accepted it/i);
+    // The two claims a 2xx cannot support: the route did not refuse, and the
+    // workflow may exist.
+    await expect(alert).not.toContainText("rejected");
+    await expect(alert).not.toContainText("Nothing was created");
+    // Nor is it success — no definition came back, so the surface must not
+    // send the reader to a workflow it never saw.
+    await expect(dialog).not.toContainText(/accepted it:/i);
+    await expect(dialog.getByRole("button", { name: "Done" })).toHaveCount(0);
 
-    // A refusal is not a dead end: the reader can type the different id the
-    // message is asking for and send it. Asserted here rather than as a new
-    // item so the suite's inventory pins do not move.
+    // An unknown outcome is not a dead end either: the reader can type a
+    // different id and send it. Asserted here rather than as a new item so the
+    // suite's inventory pins do not move.
     const create = dialog.getByRole("button", { name: "Create workflow" });
     await expect(create).toBeEnabled();
     const idInput = dialog.getByLabel("Workflow id");
