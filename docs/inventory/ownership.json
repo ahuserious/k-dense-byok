@@ -133,7 +133,10 @@
       "server/src/api/system.ts",
       "server/src/agent/models.ts",
       "server/test/openai-compatible-base-url.test.ts",
-      "server/test/ollama-base-url.test.ts"
+      "server/test/ollama-base-url.test.ts",
+      ".env.example",
+      "docs/local-models-ollama.md",
+      "docs/model-selection.md"
     ],
     "S6": [
       "server/src/workflows/prompt-opt*.ts",
@@ -1139,6 +1142,13 @@
       "date": "2026-08-18",
       "path": "server/src/agent/workflow-delegation-session.ts",
       "scope": "restore a harness dispatch decision reachable from the supervised transport (N-A7/#55)"
+    },
+    {
+      "from": "S2",
+      "to": "S5",
+      "date": "2026-08-18",
+      "path": "start.mjs",
+      "scope": "the launcher's own hardcoded Ollama probe at :299 and the .env materialisation that re-arms it (#64) \u2014 this scope only"
     }
   ]
 }
