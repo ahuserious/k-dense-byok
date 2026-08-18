@@ -2,8 +2,15 @@
 //
 // The "Console" view host: two sub-feeds behind a toggle.
 //
-//   - "DAG Runs"       : the target-native typed-engine run console
-//                        (dag-workflow-console.tsx), unchanged and the default.
+//   - "DAG Runs"       : the live-graph console (live-graph-console.tsx) — the
+//                        left rail of everything running (typed DAG runs and
+//                        chat sessions, across projects), the selected source's
+//                        live graph, and the event drawer. The target-native
+//                        typed-engine run console (dag-workflow-console.tsx) is
+//                        unchanged and remains this surface's main area until a
+//                        source is selected, so the authoritative run list,
+//                        controls, and diagnostics stay exactly one click from
+//                        where they have always been.
 //   - "Agents & Loops" : the ported Agent Console (kady-console.tsx) — KADY's
 //                        own run + goal-loop feed read from /console/runs +
 //                        /console/loops (file-backed runs-index), where e.g.
@@ -14,12 +21,20 @@
 // it must live ALONGSIDE the native DAG-runs console (additive mandate). The
 // Agent Console mounts on first visit and then stays mounted (display toggled)
 // so its polling feed keeps warm across sub-tab flips.
+//
+// `active` is the WORKSPACE's visibility predicate, not this file's sub-tab
+// state. PersistentWorkspaceSurfaces keeps the Console mounted-but-hidden once
+// it has been visited, so without it the live console would keep polling every
+// project's sessions while the reader is in Chat or Builder. The two predicates
+// multiply: the live graph runs only when the Console is the visible view AND
+// "DAG Runs" is the selected feed.
 
 "use client";
 
 import { useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import { KadyConsole } from "@/components/console/kady-console";
+import { LiveGraphConsole } from "@/components/console/live-graph-console";
 
 type ConsoleFeed = "dag-runs" | "agents";
 
@@ -29,8 +44,11 @@ const FEED_SEGMENTS: { id: ConsoleFeed; label: string }[] = [
 ];
 
 export function ConsolePanel({
+  active = true,
   dagConsole,
 }: {
+  /** True only while the Console is the workspace's visible view. */
+  active?: boolean;
   /** The native typed-engine console, rendered by the parent with its own props. */
   dagConsole: ReactNode;
 }) {
@@ -68,7 +86,7 @@ export function ConsolePanel({
           feed === "dag-runs" ? "flex" : "hidden",
         )}
       >
-        {dagConsole}
+        <LiveGraphConsole active={active && feed === "dag-runs"} runsConsole={dagConsole} />
       </div>
       {agentsVisited && (
         <div
