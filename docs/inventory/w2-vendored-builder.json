@@ -16,6 +16,9 @@
     "server/vendor/pipeline-engine/packages/web/src/components/workflows/NodeLibrary.tsx",
     "server/vendor/pipeline-engine/packages/web/src/components/workflows/StatusBar.tsx",
     "server/vendor/pipeline-engine/packages/web/src/components/workflows/CanvasChatPopout.tsx",
-    "server/vendor/pipeline-engine/packages/web/src/index.css"
+    "server/vendor/pipeline-engine/packages/web/src/index.css",
+    "server/vendor/pipeline-engine/packages/web/src/components/workflows/WorkflowList.tsx",
+    "server/vendor/pipeline-engine/packages/web/src/experiments/console/components/AddProjectDialog.tsx",
+    "e2e/builder.spec.ts"
   ]
 }
