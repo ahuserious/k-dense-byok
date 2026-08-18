@@ -32,7 +32,22 @@ export interface MockApiState {
   expectedSaveContract?: NodeSpecSaveContract;
 }
 
-const BACKEND_PATTERN = /^http:\/\/(?:127\.0\.0\.1|localhost):18000\//;
+// N-10: this used to be hard-coded to :18000, so a lane that booted its own preview on any other
+// backend port got zero interception — every mocked spec then talked to whatever really listened on
+// 18000 (on this host, the owner's own instance) and failed. The backend origin now follows the same
+// environment the preview was booted with, exactly as the pipeline-engine origin below already did.
+const localBackendPort = process.env.KADY_PORT ?? "18000";
+const configuredBackendUrl = process.env.NEXT_PUBLIC_ADK_API_URL;
+const backendOrigins = new Set([
+  `http://127.0.0.1:${localBackendPort}`,
+  `http://localhost:${localBackendPort}`,
+  ...(configuredBackendUrl ? [new URL(configuredBackendUrl).origin] : []),
+]);
+const BACKEND_PATTERN = new RegExp(
+  `^(?:${[...backendOrigins]
+    .map((origin) => origin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|")})/`,
+);
 const localPipelineEnginePort = process.env.KADY_PIPELINE_ENGINE_PORT ?? "13091";
 const configuredPipelineEngineUrl =
   process.env.NEXT_PUBLIC_PIPELINE_ENGINE_URL ?? process.env.KADY_E2E_BASE_URL;
