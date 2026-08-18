@@ -122,7 +122,8 @@
       "server/src/workflows/supervisor/journal.ts",
       "server/src/workflows/supervisor/protocol.ts",
       "server/src/workflows/supervisor/runtime.ts",
-      "server/src/workflows/supervisor/server.ts"
+      "server/src/workflows/supervisor/server.ts",
+      "server/src/api/raindrop.ts"
     ],
     "S6": [
       "server/src/workflows/prompt-opt*.ts",
