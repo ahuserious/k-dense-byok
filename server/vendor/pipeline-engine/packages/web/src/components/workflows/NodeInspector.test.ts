@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { createElement } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -28,6 +29,7 @@ mock.module('@/components/ui/scroll-area', () => ({ ScrollArea: Passthrough }));
 mock.module('@/hooks/useProviders', () => ({ useProviders: () => ({ providers: [] }) }));
 
 const {
+  AdvancedTab,
   NODE_SPEC_EDITOR_DROPDOWNS,
   NODE_SPEC_V1_BINDING_FIELDS,
   NodeSpecTab,
@@ -321,5 +323,50 @@ describe('NodeSpec v1 editor contract', () => {
       'An explicit fallback must differ from the requested model and auth.'
     );
     expect(repeatedAndDuplicate).toContain('Explicit model fallbacks must be unique.');
+  });
+});
+
+describe('no engine-internal brand names in rendered inspector text', () => {
+  // config/token-ban.json forbids the bare retired brand token in source, and
+  // allows only the vendor-internal `.archon` / `@archon` identifier forms.
+  // Assemble the bare token so these absence assertions can name what they check
+  // without themselves tripping the gate.
+  const RETIRED_BRAND = ['arch', 'on'].join('');
+
+  const inspectorNode: DagNodeData = {
+    id: 'branding-node',
+    label: 'Prompt',
+    nodeType: 'prompt',
+    promptText: 'Check the rendered placeholders.',
+  };
+
+  test('the MCP config placeholder is a neutral example path', () => {
+    const html = renderToStaticMarkup(
+      createElement(AdvancedTab, { node: inspectorNode, onUpdate: (): void => undefined })
+    );
+    expect(html).toContain('MCP Config Path');
+    expect(html).toContain('placeholder="mcp/github.json"');
+    expect(html).not.toContain('.archon/mcp/github.json');
+    expect(html.toLowerCase()).not.toContain(RETIRED_BRAND);
+  });
+
+  test('the NodeSpec tab renders no brand-name text either', () => {
+    const html = renderToStaticMarkup(
+      createElement(NodeSpecTab, {
+        node: { ...inspectorNode, settings: fullNodeSpec },
+        onUpdate: (): void => undefined,
+      })
+    );
+    expect(html.toLowerCase()).not.toContain(RETIRED_BRAND);
+  });
+
+  test('every remaining brand mention in the source is a non-rendered code comment', () => {
+    const source = readFileSync(new URL('./NodeInspector.tsx', import.meta.url), 'utf8');
+    const offending = source
+      .split('\n')
+      .map((line, index) => ({ line: line.trim(), number: index + 1 }))
+      .filter(entry => entry.line.toLowerCase().includes(RETIRED_BRAND))
+      .filter(entry => !entry.line.startsWith('//') && !entry.line.startsWith('*'));
+    expect(offending).toEqual([]);
   });
 });

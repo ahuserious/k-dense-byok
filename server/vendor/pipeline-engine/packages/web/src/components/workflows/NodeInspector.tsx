@@ -1068,7 +1068,8 @@ function RequestedModelAlternativesField({
   );
 }
 
-function AdvancedTab({
+// Exported for the rendered-text regression in NodeInspector.test.ts.
+export function AdvancedTab({
   node,
   onUpdate,
 }: {
@@ -1106,7 +1107,7 @@ function AdvancedTab({
           onChange={(e): void => {
             onUpdate({ mcp: e.target.value || undefined });
           }}
-          placeholder=".archon/mcp/github.json"
+          placeholder="mcp/github.json"
           className={cn(inputClass, 'font-mono')}
         />
         <p className="text-[9px] text-text-tertiary">

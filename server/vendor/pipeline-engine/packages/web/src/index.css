@@ -33,7 +33,9 @@
 
   /* shadcn variables mapped to dark theme */
   --radius: 0.625rem;
-  --background: oklch(0.14 0.005 260);
+  /* --background lives once, in the kady-raindrop-chrome :root block at the end
+     of this file (backlog #55: it used to be declared here AND there, and the
+     later block silently won). */
   --foreground: oklch(0.93 0.005 260);
   --card: oklch(0.18 0.008 260);
   --card-foreground: oklch(0.93 0.005 260);
@@ -329,4 +331,17 @@ body {
  * everywhere, which resolves to this var. */
 @theme inline {
   --font-sans: ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+/* An expanded node's details panel must paint above its neighbours.
+ *
+ * The panel is absolutely positioned inside the card, but React Flow stamps an
+ * inline `z-index: 0` on every unselected `.react-flow__node`, and `z-index: 0`
+ * on a positioned element opens a stacking context the panel cannot escape —
+ * so the next card down the column painted a strip straight through the open
+ * NodeSpec surface. The elevation therefore has to be applied to the node
+ * element itself, and has to beat an inline style. React Flow uses the same
+ * 1000 when it elevates a selected node. */
+.react-flow__node:has([data-testid='node-details-surface']) {
+  z-index: 1000 !important;
 }

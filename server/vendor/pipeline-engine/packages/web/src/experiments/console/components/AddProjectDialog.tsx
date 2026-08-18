@@ -224,7 +224,7 @@ export function AddProjectDialog({
                 className="rounded border bg-surface px-1.5 py-0.5 font-mono text-[0.92em] text-text-secondary"
                 style={{ borderColor: 'var(--border)' }}
               >
-                ~/.archon/workspaces/{owner}/{repo}/source
+                &lt;engine home&gt;/workspaces/{owner}/{repo}/source
               </code>
               .
             </>

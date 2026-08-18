@@ -71,7 +71,7 @@ export function BuilderToolbar({
 
   return (
     <>
-      <div className="flex items-center h-12 px-3 border-b border-border gap-2">
+      <div className="flex h-10 items-center gap-2 border-b border-border px-2.5">
         {/* Left group: Load + Breadcrumb + Mode badge */}
         <div className="flex items-center gap-2 min-w-0">
           {/* Load existing pipeline */}
@@ -80,7 +80,7 @@ export function BuilderToolbar({
             onChange={(e): void => {
               if (e.target.value) onLoadWorkflow(e.target.value);
             }}
-            className="rounded-md border border-border bg-surface px-1.5 py-1 text-xs text-text-secondary focus:outline-none focus:ring-1 focus:ring-accent w-[88px] shrink-0"
+            className="h-7 w-[92px] shrink-0 rounded border border-border bg-surface px-1.5 font-mono text-[11px] text-text-secondary focus:outline-none focus:ring-1 focus:ring-accent-bright"
             title={
               workflowsError
                 ? 'Failed to load pipelines — check server connection'
@@ -102,11 +102,11 @@ export function BuilderToolbar({
               onClick={(): void => {
                 navigate('/legacy/workflows');
               }}
-              className="text-xs text-text-tertiary hover:text-text-secondary shrink-0"
+              className="shrink-0 font-mono text-[11px] text-text-secondary hover:text-text-primary"
             >
               Pipelines
             </button>
-            <span className="text-xs text-text-tertiary shrink-0">/</span>
+            <span className="shrink-0 font-mono text-[11px] text-text-secondary">/</span>
             <input
               type="text"
               value={workflowName}
@@ -114,7 +114,7 @@ export function BuilderToolbar({
                 onNameChange(e.target.value);
               }}
               placeholder="workflow-name"
-              className="min-w-[80px] max-w-[160px] rounded-md border border-transparent hover:border-border focus:border-border bg-transparent px-1.5 py-0.5 text-xs font-medium text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-1 focus:ring-accent"
+              className="h-7 min-w-[80px] max-w-[160px] rounded border border-transparent bg-transparent px-1.5 font-mono text-[11px] font-medium text-text-primary placeholder:text-text-tertiary hover:border-border focus:border-border focus:outline-none focus:ring-1 focus:ring-accent-bright"
             />
             {hasUnsavedChanges && (
               <span
@@ -137,7 +137,7 @@ export function BuilderToolbar({
               }}
               autoFocus
               placeholder="Description..."
-              className="w-48 rounded-md border border-border bg-surface px-2 py-0.5 text-xs text-text-secondary placeholder:text-text-tertiary focus:outline-none focus:ring-1 focus:ring-accent"
+              className="h-7 w-48 rounded border border-border bg-surface px-2 font-mono text-[11px] text-text-secondary placeholder:text-text-tertiary focus:outline-none focus:ring-1 focus:ring-accent-bright"
             />
           ) : (
             <button
@@ -145,7 +145,7 @@ export function BuilderToolbar({
               onClick={(): void => {
                 setShowDescription(true);
               }}
-              className="text-[10px] text-text-tertiary hover:text-text-secondary truncate max-w-[120px] shrink-0"
+              className="max-w-[120px] shrink-0 truncate font-mono text-[10px] text-text-secondary hover:text-text-primary"
               title={workflowDescription || 'Add description'}
             >
               {workflowDescription || 'add description'}
@@ -153,7 +153,7 @@ export function BuilderToolbar({
           )}
 
           {/* Mode badge */}
-          <span className="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider shrink-0 bg-node-command/20 text-node-command">
+          <span className="shrink-0 rounded border border-border px-1.5 py-px font-mono text-[10px] font-semibold uppercase tracking-wider text-text-secondary">
             DAG
           </span>
         </div>
@@ -196,7 +196,7 @@ export function BuilderToolbar({
         {/* Right group: View toggle + Actions */}
         <div className="flex items-center gap-1.5 shrink-0">
           {/* View toggle */}
-          <div className="flex rounded-md border border-border overflow-hidden">
+          <div className="flex h-7 overflow-hidden rounded border border-border">
             {VIEW_MODE_LABELS.map(({ value, label }) => (
               <button
                 key={value}
@@ -204,11 +204,18 @@ export function BuilderToolbar({
                 onClick={(): void => {
                   onViewModeChange(value);
                 }}
+                aria-pressed={viewMode === value}
                 className={cn(
-                  'px-2 py-1 text-[10px] font-medium transition-colors',
+                  // The active segment must carry a marker that hovering an
+                  // inactive one cannot reproduce: the fill alone was exactly
+                  // the inactive hover state, so resting the pointer on a
+                  // neighbour erased "which view am I in?". Inactive segments
+                  // now brighten their TEXT on hover and never take the fill,
+                  // and the active one is additionally semibold.
+                  'px-2 font-mono text-[10px] transition-colors',
                   viewMode === value
-                    ? 'bg-accent text-accent-foreground'
-                    : 'bg-surface text-text-secondary hover:text-text-primary hover:bg-surface-hover'
+                    ? 'bg-surface-hover font-semibold text-text-primary'
+                    : 'bg-surface font-medium text-text-secondary hover:text-text-primary'
                 )}
               >
                 {label}
@@ -218,7 +225,7 @@ export function BuilderToolbar({
 
           {/* Validation errors badge */}
           {validationErrors.length > 0 && (
-            <span className="rounded-full bg-error/20 text-error px-1.5 py-0.5 text-[10px] font-medium">
+            <span className="rounded border border-error/50 px-1.5 py-px font-mono text-[10px] font-medium text-error">
               {validationErrors.length}
             </span>
           )}
@@ -242,7 +249,6 @@ export function BuilderToolbar({
             onClick={onRun}
             disabled={!workflowName.trim() || hasUnsavedChanges}
             title={hasUnsavedChanges ? 'Save the workflow before running' : undefined}
-            className="bg-node-command hover:bg-node-command/90 text-white"
           >
             Run
           </Button>
@@ -250,7 +256,7 @@ export function BuilderToolbar({
       </div>
 
       {workflowsError && (
-        <div className="px-4 py-1.5 text-xs text-error bg-surface-inset border-b border-border">
+        <div className="border-b border-border bg-surface-inset px-3 py-1 font-mono text-[11px] text-error">
           Failed to load workflow list. The load dropdown may be empty.
         </div>
       )}
