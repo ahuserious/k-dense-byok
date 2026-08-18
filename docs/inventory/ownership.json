@@ -225,8 +225,7 @@
     "W1": [
       "docs/inventory/w1-builder-shell.json",
       "web/src/components/dag-builder-surface.test.tsx",
-      "web/src/components/raindrop-panel.test.tsx",
-      "web/src/components/dag-compose-popover.tsx"
+      "web/src/components/raindrop-panel.test.tsx"
     ],
     "W2": [
       "docs/inventory/w2-vendored-builder.json",
@@ -1038,22 +1037,8 @@
       "from": "S11",
       "to": "W1",
       "date": "2026-08-18",
-      "path": "e2e/studio.spec.ts",
-      "scope": "retire the Components Studio spec together with the header entry (owner: 'there should be no components studio'); items removed, pins updated"
-    },
-    {
-      "from": "S11",
-      "to": "W1",
-      "date": "2026-08-18",
       "path": "e2e/item-count-reporter.ts",
       "scope": "inventory pins after retiring studio.spec.ts and enabling nothing else"
-    },
-    {
-      "from": "S8",
-      "to": "W1",
-      "date": "2026-08-18",
-      "path": "web/src/components/chat-rail.tsx",
-      "scope": "delete: unreferenced after the Builder rail hosts the DAG-builder assistant"
     },
     {
       "from": "S9",
@@ -1075,6 +1060,13 @@
       "date": "2026-08-18",
       "path": "web/src/app/page.tsx",
       "scope": "thread the Console view-visibility predicate (isActive && view === 'console') into ConsolePanel so the live console polls only while visible \u2014 one prop, no other change"
+    },
+    {
+      "from": "S11",
+      "to": "W1",
+      "date": "2026-08-18",
+      "path": "e2e/console-raindrop.spec.ts",
+      "scope": "drop the retired Components Studio overlap assertion (the pill no longer exists)"
     }
   ]
 }

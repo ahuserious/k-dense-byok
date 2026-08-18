@@ -1,6 +1,6 @@
 {
   "lane": "W1",
-  "purpose": "Owner punch-list 2026-08-17 (Kady shell side): no Components Studio entry or effects; a dedicated DAG-builder assistant in the Builder rail (separate from the main Kady session); Raindrop analyst copy stays a log analyst; slim Raindrop-style builder chrome",
+  "purpose": "Owner punch-list 2026-08-17 (Kady shell side): no Components Studio entry or effects; a dedicated DAG-builder assistant in the Builder rail (separate from the main Kady session); Raindrop analyst copy stays a log analyst; slim Raindrop-style builder chrome; round 2 (2026-08-18) retired the Components Studio entry (launcher no-op), deleted e2e/studio.spec.ts, chat-rail.tsx and dag-compose-popover.tsx",
   "files": [
     "docs/inventory/w1-builder-shell.json",
     "web/src/app/page.tsx",
@@ -12,10 +12,8 @@
     "web/src/components/helper-agent-chat.test.tsx",
     "web/src/components/raindrop-panel.tsx",
     "web/src/components/raindrop-panel.test.tsx",
-    "web/src/components/dag-compose-popover.tsx",
-    "e2e/studio.spec.ts",
     "e2e/item-count-reporter.ts",
-    "web/src/components/chat-rail.tsx",
-    "docs/e2e/README.md"
+    "docs/e2e/README.md",
+    "e2e/console-raindrop.spec.ts"
   ]
 }
