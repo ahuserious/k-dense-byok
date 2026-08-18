@@ -19,6 +19,9 @@ import Fastify from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const originalBaseUrl = process.env.OLLAMA_BASE_URL;
+// The registration tests below clear the sibling variable too, and vitest shares
+// process.env across every test file in a worker — so this file has to put it back.
+const originalOpenAICompatibleBaseUrl = process.env.OPENAI_COMPATIBLE_BASE_URL;
 
 /**
  * config.ts reads the environment once at import, so both the config module and the route that
@@ -56,6 +59,11 @@ function tagsResponse(names: string[]): Response {
 afterEach(async () => {
   if (originalBaseUrl === undefined) delete process.env.OLLAMA_BASE_URL;
   else process.env.OLLAMA_BASE_URL = originalBaseUrl;
+  if (originalOpenAICompatibleBaseUrl === undefined) {
+    delete process.env.OPENAI_COMPATIBLE_BASE_URL;
+  } else {
+    process.env.OPENAI_COMPATIBLE_BASE_URL = originalOpenAICompatibleBaseUrl;
+  }
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.resetModules();
@@ -310,6 +318,22 @@ describe("provider registration (agent/models.ts) does not resurrect the default
       baseUrl: "http://127.0.0.1:11434/v1",
     });
     expect(runtime.registered.map((entry) => entry.id)).not.toContain("openai-compatible");
+  });
+
+  it("registers the openai-compatible provider at the configured URL when one is set", async () => {
+    delete process.env.OLLAMA_BASE_URL;
+    process.env.OPENAI_COMPATIBLE_BASE_URL = "http://127.0.0.1:1234/";
+    vi.resetModules();
+    const { setupModelRuntime } = await import("../src/agent/models.ts");
+    const runtime = fakeRuntime();
+
+    await setupModelRuntime(runtime as never);
+
+    expect(runtime.registered).toContainEqual({
+      id: "openai-compatible",
+      baseUrl: "http://127.0.0.1:1234/v1",
+    });
+    expect(runtime.registered.map((entry) => entry.id)).not.toContain("ollama");
   });
 
   it("gives an unconfigured local model an unroutable base URL rather than a port guess", async () => {

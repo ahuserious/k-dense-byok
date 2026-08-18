@@ -54,7 +54,7 @@ This fork adds an **Openrouter Fusion** section at the top of the picker: named 
 
 ## Local Ollama models
 
-Pulled Ollama models are discovered live: the backend's `/ollama/models` endpoint queries your local daemon (`OLLAMA_BASE_URL/api/tags`), and the results appear under the **Local (Ollama)** section of the picker as `ollama/<name>`. Selecting one makes Pi call your local daemon directly — no OpenRouter key required for those models.
+Pulled Ollama models are discovered live once you set `OLLAMA_BASE_URL` in `.env` (uncomment the line in `.env.example`; there is no default, including for `http://localhost:11434`). The backend's `/ollama/models` endpoint then queries your daemon (`OLLAMA_BASE_URL/api/tags`) and the results appear under the **Local (Ollama)** section of the picker as `ollama/<name>`. Selecting one makes Pi call your local daemon directly — no OpenRouter key required for those models. While the variable is unset nothing is probed and the section stays empty (#64).
 
 Local models are useful for privacy and cost control, but tool-calling quality varies widely. For complex, tool-heavy tasks, frontier OpenRouter models are usually more reliable. See [Local models with Ollama](./local-models-ollama.md).
 

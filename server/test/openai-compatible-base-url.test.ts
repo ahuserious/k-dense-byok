@@ -3,12 +3,13 @@
  *
  * The local OpenAI-compatible server (LM Studio, vLLM, text-generation-webui, …) is optional and
  * has to be pointed at explicitly. While the config carried a `http://localhost:1234` fallback,
- * /openai-compatible/models read OPENAI_COMPATIBLE_CONFIGURED into the *response* and then
- * fetched unconditionally anyway — so the flag shaped the answer and suppressed nothing. An
- * install that had never named a server replied `{available:false, configured:false, models:[]}`
- * while the process had already resolved `localhost` and connected to :1234, reading whatever
- * unrelated dev server happened to be listening there. Identical in shape to NT-4, which this
- * lane already fixed for RAINDROP_BASE_URL; see server/test/raindrop-base-url.test.ts.
+ * /openai-compatible/models read a separate OPENAI_COMPATIBLE_CONFIGURED flag into the
+ * *response* and then fetched unconditionally anyway — so the flag shaped the answer and
+ * suppressed nothing. An install that had never named a server replied
+ * `{available:false, configured:false, models:[]}` while the process had already resolved
+ * `localhost` and connected to :1234, reading whatever unrelated dev server happened to be
+ * listening there. Identical in shape to NT-4, which this lane already fixed for
+ * RAINDROP_BASE_URL; see server/test/raindrop-base-url.test.ts.
  *
  * These tests pin both halves: unconfigured performs NO fetch at all and answers an explicit
  * unconfigured state, while a configured URL behaves exactly as it did before — same `/v1/models`
@@ -65,41 +66,29 @@ describe("OPENAI_COMPATIBLE_BASE_URL", () => {
   it("is undefined when the environment does not set it (no localhost default)", async () => {
     delete process.env.OPENAI_COMPATIBLE_BASE_URL;
     vi.resetModules();
-    const { OPENAI_COMPATIBLE_BASE_URL, OPENAI_COMPATIBLE_CONFIGURED } = await import(
-      "../src/config.ts"
-    );
+    const { OPENAI_COMPATIBLE_BASE_URL } = await import("../src/config.ts");
     expect(OPENAI_COMPATIBLE_BASE_URL).toBeUndefined();
-    expect(OPENAI_COMPATIBLE_CONFIGURED).toBe(false);
   });
 
   it("treats a blank value as unset rather than as a URL", async () => {
     process.env.OPENAI_COMPATIBLE_BASE_URL = "";
     vi.resetModules();
-    const { OPENAI_COMPATIBLE_BASE_URL, OPENAI_COMPATIBLE_CONFIGURED } = await import(
-      "../src/config.ts"
-    );
+    const { OPENAI_COMPATIBLE_BASE_URL } = await import("../src/config.ts");
     expect(OPENAI_COMPATIBLE_BASE_URL).toBeUndefined();
-    expect(OPENAI_COMPATIBLE_CONFIGURED).toBe(false);
   });
 
   it("treats a whitespace-only value as unset rather than as a URL", async () => {
     process.env.OPENAI_COMPATIBLE_BASE_URL = "   ";
     vi.resetModules();
-    const { OPENAI_COMPATIBLE_BASE_URL, OPENAI_COMPATIBLE_CONFIGURED } = await import(
-      "../src/config.ts"
-    );
+    const { OPENAI_COMPATIBLE_BASE_URL } = await import("../src/config.ts");
     expect(OPENAI_COMPATIBLE_BASE_URL).toBeUndefined();
-    expect(OPENAI_COMPATIBLE_CONFIGURED).toBe(false);
   });
 
   it("keeps a configured value verbatim apart from surrounding whitespace", async () => {
     process.env.OPENAI_COMPATIBLE_BASE_URL = "  http://127.0.0.1:7799  ";
     vi.resetModules();
-    const { OPENAI_COMPATIBLE_BASE_URL, OPENAI_COMPATIBLE_CONFIGURED } = await import(
-      "../src/config.ts"
-    );
+    const { OPENAI_COMPATIBLE_BASE_URL } = await import("../src/config.ts");
     expect(OPENAI_COMPATIBLE_BASE_URL).toBe("http://127.0.0.1:7799");
-    expect(OPENAI_COMPATIBLE_CONFIGURED).toBe(true);
   });
 });
 

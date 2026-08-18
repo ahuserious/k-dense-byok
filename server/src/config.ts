@@ -98,10 +98,13 @@ export const DEFAULT_MODEL_ID =
  * no provider is registered. Same treatment as RAINDROP_BASE_URL (NT-4) and
  * OPENAI_COMPATIBLE_BASE_URL (#57); this is #64, the widest of the three.
  *
- * The cost is borne by the user who runs Ollama on its default port and has no
- * `.env` at all: they must now name the daemon once. `.env.example` already
- * ships `OLLAMA_BASE_URL=http://localhost:11434` uncommented, so anyone who set
- * up from the documented template is unaffected.
+ * The cost is borne by every user who runs Ollama on its default port: they
+ * must now name the daemon once. `.env.example` used to ship
+ * `OLLAMA_BASE_URL=http://localhost:11434` uncommented and start.mjs copies that
+ * template into `.env` when none exists, so leaving it uncommented would have
+ * re-armed this probe on every default install and nobody would have paid the
+ * cost or gained the protection. The line now ships commented out, and
+ * docs/local-models-ollama.md tells the Ollama user to uncomment it.
  */
 export const OLLAMA_BASE_URL: string | undefined =
   process.env.OLLAMA_BASE_URL?.trim() || undefined;
@@ -157,8 +160,8 @@ export const RAINDROP_BASE_URL: string | undefined =
  *
  * No default. A `http://localhost:1234` fallback meant an install that had
  * never named a server still probed whatever happened to listen on LM Studio's
- * port of the backend's host: OPENAI_COMPATIBLE_CONFIGURED shaped the answer
- * but suppressed nothing, so /openai-compatible/models replied
+ * port of the backend's host: a separate OPENAI_COMPATIBLE_CONFIGURED flag
+ * shaped the answer but suppressed nothing, so /openai-compatible/models replied
  * `{available: false, configured: false}` while the process had already
  * resolved `localhost` and opened a socket to :1234 and read whatever answered
  * there. Unset (or blank) therefore means "the feature is off" — the route
@@ -170,19 +173,12 @@ export const RAINDROP_BASE_URL: string | undefined =
  * exactly the unrequested egress being removed, and it was already invisible
  * to most of them: the picker hides the section unless `available` or
  * `configured` holds, and this population reported `configured: false`.
+ *
+ * The route now derives the response's `configured` from this being set, which
+ * is the same fact, so the separate exported flag is gone.
  */
 export const OPENAI_COMPATIBLE_BASE_URL: string | undefined =
   process.env.OPENAI_COMPATIBLE_BASE_URL?.trim() || undefined;
-
-/**
- * Whether the user explicitly pointed us at a server. The picker hides the
- * section entirely unless this is true or a server actually answers, so the
- * majority who have never run one never see a dead "not running" row.
- *
- * Now literally "is there an address to probe", so it is also the route's
- * fetch guard rather than a label the route computes and then ignores.
- */
-export const OPENAI_COMPATIBLE_CONFIGURED = Boolean(OPENAI_COMPATIBLE_BASE_URL);
 
 /** Whether Modal-style remote compute is configured (kept for /config parity). */
 export function modalConfigured(): boolean {

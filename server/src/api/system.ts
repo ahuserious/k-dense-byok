@@ -4,11 +4,7 @@
  * api/skills.ts; /health and /config live in index.ts.
  */
 import type { FastifyInstance } from "fastify";
-import {
-  OLLAMA_BASE_URL,
-  OPENAI_COMPATIBLE_BASE_URL,
-  OPENAI_COMPATIBLE_CONFIGURED,
-} from "../config.ts";
+import { OLLAMA_BASE_URL, OPENAI_COMPATIBLE_BASE_URL } from "../config.ts";
 import { getSystemStats } from "../system-stats.ts";
 
 const GITHUB_REPO = "K-Dense-AI/k-dense-byok";
@@ -112,10 +108,10 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
     // #57: `configured` used to shape this response and suppress nothing — the
     // fetch below ran against the old `http://localhost:1234` default even when
     // it was false, so an install that had never named a server still opened a
-    // socket to LM Studio's port and read whatever answered. The flag is now
-    // the same fact as "there is an address", and it gates the probe.
+    // socket to LM Studio's port and read whatever answered. It is now the same
+    // fact as "there is an address", so the guard below both gates the probe and
+    // decides the flag, and there is no separate config export to drift from it.
     if (!baseUrl) return { available: false, configured: false, models: [] };
-    const configured = OPENAI_COMPATIBLE_CONFIGURED;
     try {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), 2000);
@@ -123,7 +119,7 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
         signal: ctrl.signal,
       });
       clearTimeout(t);
-      if (!resp.ok) return { available: false, configured, models: [] };
+      if (!resp.ok) return { available: false, configured: true, models: [] };
       const data = (await resp.json()) as { data?: unknown };
       // Deliberately lenient: take `id` off each entry and skip anything that
       // doesn't have one, so a single odd row can't blank out the whole list.
@@ -145,9 +141,9 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
           description: `Local OpenAI-compatible model: ${id}`,
         });
       }
-      return { available: true, configured, models };
+      return { available: true, configured: true, models };
     } catch {
-      return { available: false, configured, models: [] };
+      return { available: false, configured: true, models: [] };
     }
   });
 }
