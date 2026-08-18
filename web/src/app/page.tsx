@@ -1314,6 +1314,7 @@ function WorkspacePage({
             ),
             console: (
               <ConsolePanel
+                active={isActive && view === "console"}
                 dagConsole={
                   <DagWorkflowConsole
                     projectId={projectId}

@@ -144,6 +144,8 @@ export function LiveSourceRail({
   allProjects,
   onAllProjectsChange,
   error,
+  notices,
+  deepLinkNotice,
   emptyMessage,
   now,
 }: {
@@ -155,6 +157,10 @@ export function LiveSourceRail({
   allProjects: boolean;
   onAllProjectsChange: (allProjects: boolean) => void;
   error: string | null;
+  /** What discovery could not do this tick ("couldn't read 2 projects"). */
+  notices: string[];
+  /** A `?run=`/`?session=` link discovery could not resolve, if any. */
+  deepLinkNotice: string | null;
   emptyMessage: string;
   now: number;
 }) {
@@ -197,9 +203,31 @@ export function LiveSourceRail({
             Discovery failed: {error}
           </p>
         )}
+        {notices.length > 0 && (
+          <div className="flex flex-wrap gap-1 border-b border-border/60 px-3 py-1.5">
+            {notices.map((notice) => (
+              <span
+                key={notice}
+                className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 font-mono text-[9px] text-amber-700 dark:text-amber-300"
+              >
+                {notice}
+              </span>
+            ))}
+          </div>
+        )}
+        {deepLinkNotice && (
+          <p className="border-b border-border/60 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
+            {deepLinkNotice}
+          </p>
+        )}
         {sources.length === 0 ? (
+          // "Nothing is running" is a claim about the whole workspace, so it
+          // must never be printed on top of a failed discovery tick — the honest
+          // statement there is that we could not look.
           <p className="px-3 py-4 text-[11px] leading-relaxed text-muted-foreground">
-            {emptyMessage}
+            {error === null
+              ? emptyMessage
+              : "Discovery failed, so this list is not a statement about what is running. Retrying with backoff."}
           </p>
         ) : (
           <>

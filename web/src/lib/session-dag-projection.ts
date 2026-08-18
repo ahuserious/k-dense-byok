@@ -21,8 +21,15 @@
 //   3. order tolerant       an event naming an unseen parent creates a
 //                           placeholder that a later event fills in
 //   4. bounded              >12 tool calls per turn collapse into a counted
-//                           group node, at most 200 nodes are rendered, and at
-//                           most 500 event sequences are retained per source
+//                           group node (counted per tool CALL, not per frame),
+//                           at most 200 nodes are rendered, and at most 500
+//                           event sequences are retained per source
+//
+// Invariants 2 and 3 are statements about a frame *set*: the same set folded in
+// any chunking, and in any order inside a chunk, yields the same graph. Turn
+// ordinals are therefore derived from folded sequence order at save time rather
+// than from arrival order, and turns hang off the session root rather than off
+// each other, so a late low-seq frame cannot reorder the conversation.
 
 /** Node kinds, per the W4.2 projection spec. */
 export type SessionGraphNodeKind =
@@ -65,6 +72,12 @@ export interface SessionGraphNode {
   detail?: string;
   /** Number of children folded away — group nodes only. */
   collapsedCount?: number;
+  /**
+   * The tool-call ids a group node stands for. A refused tool emits `tool_start`
+   * and `tool_end` (and often `tool_update`), so counting frames would report a
+   * hidden tool two or three times; the ids make the count per CALL.
+   */
+  collapsedToolCallIds?: string[];
   /** Created by a reference from a later event before its own start arrived. */
   placeholder?: boolean;
   /** Children were dropped because MAX_DEPTH was reached ("deeper graph collapsed"). */
@@ -88,6 +101,13 @@ export interface SessionGraphProjection {
   cursor: number;
   /** Retained frame sequences (bounded ring), ascending. */
   retainedSeqs: number[];
+  /**
+   * Frame sequence -> the id of the node that frame belongs to. This is what
+   * lets the drawer list a node's real events (including the ones that create
+   * no node of their own, such as `text_delta` or `cost`) instead of restating
+   * the projected nodes back at the reader. Pruned with the retained ring.
+   */
+  frameNodeIds: Record<number, string>;
   /** True once MAX_RENDERED_NODES was reached — renders a "graph truncated" chip. */
   truncated: boolean;
   /** True once a child was refused because of MAX_DEPTH. */
@@ -192,6 +212,7 @@ export function emptySessionGraph(sessionId: string): SessionGraphProjection {
     edges: [],
     cursor: 0,
     retainedSeqs: [],
+    frameNodeIds: {},
     truncated: false,
     depthCollapsed: false,
     backEdgeCount: 0,
@@ -263,6 +284,7 @@ interface FoldState {
   parents: Map<string, string>;
   cursor: number;
   retained: number[];
+  frameNodeIds: Map<number, string>;
   truncated: boolean;
   depthCollapsed: boolean;
   backEdgeCount: number;
@@ -283,6 +305,9 @@ function loadState(previous: SessionGraphProjection): FoldState {
     parents,
     cursor: previous.cursor,
     retained: [...previous.retainedSeqs],
+    frameNodeIds: new Map(
+      Object.entries(previous.frameNodeIds ?? {}).map(([seq, nodeId]) => [Number(seq), nodeId]),
+    ),
     truncated: previous.truncated,
     depthCollapsed: previous.depthCollapsed,
     backEdgeCount: previous.backEdgeCount,
@@ -301,12 +326,24 @@ function saveState(state: FoldState): SessionGraphProjection {
   const edges = [...state.edges.values()].sort((left, right) =>
     left.id < right.id ? -1 : left.id > right.id ? 1 : 0,
   );
+  // Turn ordinals are conversation order, not arrival order. Numbering here —
+  // over the already seq-sorted node list — is what makes a late low-seq
+  // `turn_start` read as "Turn 1" instead of renaming an existing node.
+  let turnOrdinal = 0;
+  for (const node of nodes) {
+    if (node.kind !== "turn") continue;
+    turnOrdinal += 1;
+    node.label = `Turn ${turnOrdinal}`;
+  }
+  const frameNodeIds: Record<number, string> = {};
+  for (const [seq, nodeId] of state.frameNodeIds) frameNodeIds[seq] = nodeId;
   return {
     sessionId: state.sessionId,
     nodes,
     edges,
     cursor: state.cursor,
     retainedSeqs: [...state.retained],
+    frameNodeIds,
     truncated: state.truncated,
     depthCollapsed: state.depthCollapsed,
     backEdgeCount: state.backEdgeCount,
@@ -347,7 +384,8 @@ function retain(state: FoldState, seq: number): void {
   while (index > 0 && state.retained[index - 1] > seq) index -= 1;
   state.retained.splice(index, 0, seq);
   while (state.retained.length > MAX_RETAINED_FRAMES) {
-    state.retained.shift();
+    const evicted = state.retained.shift();
+    if (evicted !== undefined) state.frameNodeIds.delete(evicted);
     state.droppedFrames += 1;
   }
 }
@@ -377,12 +415,6 @@ interface EnsureNodeInput {
   edgeKind?: SessionGraphEdgeKind;
   detail?: string;
   placeholder?: boolean;
-  /**
-   * Override the derived depth. Turns chain root -> turn:1 -> turn:2 -> …, but
-   * that chain is conversation order, not delegation nesting, so every turn
-   * sits at depth 1 and MAX_DEPTH stays a statement about subagent expansion.
-   */
-  depth?: number;
 }
 
 /**
@@ -408,7 +440,7 @@ function ensureNode(state: FoldState, input: EnsureNodeInput): SessionGraphNode 
   }
 
   const parentDepth = input.parentId === undefined ? -1 : depthOf(state, input.parentId);
-  const depth = input.depth ?? parentDepth + 1;
+  const depth = parentDepth + 1;
   if (depth > MAX_DEPTH) {
     state.depthCollapsed = true;
     const parent = input.parentId ? state.nodes.get(input.parentId) : undefined;
@@ -468,22 +500,24 @@ function currentTurn(state: FoldState): SessionGraphNode | null {
 }
 
 /**
- * Open a new turn. The chain is root -> turn:1 -> turn:2 -> …, so a long
- * session reads top-to-bottom as the conversation did.
+ * Open a new turn. Every turn hangs off the session root, and the rendered
+ * order comes from the folded sequence numbers — NOT from a turn -> turn chain.
+ * Chaining turns made the graph's shape depend on arrival order (a turn folded
+ * late parented itself on a turn that came after it in the conversation) and
+ * pushed the newest turn one indent level further right for every turn before
+ * it. The id counter is only an allocator; the readable ordinal is assigned in
+ * `saveState` from sequence order.
  */
-function openTurn(state: FoldState, seq: number, label?: string): SessionGraphNode | null {
-  const turns = turnNodes(state);
-  const ordinal = turns.length + 1;
-  const previousTurn = turns[turns.length - 1];
+function openTurn(state: FoldState, seq: number): SessionGraphNode | null {
+  const ordinal = turnNodes(state).length + 1;
   return ensureNode(state, {
     id: `turn:${ordinal}`,
     kind: "turn",
-    label: label && label !== "" ? label : `Turn ${ordinal}`,
+    label: `Turn ${ordinal}`,
     status: "running",
     seq,
-    parentId: previousTurn ? previousTurn.id : sessionRootId(state.sessionId),
+    parentId: sessionRootId(state.sessionId),
     edgeKind: "turn",
-    depth: 1,
   });
 }
 
@@ -502,8 +536,18 @@ function childCount(state: FoldState, parentId: string, kinds: SessionGraphNodeK
   return count;
 }
 
-/** The counted "N more tool calls" node for an over-wide turn. */
-function groupInto(state: FoldState, turn: SessionGraphNode, seq: number): void {
+/**
+ * The counted "N more tool calls" node for an over-wide turn. The count is
+ * keyed on the tool-call id: one refused tool emits `tool_start`, usually
+ * `tool_update`, and `tool_end`, so counting calls to this function would
+ * report the same hidden tool two or three times.
+ */
+function groupInto(
+  state: FoldState,
+  turn: SessionGraphNode,
+  seq: number,
+  toolCallId: string,
+): string | null {
   const groupId = `group:${turn.id}`;
   const group = ensureNode(state, {
     id: groupId,
@@ -514,20 +558,45 @@ function groupInto(state: FoldState, turn: SessionGraphNode, seq: number): void 
     parentId: turn.id,
     edgeKind: "group",
   });
-  if (!group) return;
-  group.collapsedCount = (group.collapsedCount ?? 0) + 1;
-  group.detail = `${group.collapsedCount} more tool call${group.collapsedCount === 1 ? "" : "s"}`;
+  if (!group) return null;
+  const collapsedToolCallIds = group.collapsedToolCallIds ?? [];
+  if (!collapsedToolCallIds.includes(toolCallId)) collapsedToolCallIds.push(toolCallId);
+  group.collapsedToolCallIds = collapsedToolCallIds;
+  group.collapsedCount = collapsedToolCallIds.length;
+  group.detail =
+    `${group.collapsedCount} more tool call${group.collapsedCount === 1 ? "" : "s"}`;
+  return group.id;
 }
 
-function markRunningDescendantsDone(state: FoldState): void {
+/**
+ * A terminal frame (`agent_end` / `done`) reached the fold. A turn or a group
+ * genuinely ends with the run, but a tool, subagent, or delegated DAG that
+ * never reported its own end did NOT succeed — the run stopped underneath it,
+ * which is exactly what an abort or a crash looks like — so it settles
+ * `cancelled`. `ok` stays reserved for work that reported completion.
+ */
+function settleRunningNodes(state: FoldState): void {
   for (const node of state.nodes.values()) {
-    if (node.status === "running" && node.kind !== "session") node.status = "ok";
+    if (node.status !== "running" || node.kind === "session") continue;
+    node.status =
+      node.kind === "tool" || node.kind === "subagent" || node.kind === "dag"
+        ? "cancelled"
+        : "ok";
   }
 }
 
-function applyFrame(state: FoldState, frame: SessionFrame): void {
-  const root = state.nodes.get(sessionRootId(state.sessionId));
-  if (IGNORED_FRAME_TYPES.has(frame.type)) return;
+/**
+ * Fold one frame and return the id of the node that frame BELONGS to. That
+ * mapping is what lets the drawer list a node's genuine events rather than
+ * restating its projected children: frames the graph models away
+ * (`text_delta`, `cost`, `context_usage`, …) still name the turn they arrived
+ * in, so nothing the server sent is invisible in the console.
+ */
+function applyFrame(state: FoldState, frame: SessionFrame): string | null {
+  const rootId = sessionRootId(state.sessionId);
+  const root = state.nodes.get(rootId);
+  // No graph meaning, but they are still this turn's events.
+  if (IGNORED_FRAME_TYPES.has(frame.type)) return currentTurn(state)?.id ?? rootId;
 
   switch (frame.type) {
     case "run_start": {
@@ -536,36 +605,34 @@ function applyFrame(state: FoldState, frame: SessionFrame): void {
         const runId = textOf(frame.runId);
         if (runId) root.detail = runId;
       }
-      return;
+      return rootId;
     }
     case "turn_start": {
-      openTurn(state, frame.seq);
-      return;
+      return openTurn(state, frame.seq)?.id ?? null;
     }
     case "message_start": {
-      if (frame.role !== "user") return;
+      if (frame.role !== "user") return currentTurn(state)?.id ?? rootId;
       const prompt = firstLine(textOf(frame.content));
       const turn = currentTurn(state);
       // A user message always begins a turn; reuse the open turn only when it
       // has no prompt text yet (turn_start fires just before the message).
       if (turn && turn.detail === undefined) {
         if (prompt) turn.detail = prompt;
-        return;
+        return turn.id;
       }
       const opened = openTurn(state, frame.seq);
       if (opened && prompt) opened.detail = prompt;
-      return;
+      return opened?.id ?? null;
     }
     case "turn_end": {
       const turn = currentTurn(state);
       if (turn && turn.status === "running") turn.status = "ok";
-      return;
+      return turn?.id ?? rootId;
     }
     case "tool_start":
     case "tool_update":
     case "tool_end": {
-      applyToolFrame(state, frame);
-      return;
+      return applyToolFrame(state, frame);
     }
     case "retry": {
       const turn = currentTurn(state);
@@ -575,7 +642,7 @@ function applyFrame(state: FoldState, frame: SessionFrame): void {
           ? "retrying"
           : `retry ${attempt}/${typeof frame.max === "number" ? frame.max : "?"}`;
       }
-      return;
+      return turn?.id ?? rootId;
     }
     case "error": {
       const budget = frame.kind === "budget";
@@ -586,20 +653,20 @@ function applyFrame(state: FoldState, frame: SessionFrame): void {
         const message = firstLine(textOf(frame.message));
         if (message) turn.detail = message;
       }
-      return;
+      return turn?.id ?? rootId;
     }
     case "agent_end":
     case "done": {
-      markRunningDescendantsDone(state);
+      settleRunningNodes(state);
       if (root && root.status === "running") root.status = "ok";
-      return;
+      return rootId;
     }
     default: {
       // Unrecognised frame type — the taxonomy's documented fallback. The
       // switch above and MODELLED_FRAME_TYPES must agree; the projector test
       // asserts that no modelled type reaches this arm.
       const turn = requireTurn(state, frame.seq);
-      ensureNode(state, {
+      const node = ensureNode(state, {
         id: `event:${frame.seq}`,
         kind: "event",
         label: frame.type,
@@ -609,26 +676,24 @@ function applyFrame(state: FoldState, frame: SessionFrame): void {
         edgeKind: "event",
         detail: firstLine(textOf(frame.message)),
       });
+      return node?.id ?? turn?.id ?? rootId;
     }
   }
 }
 
-function applyToolFrame(state: FoldState, frame: SessionFrame): void {
+function applyToolFrame(state: FoldState, frame: SessionFrame): string | null {
   const toolCallId = textOf(frame.toolCallId) || `seq-${frame.seq}`;
   const toolName = textOf(frame.toolName) || "tool";
   const nodeId = `tool:${toolCallId}`;
   const existing = state.nodes.get(nodeId);
   const turn = requireTurn(state, frame.seq);
-  if (!turn) return;
+  if (!turn) return null;
 
   // A tool node is only created by tool_start; tool_update/tool_end arriving
   // first create a placeholder that tool_start later fills in.
   if (!existing) {
     const withinWidth = childCount(state, turn.id, ["tool", "subagent", "dag"]) < MAX_TOOLS_PER_TURN;
-    if (!withinWidth) {
-      groupInto(state, turn, frame.seq);
-      return;
-    }
+    if (!withinWidth) return groupInto(state, turn, frame.seq, toolCallId);
   }
 
   const isStart = frame.type === "tool_start";
@@ -646,13 +711,13 @@ function applyToolFrame(state: FoldState, frame: SessionFrame): void {
     ...(isStart ? { detail: toolDetail(frame.args) } : {}),
     ...(isStart ? {} : { placeholder: existing === undefined }),
   });
-  if (!node) return;
+  if (!node) return turn.id;
   // tool_end is authoritative over tool_start for status; tool_update is not.
   if (frame.type === "tool_end") node.status = status;
   else if (isStart && node.status !== "ok" && node.status !== "error") node.status = "running";
   if (isStart && node.label !== toolName) node.label = toolName;
 
-  if (toolName !== SUBAGENT_TOOL_NAME) return;
+  if (toolName !== SUBAGENT_TOOL_NAME) return node.id;
   // A `subagent` call fans out to one child per named agent, so a delegation
   // reads as delegation rather than as one opaque tool row.
   const names = isStart ? subagentNames(frame.args) : [];
@@ -674,17 +739,28 @@ function applyToolFrame(state: FoldState, frame: SessionFrame): void {
       if (child && child.status === "running") child.status = node.status;
     }
   }
+  return node.id;
 }
 
+/**
+ * The typed workflow run this session delegated to, from
+ * GET /sessions/:id/workflow-run-state. It hangs off the session root, not off
+ * whichever turn happened to be open: the link carries no sequence of its own,
+ * so parenting it on the open turn made the graph depend on how the caller
+ * chunked its polls (chunked folding parented it under turn 1, one-shot under
+ * turn 2, and both edges survived).
+ */
 function applyWorkflowLink(state: FoldState, link: SessionWorkflowRunLink): void {
-  const turn = currentTurn(state);
   const node = ensureNode(state, {
     id: `dag:${link.runId}`,
     kind: "dag",
     label: link.workflowId,
     status: workflowRunStatus(link.status),
-    seq: state.cursor,
-    parentId: turn ? turn.id : sessionRootId(state.sessionId),
+    // Sequence 0 — the session's own. The link arrives out of band, so using
+    // the live cursor made the node's creation order (and therefore its
+    // rendered position) depend on which poll first saw it.
+    seq: 0,
+    parentId: sessionRootId(state.sessionId),
     edgeKind: "dag",
     detail: link.runId,
   });
@@ -712,14 +788,25 @@ export function projectSessionGraph(
   options: ProjectSessionGraphOptions = {},
 ): SessionGraphProjection {
   const state = loadState(previous);
-  const fresh = frames
-    .filter((frame) => Number.isSafeInteger(frame.seq) && !alreadyFolded(state, frame.seq))
-    .sort((left, right) => left.seq - right.seq);
+  // Two frames carrying the same sequence inside ONE body are the same frame:
+  // `alreadyFolded` cannot see the first of them because nothing is retained
+  // until the fold loop runs, so they have to be collapsed here.
+  const seenSeqs = new Set<number>();
+  const fresh: SessionFrame[] = [];
+  for (const frame of frames) {
+    if (!Number.isSafeInteger(frame.seq)) continue;
+    if (alreadyFolded(state, frame.seq)) continue;
+    if (seenSeqs.has(frame.seq)) continue;
+    seenSeqs.add(frame.seq);
+    fresh.push(frame);
+  }
+  fresh.sort((left, right) => left.seq - right.seq);
 
   for (const frame of fresh) {
-    retain(state, frame.seq);
     if (frame.seq > state.cursor) state.cursor = frame.seq;
-    applyFrame(state, frame);
+    const nodeId = applyFrame(state, frame);
+    if (nodeId !== null) state.frameNodeIds.set(frame.seq, nodeId);
+    retain(state, frame.seq);
   }
 
   if (options.workflowRun) applyWorkflowLink(state, options.workflowRun);
@@ -749,6 +836,55 @@ export function childrenOf(
     if (child) children.push(child);
   }
   return children.sort((left, right) => left.createdAtSeq - right.createdAtSeq);
+}
+
+/** Subject/detail text for one raw frame, as the event drawer renders it. */
+export interface SessionFrameSummary {
+  subject?: string;
+  detail?: string;
+}
+
+/**
+ * Describe a raw frame for the drawer. This is deliberately the frame's OWN
+ * vocabulary (its type, its tool/agent/role, its message or delta) rather than
+ * the projected node's, because the drawer's job is to show what actually
+ * arrived from the server.
+ */
+export function describeSessionFrame(frame: SessionFrame): SessionFrameSummary {
+  const subject =
+    textOf(frame.toolName) ||
+    textOf(frame.agent) ||
+    textOf(frame.role) ||
+    textOf(frame.runId);
+  const detail =
+    firstLine(textOf(frame.message)) ||
+    firstLine(textOf(frame.content)) ||
+    firstLine(textOf(frame.delta)) ||
+    toolDetail(frame.args) ||
+    firstLine(textOf(frame.result));
+  return {
+    ...(subject !== "" ? { subject } : {}),
+    ...(detail !== "" ? { detail } : {}),
+  };
+}
+
+/**
+ * The frames that belong to one node (and its immediate children), in sequence
+ * order. `nodeId === null` means the whole session. Frames whose node was
+ * evicted or never recorded are excluded rather than guessed at.
+ */
+export function framesForNode(
+  projection: SessionGraphProjection,
+  frames: readonly SessionFrame[],
+  nodeId: string | null,
+): SessionFrame[] {
+  const ordered = [...frames].sort((left, right) => left.seq - right.seq);
+  if (nodeId === null) return ordered;
+  const wanted = new Set<string>([
+    nodeId,
+    ...childrenOf(projection, nodeId).map((node) => node.id),
+  ]);
+  return ordered.filter((frame) => wanted.has(projection.frameNodeIds[frame.seq] ?? ""));
 }
 
 /** One-line reason string for chips above the canvas. */

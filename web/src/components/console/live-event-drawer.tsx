@@ -24,6 +24,12 @@ export const DRAWER_ROW_HEIGHT = 56;
 const DEFAULT_VIEWPORT_HEIGHT = 480;
 export const MIN_DRAWER_WIDTH = 280;
 export const MAX_DRAWER_WIDTH = 720;
+/** Width one arrow-key press moves the resize separator. */
+export const DRAWER_RESIZE_STEP = 24;
+
+export function clampDrawerWidth(width: number): number {
+  return Math.min(MAX_DRAWER_WIDTH, Math.max(MIN_DRAWER_WIDTH, width));
+}
 
 /** One drawer row. Session frames and workflow-run events both normalize here. */
 export interface LiveDrawerEvent {
@@ -33,6 +39,13 @@ export interface LiveDrawerEvent {
   /** Node/tool/execution the event belongs to, when it has one. */
   subject?: string;
   detail?: string;
+  /**
+   * Hover-only context (execution ids and the like). It is deliberately NOT a
+   * rendered line: an opaque 32-hex id used to occupy a whole row while the
+   * event's own type — the thing the reader is scanning for — was the first
+   * field to be truncated away.
+   */
+  hint?: string;
   attempt?: number;
   ts?: number;
   data?: Record<string, unknown>;
@@ -50,14 +63,18 @@ function EventRow({ event }: { event: LiveDrawerEvent }) {
       className="flex flex-col justify-center gap-0.5 border-b border-border/60 px-3"
       style={{ height: DRAWER_ROW_HEIGHT }}
       data-event-seq={event.seq}
+      data-event-type={event.type}
+      {...(event.hint ? { title: event.hint } : {})}
     >
       <div className="flex min-w-0 items-center gap-2">
         <code className="shrink-0 font-mono text-[10px] text-muted-foreground">
           #{event.seq}
         </code>
-        <span className="truncate text-[11px] font-semibold">{event.type}</span>
+        {/* The type is the row's primary field, so it never truncates; the
+            subject (a node or tool name) gives way instead. */}
+        <span className="shrink-0 text-[11px] font-semibold">{event.type}</span>
         {event.subject ? (
-          <code className="shrink-0 truncate rounded bg-muted px-1 font-mono text-[10px]">
+          <code className="min-w-0 flex-1 truncate rounded bg-muted px-1 font-mono text-[10px]">
             {event.subject}
           </code>
         ) : null}
@@ -109,7 +126,11 @@ function VirtualizedEvents({ events }: { events: LiveDrawerEvent[] }) {
     <div
       ref={viewportRef}
       onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
-      className="min-h-0 flex-1 overflow-y-auto"
+      // A scrollable region has to be focusable, or a keyboard reader cannot
+      // reach the events at all.
+      tabIndex={0}
+      role="group"
+      className="min-h-0 flex-1 overflow-y-auto focus-visible:outline focus-visible:outline-1 focus-visible:outline-foreground/40"
       aria-label="Ordered events"
     >
       <div style={{ height: range.totalHeight, position: "relative" }}>
@@ -156,11 +177,7 @@ export function LiveEventDrawer({
       const startX = event.clientX;
       const startWidth = width;
       const onMove = (move: PointerEvent) => {
-        const next = Math.min(
-          MAX_DRAWER_WIDTH,
-          Math.max(MIN_DRAWER_WIDTH, startWidth + (startX - move.clientX)),
-        );
-        onWidthChange(next);
+        onWidthChange(clampDrawerWidth(startWidth + (startX - move.clientX)));
       };
       const onUp = () => {
         window.removeEventListener("pointermove", onMove);
@@ -168,6 +185,26 @@ export function LiveEventDrawer({
       };
       window.addEventListener("pointermove", onMove);
       window.addEventListener("pointerup", onUp);
+    },
+    [onWidthChange, width],
+  );
+
+  // Left/Right resize the drawer; the drawer grows leftwards, so Left widens.
+  const onSeparatorKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      const step =
+        event.key === "ArrowLeft"
+          ? DRAWER_RESIZE_STEP
+          : event.key === "ArrowRight"
+            ? -DRAWER_RESIZE_STEP
+            : event.key === "Home"
+              ? MAX_DRAWER_WIDTH
+              : event.key === "End"
+                ? -MAX_DRAWER_WIDTH
+                : 0;
+      if (step === 0) return;
+      event.preventDefault();
+      onWidthChange(clampDrawerWidth(width + step));
     },
     [onWidthChange, width],
   );
@@ -182,8 +219,13 @@ export function LiveEventDrawer({
         role="separator"
         aria-orientation="vertical"
         aria-label="Resize event drawer"
+        tabIndex={0}
+        aria-valuenow={width}
+        aria-valuemin={MIN_DRAWER_WIDTH}
+        aria-valuemax={MAX_DRAWER_WIDTH}
         onPointerDown={startResize}
-        className="flex w-2 cursor-col-resize items-center justify-center bg-transparent hover:bg-foreground/5"
+        onKeyDown={onSeparatorKeyDown}
+        className="flex w-2 cursor-col-resize items-center justify-center bg-transparent hover:bg-foreground/5 focus-visible:outline focus-visible:outline-1 focus-visible:outline-foreground/40"
       >
         <GripVerticalIcon className="size-3 text-muted-foreground/50" aria-hidden />
       </div>

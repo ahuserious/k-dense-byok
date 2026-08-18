@@ -1,33 +1,48 @@
-import { describe, expect, it } from "vitest";
+import { act, renderHook } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import * as dagWorkflowsApi from "@/lib/dag-workflows";
+import * as projectsApi from "@/lib/projects";
 
 import {
   ACTIVE_IDLE_POLL_MS,
   ACTIVE_RUNNING_POLL_MS,
   appendFrames,
+  applySessionRunStates,
   assignPollRanks,
   BACKGROUND_POLL_MS,
   dagRunSources,
   deepLinkSearch,
   describeEmptyState,
+  describeUnresolvedDeepLink,
+  discoveryNotices,
   filterLiveSources,
   formatElapsed,
+  isProjectBusy,
   isRecentlyActive,
   liveSourceKey,
+  LIST_POLL_MS,
   matchDeepLink,
   MAX_BACKOFF_MS,
   MAX_CONCURRENT_SESSION_POLLERS,
+  MAX_SWEPT_PROJECTS,
   mergeLiveSources,
   nextPollDelayMs,
   openChatTabsFromStorage,
   openTabSources,
   parseDeepLink,
   parseSessionRunSnapshot,
+  parseSessionWorkflowRunLink,
+  PROJECT_SWEEP_CACHE_MS,
   RECENT_ACTIVITY_WINDOW_MS,
   SELECTED_IDLE_POLL_MS,
   SELECTED_RUNNING_POLL_MS,
+  sessionsToProbe,
   sessionSources,
   SOURCE_FRAME_RING,
   toEpochMs,
+  useOpenWork,
+  useSessionRunStates,
   type LiveSource,
 } from "./console-live-sources";
 import type { WorkflowRunSummary } from "./dag-workflows";
@@ -206,11 +221,69 @@ describe("merge", () => {
     expect(filterLiveSources(sources, "  ")).toHaveLength(2);
   });
 
-  it("names both empty reasons instead of spinning", () => {
+  it("names both empty reasons instead of spinning, and scopes the session claim", () => {
     const message = describeEmptyState(null);
     expect(message).toContain("no queued or running DAG workflow runs");
     expect(message).toContain("last 30 minutes");
-    expect(describeEmptyState("default")).toContain("in default");
+    // A chat tab whose session has no transcript yet is invisible to
+    // GET /sessions, so the copy must not claim "no chat sessions open".
+    expect(message).toContain("no chat session with a saved transcript");
+    expect(describeEmptyState("Genomics")).toContain("in Genomics");
+  });
+
+  it("says so when a deep link names something discovery cannot see", () => {
+    expect(describeUnresolvedDeepLink({ kind: "dag-run", id: "wrun_x" })).toContain(
+      "wrun_x",
+    );
+    expect(describeUnresolvedDeepLink({ kind: "dag-run", id: "wrun_x" })).toContain(
+      "finished",
+    );
+    expect(describeUnresolvedDeepLink({ kind: "session", id: "session-x" })).toContain(
+      "saved transcript",
+    );
+    expect(describeUnresolvedDeepLink(null)).toBeNull();
+  });
+
+  it("counts only work happening now as busy", () => {
+    expect(isProjectBusy({ running: 1, needsInput: 0 })).toBe(true);
+    expect(isProjectBusy({ running: 0, needsInput: 2 })).toBe(true);
+    expect(isProjectBusy({ running: 0, needsInput: 0 })).toBe(false);
+    expect(isProjectBusy(null)).toBe(false);
+    // `errors` is a historical outcome and `blocked` is a spend-limit flag;
+    // neither means the project is doing anything right now.
+    const staleAndOverBudget = { running: 0, needsInput: 0, errors: 9, blocked: 1, done: 3 };
+    expect(isProjectBusy(staleAndOverBudget)).toBe(false);
+  });
+
+  it("names what discovery could not do, instead of truncating silently", () => {
+    expect(
+      discoveryNotices({
+        failedProjectIds: [],
+        busyProjectCount: 0,
+        sweptBusyProjectCount: 0,
+        activitySweepFailed: false,
+      }),
+    ).toEqual([]);
+    expect(
+      discoveryNotices({
+        failedProjectIds: ["broken"],
+        busyProjectCount: 30,
+        sweptBusyProjectCount: 19,
+        activitySweepFailed: true,
+      }),
+    ).toEqual([
+      "couldn't read 1 project",
+      "showing 19 of 30 busy projects",
+      "cross-project sweep unavailable",
+    ]);
+    expect(
+      discoveryNotices({
+        failedProjectIds: ["a", "b"],
+        busyProjectCount: 2,
+        sweptBusyProjectCount: 2,
+        activitySweepFailed: false,
+      }),
+    ).toEqual(["couldn't read 2 projects"]);
   });
 });
 
@@ -369,5 +442,392 @@ describe("deep links", () => {
     expect(matchDeepLink(sources, { kind: "dag-run", id: "wrun_missing" })).toBeNull();
     expect(matchDeepLink(sources, { kind: "session", id: "wrun_1" })).toBeNull();
     expect(matchDeepLink(sources, null)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The discovery hook itself. Round 1 tested only the pure helpers, so the
+// /projects/activity sweep — the whole of discovery input (b) — was executed by
+// no test at all, and neither were the 3s tick, the visibility pause, the
+// per-project cache, or the effect teardown.
+// ---------------------------------------------------------------------------
+
+interface FakeProject {
+  id: string;
+  name: string;
+}
+
+function project(id: string): FakeProject {
+  return { id, name: `Project ${id}` };
+}
+
+/** One `apiFetch` call, reduced to what discovery is actually asserted on. */
+interface RecordedFetch {
+  path: string;
+  projectId: string | undefined;
+}
+
+describe("useOpenWork discovery", () => {
+  let roster: FakeProject[];
+  let activities: Record<string, { running: number; needsInput: number; errors: number; blocked: number; done: number }>;
+  let calls: RecordedFetch[];
+  let failingProjectIds: Set<string>;
+  let hidden: boolean;
+
+  const activity = (
+    overrides: Partial<{ running: number; needsInput: number; errors: number; blocked: number; done: number }>,
+  ) => ({ running: 0, needsInput: 0, errors: 0, blocked: 0, done: 0, ...overrides });
+
+  function sessionRowsFor(projectId: string) {
+    return [
+      {
+        id: `session-${projectId}`,
+        name: `Chat in ${projectId}`,
+        modified: Date.now(),
+        messageCount: 2,
+      },
+    ];
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    roster = [project("default"), project("busy-1"), project("quiet-1")];
+    activities = {
+      "busy-1": activity({ running: 1 }),
+      "quiet-1": activity({ done: 4 }),
+    };
+    calls = [];
+    failingProjectIds = new Set();
+    hidden = false;
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      get: () => hidden,
+    });
+    window.localStorage.clear();
+
+    vi.spyOn(projectsApi, "listProjects").mockImplementation(async () =>
+      roster.map((entry) => ({
+        id: entry.id,
+        name: entry.name,
+        description: "",
+        tags: [],
+        createdAt: new Date(NOW).toISOString(),
+        updatedAt: new Date(NOW).toISOString(),
+        archived: false,
+        spendLimitUsd: null,
+      })),
+    );
+    vi.spyOn(projectsApi, "listProjectActivities").mockImplementation(async () => activities);
+    vi.spyOn(dagWorkflowsApi, "listDagWorkflowRuns").mockResolvedValue([]);
+    vi.spyOn(projectsApi, "apiFetch").mockImplementation(
+      async (path: string, _init?: RequestInit, projectId?: string) => {
+        calls.push({ path, projectId });
+        if (path === "/sessions") {
+          const id = projectId ?? "default";
+          if (failingProjectIds.has(id)) {
+            return { ok: false, status: 500, json: async () => null } as unknown as Response;
+          }
+          return {
+            ok: true,
+            status: 200,
+            json: async () => sessionRowsFor(id),
+          } as unknown as Response;
+        }
+        throw new Error(`unexpected apiFetch ${path}`);
+      },
+    );
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  const sessionSweepIds = () =>
+    calls.filter((call) => call.path === "/sessions").map((call) => call.projectId);
+
+  async function settle() {
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  function mount(overrides: Partial<Parameters<typeof useOpenWork>[0]> = {}) {
+    return renderHook(() =>
+      useOpenWork({ projectId: "default", enabled: true, allProjects: true, ...overrides }),
+    );
+  }
+
+  it("does not touch the network at all while it is not active", async () => {
+    // H1: the Console stays mounted-but-hidden after its first visit, so the
+    // `enabled` predicate is the only thing standing between the reader being
+    // in Chat and this hook sweeping every project every three seconds.
+    const { result, unmount } = mount({ enabled: false });
+    await settle();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LIST_POLL_MS * 4);
+    });
+
+    expect(projectsApi.listProjects).not.toHaveBeenCalled();
+    expect(projectsApi.listProjectActivities).not.toHaveBeenCalled();
+    expect(dagWorkflowsApi.listDagWorkflowRuns).not.toHaveBeenCalled();
+    expect(calls).toEqual([]);
+    expect(result.current.sources).toEqual([]);
+    unmount();
+  });
+
+  it("sweeps only the projects /projects/activity reports as working now", async () => {
+    roster = [
+      project("default"),
+      project("running"),
+      project("needs-input"),
+      project("errored"),
+      project("over-budget"),
+      project("finished"),
+    ];
+    activities = {
+      running: activity({ running: 2 }),
+      "needs-input": activity({ needsInput: 1 }),
+      errored: activity({ errors: 4 }),
+      "over-budget": activity({ blocked: 1 }),
+      finished: activity({ done: 9 }),
+    };
+
+    const { result, unmount } = mount();
+    await settle();
+
+    expect(projectsApi.listProjectActivities).toHaveBeenCalled();
+    // The active project is always swept; `errors`/`blocked`/`done` are not
+    // "busy" and must not consume one of the twenty sweep slots.
+    expect(new Set(sessionSweepIds())).toEqual(new Set(["default", "running", "needs-input"]));
+    expect(result.current.sources.map((source) => source.projectId).sort()).toEqual([
+      "default",
+      "needs-input",
+      "running",
+    ]);
+    // The busy project's counts ride along on the row.
+    const busyRow = result.current.sources.find((source) => source.projectId === "running");
+    expect(busyRow?.projectActivity).toEqual({ running: 2, needsInput: 0 });
+    expect(busyRow?.origins).toContain("active-run");
+    expect(result.current.notices).toEqual([]);
+    unmount();
+  });
+
+  it("bounds the sweep and says how many busy projects it dropped", async () => {
+    roster = [project("default")];
+    activities = {};
+    for (let index = 0; index < 30; index += 1) {
+      roster.push(project(`p${index}`));
+      activities[`p${index}`] = activity({ running: 1 });
+    }
+
+    const { result, unmount } = mount();
+    await settle();
+
+    const swept = new Set(sessionSweepIds());
+    expect(swept.size).toBe(MAX_SWEPT_PROJECTS);
+    expect(result.current.notices).toContain(
+      `showing ${MAX_SWEPT_PROJECTS - 1} of 30 busy projects`,
+    );
+    unmount();
+  });
+
+  it("keeps the projects that answered when one project's /sessions fails", async () => {
+    roster = [project("default"), project("busy-1"), project("broken")];
+    activities = { "busy-1": activity({ running: 1 }), broken: activity({ running: 1 }) };
+    failingProjectIds = new Set(["broken"]);
+
+    const { result, unmount } = mount();
+    await settle();
+
+    // H3: one 500 used to reject the whole tick, throwing away the healthy
+    // projects that had already answered in the same tick — and the rail then
+    // asserted that nothing was running.
+    expect(result.current.error).toBeNull();
+    expect(result.current.sources.map((source) => source.projectId).sort()).toEqual([
+      "busy-1",
+      "default",
+    ]);
+    expect(result.current.notices).toContain("couldn't read 1 project");
+    unmount();
+  });
+
+  it("keeps the active project's work when the cross-project sweep fails", async () => {
+    vi.mocked(projectsApi.listProjectActivities).mockRejectedValue(new Error("activity 503"));
+
+    const { result, unmount } = mount();
+    await settle();
+
+    expect(result.current.error).toBeNull();
+    expect(sessionSweepIds()).toEqual(["default"]);
+    expect(result.current.notices).toContain("cross-project sweep unavailable");
+    unmount();
+  });
+
+  it("ticks every LIST_POLL_MS and reuses a project's list for the cache window", async () => {
+    const { unmount } = mount();
+    await settle();
+    expect(sessionSweepIds().filter((id) => id === "busy-1")).toHaveLength(1);
+
+    // One tick inside PROJECT_SWEEP_CACHE_MS: discovery re-runs, the list does
+    // not (LIST_POLL_MS is 3s, the cache is 5s).
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LIST_POLL_MS);
+    });
+    await settle();
+    expect(LIST_POLL_MS).toBeLessThan(PROJECT_SWEEP_CACHE_MS);
+    expect(sessionSweepIds().filter((id) => id === "busy-1")).toHaveLength(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(PROJECT_SWEEP_CACHE_MS);
+    });
+    await settle();
+    expect(sessionSweepIds().filter((id) => id === "busy-1").length).toBeGreaterThan(1);
+    unmount();
+  });
+
+  it("pauses while the browser tab is hidden and stops on unmount", async () => {
+    const { unmount } = mount();
+    await settle();
+    const afterFirstTick = calls.length;
+
+    hidden = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LIST_POLL_MS * 3);
+    });
+    await settle();
+    expect(calls.length).toBe(afterFirstTick);
+
+    hidden = false;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LIST_POLL_MS);
+    });
+    await settle();
+    expect(calls.length).toBeGreaterThan(afterFirstTick);
+
+    const afterResume = calls.length;
+    unmount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LIST_POLL_MS * 5);
+    });
+    expect(calls.length).toBe(afterResume);
+  });
+});
+
+describe("rail run-state probes", () => {
+  const sessionSource = (id: string, overrides: Partial<LiveSource> = {}): LiveSource => ({
+    key: liveSourceKey("session", "default", id),
+    kind: "session",
+    id,
+    projectId: "default",
+    projectName: "Default",
+    title: id,
+    status: "idle",
+    live: false,
+    lastActivityAt: NOW,
+    origins: ["recent"],
+    projectActivity: null,
+    ...overrides,
+  });
+
+  it("probes the ranked-in sessions and leaves the selected one to its own poller", () => {
+    const sources = [sessionSource("a"), sessionSource("b"), sessionSource("c")];
+    const ranks = new Map([
+      [sources[0].key, 0],
+      [sources[1].key, 1],
+      [sources[2].key, 9],
+    ]);
+    expect(
+      sessionsToProbe(sources, ranks, sources[0].key).map((source) => source.id),
+    ).toEqual(["b"]);
+    expect(sessionsToProbe(sources, ranks, null).map((source) => source.id)).toEqual([
+      "a",
+      "b",
+    ]);
+  });
+
+  it("promotes a session the server reports running to running + live", () => {
+    const idle = sessionSource("idle", { lastActivityAt: NOW });
+    const busy = sessionSource("busy", { lastActivityAt: NOW - 60_000 });
+    const promoted = applySessionRunStates(
+      [idle, busy],
+      new Map([[busy.key, { status: "running" as const, runId: "run-1" }]]),
+    );
+    // The running session sorts to the top even though it was touched later.
+    expect(promoted[0].id).toBe("busy");
+    expect(promoted[0].status).toBe("running");
+    expect(promoted[0].live).toBe(true);
+    expect(promoted[0].origins).toContain("active-run");
+    // A session with no probe, or a finished one, is left exactly as it was.
+    expect(promoted[1]).toBe(idle);
+    expect(
+      applySessionRunStates([busy], new Map([[busy.key, { status: "complete", runId: null }]]))[0],
+    ).toBe(busy);
+  });
+
+  it("polls run state for the probed sessions and reports the running one", async () => {
+    vi.useFakeTimers();
+    const runStateBodies: Record<string, unknown> = {
+      "session-running": {
+        status: "running",
+        run: { runId: "run-1", frames: [{ seq: 1, type: "run_start" }], lastSeq: 1 },
+      },
+      "session-idle": { status: "none" },
+    };
+    const fetchSpy = vi
+      .spyOn(projectsApi, "apiFetch")
+      .mockImplementation(async (path: string) => {
+        const match = /^\/sessions\/([^/]+)\/run\/state$/.exec(path);
+        if (!match) throw new Error(`unexpected apiFetch ${path}`);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => runStateBodies[match[1]],
+        } as unknown as Response;
+      });
+
+    const running = sessionSource("session-running");
+    const idle = sessionSource("session-idle");
+    const ranks = new Map([
+      [running.key, 0],
+      [idle.key, 1],
+    ]);
+    const { result, unmount } = renderHook(() =>
+      useSessionRunStates({ sessions: [running, idle], ranks, enabled: true }),
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(result.current.get(running.key)).toEqual({ status: "running", runId: "run-1" });
+    expect(result.current.get(idle.key)).toEqual({ status: "none", runId: null });
+    unmount();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("reads the typed workflow-run link a session delegated to", () => {
+    expect(
+      parseSessionWorkflowRunLink({
+        state: {
+          schemaVersion: 1,
+          runId: "wrun_1",
+          workflowId: "chat-e2e-workflow",
+          workflowRevision: 2,
+          status: "running",
+          nodes: [],
+          topology: { nodes: [], edges: [] },
+        },
+      }),
+    ).toEqual({ runId: "wrun_1", workflowId: "chat-e2e-workflow", status: "running" });
+    expect(parseSessionWorkflowRunLink({ state: null })).toBeNull();
+    expect(parseSessionWorkflowRunLink({})).toBeNull();
+    expect(parseSessionWorkflowRunLink({ state: { runId: "wrun_1" } })).toBeNull();
   });
 });

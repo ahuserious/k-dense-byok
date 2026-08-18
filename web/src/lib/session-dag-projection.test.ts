@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   childrenOf,
+  describeSessionFrame,
   emptySessionGraph,
+  framesForNode,
   MODELLED_FRAME_TYPES,
   MAX_RENDERED_NODES,
   MAX_RETAINED_FRAMES,
@@ -80,7 +82,7 @@ describe("session graph shape", () => {
     expect(projection.cursor).toBe(TURN_WITH_TOOL_AND_SUBAGENT.length);
   });
 
-  it("chains turns off the root and hangs tools off their turn", () => {
+  it("hangs every turn off the root and each tool off its own turn", () => {
     const projection = projectSession(
       SESSION,
       frames(
@@ -92,14 +94,27 @@ describe("session graph shape", () => {
       ),
     );
 
+    // Turns are SIBLINGS, in conversation order. Chaining them made the
+    // rendered tree one indent level deeper per turn, so the turn the reader is
+    // watching walked off the right edge of a long session.
     expect(childrenOf(projection, sessionRootId(SESSION)).map((node) => node.id)).toEqual([
       "turn:1",
-    ]);
-    expect(childrenOf(projection, "turn:1").map((node) => node.id)).toEqual([
-      "tool:t1",
       "turn:2",
     ]);
+    expect(childrenOf(projection, "turn:1").map((node) => node.id)).toEqual(["tool:t1"]);
     expect(childrenOf(projection, "turn:2").map((node) => node.id)).toEqual(["tool:t2"]);
+  });
+
+  it("keeps a long session flat: 60 turns stay one level under the root", () => {
+    const many: SessionFrame[] = [];
+    for (let index = 0; index < 60; index += 1) {
+      many.push({ seq: index + 1, type: "turn_start" });
+    }
+    const projection = projectSession(SESSION, many);
+    const turns = projection.nodes.filter((node) => node.kind === "turn");
+    expect(turns).toHaveLength(60);
+    expect(new Set(turns.map((node) => node.depth))).toEqual(new Set([1]));
+    expect(childrenOf(projection, sessionRootId(SESSION))).toHaveLength(60);
   });
 
   it("advances status from running to ok and error", () => {
@@ -178,14 +193,111 @@ describe("session graph shape", () => {
     );
   });
 
-  it("adds a dag node from the typed workflow-run link", () => {
+  it("adds a dag node from the typed workflow-run link, under the session root", () => {
     const projection = projectSession(SESSION, frames({ type: "turn_start" }), {
       workflowRun: { runId: "wrun_1", workflowId: "rna-seq", status: "running" },
     });
     const dag = nodeById(projection, "dag:wrun_1");
     expect(dag.kind).toBe("dag");
     expect(dag.status).toBe("running");
-    expect(childrenOf(projection, "turn:1").map((node) => node.id)).toContain("dag:wrun_1");
+    expect(dag.detail).toBe("wrun_1");
+    // Root, not "whichever turn was open when the link happened to be read":
+    // the link carries no sequence, so turn-parenting made the graph depend on
+    // how the caller chunked its polls.
+    expect(childrenOf(projection, sessionRootId(SESSION)).map((node) => node.id)).toContain(
+      "dag:wrun_1",
+    );
+  });
+
+  it("settles a tool still in flight at `done` as cancelled, never ok", () => {
+    // `done` is published from a `finally` on every exit path, including abort
+    // and a thrown error, so a run killed mid-bash must not paint that tool
+    // green. `ok` is reserved for work that reported its own completion.
+    const aborted = projectSession(
+      SESSION,
+      frames(
+        { type: "run_start", runId: "run-1" },
+        { type: "turn_start" },
+        { type: "tool_start", toolCallId: "t1", toolName: "bash", args: { command: "sleep 60" } },
+        {
+          type: "tool_start",
+          toolCallId: "t2",
+          toolName: "subagent",
+          args: { agent: "statistical-reviewer" },
+        },
+        { type: "done" },
+      ),
+    );
+    expect(nodeById(aborted, "tool:t1").status).toBe("cancelled");
+    expect(nodeById(aborted, "tool:t2").status).toBe("cancelled");
+    expect(nodeById(aborted, "agent:t2:statistical-reviewer").status).toBe("cancelled");
+    // The turn and the session genuinely did end.
+    expect(nodeById(aborted, "turn:1").status).toBe("ok");
+    expect(nodeById(aborted, sessionRootId(SESSION)).status).toBe("ok");
+
+    const completed = projectSession(
+      SESSION,
+      frames(
+        { type: "run_start", runId: "run-1" },
+        { type: "turn_start" },
+        { type: "tool_start", toolCallId: "t1", toolName: "bash", args: {} },
+        { type: "tool_end", toolCallId: "t1", toolName: "bash", isError: false, result: "ok" },
+        { type: "done" },
+      ),
+    );
+    expect(nodeById(completed, "tool:t1").status).toBe("ok");
+  });
+});
+
+describe("frames behind a node", () => {
+  it("maps every frame to the node it belongs to, including the modelled-away ones", () => {
+    const projection = projectSession(SESSION, TURN_WITH_TOOL_AND_SUBAGENT);
+    // text_delta / thinking_delta / cost / context_usage create no node of
+    // their own, but they are still the turn's events and must be reachable.
+    expect(projection.frameNodeIds[5]).toBe("turn:1");
+    expect(projection.frameNodeIds[6]).toBe("turn:1");
+    expect(projection.frameNodeIds[7]).toBe("tool:call_a1");
+    expect(projection.frameNodeIds[1]).toBe(sessionRootId(SESSION));
+
+    const turnFrames = framesForNode(projection, TURN_WITH_TOOL_AND_SUBAGENT, "turn:1");
+    const types = turnFrames.map((frame) => frame.type);
+    expect(types).toContain("text_delta");
+    expect(types).toContain("thinking_delta");
+    expect(types).toContain("turn_end");
+    // Its children's frames come along, so selecting a turn shows the turn.
+    expect(types).toContain("tool_start");
+
+    const toolFrames = framesForNode(projection, TURN_WITH_TOOL_AND_SUBAGENT, "tool:call_a1");
+    expect(toolFrames.map((frame) => frame.seq)).toEqual([7, 8]);
+    // The whole session when nothing is selected.
+    expect(framesForNode(projection, TURN_WITH_TOOL_AND_SUBAGENT, null)).toHaveLength(
+      TURN_WITH_TOOL_AND_SUBAGENT.length,
+    );
+  });
+
+  it("prunes the frame index with the retained ring", () => {
+    const long: SessionFrame[] = [];
+    for (let index = 0; index < MAX_RETAINED_FRAMES + 25; index += 1) {
+      long.push({ seq: index + 1, type: "text_delta", delta: "x" });
+    }
+    const projection = projectSession(SESSION, long);
+    expect(Object.keys(projection.frameNodeIds)).toHaveLength(MAX_RETAINED_FRAMES);
+    expect(projection.frameNodeIds[1]).toBeUndefined();
+  });
+
+  it("describes a frame in its own vocabulary", () => {
+    expect(
+      describeSessionFrame({
+        seq: 1,
+        type: "tool_start",
+        toolName: "bash",
+        args: { command: "head -3 counts.tsv" },
+      }),
+    ).toEqual({ subject: "bash", detail: "head -3 counts.tsv" });
+    expect(
+      describeSessionFrame({ seq: 2, type: "message_start", role: "user", content: "Hi\nthere" }),
+    ).toEqual({ subject: "user", detail: "Hi" });
+    expect(describeSessionFrame({ seq: 3, type: "done" })).toEqual({});
   });
 });
 
@@ -200,6 +312,24 @@ describe("invariant 1 — idempotent", () => {
     const full = projectSession(SESSION, TURN_WITH_TOOL_AND_SUBAGENT);
     const replayed = projectSessionGraph(full, TURN_WITH_TOOL_AND_SUBAGENT.slice(4));
     expect(replayed).toEqual(full);
+  });
+
+  it("folds a sequence carried twice in ONE body exactly once", () => {
+    // `alreadyFolded` cannot see the first copy — nothing is retained until the
+    // fold loop runs — so the duplicate has to be collapsed before the loop.
+    const duplicated: SessionFrame[] = [
+      { seq: 1, type: "run_start", runId: "run-1" },
+      { seq: 2, type: "turn_start" },
+      { seq: 2, type: "turn_start" },
+      { seq: 3, type: "tool_start", toolCallId: "t1", toolName: "bash", args: {} },
+      { seq: 3, type: "tool_start", toolCallId: "t1", toolName: "bash", args: {} },
+    ];
+    const projection = projectSession(SESSION, duplicated);
+    expect(projection.nodes.filter((node) => node.kind === "turn")).toHaveLength(1);
+    expect(projection.retainedSeqs).toEqual([1, 2, 3]);
+    expect(projection).toEqual(
+      projectSession(SESSION, [duplicated[0], duplicated[1], duplicated[3]]),
+    );
   });
 });
 
@@ -222,6 +352,26 @@ describe("invariant 2 — incremental equals full", () => {
       (state, frame) => projectSessionGraph(state, [frame]),
       emptySessionGraph(SESSION),
     );
+    expect(incremental).toEqual(oneShot);
+  });
+
+  it("holds when a workflow-run link is supplied on every chunk", () => {
+    // The link carries no sequence of its own. Parenting it on the open turn
+    // made chunked folding attach it to turn 1 and one-shot folding to turn 2,
+    // with both edges surviving; the session root is chunk-independent.
+    const options = {
+      workflowRun: { runId: "wrun_1", workflowId: "rna-seq", status: "running" },
+    } as const;
+    const twoTurns = frames(
+      { type: "turn_start" },
+      { type: "tool_start", toolCallId: "t1", toolName: "bash", args: {} },
+      { type: "turn_start" },
+    );
+    const oneShot = projectSession(SESSION, twoTurns, options);
+    let incremental = emptySessionGraph(SESSION);
+    for (const frame of twoTurns) {
+      incremental = projectSessionGraph(incremental, [frame], options);
+    }
     expect(incremental).toEqual(oneShot);
   });
 });
@@ -247,6 +397,35 @@ describe("invariant 3 — order tolerant", () => {
     expect(node.detail).toBe("ls");
     // tool_end already landed, so the filled node keeps its terminal status.
     expect(node.status).toBe("ok");
+  });
+
+  it("numbers turns by sequence order even when they arrive backwards", () => {
+    // Turn ordinals used to come from arrival order (`turns.length + 1`), so a
+    // late low-seq turn_start produced "Turn 1" AFTER "Turn 2" in the
+    // conversation. The ordinal is now assigned from the folded sequence order.
+    const oneShot = projectSession(
+      SESSION,
+      [
+        { seq: 5, type: "turn_start" },
+        { seq: 10, type: "turn_start" },
+      ],
+    );
+    let backwards = projectSessionGraph(emptySessionGraph(SESSION), [
+      { seq: 10, type: "turn_start" },
+    ]);
+    backwards = projectSessionGraph(backwards, [{ seq: 5, type: "turn_start" }]);
+
+    const readOut = (projection: SessionGraphProjection) =>
+      projection.nodes
+        .filter((node) => node.kind === "turn")
+        .map((node) => `${node.label}@${node.createdAtSeq}`);
+    expect(readOut(backwards)).toEqual(["Turn 1@5", "Turn 2@10"]);
+    expect(readOut(backwards)).toEqual(readOut(oneShot));
+    // Both are flat under the root, so the rendered conversation order is the
+    // sequence order in either arrival order.
+    expect(
+      childrenOf(backwards, sessionRootId(SESSION)).map((node) => node.createdAtSeq),
+    ).toEqual([5, 10]);
   });
 
   it("never drops a frame that references an unseen parent", () => {
@@ -276,6 +455,36 @@ describe("invariant 4 — bounded", () => {
     const group = nodeById(projection, "group:turn:1");
     expect(group.collapsedCount).toBe(5);
     expect(group.detail).toBe("5 more tool calls");
+  });
+
+  it("counts collapsed TOOL CALLS, not the frames they emit", () => {
+    // A refused tool emits tool_start, tool_update and tool_end, and each of
+    // those used to bump the counter — so 5 hidden tools read as "15 more tool
+    // calls". Only a start-only stream ever agreed with reality.
+    const wide: SessionFrame[] = [{ seq: 1, type: "turn_start" }];
+    let seq = 2;
+    const hidden = 5;
+    for (let index = 0; index < MAX_TOOLS_PER_TURN + hidden; index += 1) {
+      const toolCallId = `call_${index}`;
+      wide.push({ seq: seq++, type: "tool_start", toolCallId, toolName: "bash", args: {} });
+      wide.push({ seq: seq++, type: "tool_update", toolCallId, toolName: "bash" });
+      wide.push({
+        seq: seq++,
+        type: "tool_end",
+        toolCallId,
+        toolName: "bash",
+        isError: false,
+        result: "ok",
+      });
+    }
+    const projection = projectSession(SESSION, wide);
+    expect(projection.nodes.filter((node) => node.kind === "tool")).toHaveLength(
+      MAX_TOOLS_PER_TURN,
+    );
+    const group = nodeById(projection, "group:turn:1");
+    expect(group.collapsedCount).toBe(hidden);
+    expect(group.detail).toBe(`${hidden} more tool calls`);
+    expect(group.collapsedToolCallIds).toHaveLength(hidden);
   });
 
   it("stops at the rendered-node cap and says so", () => {

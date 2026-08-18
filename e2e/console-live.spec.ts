@@ -1,7 +1,7 @@
-import { expect, selectWorkspaceTab, test } from "./fixtures";
+import { expect, selectWorkspaceTab, test, WORKFLOW_RUN_ID } from "./fixtures";
 import type { Page, Route } from "@playwright/test";
 
-// Lane W4 round 1: the Console's live-graph surface, session half.
+// Lane W4: the Console's live-graph surface, session half.
 //
 // The shared mocked tier answers GET /sessions/session-e2e/run/state with
 // `{status:"none"}` (fixtures.ts), which is the right default for every other
@@ -125,6 +125,40 @@ test.describe("w4-console-sessions", () => {
       "running",
     );
     await expect(graph.locator('[data-node-id="tool:call_a1"]')).toContainText("bash");
+
+    // The typed workflow this session delegated to is a node in its own graph
+    // (GET /sessions/:id/workflow-run-state), hanging off the session root.
+    await expect(graph.locator(`[data-node-id="dag:${WORKFLOW_RUN_ID}"]`)).toHaveAttribute(
+      "data-node-kind",
+      "dag",
+    );
+
+    // Clicking it swaps the main area to that run: the placeholder plus the
+    // run's genuine persisted events in the drawer.
+    await graph.locator(`[data-node-id="dag:${WORKFLOW_RUN_ID}"]`).click();
+    const runGraph = workspacePage.getByRole("region", { name: "DAG run graph" });
+    await expect(runGraph).toHaveAttribute("data-run-id", WORKFLOW_RUN_ID);
+    await expect(
+      workspacePage.getByRole("complementary", { name: "Event drawer" }).getByLabel(
+        "Ordered events",
+      ),
+    ).toContainText("node_started");
+  });
+
+  test("a running session is badged running and live in the rail", async ({
+    workspacePage,
+  }) => {
+    // The rail probes GET /sessions/:id/run/state for the sessions inside the
+    // poller cap, so a chat that is mid-run says so WITHOUT being selected.
+    // Round 1 hard-coded every session `idle`, which is exactly the question
+    // this console exists to answer.
+    const state = { body: runStateBody("running", STARTED_FRAMES) };
+    await mockRunState(workspacePage, state);
+
+    const rail = await openLiveConsole(workspacePage);
+    const row = rail.getByRole("button", { name: /E2E chat/ });
+    await expect(row.getByText("live")).toBeVisible();
+    await expect(row.getByText("running")).toBeVisible();
   });
 
   test("node status advances as the run's frames arrive", async ({ workspacePage }) => {
@@ -168,7 +202,15 @@ test.describe("w4-console-sessions", () => {
 
     const drawer = workspacePage.getByRole("complementary", { name: "Event drawer" });
     await expect(drawer).toBeVisible();
-    await expect(drawer.getByLabel("Ordered events")).toContainText("tool.ok");
+    const events = drawer.getByLabel("Ordered events");
+    // The session's REAL frames, including the ones the fold models away —
+    // not the projected nodes restated back at the reader.
+    await expect(events.locator('[data-event-type="message_start"]')).toBeVisible();
+    await expect(events.locator('[data-event-type="text_delta"]')).toBeVisible();
+    await expect(events.locator('[data-event-type="tool_end"]').first()).toBeVisible();
+    await expect(events).not.toContainText("tool.ok");
+    // The viewport is focusable, so a keyboard reader can reach the list.
+    await expect(events).toHaveAttribute("tabindex", "0");
   });
 
   test("a DAG run says the run graph waits on the typed snapshot", async ({

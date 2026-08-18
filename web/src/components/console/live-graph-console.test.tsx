@@ -55,6 +55,8 @@ function jsonResponse(body: unknown): Response {
 
 let sessionRows: Array<Record<string, unknown>>;
 let runStateBody: unknown;
+let workflowRunStateBody: unknown;
+let apiFetchPaths: string[];
 
 beforeEach(() => {
   sessionRows = [
@@ -68,6 +70,8 @@ beforeEach(() => {
     },
   ];
   runStateBody = { status: "none" };
+  workflowRunStateBody = { state: null };
+  apiFetchPaths = [];
   window.localStorage.clear();
 
   vi.spyOn(projectsApi, "listProjects").mockResolvedValue([
@@ -102,8 +106,10 @@ beforeEach(() => {
     diagnostics: [],
   });
   vi.spyOn(projectsApi, "apiFetch").mockImplementation(async (path: string) => {
+    apiFetchPaths.push(path);
     if (path === "/sessions") return jsonResponse(sessionRows);
     if (path.endsWith("/run/state")) return jsonResponse(runStateBody);
+    if (path.endsWith("/workflow-run-state")) return jsonResponse(workflowRunStateBody);
     throw new Error(`unexpected apiFetch ${path}`);
   });
 });
@@ -220,6 +226,140 @@ describe("live-graph console shell", () => {
 
     expect(await screen.findByRole("region", { name: "DAG run graph" })).toBeInTheDocument();
     window.history.replaceState(null, "", "/");
+  });
+
+  it("makes no request at all while the Console is not the visible view", async () => {
+    // The Console stays mounted-but-hidden once visited, so `active` is the
+    // only thing standing between the reader being in Chat and this surface
+    // sweeping every project's sessions every three seconds.
+    render(
+      <LiveGraphConsole
+        projectId="default"
+        active={false}
+        runsConsole={<div>typed run console</div>}
+      />,
+    );
+    const rail = await screen.findByRole("complementary", { name: "Live work" });
+    expect(rail).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    expect(projectsApi.listProjects).not.toHaveBeenCalled();
+    expect(projectsApi.listProjectActivities).not.toHaveBeenCalled();
+    expect(dagApi.listDagWorkflowRuns).not.toHaveBeenCalled();
+    expect(dagApi.pageDagWorkflowRunEvents).not.toHaveBeenCalled();
+    expect(apiFetchPaths).toEqual([]);
+  });
+
+  it("badges a running session in the rail without it being selected", async () => {
+    // Round 1 hard-coded every session `idle`, so a session whose own header
+    // said RUN RUNNING still read `idle` with no live chip in the rail.
+    runStateBody = {
+      status: "running",
+      run: {
+        runId: "run-1",
+        prompt: "Cluster the RNA-seq counts.",
+        images: [],
+        baseline: { messages: [], contextUsage: null },
+        frames: RUN_FRAMES,
+        lastSeq: 4,
+      },
+    };
+    render(<LiveGraphConsole projectId="default" runsConsole={<div>typed run console</div>} />);
+
+    const rail = await screen.findByRole("complementary", { name: "Live work" });
+    const row = await within(rail).findByRole("button", { name: /RNA clustering/ });
+    await waitFor(() => {
+      // The pulsing chip and the status word are separate elements, so match
+      // them exactly rather than against the row's run-together text content.
+      expect(within(row).getByText("live")).toBeInTheDocument();
+    });
+    expect(within(row).getByText("running")).toBeInTheDocument();
+    expect(apiFetchPaths).toContain("/sessions/session-a/run/state");
+  });
+
+  it("lists the session's real frames in the drawer, not its projected nodes", async () => {
+    runStateBody = {
+      status: "running",
+      run: {
+        runId: "run-1",
+        prompt: "Cluster the RNA-seq counts.",
+        images: [],
+        baseline: { messages: [], contextUsage: null },
+        frames: [
+          ...RUN_FRAMES,
+          { seq: 5, type: "text_delta", delta: "Inspecting the matrix." },
+        ],
+        lastSeq: 5,
+      },
+    };
+    const user = userEvent.setup();
+    render(<LiveGraphConsole projectId="default" runsConsole={<div>typed run console</div>} />);
+
+    const rail = await screen.findByRole("complementary", { name: "Live work" });
+    await user.click(await within(rail).findByRole("button", { name: /RNA clustering/ }));
+
+    const graph = await screen.findByRole("region", { name: "Session live graph" });
+    await waitFor(() => {
+      expect(graph.querySelector('[data-node-id="turn:1"]')).not.toBeNull();
+    });
+    await user.click(graph.querySelector('[data-node-id="turn:1"]') as HTMLElement);
+
+    const drawer = await screen.findByRole("complementary", { name: "Event drawer" });
+    const list = within(drawer).getByLabelText("Ordered events");
+    await waitFor(() => {
+      // Genuine frame types, including the ones the fold models away.
+      expect(list.querySelector('[data-event-type="message_start"]')).not.toBeNull();
+    });
+    expect(list.querySelector('[data-event-type="text_delta"]')).not.toBeNull();
+    expect(list.querySelector('[data-event-type="tool_start"]')).not.toBeNull();
+    // Not the node restatements the round-1 drawer showed.
+    expect(list.textContent).not.toMatch(/tool\.running/);
+  });
+
+  it("swaps to the delegated typed run when its dag node is clicked", async () => {
+    runStateBody = {
+      status: "running",
+      run: {
+        runId: "run-1",
+        prompt: "Cluster the RNA-seq counts.",
+        images: [],
+        baseline: { messages: [], contextUsage: null },
+        frames: RUN_FRAMES,
+        lastSeq: 4,
+      },
+    };
+    workflowRunStateBody = {
+      state: {
+        schemaVersion: 1,
+        runId: "wrun_1",
+        workflowId: "rna-seq",
+        workflowRevision: 1,
+        status: "running",
+        nodes: [],
+        topology: { nodes: [], edges: [] },
+      },
+    };
+    const user = userEvent.setup();
+    render(<LiveGraphConsole projectId="default" runsConsole={<div>typed run console</div>} />);
+
+    const rail = await screen.findByRole("complementary", { name: "Live work" });
+    await user.click(await within(rail).findByRole("button", { name: /RNA clustering/ }));
+
+    const graph = await screen.findByRole("region", { name: "Session live graph" });
+    const dagNode = await waitFor(() => {
+      const node = graph.querySelector('[data-node-id="dag:wrun_1"]');
+      if (!node) throw new Error("dag node not rendered");
+      return node as HTMLElement;
+    });
+    expect(dagNode.getAttribute("data-node-kind")).toBe("dag");
+
+    await user.click(dagNode);
+    const main = await screen.findByRole("region", { name: "DAG run graph" });
+    expect(main.getAttribute("data-run-id")).toBe("wrun_1");
+    const drawer = await screen.findByRole("complementary", { name: "Event drawer" });
+    await waitFor(() => {
+      expect(within(drawer).getByText("node_started")).toBeInTheDocument();
+    });
   });
 
   it("includes an open chat tab from another project when all projects are on", async () => {

@@ -29,25 +29,37 @@ import {
 } from "@/components/console/live-event-drawer";
 import { LiveSourceRail } from "@/components/console/live-source-rail";
 import {
+  applySessionRunStates,
   assignPollRanks,
   deepLinkSearch,
   describeEmptyState,
+  describeUnresolvedDeepLink,
   filterLiveSources,
+  liveSourceKey,
   matchDeepLink,
+  nextPollDelayMs,
   parseDeepLink,
+  sessionsToProbe,
   useOpenWork,
   useSessionGraph,
+  useSessionRunStates,
   type LiveSource,
+  type LiveSourceStatus,
+  type SessionRunProbe,
 } from "@/lib/console-live-sources";
 import { pageDagWorkflowRunEvents, type WorkflowRunEvent } from "@/lib/dag-workflows";
 import { getActiveProjectId } from "@/lib/projects";
 import {
   childrenOf,
+  describeSessionFrame,
+  framesForNode,
   projectionNotices,
   sessionRootId,
+  type SessionFrame,
   type SessionGraphNode,
   type SessionGraphNodeStatus,
   type SessionGraphProjection,
+  type SessionRunStatus,
 } from "@/lib/session-dag-projection";
 import { cn } from "@/lib/utils";
 
@@ -122,8 +134,13 @@ function GraphNodeCard({
 
 /**
  * Indented tree of the projection, walked from the session root. A layout
- * engine is not what round 1 owes: the shape (root → turn chain → tools →
- * subagents) is what has to be legible and live.
+ * engine is not what this owes: the shape (root → turns → tools → subagents)
+ * is what has to be legible and live.
+ *
+ * Indentation is the DELEGATION dimension only. Turns are siblings under the
+ * session root (session-dag-projection.ts parents them there), so a 60-turn
+ * session no longer walks ~1,440px off the right edge before reaching the turn
+ * the reader is actually watching.
  */
 function GraphBranch({
   projection,
@@ -135,7 +152,7 @@ function GraphBranch({
   projection: SessionGraphProjection;
   nodeId: string;
   selectedNodeId: string | null;
-  onSelectNode: (nodeId: string) => void;
+  onSelectNode: (node: SessionGraphNode) => void;
   depth: number;
 }) {
   const node = projection.nodes.find((candidate) => candidate.id === nodeId);
@@ -146,7 +163,7 @@ function GraphBranch({
       <GraphNodeCard
         node={node}
         selected={node.id === selectedNodeId}
-        onSelect={() => onSelectNode(node.id)}
+        onSelect={() => onSelectNode(node)}
       />
       {children.length > 0 ? (
         <ul className="mt-1 space-y-1 border-l border-border/60 pl-2">
@@ -201,11 +218,38 @@ function DagRunPlaceholder({ source }: { source: LiveSource }) {
   );
 }
 
-/** Frames behind one projected node, normalized for the drawer. */
+/**
+ * The selected node's REAL events. The session half used to restate the
+ * projected nodes back at the reader ("tool.running", "subagent.running"),
+ * which meant every frame the fold models away — `text_delta`,
+ * `thinking_delta`, `message_start/end`, `cost`, `context_usage`,
+ * `queue_update`, `turn_end`, `done` — appeared nowhere in the console, and a
+ * row mutated as its node's status changed instead of a new event arriving.
+ * The run half has always shown genuine persisted events; this is the same
+ * contract for sessions.
+ *
+ * Node rows remain the fallback for a node whose frames have aged out of the
+ * 500-sequence ring, so an old node is never a blank drawer.
+ */
 function sessionDrawerEvents(
   projection: SessionGraphProjection,
+  frames: readonly SessionFrame[],
   nodeId: string | null,
 ): LiveDrawerEvent[] {
+  const selectedFrames = framesForNode(projection, frames, nodeId);
+  if (selectedFrames.length > 0) {
+    return selectedFrames.map((frame) => {
+      const summary = describeSessionFrame(frame);
+      return {
+        key: `frame:${frame.seq}`,
+        seq: frame.seq,
+        type: frame.type,
+        ...(summary.subject !== undefined ? { subject: summary.subject } : {}),
+        ...(summary.detail !== undefined ? { detail: summary.detail } : {}),
+        ...(typeof frame.ts === "number" ? { ts: frame.ts } : {}),
+      };
+    });
+  }
   const nodes = nodeId === null
     ? projection.nodes
     : [
@@ -231,13 +275,23 @@ function runDrawerEvents(events: WorkflowRunEvent[]): LiveDrawerEvent[] {
     type: event.type,
     ...(event.nodeId !== undefined ? { subject: event.nodeId } : {}),
     ...(event.attempt !== undefined ? { attempt: event.attempt } : {}),
-    ...(event.executionId !== undefined ? { detail: `execution ${event.executionId}` } : {}),
+    // Hover-only: the execution id is a 32-hex opaque token, not something the
+    // reader scans a list for.
+    ...(event.executionId !== undefined ? { hint: `execution ${event.executionId}` } : {}),
     ts: event.ts,
   }));
 }
 
+const DAG_NODE_STATUS_TO_SOURCE: Record<SessionGraphNodeStatus, LiveSourceStatus> = {
+  pending: "queued",
+  running: "running",
+  ok: "ok",
+  error: "error",
+  cancelled: "cancelled",
+};
+
 /** Ordered events for a selected typed run, polled with the list cadence. */
-function useRunEvents(source: LiveSource | null): WorkflowRunEvent[] {
+function useRunEvents(source: LiveSource | null, active: boolean): WorkflowRunEvent[] {
   // Keyed by run id so switching runs discards the previous run's page during
   // render rather than through a clearing effect.
   const [page, setPage] = useState<{ runId: string | null; events: WorkflowRunEvent[] }>({
@@ -247,14 +301,32 @@ function useRunEvents(source: LiveSource | null): WorkflowRunEvent[] {
   const runId = source?.kind === "dag-run" ? source.id : null;
   const projectId = source?.projectId ?? "";
   useEffect(() => {
-    if (!runId) return;
+    if (!active || !runId) return;
     let cancelled = false;
     let cursor = 0;
+    let consecutiveErrors = 0;
     let timer: ReturnType<typeof setTimeout> | null = null;
+
+    // This poller owns its own backoff. It used to swallow errors with a
+    // comment deferring to "the poller", which was itself — so a permanently
+    // failing /dag-workflow-runs/:id/events was hit 20x a minute, silently,
+    // for as long as the run stayed selected.
+    const schedule = () => {
+      if (cancelled) return;
+      const delay = nextPollDelayMs({
+        selected: true,
+        running: true,
+        rank: 0,
+        consecutiveErrors,
+        documentHidden: typeof document !== "undefined" && document.hidden,
+      });
+      timer = setTimeout(() => void tick(), delay ?? 5_000);
+    };
+
     const tick = async () => {
       if (cancelled) return;
       if (typeof document !== "undefined" && document.hidden) {
-        timer = setTimeout(() => void tick(), 5_000);
+        schedule();
         return;
       }
       try {
@@ -263,6 +335,7 @@ function useRunEvents(source: LiveSource | null): WorkflowRunEvent[] {
           limit: 200,
         });
         if (cancelled) return;
+        consecutiveErrors = 0;
         if (next.events.length > 0) {
           cursor = next.lastSeq;
           setPage((previous) => {
@@ -276,17 +349,26 @@ function useRunEvents(source: LiveSource | null): WorkflowRunEvent[] {
           });
         }
       } catch {
-        // Backoff is the poller's; a transient failure just retries.
+        if (cancelled) return;
+        consecutiveErrors += 1;
       }
-      if (!cancelled) timer = setTimeout(() => void tick(), 3_000);
+      schedule();
     };
     void tick();
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [projectId, runId]);
+  }, [active, projectId, runId]);
   return page.runId === runId ? page.events : [];
+}
+
+/** What the selected session's poller reports back to the shell. */
+interface SessionGraphSnapshot {
+  sourceKey: string;
+  projection: SessionGraphProjection;
+  frames: SessionFrame[];
+  runStatus: SessionRunStatus;
 }
 
 export function LiveGraphConsole({
@@ -295,7 +377,13 @@ export function LiveGraphConsole({
   runsConsole,
 }: {
   projectId?: string;
-  /** The Console tab is mounted-but-hidden when the user is elsewhere. */
+  /**
+   * True only while this surface is genuinely on screen: the Console is the
+   * workspace's visible view AND "DAG Runs" is the selected feed. Every poller
+   * below is gated on it, because the Console stays mounted-but-hidden once it
+   * has been visited and would otherwise sweep every project's sessions while
+   * the reader is in Chat or Builder.
+   */
   active?: boolean;
   /**
    * The durable typed-run console. It stays the main area's default so the
@@ -317,8 +405,13 @@ export function LiveGraphConsole({
     typeof window === "undefined" ? null : parseDeepLink(window.location.search),
   );
   const [chosen, setChosen] = useState<{ key: string | null; drawer: boolean } | null>(null);
+  const [sessionSnapshot, setSessionSnapshot] = useState<SessionGraphSnapshot | null>(null);
+  // A typed run reached by clicking a `dag` node inside a session graph. It is
+  // not part of the live list (a finished run never is), so the console carries
+  // it itself rather than pretending discovery found it.
+  const [linkedRun, setLinkedRun] = useState<LiveSource | null>(null);
 
-  const { sources, error } = useOpenWork({
+  const { sources, error, notices, activeProjectName } = useOpenWork({
     projectId: resolvedProjectId,
     enabled: active,
     allProjects,
@@ -330,15 +423,51 @@ export function LiveGraphConsole({
     return () => clearInterval(id);
   }, [active]);
 
-  const visible = useMemo(() => filterLiveSources(sources, query), [query, sources]);
   const linked = useMemo(() => matchDeepLink(sources, initialLink), [initialLink, sources]);
   const selectedKey = chosen ? chosen.key : linked?.key ?? null;
   const drawerOpen = chosen ? chosen.drawer : linked !== null;
-  const selected = useMemo(
-    () => sources.find((source) => source.key === selectedKey) ?? null,
+
+  // Discovery ranks the rail; the ranks decide which sessions get a run-state
+  // probe, and the probes then say which of those are actually running. The
+  // selected session is excluded from the probes because its own graph poller
+  // already knows, and reports back through `sessionSnapshot`.
+  const discoveredRanks = useMemo(
+    () => assignPollRanks(sources, selectedKey),
     [selectedKey, sources],
   );
-  const ranks = useMemo(() => assignPollRanks(sources, selectedKey), [selectedKey, sources]);
+  const probeTargets = useMemo(
+    () => sessionsToProbe(sources, discoveredRanks, selectedKey),
+    [discoveredRanks, selectedKey, sources],
+  );
+  const probes = useSessionRunStates({
+    sessions: probeTargets,
+    ranks: discoveredRanks,
+    enabled: active,
+  });
+  const runStates = useMemo<ReadonlyMap<string, SessionRunProbe>>(() => {
+    if (!sessionSnapshot) return probes;
+    const merged = new Map(probes);
+    merged.set(sessionSnapshot.sourceKey, {
+      status: sessionSnapshot.runStatus,
+      runId: null,
+    });
+    return merged;
+  }, [probes, sessionSnapshot]);
+
+  const liveSources = useMemo(
+    () => applySessionRunStates(sources, runStates),
+    [runStates, sources],
+  );
+  const visible = useMemo(() => filterLiveSources(liveSources, query), [liveSources, query]);
+  const selected = useMemo(() => {
+    const found = liveSources.find((source) => source.key === selectedKey) ?? null;
+    if (found) return found;
+    return linkedRun && linkedRun.key === selectedKey ? linkedRun : null;
+  }, [linkedRun, liveSources, selectedKey]);
+  const ranks = useMemo(
+    () => assignPollRanks(liveSources, selectedKey),
+    [liveSources, selectedKey],
+  );
 
   // Deep link out: the address bar always names the current selection.
   const selectSource = useCallback((source: LiveSource | null) => {
@@ -354,16 +483,68 @@ export function LiveGraphConsole({
     }
   }, []);
 
-  const runEvents = useRunEvents(selected);
-  const [sessionProjection, setSessionProjection] = useState<SessionGraphProjection | null>(null);
+  /**
+   * A node inside a session's graph. A `dag` node is a delegation to a typed
+   * workflow run, so clicking it swaps the main area to that run — the run
+   * placeholder plus its genuine persisted events in the drawer — exactly as
+   * selecting the run in the rail would.
+   */
+  const selectGraphNode = useCallback(
+    (node: SessionGraphNode, source: LiveSource) => {
+      if (node.kind === "dag" && node.detail) {
+        const runId = node.detail;
+        const discovered = sources.find(
+          (candidate) => candidate.kind === "dag-run" && candidate.id === runId,
+        );
+        const runSource: LiveSource = discovered ?? {
+          key: liveSourceKey("dag-run", source.projectId, runId),
+          kind: "dag-run",
+          id: runId,
+          projectId: source.projectId,
+          projectName: source.projectName,
+          title: node.label,
+          status: DAG_NODE_STATUS_TO_SOURCE[node.status],
+          live: node.status === "running",
+          lastActivityAt: Date.now(),
+          origins: ["dag-run"],
+          projectActivity: null,
+        };
+        setLinkedRun(discovered ? null : runSource);
+        selectSource(runSource);
+        return;
+      }
+      setSelectedNodeId(node.id);
+      setChosen({ key: source.key, drawer: true });
+    },
+    [selectSource, sources],
+  );
+
+  const runEvents = useRunEvents(selected, active);
+
+  // A snapshot only describes the drawer while it still belongs to the current
+  // selection; switching sources must not show the previous session's events.
+  const activeSessionSnapshot =
+    sessionSnapshot && selected && sessionSnapshot.sourceKey === selected.key
+      ? sessionSnapshot
+      : null;
 
   const drawerEvents = selected?.kind === "dag-run"
     ? runDrawerEvents(runEvents)
-    : sessionProjection
-      ? sessionDrawerEvents(sessionProjection, selectedNodeId)
+    : activeSessionSnapshot
+      ? sessionDrawerEvents(
+          activeSessionSnapshot.projection,
+          activeSessionSnapshot.frames,
+          selectedNodeId,
+        )
       : [];
 
-  const emptyMessage = describeEmptyState(allProjects ? null : resolvedProjectId);
+  const emptyMessage = describeEmptyState(allProjects ? null : activeProjectName);
+  // The URL named something discovery cannot see. Silence read as "nothing is
+  // running" even when the link pointed at a real run that had just finished.
+  const deepLinkNotice =
+    chosen === null && initialLink !== null && linked === null
+      ? describeUnresolvedDeepLink(initialLink)
+      : null;
 
   return (
     <div className="flex h-full min-h-0 w-full">
@@ -376,6 +557,8 @@ export function LiveGraphConsole({
         allProjects={allProjects}
         onAllProjectsChange={setAllProjects}
         error={error}
+        notices={notices}
+        deepLinkNotice={deepLinkNotice}
         emptyMessage={emptyMessage}
         now={now}
       />
@@ -393,12 +576,10 @@ export function LiveGraphConsole({
           <SessionGraphView
             source={selected}
             rank={ranks.get(selected.key) ?? 0}
+            active={active}
             selectedNodeId={selectedNodeId}
-            onSelectNode={(nodeId) => {
-              setSelectedNodeId(nodeId);
-              setChosen({ key: selected.key, drawer: true });
-            }}
-            onProjection={setSessionProjection}
+            onSelectNode={selectGraphNode}
+            onSnapshot={setSessionSnapshot}
           />
         )}
       </div>
@@ -411,7 +592,7 @@ export function LiveGraphConsole({
           emptyMessage={
             selected.kind === "dag-run"
               ? "No persisted events for this run yet."
-              : "No projected nodes behind this selection yet."
+              : "No retained events behind this selection yet."
           }
           width={drawerWidth}
           onWidthChange={setDrawerWidth}
@@ -428,32 +609,36 @@ export function LiveGraphConsole({
 }
 
 /**
- * A chat session's LLM logs, folded and rendered live. It lifts the projection
- * to the shell so the drawer reads exactly what the canvas draws.
+ * A chat session's LLM logs, folded and rendered live. It lifts the projection,
+ * its retained frames, and the run status to the shell so the drawer reads
+ * exactly what the canvas draws and the rail can badge the row honestly.
  */
 function SessionGraphView({
   source,
   rank,
+  active,
   selectedNodeId,
   onSelectNode,
-  onProjection,
+  onSnapshot,
 }: {
   source: LiveSource;
   rank: number;
+  active: boolean;
   selectedNodeId: string | null;
-  onSelectNode: (nodeId: string) => void;
-  onProjection: (projection: SessionGraphProjection) => void;
+  onSelectNode: (node: SessionGraphNode, source: LiveSource) => void;
+  onSnapshot: (snapshot: SessionGraphSnapshot) => void;
 }) {
-  const { projection, runStatus, error } = useSessionGraph({
+  const { projection, frames, runStatus, error } = useSessionGraph({
     projectId: source.projectId,
     sessionId: source.id,
     selected: true,
     rank,
-    enabled: true,
+    enabled: active,
   });
+  const sourceKey = source.key;
   useEffect(() => {
-    onProjection(projection);
-  }, [onProjection, projection]);
+    onSnapshot({ sourceKey, projection, frames, runStatus });
+  }, [frames, onSnapshot, projection, runStatus, sourceKey]);
   const notices = projectionNotices(projection);
   return (
     <section
@@ -501,7 +686,7 @@ function SessionGraphView({
             projection={projection}
             nodeId={sessionRootId(source.id)}
             selectedNodeId={selectedNodeId}
-            onSelectNode={onSelectNode}
+            onSelectNode={(node) => onSelectNode(node, source)}
             depth={0}
           />
         </ul>

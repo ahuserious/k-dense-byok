@@ -21,6 +21,13 @@
 // it must live ALONGSIDE the native DAG-runs console (additive mandate). The
 // Agent Console mounts on first visit and then stays mounted (display toggled)
 // so its polling feed keeps warm across sub-tab flips.
+//
+// `active` is the WORKSPACE's visibility predicate, not this file's sub-tab
+// state. PersistentWorkspaceSurfaces keeps the Console mounted-but-hidden once
+// it has been visited, so without it the live console would keep polling every
+// project's sessions while the reader is in Chat or Builder. The two predicates
+// multiply: the live graph runs only when the Console is the visible view AND
+// "DAG Runs" is the selected feed.
 
 "use client";
 
@@ -37,8 +44,11 @@ const FEED_SEGMENTS: { id: ConsoleFeed; label: string }[] = [
 ];
 
 export function ConsolePanel({
+  active = true,
   dagConsole,
 }: {
+  /** True only while the Console is the workspace's visible view. */
+  active?: boolean;
   /** The native typed-engine console, rendered by the parent with its own props. */
   dagConsole: ReactNode;
 }) {
@@ -76,7 +86,7 @@ export function ConsolePanel({
           feed === "dag-runs" ? "flex" : "hidden",
         )}
       >
-        <LiveGraphConsole active={feed === "dag-runs"} runsConsole={dagConsole} />
+        <LiveGraphConsole active={active && feed === "dag-runs"} runsConsole={dagConsole} />
       </div>
       {agentsVisited && (
         <div

@@ -209,18 +209,47 @@ server-side scoping, the handoff is still open.
 | `tool` | `tool:<toolCallId>` | `tool_start` (`tool_update`/`tool_end` create a placeholder if they arrive first) | `tool_end.isError` |
 | `subagent` | `agent:<toolCallId>:<agentName>` | `tool_start` with `toolName === "subagent"`, one per name in `args.agent` / `args.tasks[].agent` | inherits the parent tool's terminal status |
 | `dag` | `dag:<runId>` | the `workflowRun` fold option, sourced from `GET /sessions/:id/workflow-run-state` | `queued`→`pending`, `succeeded`→`ok`, `failed`→`error`, `cancelled`→`cancelled`, else `running` |
-| `group` | `group:<turnId>` | the 13th+ tool/subagent/dag child of one turn | `running`, carries `collapsedCount` |
+| `group` | `group:<turnId>` | the 13th+ tool/subagent/dag child of one turn | `running`, carries `collapsedToolCallIds` and `collapsedCount = collapsedToolCallIds.length` |
 | `event` | `event:<seq>` | **any frame type not listed in §3** | `ok` |
 
-Edges: `session → turn:1 → turn:2 → …` (`kind: "turn"`), `turn → tool`
-(`"tool"`), `tool → subagent` (`"subagent"`), `turn → dag` (`"dag"`),
+Edges: `session → turn` for **every** turn (`kind: "turn"`), `turn → tool`
+(`"tool"`), `tool → subagent` (`"subagent"`), `session → dag` (`"dag"`),
 `turn → event` (`"event"`), `turn → group` (`"group"`). Any edge whose target is
 already an ancestor of its source is stored with `kind: "back"` and badges the
 target `cyclic` — a delegation cycle is drawn, never expanded.
 
+**Turns are siblings, not a chain.** R1 parented each turn on the previous one
+(`session → turn:1 → turn:2 → …`). That had two costs and no benefit: the
+rendered tree gained one indent level per turn, so the newest turn — the one
+being watched — walked off the right edge of a long session (60 turns ≈ 1,440px
+of indentation); and the shape depended on arrival order, because a turn folded
+out of sequence parented itself on a turn that came *after* it in the
+conversation. Conversation order now comes from the folded sequence numbers
+alone, which is where it always belonged. Indentation is reserved for the
+delegation dimension that `MAX_DEPTH` actually bounds.
+
+**The `dag` link hangs off the session root** for the same reason: it arrives
+out of band from `GET /sessions/:id/workflow-run-state` and carries no sequence
+of its own, so parenting it on "whichever turn was open when the poll landed"
+made both its parent and its creation order depend on how the caller chunked
+its polls. It is created at sequence `0` — the session's own.
+
 Ids are derived from event ids (`toolCallId`, `runId`, `seq`) or from a
-monotonic turn ordinal. **No id is ever an array position**, so filtering,
-re-ordering, or a partial poll cannot renumber a node.
+monotonic turn allocator. **No id is ever an array position**, so filtering,
+re-ordering, or a partial poll cannot renumber a node. The turn *ordinal a
+reader sees* (`Turn 1`, `Turn 2`, …) is assigned at save time from folded
+sequence order, so a late low-sequence `turn_start` reads as "Turn 1" rather
+than renaming an existing node.
+
+### 4.0 Terminal frames and unfinished work
+
+`agent_end` and `done` settle every still-`running` node, but not all to the
+same status. A `turn`, `group`, or `event` genuinely ends when the run ends, so
+it settles `ok`. A `tool`, `subagent`, or `dag` that never reported its own end
+did **not** succeed: `sessions.ts` publishes `done` from a `finally` on every
+exit path including abort and a thrown error (`sessions.ts:1409`, `:1429`), so a
+run killed mid-`bash` would otherwise paint that tool green. Those settle
+`cancelled`. `ok` is reserved for work that reported completion.
 
 ### 4.1 Why there is no `subagent`/`delegation` frame type
 
@@ -255,9 +284,34 @@ full nine, because it overlays the real run document.
 | Retained frame sequences per source | 500 | `MAX_RETAINED_FRAMES` |
 | Subagent/delegation expansion depth | 3 | `MAX_DEPTH` |
 
-Crossing the first sets `collapsedCount` on a group node; the second sets
-`truncated`; the third increments `droppedFrames`; the fourth sets
+Crossing the first records the refused **tool-call id** on the group node
+(`collapsedToolCallIds`) and reports `collapsedCount` as that list's length; the
+second sets `truncated`; the third increments `droppedFrames`; the fourth sets
 `depthCollapsed` and badges the parent `deeperCollapsed`.
+
+The group count is per *call*, not per *frame*. One refused tool emits
+`tool_start`, usually `tool_update`, and `tool_end` — counting the calls into
+the grouping path reported the same hidden tool two or three times, so 5 hidden
+tools read as "15 more tool calls" on any realistic stream.
+
+### 5.1 What the invariants are stated over
+
+Invariants 2 (incremental == full) and 3 (order tolerance) are statements about
+a frame **set**: the same set of frames, folded in any chunking and in any order
+inside a chunk, yields the same projection. They now hold across calls as well
+as inside one, because neither the turn chain nor the `dag` link's parent
+depends on arrival order any more, and because duplicate sequences inside one
+body are collapsed before the fold loop runs (`alreadyFolded` cannot see the
+first copy — nothing is retained until the loop starts).
+
+### 5.2 The frame → node index
+
+The projection carries `frameNodeIds: Record<seq, nodeId>`, pruned with the
+retained ring. It is what lets the event drawer list a node's **real events**
+rather than restating its projected children back at the reader. Frames the fold
+models away — `text_delta`, `thinking_delta`, `message_end`, `queue_update`,
+`context_usage`, `cost` — are attributed to the turn they arrived in, so nothing
+the server sent is invisible in the console.
 
 ---
 
@@ -265,6 +319,9 @@ Crossing the first sets `collapsedCount` on a group node; the second sets
 
 * The DAG-run graph (`projectRunToGraph`) needs the executed-document snapshot
   from `GET /dag-workflow-runs/:id` (probe B6, lane W3-R1). It is **not**
-  stubbed here; the console says so in place of a graph.
+  stubbed here; the console says so in place of a graph. Clicking a session's
+  `dag` node now swaps the main area to that run's placeholder and its genuine
+  persisted events, which is the whole of the contract that does not need the
+  snapshot.
 * `GET /sessions/:id/history` as a "load older" source (see §3.1).
 * Promote-this-session-to-a-DAG (W4-R3).

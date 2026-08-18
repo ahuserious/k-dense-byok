@@ -9,7 +9,11 @@
 //   (b) sessions in OTHER projects that have activity — the project set comes
 //       from GET /projects/activity (one request, already project-wide) and
 //       only projects it reports as busy are swept, bounded to
-//       MAX_SWEPT_PROJECTS and cached for PROJECT_SWEEP_CACHE_MS
+//       MAX_SWEPT_PROJECTS and cached for PROJECT_SWEEP_CACHE_MS. "Busy" means
+//       running or needing input RIGHT NOW: the summary's `errors` and
+//       `blocked` counts are historical/budget state (a chat that failed days
+//       ago, or a project merely over its spend limit) and would pin a dead
+//       project to a sweep slot forever.
 //   (c) sessions this browser has open in chat tabs, read from the persisted
 //       workspace snapshot (kady:workspace:v1), even when idle
 //   (d) sessions touched in the last 30 minutes (GET /sessions `modified`)
@@ -21,13 +25,14 @@
 
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   listDagWorkflowRuns,
   type WorkflowRunStatus,
   type WorkflowRunSummary,
 } from "@/lib/dag-workflows";
+import type { ProjectActivitySummary } from "@/lib/project-activity";
 import { apiFetch, listProjectActivities, listProjects } from "@/lib/projects";
 import {
   emptySessionGraph,
@@ -35,6 +40,7 @@ import {
   type SessionFrame,
   type SessionGraphProjection,
   type SessionRunStatus,
+  type SessionWorkflowRunLink,
 } from "@/lib/session-dag-projection";
 import {
   parseWorkspaceMetadata,
@@ -71,6 +77,8 @@ export const PROJECT_SWEEP_CACHE_MS = 5_000;
 export const PROJECT_ROSTER_CACHE_MS = 60_000;
 /** Ring buffer applied to a session's retained frames before folding. */
 export const SOURCE_FRAME_RING = 500;
+/** How often the selected session re-reads its typed workflow-run link. */
+export const SESSION_WORKFLOW_LINK_POLL_MS = 5_000;
 
 // --- source model ----------------------------------------------------------
 
@@ -100,6 +108,43 @@ export interface LiveSource {
   live: boolean;
   lastActivityAt: number;
   origins: LiveSourceOrigin[];
+  /**
+   * The owning project's live counts from GET /projects/activity, when the
+   * sweep saw them. Discovery already knows which projects are working; the
+   * rail needs it to rank rows and to explain why a project is being polled.
+   */
+  projectActivity: LiveProjectActivity | null;
+}
+
+/**
+ * The live half of a project's activity summary. Deliberately narrower than
+ * `ProjectActivitySummary`: those are the only two counts that describe work
+ * happening NOW (see `isProjectBusy`).
+ */
+export interface LiveProjectActivity {
+  running: number;
+  needsInput: number;
+}
+
+/**
+ * Busy RIGHT NOW. `errors` and `blocked` are deliberately excluded: the server
+ * reconstructs `errors` from the newest persisted transcript's outcome
+ * (a project that failed a chat days ago stays "errored"), and forces
+ * `blocked >= 1` for any project over its spend limit.
+ */
+export function isProjectBusy(
+  activity: LiveProjectActivity | undefined | null,
+): boolean {
+  if (!activity) return false;
+  return activity.running > 0 || activity.needsInput > 0;
+}
+
+function projectActivityOf(
+  activity: ProjectActivitySummary | undefined | null,
+): LiveProjectActivity | null {
+  return activity
+    ? { running: activity.running, needsInput: activity.needsInput }
+    : null;
 }
 
 export function liveSourceKey(
@@ -186,6 +231,7 @@ export function dagRunSources(
       live: run.status === "running",
       lastActivityAt: run.startedAt ?? run.createdAt,
       origins: ["dag-run" as LiveSourceOrigin],
+      projectActivity: null,
     }));
 }
 
@@ -196,6 +242,7 @@ export function sessionSources(
   projectId: string,
   projectName: string,
   now: number,
+  projectActivity: ProjectActivitySummary | null = null,
 ): LiveSource[] {
   const sources: LiveSource[] = [];
   for (const row of rows) {
@@ -212,7 +259,8 @@ export function sessionSources(
       status: "idle",
       live: false,
       lastActivityAt,
-      origins: ["recent"],
+      origins: isProjectBusy(projectActivity) ? ["recent", "active-run"] : ["recent"],
+      projectActivity: projectActivityOf(projectActivity),
     });
   }
   return sources;
@@ -241,6 +289,7 @@ export function openTabSources(
   tabs: readonly OpenChatTab[],
   projectNames: ReadonlyMap<string, string>,
   now: number,
+  activities: Readonly<Record<string, ProjectActivitySummary>> = {},
 ): LiveSource[] {
   return tabs.map((tab) => ({
     key: liveSourceKey("session", tab.projectId, tab.sessionId),
@@ -254,7 +303,10 @@ export function openTabSources(
     // An open tab is "here now" even when its transcript is old, so it sorts
     // with the freshest work rather than falling off the 30-minute window.
     lastActivityAt: now,
-    origins: ["open-tab" as LiveSourceOrigin],
+    origins: isProjectBusy(activities[tab.projectId])
+      ? (["open-tab", "active-run"] as LiveSourceOrigin[])
+      : (["open-tab"] as LiveSourceOrigin[]),
+    projectActivity: projectActivityOf(activities[tab.projectId]),
   }));
 }
 
@@ -290,6 +342,9 @@ export function mergeLiveSources(groups: readonly (readonly LiveSource[])[]): Li
       if (existing.projectName === existing.projectId) {
         existing.projectName = source.projectName;
       }
+      if (existing.projectActivity === null && source.projectActivity !== null) {
+        existing.projectActivity = source.projectActivity;
+      }
     }
   }
   for (const source of merged.values()) {
@@ -297,11 +352,21 @@ export function mergeLiveSources(groups: readonly (readonly LiveSource[])[]): Li
       (left, right) => ORIGIN_ORDER.indexOf(left) - ORIGIN_ORDER.indexOf(right),
     );
   }
-  return [...merged.values()].sort(
-    (left, right) =>
-      Number(right.live) - Number(left.live) ||
-      right.lastActivityAt - left.lastActivityAt ||
-      (left.key < right.key ? -1 : left.key > right.key ? 1 : 0),
+  return [...merged.values()].sort(compareLiveSources);
+}
+
+/**
+ * Rail order: live work first, then work whose project reports activity, then
+ * by recency. Exported so a later status upgrade (a run-state probe promoting a
+ * session to `running`) re-orders exactly the way discovery did.
+ */
+export function compareLiveSources(left: LiveSource, right: LiveSource): number {
+  return (
+    Number(right.live) - Number(left.live) ||
+    Number(isProjectBusy(right.projectActivity)) -
+      Number(isProjectBusy(left.projectActivity)) ||
+    right.lastActivityAt - left.lastActivityAt ||
+    (left.key < right.key ? -1 : left.key > right.key ? 1 : 0)
   );
 }
 
@@ -316,12 +381,51 @@ export function filterLiveSources(sources: readonly LiveSource[], query: string)
 }
 
 /**
- * Empty state that names the reason, never a bare spinner. Both halves are
- * always stated so the reader knows both discovery arms ran.
+ * Empty state that names the reason, never a bare spinner. It is a statement
+ * about what discovery LOOKED AT — both arms, and the exact session predicate —
+ * rather than a claim that the machine is idle. A chat tab whose session has no
+ * saved transcript yet is invisible to `GET /sessions`, so the copy says so.
  */
 export function describeEmptyState(projectFilter: string | null): string {
   const scope = projectFilter === null ? "" : ` in ${projectFilter}`;
-  return `Nothing is running${scope}: no queued or running DAG workflow runs, and no chat sessions open or active in the last 30 minutes.`;
+  return `Nothing is running${scope}: no queued or running DAG workflow runs, and no chat session with a saved transcript open or active in the last 30 minutes.`;
+}
+
+/**
+ * A `?run=`/`?session=` deep link discovery cannot see. Silence here read as
+ * "nothing is running" even when the URL named a real, just-finished run.
+ */
+export function describeUnresolvedDeepLink(link: LiveDeepLink | null): string | null {
+  if (!link) return null;
+  return link.kind === "dag-run"
+    ? `Run ${link.id} is not live work — it has finished, or it was never queued. Open it in the run console below.`
+    : `Session ${link.id} is not live work — it has no saved transcript, or no activity in the last 30 minutes.`;
+}
+
+/**
+ * Chips above the rail: what discovery could NOT do this tick. Silent
+ * truncation and silently-dropped projects both read as "we looked everywhere".
+ */
+export function discoveryNotices(input: {
+  failedProjectIds: readonly string[];
+  busyProjectCount: number;
+  sweptBusyProjectCount: number;
+  activitySweepFailed: boolean;
+}): string[] {
+  const notices: string[] = [];
+  if (input.failedProjectIds.length > 0) {
+    notices.push(
+      `couldn't read ${input.failedProjectIds.length} project` +
+        `${input.failedProjectIds.length === 1 ? "" : "s"}`,
+    );
+  }
+  if (input.busyProjectCount > input.sweptBusyProjectCount) {
+    notices.push(
+      `showing ${input.sweptBusyProjectCount} of ${input.busyProjectCount} busy projects`,
+    );
+  }
+  if (input.activitySweepFailed) notices.push("cross-project sweep unavailable");
+  return notices;
 }
 
 // --- cadence ---------------------------------------------------------------
@@ -364,12 +468,7 @@ export function assignPollRanks(
   const ordered = [...sessions].sort((left, right) => {
     const leftSelected = left.key === selectedKey ? 0 : 1;
     const rightSelected = right.key === selectedKey ? 0 : 1;
-    return (
-      leftSelected - rightSelected ||
-      Number(right.live) - Number(left.live) ||
-      right.lastActivityAt - left.lastActivityAt ||
-      (left.key < right.key ? -1 : left.key > right.key ? 1 : 0)
-    );
+    return leftSelected - rightSelected || compareLiveSources(left, right);
   });
   return new Map(ordered.map((source, index) => [source.key, index]));
 }
@@ -475,6 +574,39 @@ export async function fetchSessionRunSnapshot(
   return parseSessionRunSnapshot(await response.json());
 }
 
+/**
+ * The typed workflow run a chat session delegated to, from
+ * GET /sessions/:id/workflow-run-state. Only the three fields the projection's
+ * `dag` node needs are read; the full RunState v1 projection belongs to
+ * chat-live-graph.tsx, which renders it properly.
+ */
+export function parseSessionWorkflowRunLink(body: unknown): SessionWorkflowRunLink | null {
+  const record = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+  const state = record.state && typeof record.state === "object"
+    ? (record.state as Record<string, unknown>)
+    : null;
+  if (!state) return null;
+  const runId = typeof state.runId === "string" ? state.runId : "";
+  const workflowId = typeof state.workflowId === "string" ? state.workflowId : "";
+  const status = typeof state.status === "string" ? state.status : "";
+  if (runId === "" || workflowId === "" || status === "") return null;
+  return { runId, workflowId, status };
+}
+
+export async function fetchSessionWorkflowRunLink(
+  projectId: string,
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<SessionWorkflowRunLink | null> {
+  const response = await apiFetch(
+    `/sessions/${encodeURIComponent(sessionId)}/workflow-run-state`,
+    signal ? { signal } : {},
+    projectId,
+  );
+  if (!response.ok) throw new Error(`workflow run state failed: ${response.status}`);
+  return parseSessionWorkflowRunLink(await response.json());
+}
+
 async function fetchSessionList(
   projectId: string,
   signal?: AbortSignal,
@@ -496,8 +628,18 @@ export interface OpenWorkState {
   sources: LiveSource[];
   loading: boolean;
   error: string | null;
+  /** What discovery could not do this tick, as short rail chips. */
+  notices: string[];
+  /** Display name of the active project, for scoped empty-state copy. */
+  activeProjectName: string;
   /** Rises on every completed discovery tick; useful as a test/render key. */
   tick: number;
+}
+
+interface DiscoveryResult {
+  sources: LiveSource[];
+  notices: string[];
+  activeProjectName: string;
 }
 
 /**
@@ -511,6 +653,10 @@ export interface OpenWorkState {
  * is that the sweep sees a project's sessions only through that project's
  * GET /sessions, so it is bounded (MAX_SWEPT_PROJECTS) and cached
  * (PROJECT_SWEEP_CACHE_MS).
+ *
+ * Every remote read that concerns ONE project is isolated: a project whose
+ * /sessions returns 500 must not discard the projects that answered, and the
+ * activity sweep failing must not hide the active project's own work.
  */
 export function useOpenWork(options: {
   projectId: string;
@@ -524,6 +670,8 @@ export function useOpenWork(options: {
     sources: [],
     loading: true,
     error: null,
+    notices: [],
+    activeProjectName: projectId,
     tick: 0,
   });
   const rosterCache = useRef<CacheEntry<{ id: string; name: string }[]> | null>(null);
@@ -531,7 +679,7 @@ export function useOpenWork(options: {
   const errorRun = useRef(0);
 
   const discover = useCallback(
-    async (signal: AbortSignal): Promise<LiveSource[]> => {
+    async (signal: AbortSignal): Promise<DiscoveryResult> => {
       const now = nowFn();
       if (!rosterCache.current || now - rosterCache.current.at > PROJECT_ROSTER_CACHE_MS) {
         const projects = await listProjects();
@@ -547,36 +695,57 @@ export function useOpenWork(options: {
       const runs = await listDagWorkflowRuns(projectId, 100);
       const groups: LiveSource[][] = [dagRunSources(runs, projectId, activeName)];
 
-      const sweepIds = [projectId];
+      let activities: Record<string, ProjectActivitySummary> = {};
+      let activitySweepFailed = false;
+      let busyProjectIds: string[] = [];
       if (allProjects) {
-        const activities = await listProjectActivities();
-        const busy = roster
-          .filter((project) => {
-            if (project.id === projectId) return false;
-            const activity = activities[project.id];
-            if (!activity) return false;
-            return (
-              activity.running > 0 ||
-              activity.needsInput > 0 ||
-              activity.blocked > 0 ||
-              activity.errors > 0
-            );
-          })
-          .map((project) => project.id);
-        for (const id of busy) {
-          if (sweepIds.length >= MAX_SWEPT_PROJECTS) break;
-          sweepIds.push(id);
+        try {
+          activities = await listProjectActivities();
+          busyProjectIds = roster
+            .filter(
+              (project) =>
+                project.id !== projectId && isProjectBusy(activities[project.id]),
+            )
+            .map((project) => project.id);
+        } catch {
+          // The sweep is an enrichment, not the surface: losing it must not
+          // lose the active project's own runs and sessions.
+          activitySweepFailed = true;
         }
       }
 
+      const sweepIds = [projectId];
+      for (const id of busyProjectIds) {
+        if (sweepIds.length >= MAX_SWEPT_PROJECTS) break;
+        sweepIds.push(id);
+      }
+
+      const failedProjectIds: string[] = [];
       for (const sweptId of sweepIds) {
         const cached = sessionCache.current.get(sweptId);
         let rows = cached && now - cached.at <= PROJECT_SWEEP_CACHE_MS ? cached.value : null;
         if (!rows) {
-          rows = await fetchSessionList(sweptId, signal);
-          sessionCache.current.set(sweptId, { at: now, value: rows });
+          try {
+            rows = await fetchSessionList(sweptId, signal);
+            sessionCache.current.set(sweptId, { at: now, value: rows });
+          } catch (error) {
+            // One project's list failing used to reject the whole tick, so the
+            // rail lost every healthy project AND then asserted that nothing
+            // was running. Keep the projects that answered and count this one.
+            if (signal.aborted) throw error;
+            failedProjectIds.push(sweptId);
+            continue;
+          }
         }
-        groups.push(sessionSources(rows, sweptId, projectNames.get(sweptId) ?? sweptId, now));
+        groups.push(
+          sessionSources(
+            rows,
+            sweptId,
+            projectNames.get(sweptId) ?? sweptId,
+            now,
+            activities[sweptId] ?? null,
+          ),
+        );
       }
 
       const tabs = openChatTabsFromStorage(
@@ -584,9 +753,18 @@ export function useOpenWork(options: {
           ? null
           : window.localStorage.getItem(WORKSPACE_STORAGE_KEY),
       ).filter((tab) => allProjects || tab.projectId === projectId);
-      groups.push(openTabSources(tabs, projectNames, now));
+      groups.push(openTabSources(tabs, projectNames, now, activities));
 
-      return mergeLiveSources(groups);
+      return {
+        sources: mergeLiveSources(groups),
+        notices: discoveryNotices({
+          failedProjectIds,
+          busyProjectCount: busyProjectIds.length,
+          sweptBusyProjectCount: sweepIds.length - 1,
+          activitySweepFailed,
+        }),
+        activeProjectName: activeName,
+      };
     },
     [allProjects, nowFn, projectId],
   );
@@ -609,13 +787,15 @@ export function useOpenWork(options: {
         return;
       }
       try {
-        const sources = await discover(controller.signal);
+        const result = await discover(controller.signal);
         if (cancelled) return;
         errorRun.current = 0;
         setState((previous) => ({
-          sources,
+          sources: result.sources,
           loading: false,
           error: null,
+          notices: result.notices,
+          activeProjectName: result.activeProjectName,
           tick: previous.tick + 1,
         }));
         schedule(LIST_POLL_MS);
@@ -662,10 +842,178 @@ export function useOpenWork(options: {
   return state;
 }
 
+// --- rail run-state probes -------------------------------------------------
+
+/** What a cheap run-state probe tells the rail about one session. */
+export interface SessionRunProbe {
+  status: SessionRunStatus;
+  runId: string | null;
+}
+
+/**
+ * Which sessions the rail probes for run state. Discovery can only say a
+ * session exists and when it was last touched — the answer to "is this chat
+ * running RIGHT NOW" lives on GET /sessions/:id/run/state. The selected source
+ * is excluded because `useSessionGraph` already polls it (and reports its
+ * status back), so the probes stay inside the poller budget.
+ */
+export function sessionsToProbe(
+  sources: readonly LiveSource[],
+  ranks: ReadonlyMap<string, number>,
+  selectedKey: string | null,
+  cap = MAX_CONCURRENT_SESSION_POLLERS,
+): LiveSource[] {
+  return sources.filter(
+    (source) =>
+      source.kind === "session" &&
+      source.key !== selectedKey &&
+      (ranks.get(source.key) ?? cap) < cap,
+  );
+}
+
+/**
+ * Fold probe results back into the rail's rows: a session the server reports as
+ * running is `running` with the live badge and an `active-run` origin, and it
+ * re-sorts to the top exactly the way discovery would have ordered it.
+ */
+export function applySessionRunStates(
+  sources: readonly LiveSource[],
+  probes: ReadonlyMap<string, SessionRunProbe>,
+): LiveSource[] {
+  const applied = sources.map((source) => {
+    const probe = probes.get(source.key);
+    if (!probe || source.kind !== "session" || probe.status !== "running") return source;
+    return {
+      ...source,
+      status: "running" as LiveSourceStatus,
+      live: true,
+      origins: source.origins.includes("active-run")
+        ? source.origins
+        : [...source.origins, "active-run" as LiveSourceOrigin],
+    };
+  });
+  return applied.sort(compareLiveSources);
+}
+
+/**
+ * Poll run state for the ranked-in sessions. Each session gets its own poller
+ * at the cadence `nextPollDelayMs` assigns to its rank, its own error counter
+ * for the ×2 backoff, and the same `document.hidden` pause as everything else.
+ */
+export function useSessionRunStates(options: {
+  sessions: readonly LiveSource[];
+  ranks: ReadonlyMap<string, number>;
+  enabled: boolean;
+}): ReadonlyMap<string, SessionRunProbe> {
+  const { enabled, ranks, sessions } = options;
+  const [probes, setProbes] = useState<ReadonlyMap<string, SessionRunProbe>>(new Map());
+  // Discovery hands over a fresh `sessions` array every 3s tick, so the poll
+  // plan is carried as a string: identical work produces an identical string
+  // and the pollers are left alone, while a genuine change (a session appears,
+  // a rank moves) restarts exactly the affected effect.
+  const planJson = useMemo(
+    () =>
+      JSON.stringify(
+        sessions.map((source) => ({
+          key: source.key,
+          projectId: source.projectId,
+          id: source.id,
+          rank: ranks.get(source.key) ?? MAX_CONCURRENT_SESSION_POLLERS,
+        })),
+      ),
+    [ranks, sessions],
+  );
+
+  useEffect(() => {
+    const plan = JSON.parse(planJson) as Array<{
+      key: string;
+      projectId: string;
+      id: string;
+      rank: number;
+    }>;
+    if (!enabled || plan.length === 0) return;
+    let cancelled = false;
+    const controller = new AbortController();
+    const stops: Array<() => void> = [];
+
+    for (const target of plan) {
+      const rank = target.rank;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let consecutiveErrors = 0;
+      let running = false;
+
+      const schedule = () => {
+        if (cancelled) return;
+        const delay = nextPollDelayMs({
+          selected: false,
+          running,
+          rank,
+          consecutiveErrors,
+          documentHidden: typeof document !== "undefined" && document.hidden,
+        });
+        timer = setTimeout(() => void probeOnce(), delay ?? BACKGROUND_POLL_MS);
+      };
+
+      const probeOnce = async () => {
+        if (cancelled) return;
+        if (typeof document !== "undefined" && document.hidden) {
+          schedule();
+          return;
+        }
+        try {
+          const snapshot = await fetchSessionRunSnapshot(
+            target.projectId,
+            target.id,
+            controller.signal,
+          );
+          if (cancelled) return;
+          consecutiveErrors = 0;
+          running = snapshot.status === "running";
+          setProbes((previous) => {
+            const existing = previous.get(target.key);
+            if (
+              existing &&
+              existing.status === snapshot.status &&
+              existing.runId === snapshot.runId
+            ) {
+              return previous;
+            }
+            const next = new Map(previous);
+            next.set(target.key, { status: snapshot.status, runId: snapshot.runId });
+            return next;
+          });
+        } catch {
+          if (cancelled) return;
+          consecutiveErrors += 1;
+        }
+        schedule();
+      };
+
+      void probeOnce();
+      stops.push(() => {
+        if (timer) clearTimeout(timer);
+      });
+    }
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+      for (const stop of stops) stop();
+    };
+  }, [enabled, planJson]);
+
+  return probes;
+}
+
 // --- session detail hook ---------------------------------------------------
 
 export interface SessionGraphState {
   projection: SessionGraphProjection;
+  /**
+   * The retained frames the projection was folded from. The drawer lists these
+   * — the session's real events — rather than restating projected nodes.
+   */
+  frames: SessionFrame[];
   runStatus: SessionRunStatus;
   error: string | null;
   loading: boolean;
@@ -677,6 +1025,10 @@ export interface SessionGraphState {
  * already seen, which is the append-only cursor behaviour without a
  * server-side cursor (GET /sessions/:id/run/events is an SSE stream, not a
  * pollable page).
+ *
+ * The session's typed workflow-run link (GET /sessions/:id/workflow-run-state)
+ * is read on a slower fixed cadence and passed into the fold, which is what
+ * puts the `dag` node in the graph for a chat that delegated to a pipeline.
  */
 export function useSessionGraph(options: {
   projectId: string;
@@ -688,6 +1040,7 @@ export function useSessionGraph(options: {
   const { enabled, projectId, rank, selected, sessionId } = options;
   const [state, setState] = useState<SessionGraphState>(() => ({
     projection: emptySessionGraph(sessionId ?? ""),
+    frames: [],
     runStatus: "none",
     error: null,
     loading: true,
@@ -700,6 +1053,7 @@ export function useSessionGraph(options: {
     projectionRef.current = emptySessionGraph(sessionId ?? "");
     setState({
       projection: projectionRef.current,
+      frames: [],
       runStatus: "none",
       error: null,
       loading: Boolean(sessionId),
@@ -712,6 +1066,8 @@ export function useSessionGraph(options: {
     let timer: ReturnType<typeof setTimeout> | null = null;
     let consecutiveErrors = 0;
     let running = false;
+    let workflowRun: SessionWorkflowRunLink | null = null;
+    let workflowRunReadAt = 0;
     const controller = new AbortController();
 
     const schedule = () => {
@@ -728,6 +1084,24 @@ export function useSessionGraph(options: {
       timer = setTimeout(() => void tickOnce(), delay ?? BACKGROUND_POLL_MS);
     };
 
+    const readWorkflowLink = async () => {
+      const now = Date.now();
+      if (workflowRunReadAt !== 0 && now - workflowRunReadAt < SESSION_WORKFLOW_LINK_POLL_MS) {
+        return;
+      }
+      workflowRunReadAt = now;
+      try {
+        workflowRun = await fetchSessionWorkflowRunLink(
+          projectId,
+          sessionId,
+          controller.signal,
+        );
+      } catch {
+        // A session with no delegated run answers `{state:null}`; a failure
+        // here must not blank the graph the frames already produced.
+      }
+    };
+
     const tickOnce = async () => {
       if (cancelled) return;
       if (typeof document !== "undefined" && document.hidden) {
@@ -737,16 +1111,19 @@ export function useSessionGraph(options: {
       try {
         const snapshot = await fetchSessionRunSnapshot(projectId, sessionId, controller.signal);
         if (cancelled) return;
+        await readWorkflowLink();
+        if (cancelled) return;
         consecutiveErrors = 0;
         running = snapshot.status === "running";
         framesRef.current = appendFrames(framesRef.current, snapshot.frames);
         projectionRef.current = projectSessionGraph(
           projectionRef.current,
           framesRef.current,
-          { runStatus: snapshot.status },
+          { runStatus: snapshot.status, workflowRun },
         );
         setState({
           projection: projectionRef.current,
+          frames: framesRef.current,
           runStatus: snapshot.status,
           error: null,
           loading: false,
