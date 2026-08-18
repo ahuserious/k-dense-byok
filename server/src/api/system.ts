@@ -58,17 +58,30 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
   // project-scoped); polled by the UI every few seconds.
   app.get("/system/resources", async () => getSystemStats());
 
-  // Proxy local Ollama tags → the UI Model shape. Returns available:false if
-  // Ollama isn't running (the picker just hides the section).
+  // Proxy local Ollama tags → the UI Model shape. Returns available:false when
+  // the daemon isn't running, and now also when the user never named one.
+  //
+  // `configured` is new here and matches the field /openai-compatible/models
+  // below already carries, so the two local-discovery routes answer the same
+  // shape. It is purely additive for the web client: an unconfigured install
+  // returns `{available:false, models:[]}` exactly as an install with a stopped
+  // daemon always did, which is what use-models.ts and the picker's "Local
+  // (Ollama)" placeholder already render. No web change is required to keep
+  // working; a web change is only wanted to sharpen the placeholder's wording.
   app.get("/ollama/models", async () => {
+    const baseUrl = OLLAMA_BASE_URL;
+    // #64: with no OLLAMA_BASE_URL the route used to fall back to
+    // http://localhost:11434 and report a stranger's daemon as this app's own.
+    // Unset means off, and "off" is answered here, before any socket opens.
+    if (!baseUrl) return { available: false, configured: false, models: [] };
     try {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), 2000);
-      const resp = await fetch(`${OLLAMA_BASE_URL.replace(/\/+$/, "")}/api/tags`, {
+      const resp = await fetch(`${baseUrl.replace(/\/+$/, "")}/api/tags`, {
         signal: ctrl.signal,
       });
       clearTimeout(t);
-      if (!resp.ok) return { available: false, models: [] };
+      if (!resp.ok) return { available: false, configured: true, models: [] };
       const data = (await resp.json()) as { models?: { name: string }[] };
       const models = (data.models ?? []).map((m) => ({
         id: `ollama/${m.name}`,
@@ -80,9 +93,9 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
         modality: "text->text",
         description: `Local Ollama model: ${m.name}`,
       }));
-      return { available: true, models };
+      return { available: true, configured: true, models };
     } catch {
-      return { available: false, models: [] };
+      return { available: false, configured: true, models: [] };
     }
   });
 
@@ -95,14 +108,20 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
   // provider, so it can stay hidden for everyone else instead of showing a
   // permanently dead section.
   app.get("/openai-compatible/models", async () => {
+    const baseUrl = OPENAI_COMPATIBLE_BASE_URL;
+    // #57: `configured` used to shape this response and suppress nothing — the
+    // fetch below ran against the old `http://localhost:1234` default even when
+    // it was false, so an install that had never named a server still opened a
+    // socket to LM Studio's port and read whatever answered. The flag is now
+    // the same fact as "there is an address", and it gates the probe.
+    if (!baseUrl) return { available: false, configured: false, models: [] };
     const configured = OPENAI_COMPATIBLE_CONFIGURED;
     try {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), 2000);
-      const resp = await fetch(
-        `${OPENAI_COMPATIBLE_BASE_URL.replace(/\/+$/, "")}/v1/models`,
-        { signal: ctrl.signal },
-      );
+      const resp = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/models`, {
+        signal: ctrl.signal,
+      });
       clearTimeout(t);
       if (!resp.ok) return { available: false, configured, models: [] };
       const data = (await resp.json()) as { data?: unknown };
