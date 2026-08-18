@@ -57,3 +57,18 @@ deploy; local execution + waiver) are recorded but not chosen.
 - Every future evidence claim about remoteness must enumerate this host's addresses and default UAs into a
   deny-list before asserting foreign-ness.
 - "200 items" is a floor on **substantive** items, not collected items.
+
+## 2026-08-18 amendment — the substantive floor after the Components Studio retirement
+
+Deleting `e2e/studio.spec.ts` with the retired Components Studio entry (owner direction 2026-08-17, ADR S1 amendment
+of the same date) removes 34 collected items, of which 33 were substantive: the inventory drops from
+261 collected / 225 substantive to 227 / 192. **192 is below this ADR's floor of 200 substantive items**, so the
+floor is not satisfied by the retirement alone.
+
+Binding merge gate, in force until the floor is met again: no integration tip that carries the studio retirement may
+be pushed or claimed as a hosted-run subject until `npx playwright test --list` reports **≥ 200 executing-substantive
+items**, with `e2e/item-count-reporter.ts`, `docs/e2e/README.md` and the hosted-evidence bound moved together in the
+same commit. The replacement coverage comes from the lanes that add real behaviour on the same surfaces: lane W4's
+console live-graph items (+6 substantive) and lane W3's typed-authoring items (load, import, stitch, harness). Any
+shortfall at merge time is closed by adding substantive items for behaviour that exists, never by relabelling thin
+items as substantive.
