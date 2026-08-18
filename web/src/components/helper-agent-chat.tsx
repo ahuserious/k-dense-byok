@@ -35,10 +35,10 @@ function helperLabel(profile: HelperAgentProfile): string {
 }
 
 /**
- * Which of the three context states the caller is in. The empty state and the
- * blocked hint have to differ across all three: the copy that describes what
+ * Which of the five context states the caller is in. The empty state and the
+ * blocked hint have to differ across all of them: the copy that describes what
  * the helper does is a lie in the state where it can do nothing, and "pick one
- * above" is a lie when the picker has nothing to offer.
+ * above" is a lie when the picker has nothing to offer — or nothing YET.
  */
 type HelperContextState =
   /** A context reference is bound; the helper can actually answer. */
@@ -48,10 +48,28 @@ type HelperContextState =
   /** The picker is empty — nothing in this project can be selected yet. */
   | "unavailable"
   /**
-   * The picker's list could not be fetched, so the helper does not KNOW what
-   * this project has. Distinct from "unavailable" on purpose (r3 review F8): an
+   * The picker's first fetch has not come back, so nothing is selectable YET
+   * and the helper does not know what this project holds. Distinct from
+   * "unselected" on purpose (r4 review R2): that state tells the user to choose
+   * a revision above, and at this instant the picker's only option is
+   * "Loading saved workflows…". The state is transient and self-correcting, but
+   * every user passes through it on the way in, and the rule for this rail is
+   * that a sentence names a route the user can walk AT THE MOMENT it is on
+   * screen. Ranked below "selected" so a reload that follows a selection never
+   * pulls the rail back out of the state it earned.
+   */
+  | "loading"
+  /**
+   * The picker's list could not be READ, so the helper does not KNOW what this
+   * project has. Distinct from "unavailable" on purpose (r3 review F8): an
    * errored list left the rail asserting "No saved workflow to work on yet" and
    * then telling the user to go create a workflow they may already own.
+   *
+   * Two causes reach it, which is why the copy says "could not be read" rather
+   * than r4's "did not load": the fetch rejecting, and a 200 whose body is not
+   * a usable list at all (r4 review R3). In the second case the list DID load,
+   * so "did not load" would have been the state's own sentence saying something
+   * untrue — the exact failure mode of rounds 1 and 3.
    */
   | "unlistable";
 
@@ -87,9 +105,13 @@ function helperEmptyState(
     //     that produces a listed revision is Scientific Pipelines → "New typed
     //     workflow", so that is the only route named.
     //   * r3 F2: "draft YAML you can copy into the canvas" named a paste target
-    //     that does not exist. The engine's YAML surface is a read-only <pre>
-    //     headed "Read-only YAML preview" in both YAML and Split modes, there is
-    //     no YAML import anywhere in the vendored app or in Kady's web app, and
+    //     that does not exist. The engine's YAML surface is a <pre> that is
+    //     read-only in both YAML and Split modes; the "Read-only YAML preview"
+    //     header that says so renders in full YAML mode ONLY
+    //     (YamlCodeView.tsx:183-187 gates it on `mode === 'full'`), so in Split
+    //     mode the surface still refuses edits and simply does not announce it
+    //     (r4 review R6). There is no YAML import anywhere in the vendored app
+    //     or in Kady's web app, and
     //     /dag-workflow-imports/* has no caller in web/src. The draft is text in
     //     THIS chat and nothing more, so that is what the copy says.
     //   * r3 F3: "then pick its revision above" was false at the moment the user
@@ -97,15 +119,39 @@ function helperEmptyState(
     //     returning to the Builder does not refetch. The Reload control is the
     //     trigger the rail actually owns, so the copy names it.
     //
-    // A word ban cannot police this (neither r3 sentence used a banned word);
-    // the assertion in helper-agent-chat.test.tsx pins the ban across every
-    // string in every state, and the walk-throughs in the lane report are what
-    // pin the routes.
+    // A word ban cannot police this (neither r3 sentence used a banned word).
+    // Be exact about what the ban does cover, because r4's report was not
+    // (r4 review R4). Three assertions between them reach every FIXED string
+    // the Builder rail can render:
+    //   * this function's 19 — title/description/placeholder/hint for each of
+    //     the four blocked states, title/description/placeholder for the
+    //     selected one — walked state by state in helper-agent-chat.test.tsx;
+    //   * this component's own chrome (label, header statuses, composer
+    //     labels, Send/Stop, the three blocked hints), swept from the rendered
+    //     DOM in the same file;
+    //   * the 17 strings dag-builder-surface.tsx renders around it — the three
+    //     strip lines, the four picker options and the rail's labels — swept
+    //     the same way in dag-builder-surface.test.tsx. That file is where the
+    //     strip line r3's F2 was actually about lives, and it was in NEITHER
+    //     ban until this round.
+    // Three strings stay unpinnable because they are supplied at runtime: the
+    // list error, the helper session error, and the `{name} · rev {revision}`
+    // option label. The walk-throughs in the lane report are what pin the
+    // routes.
+    if (contextState === "loading") {
+      return {
+        title: "Checking this project's saved workflows",
+        description:
+          "The list above is still loading. Once it settles, pick a revision and I explain its nodes and edges, draft YAML here in the chat, and propose fixes for validation errors.",
+        placeholder: "Waiting for the saved workflow list…",
+        missingContext: "The saved workflow list above is still loading.",
+      };
+    }
     if (contextState === "unlistable") {
       return {
         title: "Saved workflows could not be listed",
         description:
-          "The list above did not load, so I do not know which revisions this project has. Press Reload above to try again.",
+          "The list above could not be read, so I do not know which revisions this project has. Press Reload above to try again.",
         placeholder: "Reload the list above, then ask…",
         missingContext: "Saved workflows could not be listed. Press Reload above to try again.",
       };
@@ -164,6 +210,7 @@ function ScopedHelperAgentChat({
   contextReference,
   hasSelectableContext = true,
   contextListFailed = false,
+  contextListLoading = false,
   providerBlocked = false,
 }: {
   projectId: string;
@@ -171,6 +218,7 @@ function ScopedHelperAgentChat({
   contextReference?: HelperAgentContextReference;
   hasSelectableContext?: boolean;
   contextListFailed?: boolean;
+  contextListLoading?: boolean;
   providerBlocked?: boolean;
 }) {
   const agent = useAgent(projectId);
@@ -244,6 +292,11 @@ function ScopedHelperAgentChat({
   const contextReady = Boolean(contextKind && contextId);
   // `hasSelectableContext` defaults to true, so a call site that does not know
   // whether its picker is empty keeps the previous two-state behaviour.
+  // "loading" ranks directly below "selected" and ABOVE everything else: a list
+  // that has not come back is not evidence of anything, so neither "choose a
+  // revision above" (there is nothing to choose yet) nor "this project has
+  // none" (unknown) may be said. It ranks below "selected" so a reload behind
+  // an existing selection never pulls the rail back to a waiting state.
   // "unlistable" ranks BELOW "unselected": a caller whose list failed but whose
   // previous snapshot still holds options can still pick one, and the picker's
   // own role=alert already reports the failure. It ranks ABOVE "unavailable"
@@ -252,11 +305,13 @@ function ScopedHelperAgentChat({
     profile,
     contextReady
       ? "selected"
-      : hasSelectableContext
-        ? "unselected"
-        : contextListFailed
-          ? "unlistable"
-          : "unavailable",
+      : contextListLoading
+        ? "loading"
+        : hasSelectableContext
+          ? "unselected"
+          : contextListFailed
+            ? "unlistable"
+            : "unavailable",
   );
 
   // The composer used to be a bare native `disabled` on both the textarea and
@@ -274,19 +329,42 @@ function ScopedHelperAgentChat({
   // "pick a context" hint, and the caller is expected to pass it only once the
   // provider check has SETTLED — an unsettled check would flash the amber block
   // and shove the composer down on every Builder visit.
-  const blockedHint = providerBlocked
-    ? "Connect a provider in Settings to send"
-    : !contextReady
-      ? emptyState.missingContext
-      : connection === "connecting"
-        ? `${helperLabel(profile)} is connecting…`
-        : null;
+  //
+  // Written as an if-chain rather than one more nested ternary because the last
+  // rung is the one that used to be missing (r4 review R1): `connection ===
+  // "error"` fell off the end of the ladder, so a helper session that failed to
+  // start left `blockedHint` null while `blocked` was true. The user then read
+  // the full capability copy, typed into the composer, and the field silently
+  // refused — the only explanation being a 10px destructive line at the top of
+  // the rail. Nothing false was asserted, which is why it was a follow-up and
+  // not a failure, but a control that refuses input has to say so where the
+  // input is being attempted.
+  let blockedHint: string | null = null;
+  if (providerBlocked) {
+    blockedHint = "Connect a provider in Settings to send";
+  } else if (!contextReady) {
+    blockedHint = emptyState.missingContext;
+  } else if (connection === "connecting") {
+    blockedHint = `${helperLabel(profile)} is connecting…`;
+  } else if (connection === "error") {
+    // "The reason is above" is only said when there IS one above. `connection`
+    // and `connectionError` are set together in the same catch today, so the
+    // second branch is unreachable — it is here so that decoupling them later
+    // degrades to a true sentence instead of pointing at nothing.
+    blockedHint = connectionError
+      ? `${helperLabel(profile)} could not start, so this box cannot send. The reason is above.`
+      : `${helperLabel(profile)} could not start, so this box cannot send.`;
+  }
   const blocked = providerBlocked || connection !== "ready" || !contextReady;
-  const blockedDescribedBy = connectionError
-    ? connectionErrorId
-    : blockedHint
-      ? blockedHintId
-      : undefined;
+  // Both, when both are on screen, error first: the alert carries the SERVER's
+  // reason and the hint carries the consequence for this control. Previously
+  // the error SUPPRESSED the hint id, which was fine while the error state
+  // produced no hint; now that it produces one, dropping it would hide from
+  // screen-reader users the one sentence sighted users just gained.
+  const blockedDescribedBy =
+    [connectionError ? connectionErrorId : null, blockedHint ? blockedHintId : null]
+      .filter((id): id is string => id !== null)
+      .join(" ") || undefined;
 
   const submit = async (event?: FormEvent) => {
     event?.preventDefault();
@@ -438,6 +516,14 @@ export function HelperAgentChat(props: {
    * create one they may already have (r3 review F8). Optional and defaulted off.
    */
   contextListFailed?: boolean;
+  /**
+   * True while the caller's picker has not yet received its FIRST list. Neither
+   * "choose one above" nor "this project has none" is true during that instant,
+   * so the helper says it is still waiting instead (r4 review R2). Optional and
+   * defaulted off: a call site that does not track its first fetch keeps the
+   * previous behaviour.
+   */
+  contextListLoading?: boolean;
   /**
    * True when no model provider is connected, so no helper turn can be served.
    * Optional and defaulted off: call sites that do not run the provider check

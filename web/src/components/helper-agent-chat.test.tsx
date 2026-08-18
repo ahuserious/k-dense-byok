@@ -9,13 +9,18 @@ const mocks = vi.hoisted(() => ({
   loadSession: vi.fn(),
   send: vi.fn(),
   stop: vi.fn(),
+  // Steerable so the streaming chrome ("Stop") is reachable by the DOM sweep
+  // below; every other test leaves it at the default.
+  agentStatus: "ready" as string,
 }));
 
 vi.mock("@/lib/projects", () => ({ apiFetch: mocks.apiFetch }));
 vi.mock("@/lib/use-agent", () => ({
   useAgent: () => ({
     messages: [],
-    status: "ready",
+    get status() {
+      return mocks.agentStatus;
+    },
     sessionId: "helper-session",
     loadSession: mocks.loadSession,
     send: mocks.send,
@@ -37,6 +42,7 @@ beforeEach(() => {
   });
   mocks.loadSession.mockResolvedValue("restored");
   mocks.send.mockResolvedValue(undefined);
+  mocks.agentStatus = "ready";
 });
 
 describe("HelperAgentChat server-owned context boundary", () => {
@@ -233,6 +239,16 @@ describe("HelperAgentChat blocked composer states the reason", () => {
     // the canvas" (F2) both pass this regex. The routes themselves are pinned by
     // the exact-text assertions below and walked in the lane report.
     const NO_CANVAS_REACH = /\bapply\b|\bapplies\b|\bvisual\b/i;
+    // Kept verbatim in dag-builder-surface.test.tsx, which bans the same two
+    // patterns across the rail's OTHER fixed strings. `saves?` rather than
+    // `save`: the unavailable state's "The canvas on the left saves into the
+    // pipeline engine's own store" cleared the old pattern only because
+    // `\bsave\b` does not match "saves" (r4 review R4). It clears the tightened
+    // pattern on the merits — there "the canvas" precedes the verb rather than
+    // following it, which is the difference between describing the canvas and
+    // offering it as a destination.
+    const NOTHING_GOES_INTO_THE_CANVAS =
+      /\b(?:saves?|cop(?:y|ies)|pastes?|drops?|puts?|imports?)\b[^.]*\b(?:in|into|to)\s+the\s+canvas\b/i;
     const visibleCopy: string[] = [];
     const collectVisibleCopy = (title: string, description: string) => {
       expect(screen.getByText(title)).toBeInTheDocument();
@@ -246,7 +262,29 @@ describe("HelperAgentChat blocked composer states the reason", () => {
       );
     };
 
-    // (a) The list came back empty. Only ONE route produces a revision this
+    // (a) The first fetch has not come back (r4 review R2). Neither "choose a
+    // revision above" nor "this project has none" is knowable yet, so the copy
+    // says only what is true: it is waiting. `hasSelectableContext` is false
+    // here exactly as it is for an empty list — the loading flag is what tells
+    // the two apart, and it outranks everything but a bound revision.
+    const { unmount: unmountLoading } = render(
+      <HelperAgentChat
+        projectId="project-a"
+        profile="dag-builder"
+        hasSelectableContext={false}
+        contextListLoading
+      />,
+    );
+    collectVisibleCopy(
+      "Checking this project's saved workflows",
+      "The list above is still loading. Once it settles, pick a revision and I explain its nodes and edges, draft YAML here in the chat, and propose fixes for validation errors.",
+    );
+    expect(screen.getByTestId("helper-agent-blocked-hint")).toHaveTextContent(
+      "The saved workflow list above is still loading.",
+    );
+    unmountLoading();
+
+    // (b) The list came back empty. Only ONE route produces a revision this
     // picker lists — Scientific Pipelines' "New typed workflow" — and only the
     // rail's own Reload control refreshes the list, so those are the two things
     // named. The canvas is named for what it actually does, not offered.
@@ -266,7 +304,7 @@ describe("HelperAgentChat blocked composer states the reason", () => {
     );
     unmountUnavailable();
 
-    // (b) The list could NOT be fetched (r3 review F8). Saying "no saved
+    // (c) The list could NOT be fetched (r3 review F8). Saying "no saved
     // workflow exists" here is a guess, and the wrong one for a project that is
     // full of them, so this state claims nothing about what the project has.
     const { unmount: unmountUnlistable } = render(
@@ -279,14 +317,14 @@ describe("HelperAgentChat blocked composer states the reason", () => {
     );
     collectVisibleCopy(
       "Saved workflows could not be listed",
-      "The list above did not load, so I do not know which revisions this project has. Press Reload above to try again.",
+      "The list above could not be read, so I do not know which revisions this project has. Press Reload above to try again.",
     );
     expect(screen.getByTestId("helper-agent-blocked-hint")).toHaveTextContent(
       "Saved workflows could not be listed. Press Reload above to try again.",
     );
     unmountUnlistable();
 
-    // (c) Revisions exist, none picked.
+    // (d) Revisions exist, none picked.
     const { unmount: unmountUnselected } = render(
       <HelperAgentChat projectId="project-a" profile="dag-builder" />,
     );
@@ -299,7 +337,7 @@ describe("HelperAgentChat blocked composer states the reason", () => {
     );
     unmountUnselected();
 
-    // (d) A revision is bound. Only here does the drafting copy appear, and even
+    // (e) A revision is bound. Only here does the drafting copy appear, and even
     // then it names both limits: no apply path AND no paste target.
     render(
       <HelperAgentChat
@@ -321,10 +359,13 @@ describe("HelperAgentChat blocked composer states the reason", () => {
 
     // R1 [medium]: there is no bridge from this rail into the cross-origin
     // builder canvas, so no state may claim it draws or applies anything there.
-    // 15 strings: title/description/placeholder/hint for each of (a)–(c), and
-    // title/description/placeholder for (d), which has no blocked hint once a
-    // revision is bound.
-    expect(visibleCopy).toHaveLength(15);
+    // 19 strings: title/description/placeholder/hint for each of (a)–(d), and
+    // title/description/placeholder for (e), which has no blocked hint once a
+    // revision is bound. This is the WHOLE of what this assertion covers — the
+    // rail's other fixed strings live in dag-builder-surface.tsx and are banned
+    // by dag-builder-surface.test.tsx (r4 review R4). The length is the tripwire
+    // for a sixth context state added without extending the collector.
+    expect(visibleCopy).toHaveLength(19);
     for (const text of visibleCopy) {
       expect(text).not.toMatch(NO_CANVAS_REACH);
     }
@@ -333,7 +374,7 @@ describe("HelperAgentChat blocked composer states the reason", () => {
     // the canvas" and "paste into the canvas" all match; "reaches the canvas"
     // and "edit the canvas" — statements of the limit — do not.
     for (const text of visibleCopy) {
-      expect(text).not.toMatch(/\b(?:save|copy|paste|drop|put|import)\b[^.]*\b(?:in|into|to)\s+the\s+canvas\b/i);
+      expect(text).not.toMatch(NOTHING_GOES_INTO_THE_CANVAS);
     }
   });
 
@@ -399,5 +440,175 @@ describe("HelperAgentChat blocked composer states the reason", () => {
     expect(send).not.toHaveAttribute("aria-disabled");
     await userEvent.click(send);
     await waitFor(() => expect(mocks.send).toHaveBeenCalledWith("Give me the timeline."));
+  });
+
+  it("bans the canvas-reach words across this component's own chrome too", async () => {
+    // r4 review R4. The walk above covers the 19 strings `helperEmptyState`
+    // returns; this covers everything ELSE this component renders — the
+    // landmark and header labels, the four connection statuses, the composer
+    // labels, Send/Stop, and all three blocked hints. Together with the sweep
+    // in dag-builder-surface.test.tsx, every fixed string the Builder rail can
+    // render is now under the ban. Swept from the rendered DOM rather than
+    // listed by hand so a string added later is caught without anyone
+    // remembering to extend a list.
+    const NO_CANVAS_REACH = /\bapply\b|\bapplies\b|\bvisual\b/i;
+    const NOTHING_GOES_INTO_THE_CANVAS =
+      /\b(?:saves?|cop(?:y|ies)|pastes?|drops?|puts?|imports?)\b[^.]*\b(?:in|into|to)\s+the\s+canvas\b/i;
+    const seen = new Set<string>();
+    const collect = (container: HTMLElement) => {
+      for (const element of Array.from(container.querySelectorAll<HTMLElement>("*"))) {
+        const label = element.getAttribute("aria-label");
+        if (label) seen.add(label);
+        const placeholder = element.getAttribute("placeholder");
+        if (placeholder) seen.add(placeholder);
+        if (element.children.length === 0 && element.textContent) seen.add(element.textContent);
+        // Direct text nodes too: a control like `<Icon /> Send` has an element
+        // child, so the leaf rule alone would skip its label.
+        for (const node of Array.from(element.childNodes)) {
+          const text = node.nodeType === Node.TEXT_NODE ? (node.textContent ?? "").trim() : "";
+          if (text) seen.add(text);
+        }
+      }
+    };
+
+    // (a) waiting for a context, with no provider connected.
+    const waiting = render(
+      <HelperAgentChat projectId="project-a" profile="dag-builder" providerBlocked />,
+    );
+    collect(waiting.container);
+    waiting.unmount();
+
+    // (b) connecting, then ready — the session POST is held open so the
+    //     "Connecting…" status and "Restoring helper session…" line are real.
+    let letSessionThrough: (value: unknown) => void = () => {};
+    mocks.apiFetch.mockReturnValue(
+      new Promise((resolve) => {
+        letSessionThrough = resolve;
+      }),
+    );
+    const connecting = render(
+      <HelperAgentChat
+        projectId="project-a"
+        profile="dag-builder"
+        contextReference={{ kind: "workflow", id: "microscopy_qc@4" }}
+      />,
+    );
+    expect(await screen.findByText("Connecting…")).toBeInTheDocument();
+    collect(connecting.container);
+    letSessionThrough({
+      ok: true,
+      json: async () => ({
+        id: "helper-workflow-microscopy_qc@4",
+        source: { kind: "workflow", id: "microscopy_qc@4" },
+      }),
+    });
+    expect(
+      await screen.findByText("Pi (Kady) · bounded context · no tools"),
+    ).toBeInTheDocument();
+    collect(connecting.container);
+    connecting.unmount();
+
+    // (c) streaming — the only state that renders Stop instead of Send.
+    mocks.agentStatus = "streaming";
+    const streaming = render(
+      <HelperAgentChat
+        projectId="project-a"
+        profile="dag-builder"
+        contextReference={{ kind: "workflow", id: "microscopy_qc@4" }}
+      />,
+    );
+    expect(await screen.findByRole("button", { name: "Stop" })).toBeInTheDocument();
+    collect(streaming.container);
+    streaming.unmount();
+    mocks.agentStatus = "ready";
+
+    // (d) the session failed.
+    mocks.apiFetch.mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ detail: "Helper session backend exploded." }),
+    });
+    const failed = render(
+      <HelperAgentChat
+        projectId="project-a"
+        profile="dag-builder"
+        contextReference={{ kind: "workflow", id: "microscopy_qc@4" }}
+      />,
+    );
+    await screen.findByTestId("helper-agent-blocked-hint");
+    collect(failed.container);
+    failed.unmount();
+
+    const collected = [...seen];
+    // The sweep really reaches the chrome — otherwise the loop below could
+    // pass by having seen almost nothing.
+    for (const pinned of [
+      "DAG Builder agent",
+      "Message DAG Builder agent",
+      "Connecting…",
+      "Pi (Kady) · bounded context · no tools",
+      "Select saved context",
+      "Unavailable",
+      "Restoring helper session…",
+      "Connect a provider in Settings to send",
+      "DAG Builder agent is connecting…",
+      "DAG Builder agent could not start, so this box cannot send. The reason is above.",
+      "Shift+Enter for a new line",
+      "Stop",
+      "Send",
+    ]) {
+      expect(collected).toContain(pinned);
+    }
+    for (const text of collected) {
+      expect(text).not.toMatch(NO_CANVAS_REACH);
+      expect(text).not.toMatch(NOTHING_GOES_INTO_THE_CANVAS);
+    }
+  });
+
+  it("explains itself when the helper session failed, beside the composer that is refusing", async () => {
+    // r4 review R1. `connection === "error"` fell off the end of the hint
+    // ladder, so a helper session that failed to start rendered the FULL
+    // capability copy — "I explain the nodes and edges…", "Ask about this
+    // workflow…" — over a textarea that was silently readOnly, with the only
+    // explanation a 10px destructive line at the top of the rail, some 300px
+    // from the control refusing the input.
+    mocks.apiFetch.mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ detail: "Helper session backend exploded." }),
+    });
+    render(
+      <HelperAgentChat
+        projectId="project-a"
+        profile="dag-builder"
+        contextReference={{ kind: "workflow", id: "microscopy_qc@4" }}
+      />,
+    );
+
+    const hint = await screen.findByTestId("helper-agent-blocked-hint");
+    expect(hint).toHaveTextContent(
+      "DAG Builder agent could not start, so this box cannot send. The reason is above.",
+    );
+    // And "above" is a real place: the server's own reason is on screen.
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("Helper session backend exploded.");
+
+    const textarea = screen.getByRole("textbox", { name: "Message DAG Builder agent" });
+    const send = screen.getByRole("button", { name: "Send" });
+    expect(textarea).toHaveAttribute("readonly");
+    expect(textarea).toHaveAttribute("aria-disabled", "true");
+    // Both, error first: the alert carries the cause and the hint the
+    // consequence. The alert wiring predates this hint and must survive it —
+    // dropping it would take the specific reason away from screen-reader users
+    // in exchange for the sentence sighted users just gained.
+    expect(textarea).toHaveAttribute("aria-describedby", `${alert.id} ${hint.id}`);
+    expect(send).toHaveAttribute("aria-describedby", `${alert.id} ${hint.id}`);
+    expect(alert.id).not.toBe("");
+
+    // Still refuses to send, and still focusable so the reason is reachable.
+    send.focus();
+    expect(send).toHaveFocus();
+    await userEvent.click(send);
+    expect(mocks.send).not.toHaveBeenCalled();
   });
 });

@@ -22,6 +22,7 @@ vi.mock("@/components/helper-agent-chat", () => ({
     contextReference?: { kind: string; id: string };
     hasSelectableContext?: boolean;
     contextListFailed?: boolean;
+    contextListLoading?: boolean;
     providerBlocked?: boolean;
   }) => {
     helperProps.capture(props);
@@ -31,6 +32,7 @@ vi.mock("@/components/helper-agent-chat", () => ({
         {props.contextReference ? `${props.contextReference.kind}:${props.contextReference.id}` : "no-context"}
         {props.hasSelectableContext === false ? ":nothing-to-select" : ""}
         {props.contextListFailed ? ":list-failed" : ""}
+        {props.contextListLoading ? ":list-loading" : ""}
         {props.providerBlocked ? ":provider-blocked" : ""}
       </div>
     );
@@ -45,6 +47,17 @@ vi.mock("@/lib/dag-workflows", async (importOriginal) => {
 vi.mock("@/lib/use-models", () => ({ useModels: () => ({ models: mocks.models }) }));
 
 import { DagBuilderSurface } from "./dag-builder-surface";
+
+// The same two regexes helper-agent-chat.test.tsx applies to the empty-state
+// copy, kept verbatim so the two halves of the ban cannot drift apart. `saves?`
+// rather than `save`: r4's copy ("The canvas on the left saves into the pipeline
+// engine's own store") cleared the old pattern only because `\bsave\b` does not
+// match "saves", which was luck rather than design (r4 review R4). It clears the
+// tightened pattern on the merits — "the canvas" precedes the verb there instead
+// of following it.
+const NO_CANVAS_REACH = /\bapply\b|\bapplies\b|\bvisual\b/i;
+const NOTHING_GOES_INTO_THE_CANVAS =
+  /\b(?:saves?|cop(?:y|ies)|pastes?|drops?|puts?|imports?)\b[^.]*\b(?:in|into|to)\s+the\s+canvas\b/i;
 
 function workflow(id: string, revision: number, name: string) {
   return {
@@ -131,6 +144,7 @@ describe("DagBuilderSurface", () => {
       contextReference: { kind: "workflow", id: "microscopy_qc@4" },
       hasSelectableContext: true,
       contextListFailed: false,
+      contextListLoading: false,
       providerBlocked: false,
     });
 
@@ -313,5 +327,223 @@ describe("DagBuilderSurface", () => {
     await waitFor(() =>
       expect(screen.getByTestId("builder-assistant")).toHaveTextContent(":provider-blocked"),
     );
+  });
+
+  it("treats a 200 that is not a list as unlistable rather than crashing the page", async () => {
+    // r4 review R3b. `listDagWorkflowDefinitions` returns `body.workflows` with
+    // no validation, so `GET /dag-workflows` -> `200 {}` handed this state
+    // `undefined`; the `workflows.find` memo then threw IN THE RENDER PHASE.
+    // The effect's `.catch` cannot see that — nothing rejected — so the throw
+    // escaped the rail and took the whole tab down with "Application error: a
+    // client-side exception has occurred". A malformed envelope is not evidence
+    // about what the project holds, so it lands in the same state as a failed
+    // fetch and never claims the project is empty.
+    mocks.listDagWorkflowDefinitions.mockResolvedValue(undefined as never);
+    render(<DagBuilderSurface projectId="project-a" />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("builder-assistant")).toHaveTextContent(":list-failed"),
+    );
+    expect(
+      screen.getByRole("complementary", { name: "DAG builder assistant" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Saved workflows could not be listed.");
+    expect(
+      screen.getByRole("option", { name: "Saved workflows could not be listed" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "No saved workflows yet" })).not.toBeInTheDocument();
+
+    // And it recovers: a well-formed reload clears the alert and lists again.
+    mocks.listDagWorkflowDefinitions.mockResolvedValue([workflow("microscopy_qc", 4, "Microscopy QC")]);
+    await userEvent.click(screen.getByRole("button", { name: "Reload the workflow list" }));
+    await waitFor(() =>
+      expect(screen.getByRole("option", { name: "Microscopy QC · rev 4" })).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("drops a row it can neither render nor address, and reports the gap", async () => {
+    // r4 review R3a. `200 {"workflows":[{"id":"broken"}]}` rendered a selectable
+    // option whose entire visible text was "· rev", and selecting it bound the
+    // pointer "undefined@undefined". Dropping it silently would be the r3 F8
+    // failure in miniature — a picker claiming to be the whole list — so the
+    // drop is reported while the rows that ARE usable stay selectable.
+    mocks.listDagWorkflowDefinitions.mockResolvedValue([
+      workflow("microscopy_qc", 4, "Microscopy QC"),
+      { id: "broken" } as never,
+    ]);
+    render(<DagBuilderSurface projectId="project-a" />);
+
+    await waitFor(() =>
+      expect(screen.getByRole("option", { name: "Microscopy QC · rev 4" })).toBeInTheDocument(),
+    );
+    const options = screen.getAllByRole("option");
+    expect(options).toHaveLength(2); // the placeholder and the one usable row
+    for (const option of options) {
+      expect(option.textContent ?? "").not.toMatch(/undefined/);
+      expect(option.textContent ?? "").not.toMatch(/^\s*·\s*rev\s*$/);
+    }
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Some saved workflows could not be read and are not listed.",
+    );
+    // One bad row does not deny the working route the other row is.
+    expect(screen.getByTestId("builder-assistant")).not.toHaveTextContent(":nothing-to-select");
+
+    // Every row malformed collapses to the unlistable state instead — there is
+    // then nothing to select AND nothing known about the project. The alert
+    // stops saying "some", because none of them survived.
+    mocks.listDagWorkflowDefinitions.mockResolvedValue([{ id: "broken" } as never]);
+    await userEvent.click(screen.getByRole("button", { name: "Reload the workflow list" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("builder-assistant")).toHaveTextContent(":nothing-to-select"),
+    );
+    expect(screen.getByTestId("builder-assistant")).toHaveTextContent(":list-failed");
+    expect(screen.getByRole("alert")).toHaveTextContent("Saved workflows could not be read.");
+    expect(screen.queryByRole("option", { name: "No saved workflows yet" })).not.toBeInTheDocument();
+  });
+
+  it("says the list is still loading rather than pointing at an empty picker", async () => {
+    // r4 review R2. Before the first fetch resolved, four strings told the user
+    // to choose a revision from a picker whose only option read "Loading saved
+    // workflows…". The instant now has a state of its own; `hasSelectableContext`
+    // is false during it, but the helper's ladder ranks "loading" above
+    // "unavailable" so nothing claims the project is empty.
+    let settle: (rows: unknown[]) => void = () => {};
+    mocks.listDagWorkflowDefinitions.mockReturnValue(
+      new Promise<unknown[]>((resolve) => {
+        settle = resolve;
+      }),
+    );
+    render(<DagBuilderSurface projectId="project-a" />);
+
+    expect(
+      await screen.findByRole("option", { name: "Loading saved workflows…" }),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("builder-assistant")).toHaveTextContent(":list-loading");
+    expect(screen.getByTestId("builder-assistant")).not.toHaveTextContent(":list-failed");
+
+    settle([workflow("microscopy_qc", 4, "Microscopy QC")]);
+    await waitFor(() =>
+      expect(screen.getByTestId("builder-assistant")).not.toHaveTextContent(":list-loading"),
+    );
+    expect(screen.getByRole("option", { name: "Microscopy QC · rev 4" })).toBeInTheDocument();
+
+    // A RELOAD behind a settled list is not the loading instant: the picker
+    // still holds its options, so the copy must not go back to waiting.
+    mocks.listDagWorkflowDefinitions.mockReturnValue(
+      new Promise<unknown[]>((resolve) => {
+        settle = resolve;
+      }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Reload the workflow list" }));
+    expect(screen.getByTestId("builder-assistant")).not.toHaveTextContent(":list-loading");
+    settle([workflow("microscopy_qc", 4, "Microscopy QC")]);
+  });
+
+  it("bans the canvas-reach words across this surface's own copy, in every list state", async () => {
+    // r4 review R4. helper-agent-chat.test.tsx runs the ban over the 19 strings
+    // `helperEmptyState("dag-builder")` returns, and r4's report then summarised
+    // that as "every user-visible string in all four states", which it is not:
+    // the rail's other fixed strings are rendered by THIS file, including the
+    // permanent strip line that r3's F2 was actually about. This is the other
+    // half of the ban.
+    const seen = new Set<string>();
+    const collect = (container: HTMLElement) => {
+      for (const element of Array.from(container.querySelectorAll<HTMLElement>("*"))) {
+        // The helper is mocked out here; its strings are banned in its own file.
+        if (element.closest("[data-testid='builder-assistant']")) continue;
+        const label = element.getAttribute("aria-label");
+        if (label) seen.add(label);
+        if (element.children.length === 0 && element.textContent) seen.add(element.textContent);
+        // Direct text nodes too: a control like `<Icon /> Send` has an element
+        // child, so the leaf rule alone would skip its label.
+        for (const node of Array.from(element.childNodes)) {
+          const text = node.nodeType === Node.TEXT_NODE ? (node.textContent ?? "").trim() : "";
+          if (text) seen.add(text);
+        }
+      }
+    };
+
+    // (a) the first fetch still in flight.
+    const pending = render(<DagBuilderSurface projectId="project-a" />);
+    mocks.listDagWorkflowDefinitions.mockReturnValue(new Promise<unknown[]>(() => {}));
+    pending.unmount();
+    const loading = render(<DagBuilderSurface projectId="project-a" />);
+    expect(
+      await screen.findByRole("option", { name: "Loading saved workflows…" }),
+    ).toBeInTheDocument();
+    collect(loading.container);
+    loading.unmount();
+
+    // (b) a list with rows, and one of them selected — the only state that
+    //     renders the node/edge strip line.
+    mocks.listDagWorkflowDefinitions.mockResolvedValue([
+      workflow("microscopy_qc", 4, "Microscopy QC"),
+      workflow("rna_seq", 1, "RNA-seq"),
+    ]);
+    const listed = render(<DagBuilderSurface projectId="project-a" />);
+    const picker = await screen.findByLabelText("SAVED WORKFLOW REVISION");
+    await waitFor(() =>
+      expect(screen.getByRole("option", { name: "Microscopy QC · rev 4" })).toBeInTheDocument(),
+    );
+    collect(listed.container);
+    await userEvent.selectOptions(picker, "microscopy_qc@4");
+    await waitFor(() =>
+      expect(screen.getByText(/3 nodes · 2 edges/)).toBeInTheDocument(),
+    );
+    collect(listed.container);
+    // The collapsed rail too, for the toggle's other accessible name. Reopened
+    // afterwards because the choice is persisted, and a rail that mounts
+    // collapsed never fetches at all.
+    await userEvent.click(screen.getByRole("button", { name: "Hide builder assistant" }));
+    collect(listed.container);
+    await userEvent.click(screen.getByRole("button", { name: "Show builder assistant" }));
+    listed.unmount();
+
+    // (c) the empty list, (d) the failed list, (e) the malformed envelope.
+    for (const rows of [[] as unknown[], null, undefined]) {
+      if (rows === null) {
+        mocks.listDagWorkflowDefinitions.mockRejectedValue(
+          new Error("Saved workflows could not be listed."),
+        );
+      } else {
+        mocks.listDagWorkflowDefinitions.mockResolvedValue(rows as never);
+      }
+      const view = render(<DagBuilderSurface projectId="project-a" />);
+      await waitFor(() =>
+        expect(screen.getByTestId("builder-assistant")).toHaveTextContent("dag-builder:"),
+      );
+      await waitFor(() =>
+        expect(screen.queryByRole("option", { name: "Loading saved workflows…" })).not
+          .toBeInTheDocument(),
+      );
+      collect(view.container);
+      view.unmount();
+    }
+
+    const collected = [...seen];
+    // The collector really does reach the strings the review named — otherwise
+    // the loop above could pass by seeing nothing.
+    for (const pinned of [
+      "Only the selected revision is sent — never the unsaved canvas draft.",
+      "The assistant explains and drafts YAML here in the chat. It cannot edit the canvas, and the canvas has no YAML import.",
+      "Loading saved workflows…",
+      "Select a saved workflow…",
+      "No saved workflows yet",
+      "Saved workflows could not be listed",
+      "Reload the workflow list",
+      "Hide builder assistant",
+      "Show builder assistant",
+      "DAG BUILDER",
+      "BUILDER ASSISTANT",
+      "SAVED WORKFLOW REVISION",
+      "separate session",
+    ]) {
+      expect(collected).toContain(pinned);
+    }
+    for (const text of collected) {
+      expect(text).not.toMatch(NO_CANVAS_REACH);
+      expect(text).not.toMatch(NOTHING_GOES_INTO_THE_CANVAS);
+    }
   });
 });

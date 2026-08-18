@@ -34,11 +34,19 @@
 // WHAT THE ASSISTANT CANNOT DO, and why the copy must not imply otherwise:
 // the no-bridge fact above cuts BOTH ways. Nothing the assistant produces can
 // reach the canvas either. There is no apply path AND no paste target: the
-// engine's YAML surface is a read-only <pre> ("Read-only YAML preview") in both
-// YAML and Split modes, there is no YAML import anywhere in the vendored app or
-// in Kady's web app, and /dag-workflow-imports/* has no caller in web/src. So
-// the draft is text in the rail's own transcript and nothing more, until lane
-// W3's typed authoring path lands.
+// engine's YAML surface is a <pre> that refuses edits in both YAML and Split
+// modes, there is no YAML import anywhere in the vendored app or in Kady's web
+// app, and /dag-workflow-imports/* has no caller in web/src. Precisely (r4
+// review R6): the READ-ONLINESS holds in both modes, the "Read-only YAML
+// preview" header that announces it renders in full YAML mode only —
+// YamlCodeView.tsx:183-187 gates that header on `mode === 'full'`, and Split
+// mode shows the same non-editable <pre> with nothing on screen saying so. The
+// canvas app is not free of editable text either: selecting a node opens an
+// inspector with real <textarea> fields (NodeInspector.tsx:955-1010,
+// `JsonTextareaField`). None of them takes a workflow document — they are
+// per-node config — so the conclusion is unchanged: no YAML import. So the
+// draft is text in the rail's own transcript and nothing more, until lane W3's
+// typed authoring path lands.
 //
 // The TWO STORES matter to the copy as much as the missing bridge. This rail's
 // picker lists Kady's TYPED workflows (GET /dag-workflows). The canvas saves
@@ -52,8 +60,19 @@
 // `helperEmptyState("dag-builder")`: it must name a route a user can walk end
 // to end, and someone must have walked it. Rounds 1 and 3 both shipped copy that
 // passed the word ban and still described something the product cannot do, so
-// the ban ("apply", "applies", "visual" — pinned across every string in every
-// state by helper-agent-chat.test.tsx) is a floor, not the test.
+// the ban ("apply", "applies", "visual", and naming the canvas as somewhere to
+// put something) is a floor, not the test.
+//
+// WHERE THE BAN IS APPLIED, exactly — r4's report claimed it covered "every
+// user-visible string in all four states", and it did not (r4 review R4).
+// helper-agent-chat.test.tsx runs it over the 19 strings
+// `helperEmptyState("dag-builder")` can return; dag-builder-surface.test.tsx
+// runs it over this file's own fixed copy — the three strip lines, the four
+// picker placeholder options and the rail's labels — which is where the line
+// r3's F2 was actually about lives. Between them every fixed string the rail
+// renders is covered. The three remaining strings are supplied at runtime (the
+// list error, the helper session error, and the `{name} · rev {revision}`
+// option label) and cannot be pinned by a static assertion.
 //
 // The main Kady chat is unaffected: it keeps its own `/sessions` sessions and
 // never shares a transcript with this rail.
@@ -103,6 +122,47 @@ function persistAssistantOpen(open: boolean): void {
 /** The `<workflow-id>@<revision>` pointer the dag-builder helper profile takes. */
 function workflowRevisionId(workflow: DagWorkflowDefinitionSummary): string {
   return `${workflow.id}@${workflow.revision}`;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
+ * Exactly the five fields of a listed row that this rail RENDERS or SENDS:
+ * `name` and `revision` are the option's visible text, `id` and `revision` are
+ * the `<workflow-id>@<revision>` pointer POSTed to /helper-sessions, and
+ * `nodeCount`/`edgeCount` are the strip line under the picker. The other five
+ * stored fields are never read here, so they stay trusted — same posture as the
+ * rest of this client.
+ *
+ * WHY A ROW IS DROPPED RATHER THAN RENDERED (r4 review R3a): a row missing
+ * `name`/`revision` renders an option whose entire visible text is "· rev", and
+ * selecting it binds the pointer "undefined@undefined", which the server
+ * rejects on every question. An unselectable-in-practice option that looks
+ * selectable is worse than an absent one.
+ *
+ * WHY DROPPING ONE ALSO RAISES THE LIST ERROR: silence would put the rail back
+ * in the failure r3's F8 was about. A project holding one malformed row and
+ * nothing else would render "No saved workflow to work on yet" and send the
+ * user off to create a workflow it cannot see; a project holding nine good rows
+ * and one bad one would present a picker that silently claims to be the whole
+ * list. Neither is knowable from a filtered array, so the drop is reported and
+ * the surviving rows stay selectable — the same precedence the rail already
+ * uses for a failed RELOAD that holds a usable list.
+ */
+function isUsableWorkflowSummary(value: unknown): value is DagWorkflowDefinitionSummary {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Partial<DagWorkflowDefinitionSummary>;
+  return (
+    typeof row.id === "string"
+    && row.id.length > 0
+    && typeof row.name === "string"
+    && row.name.length > 0
+    && isNonNegativeInteger(row.revision)
+    && isNonNegativeInteger(row.nodeCount)
+    && isNonNegativeInteger(row.edgeCount)
+  );
 }
 
 export function DagBuilderSurface({
@@ -207,8 +267,36 @@ function BuilderAssistantRail({
     void listDagWorkflowDefinitions(projectId)
       .then((saved) => {
         if (cancelled) return;
-        setWorkflows(saved);
-        setWorkflowsError(null);
+        // A 200 is not a list. `listDagWorkflowDefinitions` returns
+        // `body.workflows` with no validation (web/src/lib/dag-workflows.ts),
+        // so `200 {}` used to hand this state `undefined` and the
+        // `workflows.find` below then threw IN THE RENDER PHASE — past the
+        // rail, past the Builder, out to "Application error: a client-side
+        // exception has occurred" for the whole page. The `.catch` on this
+        // chain cannot help: there is no rejection (r4 review R3b). The
+        // declared type is precisely what is not trustworthy here, so it is
+        // widened before it is believed.
+        //
+        // A malformed envelope means the rail does not KNOW what this project
+        // holds — the same thing a failed fetch means — so it falls into the
+        // `unlistable` state rather than claiming the project is empty.
+        const listed: unknown = saved;
+        const rows = Array.isArray(listed) ? (listed as unknown[]) : null;
+        const usable = rows ? rows.filter(isUsableWorkflowSummary) : [];
+        setWorkflows(usable);
+        // Three different things happened and the alert says which, because the
+        // user's next move differs: an envelope that is not a list is a client
+        // or route problem, a list whose every row is unreadable is a store
+        // problem, and a list that lost SOME rows still has usable ones in it.
+        if (!rows) {
+          setWorkflowsError("Saved workflows could not be listed.");
+        } else if (usable.length === rows.length) {
+          setWorkflowsError(null);
+        } else if (usable.length === 0) {
+          setWorkflowsError("Saved workflows could not be read.");
+        } else {
+          setWorkflowsError("Some saved workflows could not be read and are not listed.");
+        }
         setWorkflowsLoaded(true);
       })
       .catch((error: unknown) => {
@@ -231,9 +319,15 @@ function BuilderAssistantRail({
     () => workflows.find((workflow) => workflowRevisionId(workflow) === selectedWorkflowId) ?? null,
     [selectedWorkflowId, workflows],
   );
-  // Only true once a list has actually come back: before that the rail must not
-  // tell the user there is nothing to select.
-  const hasSelectableContext = !workflowsLoaded || workflows.length > 0;
+  // Three separate facts, and the copy needs all three kept apart. Folding the
+  // first fetch into `hasSelectableContext` (as `!workflowsLoaded || length > 0`
+  // did) avoided the worse error of claiming emptiness early, but it bought that
+  // by telling the user to "choose a saved revision above" while the picker's
+  // only option read "Loading saved workflows…" — four strings naming a control
+  // that had nothing in it (r4 review R2). The helper now gets the loading
+  // instant as its own state and says it is waiting.
+  const contextListLoading = !workflowsLoaded;
+  const hasSelectableContext = workflows.length > 0;
   // "The list failed" is not "the project is empty". Left conflated, a failed
   // fetch made the rail assert "No saved workflow to work on yet" and then send
   // the user off to create a workflow they may already own (r3 review F8).
@@ -357,6 +451,7 @@ function BuilderAssistantRail({
           }
           hasSelectableContext={hasSelectableContext}
           contextListFailed={contextListFailed}
+          contextListLoading={contextListLoading}
           providerBlocked={providerBlocked}
         />
       </div>
