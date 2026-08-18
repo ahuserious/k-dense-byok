@@ -34,7 +34,24 @@ function helperLabel(profile: HelperAgentProfile): string {
   return "Raindrop analyst";
 }
 
-function helperEmptyState(profile: HelperAgentProfile): {
+/**
+ * Which of the three context states the caller is in. The empty state and the
+ * blocked hint have to differ across all three: the copy that describes what
+ * the helper does is a lie in the state where it can do nothing, and "pick one
+ * above" is a lie when the picker has nothing to offer.
+ */
+type HelperContextState =
+  /** A context reference is bound; the helper can actually answer. */
+  | "selected"
+  /** Selectable contexts exist, the user has not chosen one. */
+  | "unselected"
+  /** The picker is empty — nothing in this project can be selected yet. */
+  | "unavailable";
+
+function helperEmptyState(
+  profile: HelperAgentProfile,
+  contextState: HelperContextState,
+): {
   title: string;
   description: string;
   placeholder: string;
@@ -47,14 +64,38 @@ function helperEmptyState(profile: HelperAgentProfile): {
   missingContext: string;
 } {
   if (profile === "dag-builder") {
-    // The DAG-BUILDING chat the owner asked for, and the only one: this copy has
-    // to say "I draft the graph with you" without a reader having to infer it
-    // from the profile name. The Raindrop analyst below is deliberately worded
-    // so it can never be mistaken for this helper again.
+    // The DAG-BUILDING chat the owner asked for, and the only one. Two hard
+    // limits shape every string here, and the round-1 review failed on the
+    // first: (1) the composer is HARD BLOCKED until a SAVED revision is
+    // selected, so on a project with no saved workflow the old copy invited the
+    // user to "describe the pipeline you want" into a box that could never
+    // send; (2) there is no bridge from this rail into the canvas
+    // (dag-builder-surface.tsx header), so "I draft the VISUAL DAG" promised an
+    // apply path that does not exist. The copy below says only what is true in
+    // each state: explain, draft YAML the user copies in, propose fixes.
+    if (contextState === "unavailable") {
+      return {
+        title: "No saved workflow to work on yet",
+        description:
+          "This assistant works on SAVED workflow revisions, so it needs one to exist first. Save a workflow in the canvas on the left, or create one in Scientific Pipelines, then pick its revision above.",
+        placeholder: "Save a workflow first, then ask about it…",
+        missingContext:
+          "Save a workflow first, or create one in Scientific Pipelines, then pick its revision above.",
+      };
+    }
+    if (contextState === "unselected") {
+      return {
+        title: "Pick a saved workflow revision to start",
+        description:
+          "Choose a saved revision above. I then explain its nodes and edges, draft YAML you can copy into the canvas, and propose fixes for validation errors.",
+        placeholder: "Pick a saved revision above, then ask…",
+        missingContext: "Pick a saved workflow revision above to ask the DAG Builder agent.",
+      };
+    }
     return {
-      title: "Build this workflow with a separate Builder agent",
+      title: "Build on this saved workflow revision",
       description:
-        "Describe the pipeline you want; I draft the visual/YAML DAG, explain nodes and edges, and propose fixes for validation errors.",
+        "I explain the nodes and edges of the revision above, draft YAML you can copy into the canvas, and propose fixes for validation errors. I cannot edit the canvas myself.",
       placeholder: "Ask about this workflow…",
       missingContext: "Pick a saved workflow revision above to ask the DAG Builder agent.",
     };
@@ -84,11 +125,13 @@ function ScopedHelperAgentChat({
   projectId,
   profile,
   contextReference,
+  hasSelectableContext = true,
   providerBlocked = false,
 }: {
   projectId: string;
   profile: HelperAgentProfile;
   contextReference?: HelperAgentContextReference;
+  hasSelectableContext?: boolean;
   providerBlocked?: boolean;
 }) {
   const agent = useAgent(projectId);
@@ -159,8 +202,13 @@ function ScopedHelperAgentChat({
   }, [contextId, contextKind, profile, projectId]);
 
   const running = agent.status === "submitted" || agent.status === "streaming";
-  const emptyState = helperEmptyState(profile);
   const contextReady = Boolean(contextKind && contextId);
+  // `hasSelectableContext` defaults to true, so a call site that does not know
+  // whether its picker is empty keeps the previous two-state behaviour.
+  const emptyState = helperEmptyState(
+    profile,
+    contextReady ? "selected" : hasSelectableContext ? "unselected" : "unavailable",
+  );
 
   // The composer used to be a bare native `disabled` on both the textarea and
   // Send: unfocusable, so a keyboard or screen-reader user could neither land
@@ -327,6 +375,13 @@ export function HelperAgentChat(props: {
   projectId: string;
   profile: HelperAgentProfile;
   contextReference?: HelperAgentContextReference;
+  /**
+   * False when the caller's picker has nothing to offer at all — a project with
+   * no saved workflow, say. The empty state and the blocked hint then name the
+   * way out instead of telling the user to pick from an empty list. Optional
+   * and defaulted true: call sites that cannot tell keep the previous copy.
+   */
+  hasSelectableContext?: boolean;
   /**
    * True when no model provider is connected, so no helper turn can be served.
    * Optional and defaulted off: call sites that do not run the provider check

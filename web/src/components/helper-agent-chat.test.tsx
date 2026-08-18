@@ -178,12 +178,14 @@ describe("HelperAgentChat blocked composer states the reason", () => {
       <HelperAgentChat projectId="project-a" profile="dag-builder" />,
     );
     // O2: the Builder assistant says what it drafts, in the Builder's words.
+    // With nothing selected but selectable revisions available, that is the
+    // "pick one and here is what happens next" wording.
     expect(
-      screen.getByText("Build this workflow with a separate Builder agent"),
+      screen.getByText("Pick a saved workflow revision to start"),
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        "Describe the pipeline you want; I draft the visual/YAML DAG, explain nodes and edges, and propose fixes for validation errors.",
+        "Choose a saved revision above. I then explain its nodes and edges, draft YAML you can copy into the canvas, and propose fixes for validation errors.",
       ),
     ).toBeInTheDocument();
     unmount();
@@ -208,6 +210,65 @@ describe("HelperAgentChat blocked composer states the reason", () => {
         .getAttribute("placeholder") ?? "",
     ]) {
       expect(text).not.toMatch(/\bbuild|\bdraft|\bdesign|\bDAG\b/i);
+    }
+  });
+
+  it("tells the truth in each context state and never promises to reach the canvas", async () => {
+    // R1 [high]: the dag-builder empty state used to read "Describe the pipeline
+    // you want; I draft the visual/YAML DAG…" in EVERY state — including the one
+    // where the project has no saved workflow at all and the composer is
+    // therefore hard-blocked with no way out from this rail. Each state now says
+    // what is true of it.
+    const { unmount: unmountUnavailable } = render(
+      <HelperAgentChat
+        projectId="project-a"
+        profile="dag-builder"
+        hasSelectableContext={false}
+      />,
+    );
+    expect(screen.getByText("No saved workflow to work on yet")).toBeInTheDocument();
+    expect(screen.getByTestId("helper-agent-blocked-hint")).toHaveTextContent(
+      "Save a workflow first, or create one in Scientific Pipelines, then pick its revision above.",
+    );
+    const unavailableCopy = [
+      screen.getByText("No saved workflow to work on yet").textContent ?? "",
+      screen.getByTestId("helper-agent-blocked-hint").textContent ?? "",
+    ];
+    unmountUnavailable();
+
+    const { unmount: unmountUnselected } = render(
+      <HelperAgentChat projectId="project-a" profile="dag-builder" />,
+    );
+    expect(screen.getByText("Pick a saved workflow revision to start")).toBeInTheDocument();
+    expect(screen.getByTestId("helper-agent-blocked-hint")).toHaveTextContent(
+      "Pick a saved workflow revision above to ask the DAG Builder agent.",
+    );
+    unmountUnselected();
+
+    render(
+      <HelperAgentChat
+        projectId="project-a"
+        profile="dag-builder"
+        contextReference={{ kind: "workflow", id: "microscopy_qc@4" }}
+      />,
+    );
+    // Only with a revision bound does the drafting copy appear, and even then it
+    // names its own limit.
+    const selectedTitle = await screen.findByText("Build on this saved workflow revision");
+    const selectedDescription = screen.getByText(
+      "I explain the nodes and edges of the revision above, draft YAML you can copy into the canvas, and propose fixes for validation errors. I cannot edit the canvas myself.",
+    );
+
+    // R1 [medium]: there is no bridge from this rail into the cross-origin
+    // builder canvas, so no state may claim it draws or applies anything there.
+    for (const text of [
+      ...unavailableCopy,
+      selectedTitle.textContent ?? "",
+      selectedDescription.textContent ?? "",
+      screen.getByRole("textbox", { name: "Message DAG Builder agent" })
+        .getAttribute("placeholder") ?? "",
+    ]) {
+      expect(text).not.toMatch(/\bapply\b|\bapplies\b|\bvisual\b/i);
     }
   });
 

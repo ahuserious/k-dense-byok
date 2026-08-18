@@ -255,19 +255,28 @@ test.describe("Raindrop log interactions", () => {
     await composer.fill(RAINDROP_ANALYST_QUESTION);
     const send = analyst.getByRole("button", { name: "Send" });
     await expect(send).toBeEnabled();
-    const launcher = workspacePage.getByRole("button", { name: "Components studio" });
-    const [launcherRect, sendRect] = await Promise.all([
-      launcher.boundingBox(),
-      send.boundingBox(),
-    ]);
-    expect(launcherRect).not.toBeNull();
-    expect(sendRect).not.toBeNull();
-    expect(
-      launcherRect!.x + launcherRect!.width <= sendRect!.x ||
-      sendRect!.x + sendRect!.width <= launcherRect!.x ||
-      launcherRect!.y + launcherRect!.height <= sendRect!.y ||
-      sendRect!.y + sendRect!.height <= launcherRect!.y,
-    ).toBe(true);
+    // This used to compare the Send button's rectangle against the "Components
+    // studio" launcher pill's. That pill was retired in lane W1 round 2 (owner:
+    // "there should be no components studio"), so one of the two rectangles no
+    // longer exists and the old assertion could only fail. What it was actually
+    // protecting is kept, and widened past any single pill: the retired
+    // launcher must stay gone, and no floating workspace chrome may sit on top
+    // of the analyst's Send button — pinned by asking the browser what it would
+    // actually hit at the button's own centre, which catches an overlay from
+    // any source rather than only the one that used to be there.
+    await expect(
+      workspacePage.getByRole("button", { name: "Components studio" }),
+    ).toHaveCount(0);
+    await send.scrollIntoViewIfNeeded();
+    const sendReceivesItsOwnCentreClick = await send.evaluate((sendButton) => {
+      const rect = sendButton.getBoundingClientRect();
+      const topmostElementAtCentre = document.elementFromPoint(
+        rect.x + rect.width / 2,
+        rect.y + rect.height / 2,
+      );
+      return topmostElementAtCentre !== null && sendButton.contains(topmostElementAtCentre);
+    });
+    expect(sendReceivesItsOwnCentreClick).toBe(true);
     await send.click();
     await expect(analyst.getByText(RAINDROP_ANALYST_QUESTION, { exact: true })).toBeVisible();
     await expect(analyst.getByText(RAINDROP_ANALYST_RESPONSE, { exact: true })).toBeVisible();
