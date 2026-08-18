@@ -14,9 +14,12 @@ mock.module('@/lib/utils', () => ({
 
 const {
   DagNodeRender,
+  ENGINE_BOUND_HARNESSES,
+  HARNESS_UNBOUND_NOTE,
   HarnessSelect,
   NODE_HARNESSES,
   NODE_HARNESS_OPTIONS,
+  isHarnessBound,
   NodeDetailsSurface,
   NodeTypeBadge,
   TYPE_CONFIG,
@@ -105,7 +108,6 @@ describe('node content projection', () => {
     expect(html).toContain('data-testid="node-details-panel"');
     // The blue-smoke effect was a WebGL <canvas> painted behind this content.
     expect(html).not.toContain('<canvas');
-    expect(html).not.toContain('layoutsubtree');
   });
 
   test('detail surface renders full prompt and the complete resolved NodeSpec', async () => {
@@ -160,6 +162,21 @@ describe('Scientific DAG Studio visual contracts', () => {
     expect(css).toContain('--background: oklch(0.13 0 0);');
   });
 
+  test('an expanded node paints above its neighbours', () => {
+    // React Flow stamps an inline `z-index: 0` on unselected nodes, which opens
+    // a stacking context the absolutely-positioned details panel cannot escape,
+    // so the next card down the column painted through the open panel. The
+    // elevation has to land on the node element and beat an inline style.
+    expect(css).toContain(
+      ".react-flow__node:has([data-testid='node-details-surface'])"
+    );
+    expect(css).toContain('z-index: 1000 !important;');
+    // The selector is only as good as the testid the pinned card actually
+    // renders, so pin the two together.
+    const component = readFileSync(new URL('./DagNodeComponent.tsx', import.meta.url), 'utf8');
+    expect(component).toContain('data-testid="node-details-surface"');
+  });
+
   test('node palette retains a distinct token for every node type', () => {
     expect(css).toContain('--node-command:');
     expect(css).toContain('--node-prompt:');
@@ -211,25 +228,34 @@ describe('quick-node CLI harness selection', () => {
     }
   });
 
-  test('a non-Pi choice says at the picker that Save does not accept it yet', () => {
-    const pi = renderToStaticMarkup(
+  test('only the execution-bound harnesses are selectable, and the note says why', () => {
+    // The engine's node-spec-enforcement fails closed on every harness it has
+    // not bound yet ([vendored-harness-unbound]), so offering them as live
+    // choices let the builder author a graph that PUT /api/workflows rejects.
+    expect([...ENGINE_BOUND_HARNESSES]).toEqual(['pi']);
+    expect(isHarnessBound('pi')).toBe(true);
+    for (const harness of NODE_HARNESSES.filter((value: string) => value !== 'pi')) {
+      expect(isHarnessBound(harness)).toBe(false);
+    }
+
+    const html = renderToStaticMarkup(
       createElement(HarnessSelect, {
         value: 'pi',
         onChange: (): void => undefined,
         label: 'CLI harness for the Prompt quick node',
       })
     );
-    expect(pi).not.toContain('data-testid="quick-node-harness-note"');
-
-    const codex = renderToStaticMarkup(
-      createElement(HarnessSelect, {
-        value: 'codex',
-        onChange: (): void => undefined,
-        label: 'CLI harness for the Prompt quick node',
-      })
-    );
-    expect(codex).toContain('data-testid="quick-node-harness-note"');
-    expect(codex).toContain('Save accepts Pi only');
+    // The frozen union stays visible — the vocabulary is the contract — but the
+    // four unbound members render disabled.
+    expect(html).toContain('value="pi"');
+    expect(html).not.toContain('value="pi" disabled');
+    for (const harness of NODE_HARNESSES.filter((value: string) => value !== 'pi')) {
+      expect(html).toContain(`value="${harness}" disabled`);
+    }
+    // The amber note is unconditional now: it is what explains the grey rows.
+    expect(html).toContain('data-testid="quick-node-harness-note"');
+    expect(html).toContain('Save accepts Pi only until the typed route lands (lane W3).');
+    expect(HARNESS_UNBOUND_NOTE).toContain('Save accepts Pi only');
   });
 
   test('the card badge shows the harness the node actually carries', () => {

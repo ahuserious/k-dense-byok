@@ -62,6 +62,28 @@ export const NODE_HARNESS_OPTIONS: readonly { value: NodeHarness; label: string 
 
 export const DEFAULT_NODE_HARNESS: NodeHarness = 'pi';
 
+/**
+ * The harnesses the vendored engine will actually accept on save today.
+ *
+ * `HarnessSchema` freezes the SHAPE of the union, but `node-spec-enforcement`
+ * fails closed on every member that is not yet execution-bound
+ * ([vendored-harness-unbound]), so a document authored with one of the other
+ * four is rejected by PUT /api/workflows. The picker keeps the whole frozen
+ * union visible — the vocabulary is the contract — but only offers the bound
+ * members as selectable, so the builder cannot produce an unsavable graph in
+ * two clicks. Widening this list is a runtime-binding change (lane W3's typed
+ * route), never a UI change.
+ */
+export const ENGINE_BOUND_HARNESSES: readonly NodeHarness[] = ['pi'];
+
+export function isHarnessBound(harness: NodeHarness): boolean {
+  return ENGINE_BOUND_HARNESSES.includes(harness);
+}
+
+/** Why the non-Pi options are greyed out, said where the choice is made. */
+export const HARNESS_UNBOUND_NOTE =
+  'Save accepts Pi only until the typed route lands (lane W3).';
+
 export function nodeHarnessLabel(harness: NodeHarness): string {
   return NODE_HARNESS_OPTIONS.find(option => option.value === harness)?.label ?? harness;
 }
@@ -84,11 +106,6 @@ export function HarnessSelect({
   label: string;
   id?: string;
 }): React.ReactElement {
-  // NodeSpec v1 freezes the harness SHAPE but binds only `pi`; the builder's own
-  // fail-closed validator (nodeSpecV1InlineErrors) rejects the others until that
-  // binding lands, so a non-Pi choice must say so where it is made rather than
-  // only in the inspector's error list.
-  const isPendingBinding = value !== DEFAULT_NODE_HARNESS;
   return (
     <div className="min-w-0 flex-1">
       <select
@@ -106,19 +123,17 @@ export function HarnessSelect({
         className="w-full min-w-0 rounded border border-border bg-surface px-1.5 py-0.5 font-mono text-[10px] text-text-secondary focus:outline-none focus:ring-1 focus:ring-accent-bright"
       >
         {NODE_HARNESS_OPTIONS.map(option => (
-          <option key={option.value} value={option.value}>
+          <option key={option.value} value={option.value} disabled={!isHarnessBound(option.value)}>
             {option.label}
           </option>
         ))}
       </select>
-      {isPendingBinding && (
-        <p
-          data-testid="quick-node-harness-note"
-          className="mt-0.5 font-mono text-[9px] leading-tight text-warning"
-        >
-          Not bound yet — Save accepts Pi only.
-        </p>
-      )}
+      <p
+        data-testid="quick-node-harness-note"
+        className="mt-0.5 font-mono text-[9px] leading-tight text-warning"
+      >
+        {HARNESS_UNBOUND_NOTE}
+      </p>
     </div>
   );
 }

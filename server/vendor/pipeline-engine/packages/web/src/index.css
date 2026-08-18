@@ -332,3 +332,16 @@ body {
 @theme inline {
   --font-sans: ui-monospace, 'SF Mono', Menlo, monospace;
 }
+
+/* An expanded node's details panel must paint above its neighbours.
+ *
+ * The panel is absolutely positioned inside the card, but React Flow stamps an
+ * inline `z-index: 0` on every unselected `.react-flow__node`, and `z-index: 0`
+ * on a positioned element opens a stacking context the panel cannot escape —
+ * so the next card down the column painted a strip straight through the open
+ * NodeSpec surface. The elevation therefore has to be applied to the node
+ * element itself, and has to beat an inline style. React Flow uses the same
+ * 1000 when it elevates a selected node. */
+.react-flow__node:has([data-testid='node-details-surface']) {
+  z-index: 1000 !important;
+}

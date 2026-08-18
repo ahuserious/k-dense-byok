@@ -31,7 +31,12 @@ import { BuilderToolbar } from './BuilderToolbar';
 import type { ViewMode } from './BuilderToolbar';
 import { NodeLibrary } from './NodeLibrary';
 import type { QuickNodeType } from './NodeLibrary';
-import { FIT_VIEW_OPTIONS, WorkflowCanvas, reactFlowToDagNodes } from './WorkflowCanvas';
+import {
+  FIT_VIEW_OPTIONS,
+  WorkflowCanvas,
+  nextNodePosition,
+  reactFlowToDagNodes,
+} from './WorkflowCanvas';
 import { NodeInspector } from './NodeInspector';
 import { ValidationPanel } from './ValidationPanel';
 import { StatusBar } from './StatusBar';
@@ -310,24 +315,13 @@ function WorkflowBuilderInner(): React.ReactElement {
     handleNodeDeleteById(selectedNodeId);
   }, [selectedNodeId, handleNodeDeleteById]);
 
-  /**
-   * Place a new node below the lowest existing one instead of always at
-   * (200, 200), where repeated adds stacked invisibly on top of each other.
-   */
-  const nextNodePosition = useCallback((): { x: number; y: number } => {
-    const current = nodesRef.current;
-    if (current.length === 0) return { x: 200, y: 120 };
-    const lowest = current.reduce((a, b) => (a.position.y >= b.position.y ? a : b));
-    return { x: lowest.position.x, y: lowest.position.y + 140 };
-  }, []);
-
   const addNode = useCallback(
     (nodeType: 'prompt' | 'bash', label: string, harness?: NodeHarness): void => {
       const id = `node-${crypto.randomUUID()}`;
       const newNode: DagFlowNode = {
         id,
         type: 'dagNode',
-        position: nextNodePosition(),
+        position: nextNodePosition(nodesRef.current),
         data: {
           id,
           label,
@@ -339,7 +333,7 @@ function WorkflowBuilderInner(): React.ReactElement {
       setNodes(nds => [...nds, newNode]);
       markDirty();
     },
-    [nextNodePosition, pushSnapshotLatest, setNodes, markDirty]
+    [pushSnapshotLatest, setNodes, markDirty]
   );
 
   /** Node library "add" button — the keyboard route for a harness-tagged node. */

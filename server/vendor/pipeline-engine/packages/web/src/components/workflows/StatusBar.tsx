@@ -22,7 +22,7 @@ export function StatusBar({
   const isValid = errorCount === 0 && warningCount === 0;
 
   return (
-    <div className="flex h-7 items-center justify-between border-t border-border bg-surface px-3 font-mono text-[11px] text-text-tertiary">
+    <div className="flex h-7 items-center justify-between border-t border-border bg-surface px-3 font-mono text-[11px] text-text-secondary">
       {/* Left side */}
       <div className="flex items-center gap-3">
         {/* Validation badge */}

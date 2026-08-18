@@ -191,11 +191,11 @@ export function WorkflowList(): React.ReactElement {
           <div className="text-sm text-text-secondary">
             {localProjectId ? (
               <>
-                No workflows found in this project. Add workflow definitions to{' '}
+                No workflows found in this project. Add workflow definitions to the{' '}
                 <code className="text-xs bg-surface-inset px-1 py-0.5 rounded">
-                  .archon/workflows/
+                  workflows/
                 </code>{' '}
-                in the project root.
+                folder inside the Pipeline Engine config directory at the project root.
               </>
             ) : (
               <>

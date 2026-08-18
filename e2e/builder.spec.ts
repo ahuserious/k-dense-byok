@@ -151,9 +151,13 @@ test.describe("thin inventory smoke — excluded from the substantive count", ()
         : control.kind === "placeholder"
           ? frame.getByPlaceholder(control.value)
           : control.kind === "palette"
-            ? frame.locator('[draggable="true"]').filter({
-                hasText: new RegExp(`^${control.value}$`),
-              })
+            // The quick-node card is still the draggable unit, but it now
+            // carries its own CLI-harness picker and "add" button, so its text
+            // is no longer exactly the node name. Address it by testid and keep
+            // asserting that the addressed element is the draggable one.
+            ? frame.locator(
+                `[draggable="true"][data-testid="quick-node-${control.value.toLowerCase()}"]`,
+              )
             : frame.getByRole("button", { name: control.value, exact: true });
       await expect(locator.first()).toBeVisible();
     });
@@ -166,9 +170,12 @@ test.describe("node card detail surface", () => {
     await expect(frame.getByTestId("node-type-badge")).toContainText("PROMPT");
   });
 
-  test("prompt node shows its harness topology badge", async ({ workspacePage }) => {
+  test("prompt node shows its CLI harness badge", async ({ workspacePage }) => {
     const frame = await addPromptNode(workspacePage);
-    await expect(frame.getByTestId("node-harness-badge")).toHaveAttribute("title", "Harness topology: pi");
+    await expect(frame.getByTestId("node-harness-badge")).toHaveAttribute(
+      "title",
+      "CLI harness: Pi (Kady)",
+    );
   });
 
   test("plus control pins the full node details", async ({ workspacePage }) => {
@@ -182,12 +189,17 @@ test.describe("node card detail surface", () => {
     await expect(collapseButton).toHaveAttribute("aria-expanded", "true");
   });
 
-  test("hover expands and mouse-leave collapses unpinned details", async ({ workspacePage }) => {
+  test("hover expands nothing", async ({ workspacePage }) => {
+    // Details are pinned-only now: hovering used to explode the card into a
+    // full NodeSpec panel just from moving the pointer across the canvas, and
+    // it made the "expand +" control look dead. Only the control opens them.
     const frame = await addPromptNode(workspacePage);
     await frame.getByTestId("node-harness-badge").hover();
-    await expect(frame.getByTestId("node-details-surface")).toBeVisible();
-    await frame.locator(".react-flow__pane").hover({ position: { x: 8, y: 8 } });
+    await workspacePage.waitForTimeout(2000);
     await expect(frame.getByTestId("node-details-surface")).toHaveCount(0);
+    await expect(
+      frame.getByRole("button", { name: "Expand full node details" }),
+    ).toHaveAttribute("aria-expanded", "false");
   });
 
   test("mouse-leave does not collapse pinned details", async ({ workspacePage }) => {
@@ -220,9 +232,9 @@ test.describe("node card detail surface", () => {
         : detail === "Settings"
           ? "Resolved NodeSpec v1"
           : detail;
-    test(`hover details expose ${detail}`, async ({ workspacePage }) => {
+    test(`expanded details expose ${detail}`, async ({ workspacePage }) => {
       const frame = await addPromptNode(workspacePage);
-      await frame.getByTestId("node-harness-badge").hover();
+      await frame.getByRole("button", { name: "Expand full node details" }).click();
       await expect(frame.getByTestId("node-details-surface").getByText(displayedText, { exact: true })).toBeVisible();
     });
   }
@@ -280,8 +292,12 @@ test.describe("builder runtime rendering", () => {
     expect(palette.promptStripeToken).toEqual([125, 94, 224, 255]);
   });
 
-  // Product task: remove these four user-visible legacy sites before enabling this assertion:
-  // WorkflowList.tsx:196, NodePalette.tsx:96, NodeInspector.tsx:1109, QuickAddPicker.tsx:115.
+  // All four user-visible legacy sites this waited on are now neutral
+  // (NodePalette, NodeInspector and QuickAddPicker in lane W2 round 1;
+  // WorkflowList in round 2), and the assertion passes when run on its own.
+  // Enabling it here is an S11 change, not a W2 one: dropping `.fixme` moves
+  // e2e/item-count-reporter.ts's EXPECTED_FIXME_ITEMS 4 -> 3 and
+  // EXPECTED_THIN_ITEMS 36 -> 35, and that file is outside this lane's set.
   test.fixme("builder body contains no retired Archon text", async ({ workspacePage }) => {
     const frame = await openBuilderDraft(workspacePage);
     await expect(frame.locator("body")).not.toContainText(/archon/i);

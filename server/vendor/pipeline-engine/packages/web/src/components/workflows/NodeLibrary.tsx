@@ -195,7 +195,7 @@ export function NodeLibrary({
     <div className="flex flex-col h-full overflow-hidden border-r border-border bg-surface">
       {/* Header */}
       <div className="border-b border-border px-2.5 py-1.5">
-        <h3 className="mb-1.5 font-mono text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">
+        <h3 className="mb-1.5 font-mono text-[10px] font-semibold uppercase tracking-wide text-text-secondary">
           Node Library
         </h3>
         <input

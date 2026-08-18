@@ -3,10 +3,15 @@ import type { WorkflowDefinition, NodeSpecV1 } from '@/lib/api';
 import type { DagFlowNode } from './DagNodeComponent';
 import { dagNodesToReactFlow } from '@/lib/dag-layout';
 import {
+  CANVAS_INTERACTION_PROPS,
   CANVAS_MAX_ZOOM,
   CANVAS_MIN_ZOOM,
+  FIRST_NODE_POSITION,
   FIT_VIEW_OPTIONS,
   HARNESS_DRAG_MIME,
+  NEW_NODE_ROW_SPACING,
+  newNodeHarnessSettings,
+  nextNodePosition,
   nodeSetSignature,
   reactFlowToDagNodes,
 } from './WorkflowCanvas';
@@ -163,5 +168,40 @@ describe('balanced canvas viewport', () => {
     expect(saved[0]?.settings?.harness).toBe('claude-code');
     const reloaded = dagNodesToReactFlow(saved);
     expect(reloaded.nodes[0]?.data.settings?.harness).toBe('claude-code');
+  });
+});
+
+describe('canvas gestures and node placement', () => {
+  const positionedNode = (id: string, x: number, y: number): DagFlowNode => ({
+    id,
+    type: 'dagNode',
+    position: { x, y },
+    data: { id, label: 'Prompt', nodeType: 'prompt' },
+  });
+
+  test('double-clicking the pane quick-adds without also doubling the zoom', () => {
+    // Double click is the builder's OWN quick-add gesture (handlePaneClick), so
+    // React Flow's default double-click zoom fired on the same gesture: the menu
+    // opened at 200%, a second double click hit the 250% ceiling, and cancelling
+    // with Escape left the viewport parked there.
+    expect(CANVAS_INTERACTION_PROPS.zoomOnDoubleClick).toBe(false);
+    expect(CANVAS_INTERACTION_PROPS.panOnDrag).toBe(true);
+    expect(CANVAS_INTERACTION_PROPS.selectionOnDrag).toBe(false);
+  });
+
+  test('a new node stacks below the lowest card in the FIRST card\u2019s column', () => {
+    expect(nextNodePosition([])).toEqual({ ...FIRST_NODE_POSITION });
+    const column = [positionedNode('a', 200, 120), positionedNode('b', 200, 260)];
+    expect(nextNodePosition(column)).toEqual({ x: 200, y: 260 + NEW_NODE_ROW_SPACING });
+    // Dragging one card far to the right must not drag the column with it.
+    const dragged = [positionedNode('a', 200, 120), positionedNode('b', 980, 640)];
+    expect(nextNodePosition(dragged)).toEqual({ x: 200, y: 640 + NEW_NODE_ROW_SPACING });
+  });
+
+  test('a new node writes settings.harness only when it is not the default', () => {
+    // An explicit `pi` would shadow the document-level `defaultHarness` that
+    // `settings.harness ?? document.settings.defaultHarness ?? default` resolves.
+    expect(newNodeHarnessSettings('pi')).toBeUndefined();
+    expect(newNodeHarnessSettings('claude-code')).toEqual({ harness: 'claude-code' });
   });
 });

@@ -48,6 +48,61 @@ export const CANVAS_MIN_ZOOM = 0.2;
 export const CANVAS_MAX_ZOOM = 2.5;
 
 /**
+ * React Flow pointer behaviour the builder pins deliberately.
+ *
+ * `zoomOnDoubleClick` is React Flow's default-on gesture, but double-clicking
+ * the pane is ALSO the builder's own quick-add gesture (`handlePaneClick`), so
+ * one double click both opened the quick-add menu and doubled the zoom — and
+ * cancelling the menu with Escape left the viewport parked at the 250% ceiling.
+ * The wheel, the "+" / "-" controls and the `f` key remain the zoom affordances.
+ */
+export const CANVAS_INTERACTION_PROPS = {
+  panOnDrag: true,
+  selectionOnDrag: false,
+  zoomOnDoubleClick: false,
+} as const;
+
+/**
+ * Vertical stride between nodes created without a pointer position (keyboard
+ * add, node-library "add" button, quick-add menu).
+ */
+export const NEW_NODE_ROW_SPACING = 140;
+
+/** Where the first node lands on an empty canvas. */
+export const FIRST_NODE_POSITION = { x: 200, y: 120 } as const;
+
+/**
+ * Place a new node below the lowest existing one instead of always at
+ * (200, 200), where repeated adds stacked invisibly on top of each other.
+ *
+ * The column is anchored to the FIRST node's x, not the lowest node's: after
+ * you drag one node far to the right, the next keyboard-added node should still
+ * appear in the original column rather than chasing the dragged card.
+ */
+export function nextNodePosition(nodes: readonly DagFlowNode[]): { x: number; y: number } {
+  const firstNode = nodes[0];
+  if (!firstNode) return { ...FIRST_NODE_POSITION };
+  const lowestNode = nodes.reduce((a, b) => (a.position.y >= b.position.y ? a : b));
+  return { x: firstNode.position.x, y: lowestNode.position.y + NEW_NODE_ROW_SPACING };
+}
+
+/**
+ * The `settings` object a newly created node should carry for a chosen harness.
+ *
+ * The key is written ONLY when it differs from the default: `settings` is
+ * optional in the vendored NodeSpec and resolution is
+ * `settings.harness ?? document.settings.defaultHarness ?? default`, so
+ * stamping an explicit `pi` on every dragged node would shadow document-level
+ * `defaultHarness` inheritance. Omitting it also makes all three creation paths
+ * (drop, quick-add, keyboard) agree.
+ */
+export function newNodeHarnessSettings(
+  harness: NodeHarness
+): { harness: NodeHarness } | undefined {
+  return harness === DEFAULT_NODE_HARNESS ? undefined : { harness };
+}
+
+/**
  * Identity of the current node SET (not their positions). A change means nodes
  * were loaded, added, removed or undone — the moments that deserve a re-fit.
  * Dragging a node changes positions only, and must not yank the viewport.
@@ -202,6 +257,7 @@ export function WorkflowCanvas({
       // The palette picks the CLI harness BEFORE the drag; carry that choice
       // into the node's NodeSpec so the card badge and the saved YAML agree.
       const harness = (draggedHarness || DEFAULT_NODE_HARNESS) as NodeHarness;
+      const harnessSettings = newNodeHarnessSettings(harness);
 
       const newNode: DagFlowNode = {
         id,
@@ -211,7 +267,7 @@ export function WorkflowCanvas({
           id,
           label,
           nodeType,
-          settings: { harness },
+          ...(harnessSettings ? { settings: harnessSettings } : {}),
         },
       };
 
@@ -335,6 +391,8 @@ export function WorkflowCanvas({
       const id = `node-${crypto.randomUUID()}`;
       const label = resolveNodeLabel(type, options?.commandName ?? '');
 
+      const harnessSettings = newNodeHarnessSettings(options?.harness ?? DEFAULT_NODE_HARNESS);
+
       const newNode: DagFlowNode = {
         id,
         type: 'dagNode',
@@ -343,7 +401,7 @@ export function WorkflowCanvas({
           id,
           label,
           nodeType: type,
-          settings: { harness: options?.harness ?? DEFAULT_NODE_HARNESS },
+          ...(harnessSettings ? { settings: harnessSettings } : {}),
           ...(options?.skills && { skills: options.skills }),
           ...(options?.mcp && { mcp: options.mcp }),
         },
@@ -422,8 +480,7 @@ export function WorkflowCanvas({
         onNodeContextMenu={handleNodeContextMenu}
         onPaneClick={handlePaneClick}
         nodeTypes={nodeTypes}
-        panOnDrag
-        selectionOnDrag={false}
+        {...CANVAS_INTERACTION_PROPS}
         fitView
         fitViewOptions={FIT_VIEW_OPTIONS}
         minZoom={CANVAS_MIN_ZOOM}

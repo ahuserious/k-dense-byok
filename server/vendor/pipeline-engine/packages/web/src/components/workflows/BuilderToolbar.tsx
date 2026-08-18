@@ -102,11 +102,11 @@ export function BuilderToolbar({
               onClick={(): void => {
                 navigate('/legacy/workflows');
               }}
-              className="shrink-0 font-mono text-[11px] text-text-tertiary hover:text-text-primary"
+              className="shrink-0 font-mono text-[11px] text-text-secondary hover:text-text-primary"
             >
               Pipelines
             </button>
-            <span className="shrink-0 font-mono text-[11px] text-text-tertiary">/</span>
+            <span className="shrink-0 font-mono text-[11px] text-text-secondary">/</span>
             <input
               type="text"
               value={workflowName}
@@ -145,7 +145,7 @@ export function BuilderToolbar({
               onClick={(): void => {
                 setShowDescription(true);
               }}
-              className="max-w-[120px] shrink-0 truncate font-mono text-[10px] text-text-tertiary hover:text-text-primary"
+              className="max-w-[120px] shrink-0 truncate font-mono text-[10px] text-text-secondary hover:text-text-primary"
               title={workflowDescription || 'Add description'}
             >
               {workflowDescription || 'add description'}
@@ -206,10 +206,16 @@ export function BuilderToolbar({
                 }}
                 aria-pressed={viewMode === value}
                 className={cn(
-                  'px-2 font-mono text-[10px] font-medium transition-colors',
+                  // The active segment must carry a marker that hovering an
+                  // inactive one cannot reproduce: the fill alone was exactly
+                  // the inactive hover state, so resting the pointer on a
+                  // neighbour erased "which view am I in?". Inactive segments
+                  // now brighten their TEXT on hover and never take the fill,
+                  // and the active one is additionally semibold.
+                  'px-2 font-mono text-[10px] transition-colors',
                   viewMode === value
-                    ? 'bg-surface-hover text-text-primary'
-                    : 'bg-surface text-text-secondary hover:bg-surface-hover hover:text-text-primary'
+                    ? 'bg-surface-hover font-semibold text-text-primary'
+                    : 'bg-surface font-medium text-text-secondary hover:text-text-primary'
                 )}
               >
                 {label}
