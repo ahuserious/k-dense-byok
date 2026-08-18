@@ -143,6 +143,23 @@ function makeCheckoutWithHistory(root: string, name: string): string {
   return checkout;
 }
 
+/**
+ * Where a repository's Git directory actually is: `<checkout>/.git` for an
+ * ordinary developer checkout, and the directory the pointer file names for a
+ * project sandbox, whose repository lives beside it since round 18.
+ */
+function gitDirectoryOf(checkout: string): string {
+  const entry = path.join(checkout, ".git");
+  if (fs.statSync(entry).isDirectory()) return entry;
+  const pointer = fs.readFileSync(entry, "utf-8").split("\n", 1)[0] ?? "";
+  return path.resolve(checkout, pointer.slice("gitdir:".length).trim());
+}
+
+/** Where this module puts a sandbox's repository: beside it, never inside it. */
+function projectRepositoryDirectoryFor(sandbox: string): string {
+  return path.join(path.dirname(sandbox), `${path.basename(sandbox)}.git`);
+}
+
 interface CheckoutFingerprint {
   userName: string | null;
   userEmail: string | null;
@@ -158,7 +175,7 @@ function fingerprintCheckout(checkout: string): CheckoutFingerprint {
     userEmail: gitOrNull(checkout, ["config", "--local", "user.email"]),
     head: gitOrNull(checkout, ["rev-parse", "HEAD"]),
     commitCount: gitOrNull(checkout, ["rev-list", "--count", "HEAD"]),
-    configBytes: fs.readFileSync(path.join(checkout, ".git", "config"), "utf-8"),
+    configBytes: fs.readFileSync(path.join(gitDirectoryOf(checkout), "config"), "utf-8"),
   };
 }
 
@@ -300,8 +317,17 @@ describe("project repository containment", () => {
 
     ensureProjectRepository(sandbox);
 
-    expect(fs.lstatSync(path.join(sandbox, ".git")).isDirectory()).toBe(true);
+    // The repository is beside the sandbox, not inside it: nothing the sandbox
+    // can reach decides where its objects and refs land.
+    expect(fs.lstatSync(path.join(sandbox, ".git")).isFile()).toBe(true);
+    expect(fs.readFileSync(path.join(sandbox, ".git"), "utf-8")).toBe(
+      `gitdir: ${projectRepositoryDirectoryFor(sandbox)}\n`,
+    );
+    expect(fs.statSync(projectRepositoryDirectoryFor(sandbox)).isDirectory()).toBe(true);
     expect(git(sandbox, ["rev-parse", "--show-toplevel"])).toBe(sandbox);
+    expect(git(sandbox, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).toBe(
+      projectRepositoryDirectoryFor(sandbox),
+    );
     expect(git(sandbox, ["rev-list", "--count", "HEAD"])).toBe("1");
     expect(git(sandbox, ["log", "-1", "--format=%s"])).toBe("Initialize Kady project");
     expect(git(sandbox, ["log", "-1", "--format=%an <%ae>"])).toBe(
@@ -509,7 +535,7 @@ describe("project repository containment", () => {
     // path, the same inode, nothing a path-keyed cache would notice.
     const victim = makeCheckoutWithHistory(root, "commondir-victim");
     fs.writeFileSync(
-      path.join(sandbox, ".git", "commondir"),
+      path.join(gitDirectoryOf(sandbox), "commondir"),
       path.join(victim, ".git") + "\n",
       "utf-8",
     );
@@ -552,7 +578,7 @@ describe("project repository containment", () => {
 
     const fingerprint = (): string => {
       const sandboxEntry = fs.lstatSync(sandbox);
-      const gitEntry = fs.lstatSync(path.join(sandbox, ".git"));
+      const gitEntry = fs.lstatSync(gitDirectoryOf(sandbox));
       return [
         sandboxEntry.dev, sandboxEntry.ino, gitEntry.dev, gitEntry.ino,
         gitEntry.size, gitEntry.mtimeMs, gitEntry.ctimeMs,
@@ -560,7 +586,7 @@ describe("project repository containment", () => {
     };
     const before = fingerprint();
 
-    const configPath = path.join(sandbox, ".git", "config");
+    const configPath = path.join(gitDirectoryOf(sandbox), "config");
     const repointed = fs
       .readFileSync(configPath, "utf-8")
       .replace(/\[core\]\n/, `[core]\n\tworktree = ${victim}\n`);
@@ -584,6 +610,199 @@ describe("project repository containment", () => {
     expect((thrown as ProjectRepositoryContainmentError).invariant).toBe(
       "sandbox_is_not_repository_toplevel",
     );
+  });
+});
+
+describe("the sandbox cannot reach the repository it writes through", () => {
+  /** Everything a redirected write would land in, counted rather than argued. */
+  function looseObjectCount(checkout: string): number {
+    const objects = path.join(gitDirectoryOf(checkout), "objects");
+    let total = 0;
+    const visit = (directory: string): void => {
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        if (entry.isDirectory()) visit(path.join(directory, entry.name));
+        else total += 1;
+      }
+    };
+    visit(objects);
+    return total;
+  }
+
+  /** A sandbox in the pre-round-18 shape: its own repository, inside it. */
+  function makeSandboxWithItsOwnGitDirectory(sandbox: string): void {
+    makeSandboxWithFile(sandbox);
+    git(path.dirname(sandbox), ["init", "--quiet", "-b", "main", path.basename(sandbox)]);
+  }
+
+  function refusalFrom(sandbox: string): ProjectRepositoryContainmentError {
+    let thrown: unknown;
+    try {
+      ensureProjectRepository(sandbox);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(ProjectRepositoryContainmentError);
+    return thrown as ProjectRepositoryContainmentError;
+  }
+
+  it("moves a sandbox's own .git directory out of the sandbox, keeping its history and identity", () => {
+    const root = makeTemporaryRoot();
+    const sandbox = path.join(root, "project", "sandbox");
+    makeSandboxWithItsOwnGitDirectory(sandbox);
+    git(sandbox, ["config", "user.name", "Sandbox Owner"]);
+    git(sandbox, ["config", "user.email", "owner@example.test"]);
+    fs.writeFileSync(path.join(sandbox, "work.txt"), "real sandbox work\n", "utf-8");
+    git(sandbox, ["add", "work.txt"]);
+    git(sandbox, ["commit", "--quiet", "-m", "sandbox history"]);
+    const head = git(sandbox, ["rev-parse", "HEAD"]);
+
+    ensureProjectRepository(sandbox);
+
+    const repository = projectRepositoryDirectoryFor(sandbox);
+    expect(fs.lstatSync(path.join(sandbox, ".git")).isFile()).toBe(true);
+    expect(fs.statSync(repository).isDirectory()).toBe(true);
+    // Nothing of the repository is left where the sandbox can reach it.
+    expect(fs.readdirSync(sandbox).sort()).toEqual([".git", "AGENTS.md", "work.txt"]);
+    // Its history, its identity and its ref all survive the move untouched.
+    expect(git(sandbox, ["rev-parse", "HEAD"])).toBe(head);
+    expect(git(sandbox, ["log", "-1", "--format=%s"])).toBe("sandbox history");
+    expect(git(sandbox, ["config", "--local", "user.name"])).toBe("Sandbox Owner");
+    expect(git(sandbox, ["rev-parse", "--show-toplevel"])).toBe(sandbox);
+    // Idempotent: a repository already beside its sandbox is not moved again.
+    ensureProjectRepository(sandbox);
+    expect(git(sandbox, ["rev-parse", "HEAD"])).toBe(head);
+    expect(fs.existsSync(path.join(repository, ".git"))).toBe(false);
+  });
+
+  it.each(["objects", "refs", "logs"])(
+    "refuses a sandbox whose own .git/%s is a symlink into another repository",
+    (entryName) => {
+      // The four invariants prove things *about* `<sandbox>/.git` and nothing
+      // about its contents, and it sits in the sandbox, which is the agent's
+      // own cwd. Before round 18 this planted the sandbox's blobs in the
+      // victim's object store and a Kady-authored branch in its refs, with the
+      // proof answering correctly throughout.
+      const root = makeTemporaryRoot();
+      const victim = makeCheckoutWithHistory(root, "symlink-victim");
+      const sandbox = path.join(root, "project", "sandbox");
+      makeSandboxWithItsOwnGitDirectory(sandbox);
+      fs.rmSync(path.join(sandbox, ".git", entryName), { recursive: true, force: true });
+      fs.symlinkSync(
+        path.join(victim, ".git", entryName),
+        path.join(sandbox, ".git", entryName),
+      );
+      const before = fingerprintCheckout(victim);
+      const objectsBefore = looseObjectCount(victim);
+
+      expect(refusalFrom(sandbox).invariant).toBe("project_repository_holds_a_symlink");
+
+      expect(fingerprintCheckout(victim)).toEqual(before);
+      expect(looseObjectCount(victim)).toBe(objectsBefore);
+      // And it stays refused: a repository that failed this check is never
+      // re-attached on a later request just because its pointer is missing.
+      expect(refusalFrom(sandbox).invariant).toBe("project_repository_holds_a_symlink");
+      expect(fingerprintCheckout(victim)).toEqual(before);
+      expect(looseObjectCount(victim)).toBe(objectsBefore);
+    },
+  );
+
+  it("refuses a symlink buried below the top of the .git directory", () => {
+    // The rule is about the whole subtree, not the handful of entries that
+    // happen to matter today: burying the link deeper does not get around it.
+    const root = makeTemporaryRoot();
+    const victim = makeCheckoutWithHistory(root, "deep-symlink-victim");
+    const sandbox = path.join(root, "project", "sandbox");
+    makeSandboxWithItsOwnGitDirectory(sandbox);
+    fs.rmSync(path.join(sandbox, ".git", "refs", "heads"), { recursive: true, force: true });
+    fs.symlinkSync(
+      path.join(victim, ".git", "refs", "heads"),
+      path.join(sandbox, ".git", "refs", "heads"),
+    );
+    const before = fingerprintCheckout(victim);
+
+    expect(refusalFrom(sandbox).invariant).toBe("project_repository_holds_a_symlink");
+    expect(fingerprintCheckout(victim)).toEqual(before);
+  });
+
+  it("refuses a .git pointer file that names a repository other than the project's own", () => {
+    const root = makeTemporaryRoot();
+    const victim = makeCheckoutWithHistory(root, "pointer-victim");
+    const sandbox = path.join(root, "project", "sandbox");
+    makeSandboxWithFile(sandbox);
+    ensureProjectRepository(sandbox);
+    const before = fingerprintCheckout(victim);
+
+    for (const rewrite of ["file", "symlink"] as const) {
+      fs.rmSync(path.join(sandbox, ".git"));
+      if (rewrite === "file") {
+        fs.writeFileSync(
+          path.join(sandbox, ".git"),
+          `gitdir: ${path.join(victim, ".git")}\n`,
+          "utf-8",
+        );
+      } else {
+        fs.symlinkSync(path.join(victim, ".git"), path.join(sandbox, ".git"));
+      }
+      expect(refusalFrom(sandbox).invariant).toBe("sandbox_git_is_a_pointer_file");
+      expect(fingerprintCheckout(victim)).toEqual(before);
+    }
+  });
+
+  it("refuses a second .git directory created beside the project's own repository", () => {
+    const root = makeTemporaryRoot();
+    const sandbox = path.join(root, "project", "sandbox");
+    makeSandboxWithFile(sandbox);
+    ensureProjectRepository(sandbox);
+    const head = git(sandbox, ["rev-parse", "HEAD"]);
+
+    fs.rmSync(path.join(sandbox, ".git"));
+    git(path.dirname(sandbox), ["init", "--quiet", "-b", "main", path.basename(sandbox)]);
+
+    expect(refusalFrom(sandbox).invariant).toBe(
+      "sandbox_git_directory_shadows_project_repository",
+    );
+    // The project's own repository is left exactly as it was.
+    expect(
+      git(root, ["--git-dir", projectRepositoryDirectoryFor(sandbox), "rev-parse", "HEAD"]),
+    ).toBe(head);
+  });
+
+  it("refuses a project repository directory that is itself a symlink", () => {
+    const root = makeTemporaryRoot();
+    const victim = makeCheckoutWithHistory(root, "repository-symlink-victim");
+    const sandbox = path.join(root, "project", "sandbox");
+    makeSandboxWithFile(sandbox);
+    ensureProjectRepository(sandbox);
+    const before = fingerprintCheckout(victim);
+
+    fs.rmSync(projectRepositoryDirectoryFor(sandbox), { recursive: true, force: true });
+    fs.symlinkSync(path.join(victim, ".git"), projectRepositoryDirectoryFor(sandbox));
+
+    expect(refusalFrom(sandbox).invariant).toBe("project_repository_holds_a_symlink");
+    expect(fingerprintCheckout(victim)).toEqual(before);
+
+    // ...and with the pointer file gone too, which is the arrangement that
+    // reaches the re-attach path rather than the proof.
+    fs.rmSync(path.join(sandbox, ".git"));
+    expect(refusalFrom(sandbox).invariant).toBe("project_repository_holds_a_symlink");
+    expect(fingerprintCheckout(victim)).toEqual(before);
+    // Refused before `git init --separate-git-dir` ran, which is what stops it
+    // re-initialising the repository the link leads to.
+    expect(fs.existsSync(path.join(sandbox, ".git"))).toBe(false);
+  });
+
+  it("re-attaches a repository whose pointer file was deleted rather than starting a new one", () => {
+    const root = makeTemporaryRoot();
+    const sandbox = path.join(root, "project", "sandbox");
+    makeSandboxWithFile(sandbox);
+    ensureProjectRepository(sandbox);
+    const head = git(sandbox, ["rev-parse", "HEAD"]);
+
+    fs.rmSync(path.join(sandbox, ".git"));
+    ensureProjectRepository(sandbox);
+
+    expect(git(sandbox, ["rev-parse", "HEAD"])).toBe(head);
+    expect(git(sandbox, ["rev-list", "--count", "HEAD"])).toBe("1");
   });
 });
 
@@ -912,7 +1131,7 @@ describe("git runs no code the project sandbox supplied", () => {
     // `<sandbox>/.git/hooks` is as writable as any config key.
     const defaultHookMarker = path.join(root, "default-hook-ran.txt");
     writeIncidentPayload(
-      path.join(sandbox, ".git", "hooks", "reference-transaction"),
+      path.join(gitDirectoryOf(sandbox), "hooks", "reference-transaction"),
       defaultHookMarker,
       victim,
     );
@@ -927,7 +1146,7 @@ describe("git runs no code the project sandbox supplied", () => {
     const fsmonitorMarker = path.join(root, "fsmonitor-ran.txt");
     writeIncidentPayload(path.join(sandbox, "fsmonitor.sh"), fsmonitorMarker, victim);
     fs.appendFileSync(
-      path.join(sandbox, ".git", "config"),
+      path.join(gitDirectoryOf(sandbox), "config"),
       `[core]\n\thooksPath = ${path.join(sandbox, ".kady-hooks")}\n` +
         `\tfsmonitor = ${path.join(sandbox, "fsmonitor.sh")}\n`,
       "utf-8",
@@ -966,7 +1185,7 @@ describe("git runs no code the project sandbox supplied", () => {
         { mode: 0o755 },
       );
       fs.appendFileSync(
-        path.join(sandbox, ".git", "config"),
+        path.join(gitDirectoryOf(sandbox), "config"),
         `[filter "evil"]\n\tclean = ${payload}\n`,
         "utf-8",
       );
@@ -974,8 +1193,12 @@ describe("git runs no code the project sandbox supplied", () => {
       if (attributeSource === "gitattributes") {
         fs.writeFileSync(path.join(sandbox, ".gitattributes"), attributes, "utf-8");
       } else {
-        fs.mkdirSync(path.join(sandbox, ".git", "info"), { recursive: true });
-        fs.writeFileSync(path.join(sandbox, ".git", "info", "attributes"), attributes, "utf-8");
+        fs.mkdirSync(path.join(gitDirectoryOf(sandbox), "info"), { recursive: true });
+        fs.writeFileSync(
+          path.join(gitDirectoryOf(sandbox), "info", "attributes"),
+          attributes,
+          "utf-8",
+        );
       }
       fs.writeFileSync(path.join(sandbox, "AGENTS.md"), "# real sandbox content\n", "utf-8");
 
@@ -987,16 +1210,63 @@ describe("git runs no code the project sandbox supplied", () => {
     }
   });
 
-  it("stages executable bits, symlinks and awkward names the way git add did", () => {
-    // The staging path stopped using `git add`, so the tree it produces has to
-    // be the same tree for everything a sandbox can legitimately contain.
-    const sandbox = ensureProjectExists("staging-study").sandbox;
+  /**
+   * The tree `git add --force` records for the same working tree, built in a
+   * scratch repository from the snapshot's own path list.
+   *
+   * Asserting mode strings alone is what let round 17 ship a divergence: the
+   * rule can be wrong in both places at once. This asks Git.
+   */
+  function treeGitAddWouldRecord(
+    scratchRoot: string,
+    sandbox: string,
+    relativePaths: string[],
+    fileMode: boolean,
+  ): string[] {
+    const reference = path.join(scratchRoot, "git-add-reference");
+    fs.mkdirSync(reference, { recursive: true });
+    git(reference, ["init", "--quiet", "-b", "main", "."]);
+    git(reference, ["config", "--local", "core.fileMode", String(fileMode)]);
+    for (const relativePath of relativePaths) {
+      const from = path.join(sandbox, relativePath);
+      const to = path.join(reference, relativePath);
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      const entry = fs.lstatSync(from);
+      if (entry.isSymbolicLink()) {
+        fs.symlinkSync(fs.readlinkSync(from), to);
+      } else {
+        fs.copyFileSync(from, to);
+        fs.chmodSync(to, entry.mode & 0o7777);
+      }
+    }
+    git(reference, ["add", "--force", "."]);
+    return git(reference, ["ls-tree", "-r", git(reference, ["write-tree"])]).split("\n").sort();
+  }
+
+  /** Every shape whose recorded mode `git add` decides differently from `& 0o111`. */
+  function writeStagingFixtures(sandbox: string): void {
     fs.writeFileSync(path.join(sandbox, "script.sh"), "#!/bin/sh\necho hi\n", { mode: 0o755 });
     fs.writeFileSync(path.join(sandbox, "plain.txt"), "plain\n", "utf-8");
+    // Executable by group only, and by others only: `git add` reads S_IXUSR
+    // alone, so both of these are ordinary `100644` blobs to Git.
+    fs.writeFileSync(path.join(sandbox, "group-exec-only.txt"), "group\n", { mode: 0o654 });
+    fs.writeFileSync(path.join(sandbox, "other-exec-only.txt"), "other\n", { mode: 0o645 });
     fs.writeFileSync(path.join(sandbox, "awkward\nname.txt"), "awkward\n", "utf-8");
     fs.mkdirSync(path.join(sandbox, "nested"), { recursive: true });
     fs.writeFileSync(path.join(sandbox, "nested", "deep.txt"), "deep\n", "utf-8");
     fs.symlinkSync("plain.txt", path.join(sandbox, "link.txt"));
+    // `writeFileSync`'s mode is masked by the umask; set them outright.
+    fs.chmodSync(path.join(sandbox, "group-exec-only.txt"), 0o654);
+    fs.chmodSync(path.join(sandbox, "other-exec-only.txt"), 0o645);
+    fs.chmodSync(path.join(sandbox, "script.sh"), 0o755);
+  }
+
+  it("stages executable bits, symlinks and awkward names the way git add did", () => {
+    // The staging path stopped using `git add`, so the tree it produces has to
+    // be the same tree for everything a sandbox can legitimately contain.
+    const root = makeTemporaryRoot();
+    const sandbox = ensureProjectExists("staging-study").sandbox;
+    writeStagingFixtures(sandbox);
 
     const snapshot = createProjectRunSnapshot("staging-study", "staging-run");
     const entries = git(sandbox, ["ls-tree", "-r", snapshot]).split("\n");
@@ -1004,9 +1274,46 @@ describe("git runs no code the project sandbox supplied", () => {
     expect(entries.find((line) => line.endsWith("script.sh"))).toContain("100755");
     expect(entries.find((line) => line.endsWith("link.txt"))).toContain("120000");
     expect(entries.find((line) => line.endsWith("plain.txt"))).toContain("100644");
+    // The owner bit alone, not `mode & 0o111`.
+    expect(entries.find((line) => line.endsWith("group-exec-only.txt"))).toContain("100644");
+    expect(entries.find((line) => line.endsWith("other-exec-only.txt"))).toContain("100644");
     expect(git(sandbox, ["show", `${snapshot}:link.txt`])).toBe("plain.txt");
     expect(git(sandbox, ["show", `${snapshot}:nested/deep.txt`])).toBe("deep");
     expect(git(sandbox, ["show", `${snapshot}:awkward\nname.txt`])).toBe("awkward");
+
+    // The whole tree, against Git's own answer for the same working tree.
+    const staged = git(sandbox, ["ls-tree", "-r", "-z", "--name-only", snapshot])
+      .split("\0")
+      .filter(Boolean);
+    expect(entries.slice().sort()).toEqual(
+      treeGitAddWouldRecord(root, sandbox, staged, true),
+    );
+  });
+
+  it("records the tree git add would record in a repository with core.fileMode=false", () => {
+    // Git sets `core.fileMode` false by itself on filesystems that do not
+    // preserve the execute bit, and then `git add` records every file 100644.
+    // A snapshot that records 100755 there is a silent change to the artefact
+    // this module exists to produce.
+    const projectId = "filemode-study";
+    const sandbox = ensureProjectExists(projectId).sandbox;
+    const root = makeTemporaryRoot();
+    git(sandbox, ["config", "--local", "core.fileMode", "false"]);
+    writeStagingFixtures(sandbox);
+
+    const snapshot = createProjectRunSnapshot(projectId, "filemode-run");
+    const entries = git(sandbox, ["ls-tree", "-r", snapshot]).split("\n");
+
+    expect(entries.find((line) => line.endsWith("script.sh"))).toContain("100644");
+    // A symlink is still a symlink: `core.fileMode` says nothing about them.
+    expect(entries.find((line) => line.endsWith("link.txt"))).toContain("120000");
+
+    const staged = git(sandbox, ["ls-tree", "-r", "-z", "--name-only", snapshot])
+      .split("\0")
+      .filter(Boolean);
+    expect(entries.slice().sort()).toEqual(
+      treeGitAddWouldRecord(root, sandbox, staged, false),
+    );
   });
 
   it("hands git the same overrides and --local on every invocation, and runs no other subcommand", () => {
@@ -1020,7 +1327,8 @@ describe("git runs no code the project sandbox supplied", () => {
     const record = path.join(root, "git-argv.log");
     const shim = makeGitShim(
       root,
-      `{ for a in "$@"; do printf '%s\u001f' "$a"; done; printf '\\n'; } >> ${JSON.stringify(record)}`,
+      `{ printf 'GIT_DIR=%s\u001f' "$GIT_DIR"; for a in "$@"; do printf '%s\u001f' "$a"; done; ` +
+        `printf '\\n'; } >> ${JSON.stringify(record)}`,
     );
     const projectsRoot = path.join(root, "child-projects");
     runInChildProcess(
@@ -1035,12 +1343,36 @@ describe("git runs no code the project sandbox supplied", () => {
       { PATH: `${shim}${path.delimiter}${process.env.PATH ?? ""}` },
     );
 
-    const invocations = fs
+    const recorded = fs
       .readFileSync(record, "utf-8")
       .split("\n")
       .filter(Boolean)
       .map((line) => line.split("\u001f").filter(Boolean));
+    const invocations = recorded.map((fields) => fields.slice(1));
+    const gitDirectoryOfInvocation = recorded.map((fields) =>
+      fields[0].slice("GIT_DIR=".length),
+    );
     expect(invocations.length).toBeGreaterThan(0);
+
+    // Every invocation that writes names the repository it writes to, so a
+    // pointer file swapped between the proof and the write cannot move it.
+    const writingSubcommands = new Set([
+      "commit-tree", "config", "hash-object", "read-tree",
+      "update-index", "update-ref", "write-tree",
+    ]);
+    let boundWrites = 0;
+    invocations.forEach((argv, index) => {
+      const subcommand = argv.find(
+        (argument, position) =>
+          !argument.startsWith("-") &&
+          argv[position - 1] !== "-c" &&
+          argv[position - 1] !== "-C",
+      );
+      if (!subcommand || !writingSubcommands.has(subcommand)) return;
+      expect(gitDirectoryOfInvocation[index]).toMatch(/[/\\]sandbox\.git$/);
+      boundWrites += 1;
+    });
+    expect(boundWrites).toBeGreaterThan(0);
 
     const subcommands = new Set<string>();
     for (const argv of invocations) {
@@ -1056,8 +1388,12 @@ describe("git runs no code the project sandbox supplied", () => {
       expect(subcommand).toBeDefined();
       subcommands.add(subcommand!);
       // The identity write names the file it writes: without `--local`,
-      // `git config` writes wherever GIT_CONFIG points.
-      if (subcommand === "config") expect(argv).toContain("--local");
+      // `git config` writes wherever GIT_CONFIG points. The one config
+      // invocation that is a read — `core.fileMode`, resolved through the whole
+      // stack the way `git add` resolves it — is `--get` and writes nothing.
+      if (subcommand === "config" && !argv.includes("--get")) {
+        expect(argv).toContain("--local");
+      }
     }
     for (const subcommand of subcommands) {
       expect(PROJECT_GIT_SUBCOMMANDS).toContain(subcommand);
