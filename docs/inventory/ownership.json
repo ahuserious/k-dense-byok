@@ -196,7 +196,8 @@
       "server/src/projects.ts",
       "server/src/sandbox-fs.ts",
       "server/test/credential-env-isolation.test.ts",
-      "server/test/env-isolation.test.ts"
+      "server/test/env-isolation.test.ts",
+      "server/test/project-repository-containment.test.ts"
     ],
     "R1": [
       ".gitignore"
