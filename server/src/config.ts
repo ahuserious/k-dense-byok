@@ -82,8 +82,32 @@ export const DEFAULT_MODEL_PROVIDER =
 export const DEFAULT_MODEL_ID =
   process.env.DEFAULT_MODEL_ID ?? "anthropic/claude-opus-5";
 
-export const OLLAMA_BASE_URL =
-  process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
+/**
+ * Local Ollama daemon: `/api/tags` for discovery, its OpenAI-compatible `/v1`
+ * surface for dispatch.
+ *
+ * No default. A `http://localhost:11434` fallback meant an install that had
+ * never named a daemon still probed whatever happened to listen on Ollama's
+ * port of the backend's host — and this route was worse than its
+ * OpenAI-compatible sibling below, not merely equal to it. That one at least
+ * computed a `configured` flag; /ollama/models had no notion of "unconfigured"
+ * at all, so it answered `available: true` and enumerated a stranger's models
+ * straight into the picker, where agent/models.ts had registered the provider
+ * at the same default and made them selectable and dispatchable. Unset (or
+ * blank) therefore means "the feature is off": the route attempts no fetch, and
+ * no provider is registered. Same treatment as RAINDROP_BASE_URL (NT-4) and
+ * OPENAI_COMPATIBLE_BASE_URL (#57); this is #64, the widest of the three.
+ *
+ * The cost is borne by every user who runs Ollama on its default port: they
+ * must now name the daemon once. `.env.example` used to ship
+ * `OLLAMA_BASE_URL=http://localhost:11434` uncommented and start.mjs copies that
+ * template into `.env` when none exists, so leaving it uncommented would have
+ * re-armed this probe on every default install and nobody would have paid the
+ * cost or gained the protection. The line now ships commented out, and
+ * docs/local-models-ollama.md tells the Ollama user to uncomment it.
+ */
+export const OLLAMA_BASE_URL: string | undefined =
+  process.env.OLLAMA_BASE_URL?.trim() || undefined;
 
 function deprecatedEnvironmentValue(currentName: string, legacyName: string): string | undefined {
   const currentValue = process.env[currentName];
@@ -131,21 +155,30 @@ export const RAINDROP_BASE_URL: string | undefined =
 
 /**
  * Local OpenAI-compatible model server (LM Studio, vLLM, text-generation-webui,
- * …) discovered through the standard `/v1/models` endpoint. Defaults to LM
- * Studio's port so that case needs no configuration; vLLM's default (8000)
- * collides with this backend, so those users must move one of the two.
+ * …) discovered through the standard `/v1/models` endpoint. vLLM's default
+ * (8000) collides with this backend, so those users must move one of the two.
+ *
+ * No default. A `http://localhost:1234` fallback meant an install that had
+ * never named a server still probed whatever happened to listen on LM Studio's
+ * port of the backend's host: a separate OPENAI_COMPATIBLE_CONFIGURED flag
+ * shaped the answer but suppressed nothing, so /openai-compatible/models replied
+ * `{available: false, configured: false}` while the process had already
+ * resolved `localhost` and opened a socket to :1234 and read whatever answered
+ * there. Unset (or blank) therefore means "the feature is off" — the route
+ * attempts no fetch at all — which is the same treatment RAINDROP_BASE_URL
+ * above got for the identical defect (NT-4); this is #57, one port over.
+ *
+ * Losing the fallback costs the user who runs LM Studio on its default port
+ * and never configured anything their zero-config discovery. That discovery is
+ * exactly the unrequested egress being removed, and it was already invisible
+ * to most of them: the picker hides the section unless `available` or
+ * `configured` holds, and this population reported `configured: false`.
+ *
+ * The route now derives the response's `configured` from this being set, which
+ * is the same fact, so the separate exported flag is gone.
  */
-export const OPENAI_COMPATIBLE_BASE_URL =
-  process.env.OPENAI_COMPATIBLE_BASE_URL?.trim() || "http://localhost:1234";
-
-/**
- * Whether the user explicitly pointed us at a server. The picker hides the
- * section entirely unless this is true or a server actually answers, so the
- * majority who have never run one never see a dead "not running" row.
- */
-export const OPENAI_COMPATIBLE_CONFIGURED = Boolean(
-  process.env.OPENAI_COMPATIBLE_BASE_URL?.trim(),
-);
+export const OPENAI_COMPATIBLE_BASE_URL: string | undefined =
+  process.env.OPENAI_COMPATIBLE_BASE_URL?.trim() || undefined;
 
 /** Whether Modal-style remote compute is configured (kept for /config parity). */
 export function modalConfigured(): boolean {

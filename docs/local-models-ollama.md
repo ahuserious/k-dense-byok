@@ -28,7 +28,13 @@ Two kinds of local server are supported, and they appear as separate sections in
    ollama pull qwen2.5-coder:7b
    ```
 
-3. **(Optional) Custom Ollama host.** If your Ollama server lives somewhere other than `http://localhost:11434`, set `OLLAMA_BASE_URL` in the repo-root `.env`.
+3. **Point Kady at the daemon.** Set `OLLAMA_BASE_URL` in the repo-root `.env` — `.env.example` ships the line commented out, so uncomment it:
+
+   ```bash
+   OLLAMA_BASE_URL=http://localhost:11434   # or wherever your daemon listens
+   ```
+
+   This is required even on the default port. Kady used to assume `http://localhost:11434` and probe it on every install, which meant a machine running Ollama for something else had its models enumerated by an app that was never pointed at it (#64). With the variable unset the backend makes no request and the **Local (Ollama)** section stays empty; the cost of that is this one line.
 
 4. **Pick the model in the app.** Open the model dropdown in the chat input. Pulled models appear under the **Local (Ollama)** section at the bottom. Picking one routes Kady - and any subagents it spawns - through your local daemon.
 
@@ -43,7 +49,7 @@ DEFAULT_MODEL_ID="llama3"   # any model you've pulled
 
 ## OpenAI-compatible server setup (LM Studio, vLLM, …)
 
-Any local server exposing the standard `GET /v1/models` and `POST /v1/chat/completions` endpoints works. Unlike the Ollama section, this one is hidden until you ask for it:
+Any local server exposing the standard `GET /v1/models` and `POST /v1/chat/completions` endpoints works. Like the Ollama section above, it stays off until you name a server:
 
 1. **Start your server and load a model.** In LM Studio that's the *Developer* tab → *Start Server*; with vLLM it's `vllm serve <model>`.
 
@@ -53,7 +59,7 @@ Any local server exposing the standard `GET /v1/models` and `POST /v1/chat/compl
    OPENAI_COMPATIBLE_BASE_URL=http://localhost:1234   # LM Studio's default port
    ```
 
-   The default is LM Studio's port, so if that's what you run, setting the variable to any value switches the section on. **vLLM defaults to port 8000, which is Kady's backend port** — move one of the two, e.g. `vllm serve <model> --port 1234`.
+   The section is switched on by setting the variable, and nothing is probed until you do. **vLLM defaults to port 8000, which is Kady's backend port** — move one of the two, e.g. `vllm serve <model> --port 1234`.
 
 3. **Pick the model in the app.** Loaded models appear under **Local (OpenAI-compatible)**. The list comes from your server's `/v1/models` (via the backend's `/openai-compatible/models` route), so loading a different model and re-opening the dropdown is enough — no app restart.
 

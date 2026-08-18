@@ -244,9 +244,8 @@ function setupEnv() {
     } else {
       log("No .env found — creating one from .env.example.");
       fs.copyFileSync(example, rootEnv);
-      log(
-        `  ${sym.arrow} Add an OpenRouter key, run Ollama, or connect a subscription in Settings.`,
-      );
+      log(`  ${sym.arrow} Add an OpenRouter key, connect a subscription in Settings, or`);
+      log("    uncomment OLLAMA_BASE_URL in .env for a local Ollama.");
     }
   }
   // The backend re-loads these itself (server/src/env.ts); loading them here
@@ -286,6 +285,15 @@ function hasSubscriptionCredential() {
   }
 }
 
+/** The three ways to give the agent a model, printed when none was detected. */
+function logModelSourceAdvice() {
+  log("    The UI will start. To run the agent, either:");
+  log("      - add OPENROUTER_API_KEY to .env (https://openrouter.ai/keys), or");
+  log("      - run a local Ollama (https://ollama.com) with a pulled model and point");
+  log("        OLLAMA_BASE_URL in .env at it (e.g. http://localhost:11434), or");
+  log("      - connect ChatGPT, Claude, Copilot, or xAI in Settings.");
+}
+
 /** Warn when no immediately detectable model source is configured. */
 async function checkModelAccess() {
   if (
@@ -296,17 +304,28 @@ async function checkModelAccess() {
   ) {
     return;
   }
-  const ollama = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
+  // #64: this used to fall back to `http://localhost:11434` and dial it, so a
+  // machine that had never named a daemon still opened a socket to whatever
+  // answered on Ollama's port — and was then told this app was "using" it, which
+  // is not true any more: the backend registers no `ollama` provider and
+  // /ollama/models runs no probe unless OLLAMA_BASE_URL is set (server/src/config.ts).
+  // Gate on the same variable so the launcher's report and the backend's
+  // behavior are one fact rather than two.
+  const ollama = process.env.OLLAMA_BASE_URL?.trim();
+  if (!ollama) {
+    log("");
+    log(`  ${sym.warn} No model source configured.`);
+    logModelSourceAdvice();
+    log("");
+    return;
+  }
   try {
     await fetch(`${ollama}/api/tags`, { signal: AbortSignal.timeout(2000) });
     log(`  No OPENROUTER_API_KEY set — using local Ollama at ${ollama}.`);
   } catch {
     log("");
     log(`  ${sym.warn} No OPENROUTER_API_KEY in .env and no Ollama at ${ollama}.`);
-    log("    The UI will start. To run the agent, either:");
-    log("      - add OPENROUTER_API_KEY to .env (https://openrouter.ai/keys), or");
-    log("      - start a local Ollama (https://ollama.com) with a pulled model, or");
-    log("      - connect ChatGPT, Claude, Copilot, or xAI in Settings.");
+    logModelSourceAdvice();
     log("");
   }
 }

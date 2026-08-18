@@ -5,7 +5,7 @@
  *   - OpenRouter (built-in Pi provider, key via OPENROUTER_API_KEY)
  *   - Pi OAuth providers (OpenAI Codex, Anthropic, GitHub Copilot, xAI)
  *   - NVIDIA NIM (built-in Pi provider, key via NVIDIA_API_KEY)
- *   - Ollama (local, OpenAI-compatible at OLLAMA_BASE_URL)
+ *   - Ollama (local, OpenAI-compatible at OLLAMA_BASE_URL, when set)
  *
  * The frontend picker sends model refs like "openrouter/anthropic/claude-opus-4.8"
  * or "ollama/llama3". OpenRouter has thousands of models that aren't all in Pi's
@@ -35,6 +35,37 @@ import {
 // "vendor/model" ids and Bearer auth as OpenRouter.
 const OPENROUTER_BASE_URL =
   process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1";
+
+/**
+ * Base URL stamped onto a local-provider Model whose address the user never
+ * supplied (OLLAMA_BASE_URL / OPENAI_COMPATIBLE_BASE_URL unset — see the notes
+ * on both in config.ts, #57 and #64).
+ *
+ * Only reachable when something resolves an `ollama/…` or
+ * `openai-compatible/…` ref on an install that has no such server configured —
+ * a ref persisted into a project before the variable was removed, or one typed
+ * by hand. `setupModelRuntime` declines to register those providers in that
+ * state, so Pi refuses the dispatch before this URL is consulted; this exists
+ * so the Model object stays *constructible* (callers treat a resolution throw
+ * as a crash, not as a disabled feature) without carrying a routable address.
+ *
+ * `.invalid` is reserved by RFC 6761 §6.4 and is guaranteed never to resolve,
+ * so nothing built from it can leave the host even by accident, and the failure
+ * names itself in the log.
+ *
+ * Deliberately NOT `http://localhost:<the provider's usual port>`. A default
+ * here would resurrect the exact defect config.ts just removed — one layer
+ * below the discovery routes, where neither route's tests would ever see it.
+ */
+const UNCONFIGURED_LOCAL_BASE_URL = "http://unconfigured.invalid";
+
+/**
+ * `<base>/v1` for a local OpenAI-shaped provider, falling back to the
+ * unroutable sentinel rather than to a port guess when nothing was configured.
+ */
+function localProviderApiUrl(configuredBaseUrl: string | undefined): string {
+  return `${(configuredBaseUrl ?? UNCONFIGURED_LOCAL_BASE_URL).replace(/\/+$/, "")}/v1`;
+}
 const CATALOGUE_PATH = path.join(REPO_ROOT, "web", "src", "data", "models.json");
 
 interface CatalogueEntry {
@@ -226,7 +257,7 @@ function buildOllamaModel(name: string): Model<Api> {
     name,
     api: "openai-completions",
     provider: "ollama",
-    baseUrl: `${OLLAMA_BASE_URL.replace(/\/+$/, "")}/v1`,
+    baseUrl: localProviderApiUrl(OLLAMA_BASE_URL),
     reasoning: false,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -250,7 +281,7 @@ export function buildOpenAICompatibleModel(name: string): Model<Api> {
     name,
     api: "openai-completions",
     provider: "openai-compatible",
-    baseUrl: `${OPENAI_COMPATIBLE_BASE_URL.replace(/\/+$/, "")}/v1`,
+    baseUrl: localProviderApiUrl(OPENAI_COMPATIBLE_BASE_URL),
     reasoning: false,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -297,21 +328,39 @@ export function nvidiaExtraModelIds(): string[] {
 
 /** Configure app-specific providers and runtime credentials. */
 export async function setupModelRuntime(modelRuntime: ModelRuntime): Promise<void> {
-  modelRuntime.registerProvider("ollama", {
-    name: "Ollama",
-    baseUrl: `${OLLAMA_BASE_URL.replace(/\/+$/, "")}/v1`,
-    api: "openai-completions",
-    apiKey: "ollama",
-  });
+  // Both local providers are registered only once the user has actually named a
+  // server. These two guards are not cosmetic and not optional — they are the
+  // load-bearing half of #57/#64, and suppressing the discovery routes in
+  // api/system.ts without them fixes nothing that matters.
+  //
+  // Registration is what makes a ref *dispatchable*. The discovery routes only
+  // decide what the picker offers; a model ref reaches this runtime from three
+  // other directions that never consult them — a ref persisted in a project's
+  // saved settings, a `model:` line in an imported workflow YAML, and a
+  // hand-typed ref. Register at a default address and any of those still runs a
+  // real turn against whatever answers on localhost:11434 or :1234, sending the
+  // user's prompt to a service this app was never pointed at, with the picker
+  // now showing nothing at all. Leaving the provider unregistered makes Pi
+  // refuse the dispatch instead. Do not re-add a default base URL here.
+  if (OLLAMA_BASE_URL) {
+    modelRuntime.registerProvider("ollama", {
+      name: "Ollama",
+      baseUrl: localProviderApiUrl(OLLAMA_BASE_URL),
+      api: "openai-completions",
+      apiKey: "ollama",
+    });
+  }
 
   // Local servers ignore the credential, but Pi needs *something* to resolve
   // before it will dispatch — same placeholder arrangement as Ollama.
-  modelRuntime.registerProvider("openai-compatible", {
-    name: "OpenAI-Compatible",
-    baseUrl: `${OPENAI_COMPATIBLE_BASE_URL.replace(/\/+$/, "")}/v1`,
-    api: "openai-completions",
-    apiKey: "openai-compatible",
-  });
+  if (OPENAI_COMPATIBLE_BASE_URL) {
+    modelRuntime.registerProvider("openai-compatible", {
+      name: "OpenAI-Compatible",
+      baseUrl: localProviderApiUrl(OPENAI_COMPATIBLE_BASE_URL),
+      api: "openai-completions",
+      apiKey: "openai-compatible",
+    });
+  }
 
   const orKey = process.env.OPENROUTER_API_KEY || process.env.OR_API_KEY;
   if (orKey) await modelRuntime.setRuntimeApiKey("openrouter", orKey);
