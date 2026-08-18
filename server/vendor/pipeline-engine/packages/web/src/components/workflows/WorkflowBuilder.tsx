@@ -26,6 +26,7 @@ import { resolveWorkflowBuilderBinding } from '@/lib/workflow-builder-binding';
 import { useBuilderKeyboard } from '@/hooks/useBuilderKeyboard';
 import { useBuilderUndo } from '@/hooks/useBuilderUndo';
 import { useBuilderValidation } from '@/hooks/useBuilderValidation';
+import { useHostBridge, viewToFlow } from '@/host/HostBridge';
 import type { ValidationIssue } from '@/hooks/useBuilderValidation';
 import { BuilderToolbar } from './BuilderToolbar';
 import type { ViewMode } from './BuilderToolbar';
@@ -173,6 +174,38 @@ function WorkflowBuilderInner(): React.ReactElement {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const activeBindingKey = useRef(bindingKey);
 
+  // Host mode (the Kady embed). Outside it every hook below is inert and the
+  // builder behaves exactly as it does standalone.
+  const host = useHostBridge();
+  const appliedHostView = useRef<string | null>(null);
+  const { detachCanvas } = host;
+  /**
+   * The canvas is about to show something the host did not push (an engine
+   * pipeline). Forgetting the applied stamp matters as much as detaching: the
+   * host may push the very same view again afterwards, and a stamp left behind
+   * would make that push a no-op against a canvas that no longer shows it.
+   */
+  const leaveHostView = useCallback((): void => {
+    appliedHostView.current = null;
+    detachCanvas();
+  }, [detachCanvas]);
+
+  useEffect(() => {
+    if (!host.hostMode || !host.view) return;
+    // The host is authoritative: a pushed view REPLACES the canvas. Applying
+    // the same view twice would clobber edits the author made since it landed.
+    const stamp = `${host.view.documentId}\u0000${host.view.graphSha256 ?? ''}`;
+    if (appliedHostView.current === stamp) return;
+    appliedHostView.current = stamp;
+    const projected = viewToFlow(host.view);
+    setWorkflowName(host.view.name);
+    setWorkflowDescription(host.view.description ?? '');
+    setNodes(projected.nodes);
+    setEdges(projected.edges);
+    setSelectedNodeId(null);
+    setHasUnsavedChanges(false);
+  }, [host.hostMode, host.view, setNodes, setEdges]);
+
   // Loop state
 
   // Commands for palette/inspector
@@ -212,6 +245,20 @@ function WorkflowBuilderInner(): React.ReactElement {
     nodesRef.current = nodes;
     edgesRef.current = edges;
   }, [nodes, edges]);
+
+  // Report the canvas to the host, which diffs it into deltas against the view
+  // it last pushed. Diffing there keeps every mutation path covered without a
+  // hook in each handler.
+  //
+  // Depend on the two STABLE members, never on `host` itself: the hook returns a
+  // fresh object every render, so `[host, …]` re-runs this effect on every
+  // render and restarts the 250 ms delta debounce each time. On a busy page that
+  // starves the timer and an edit silently never reaches the host.
+  const { hostMode, syncCanvas } = host;
+  useEffect(() => {
+    if (!hostMode) return;
+    syncCanvas(nodes, edges);
+  }, [hostMode, syncCanvas, nodes, edges]);
 
   const pushSnapshotLatest = useCallback((): void => {
     pushSnapshot({ nodes: nodesRef.current, edges: edgesRef.current });
@@ -284,6 +331,14 @@ function WorkflowBuilderInner(): React.ReactElement {
     setSelectedNodeId(null);
     if (editName) void loadWorkflow(editName, bindingKey);
   }, [bindingKey, editName, loadWorkflow, setEdges, setNodes]);
+
+  // A host-picked ENGINE pipeline goes through the builder's own loader, because
+  // the engine document model is the iframe's, not the host's.
+  useEffect(() => {
+    if (!host.hostMode || !host.enginePipelineRequest) return;
+    leaveHostView();
+    void loadWorkflow(host.enginePipelineRequest.id, bindingKey);
+  }, [host.hostMode, host.enginePipelineRequest, leaveHostView, loadWorkflow, bindingKey]);
 
   const handleToggleValidationPanel = useCallback((): void => {
     setValidationPanelOpen(v => !v);
@@ -550,13 +605,24 @@ function WorkflowBuilderInner(): React.ReactElement {
           void handleValidate();
         }}
         onSave={(): void => {
+          // Host-owned save applies only while the canvas is actually showing a
+          // host-pushed document. In host mode with nothing pushed — a draft, or
+          // an engine pipeline the author opened here — this builder still owns
+          // its own document and must save it the way it always has.
+          if (host.hostMode && host.view) {
+            host.requestSave();
+            return;
+          }
           void handleSave();
         }}
-        saveDisabledReason={saveDisabledReason}
+        saveDisabledReason={host.hostMode && host.view ? undefined : saveDisabledReason}
+        hostSourceGroups={host.sourceGroups}
+        onLoadHostSource={host.requestSource}
         onRun={(): void => {
           void handleRun();
         }}
         onLoadWorkflow={(name): void => {
+          if (host.hostMode) leaveHostView();
           void loadWorkflow(name, bindingKey);
         }}
       />

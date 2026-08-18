@@ -320,6 +320,46 @@ export const WorkflowNodePositionSchema = Type.Object(
   { additionalProperties: false },
 );
 
+/**
+ * Where a node or a document came from.
+ *
+ * Additive, optional, and deliberately outside validation semantics: nothing
+ * in validate.ts branches on it, and it exists so an imported or stitched-in
+ * node can name its source without the executor ever consulting it.
+ *
+ * Module-local. This schema and the three below it are composed into
+ * `WorkflowGraphDocumentSchema` and nothing else consumes them, so they stay
+ * off the runtime's public export surface — `test/guards/typed-workflow-exports.test.ts`
+ * pins that surface, and widening it is a reviewed decision this lane has no
+ * reason to force.
+ */
+const WorkflowProvenanceSchema = Type.Object(
+  {
+    source: Type.String({ minLength: 1, maxLength: 64 }),
+    id: Type.String({ minLength: 1, maxLength: 256 }),
+    sha256: Type.Optional(Type.String({ minLength: 64, maxLength: 64, pattern: "^[0-9a-f]{64}$" })),
+  },
+  { additionalProperties: false },
+);
+
+/** Flatten provenance for a node that arrived as part of a stitched subgraph. */
+const WorkflowNodeCompositeOriginSchema = Type.Object(
+  {
+    kind: Type.String({ minLength: 1, maxLength: 64 }),
+    sourceId: Type.String({ minLength: 1, maxLength: 256 }),
+    sourceGraphSha256: Type.Optional(
+      Type.String({ minLength: 64, maxLength: 64, pattern: "^[0-9a-f]{64}$" }),
+    ),
+    label: Type.Optional(ShortTextSchema),
+  },
+  { additionalProperties: false },
+);
+
+const WorkflowNodeMetaSchema = Type.Object(
+  { compositeOf: Type.Optional(WorkflowNodeCompositeOriginSchema) },
+  { additionalProperties: false },
+);
+
 const CommonNodeProperties = {
   id: IdentifierSchema,
   name: ShortTextSchema,
@@ -331,6 +371,8 @@ const CommonNodeProperties = {
   rescue: Type.Optional(RescuePolicySchema),
   evidence: Type.Optional(EvidencePolicySchema),
   settings: Type.Optional(NodeSpecV1Schema),
+  meta: Type.Optional(WorkflowNodeMetaSchema),
+  provenance: Type.Optional(WorkflowProvenanceSchema),
 };
 
 const ModelDrivenNodeProperties = {
@@ -560,6 +602,36 @@ export const ScientificWorkflowPreconditionsSchema = Type.Object(
   { additionalProperties: false },
 );
 
+/**
+ * Canvas presentation state.
+ *
+ * Node LAYOUT does not live here: `CommonNodeProperties.position` already
+ * carries it per node, and adding a second `ui.positions` map would create two
+ * sources of truth for the same coordinate. `ui` therefore carries only the
+ * viewport, which has no per-node home.
+ *
+ * Note that `ui` — like the per-node `position` that predates it — DOES
+ * participate in `graphSha256`. That is not a free choice: the store treats an
+ * identical hash as "unchanged" and skips the write
+ * (store.ts saveDefinitionWithIntent), so a hash that ignored layout would make
+ * a layout-only save a silent no-op that never persists.
+ */
+const WorkflowDocumentUiSchema = Type.Object(
+  {
+    viewport: Type.Optional(
+      Type.Object(
+        {
+          x: Type.Number({ minimum: -1_000_000, maximum: 1_000_000 }),
+          y: Type.Number({ minimum: -1_000_000, maximum: 1_000_000 }),
+          zoom: Type.Number({ minimum: 0.01, maximum: 100 }),
+        },
+        { additionalProperties: false },
+      ),
+    ),
+  },
+  { additionalProperties: false },
+);
+
 export const WorkflowGraphDocumentSchema = Type.Object(
   {
     schemaVersion: Type.Literal(WORKFLOW_GRAPH_SCHEMA_VERSION),
@@ -581,11 +653,16 @@ export const WorkflowGraphDocumentSchema = Type.Object(
       maxItems: MAX_WORKFLOW_NODES,
     }),
     edges: Type.Array(WorkflowEdgeSchema, { maxItems: MAX_WORKFLOW_EDGES }),
+    ui: Type.Optional(WorkflowDocumentUiSchema),
+    provenance: Type.Optional(WorkflowProvenanceSchema),
   },
   { additionalProperties: false },
 );
 
 export type WorkflowLimits = Static<typeof WorkflowLimitsSchema>;
+export type WorkflowDocumentUi = Static<typeof WorkflowDocumentUiSchema>;
+export type WorkflowProvenance = Static<typeof WorkflowProvenanceSchema>;
+export type WorkflowNodeMeta = Static<typeof WorkflowNodeMetaSchema>;
 export type NodeLimits = Static<typeof NodeLimitsSchema>;
 export type RequestedModel = Static<typeof RequestedModelSchema>;
 export type ModelRequest = Static<typeof ModelRequestSchema>;

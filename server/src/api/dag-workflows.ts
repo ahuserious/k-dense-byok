@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { registerDagWorkflowValidateRoute } from "./dag-workflows-validate.ts";
 import { currentProjectId } from "../scope.ts";
 import {
   WorkflowBudgetError,
@@ -360,6 +361,10 @@ export async function registerDagWorkflowRoutes(
       );
     },
   );
+
+  // Non-writing document evaluation. Registered BEFORE `/dag-workflows/:id`
+  // so the literal path wins the route match against the parameterised one.
+  registerDagWorkflowValidateRoute(app);
 
   app.get("/dag-workflows", async (_request, reply) => {
     try {
