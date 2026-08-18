@@ -1,9 +1,15 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { useSearchParams, useNavigate } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
-import { ReactFlowProvider, useNodesState, useEdgesState, useViewport } from '@xyflow/react';
+import {
+  ReactFlowProvider,
+  useNodesState,
+  useEdgesState,
+  useReactFlow,
+  useViewport,
+} from '@xyflow/react';
 import type { Edge } from '@xyflow/react';
-import type { WorkflowDefinition, WorkflowSource } from '@/lib/api';
+import type { NodeHarness, WorkflowDefinition, WorkflowSource } from '@/lib/api';
 
 import { useProject } from '@/contexts/ProjectContext';
 import {
@@ -24,7 +30,8 @@ import type { ValidationIssue } from '@/hooks/useBuilderValidation';
 import { BuilderToolbar } from './BuilderToolbar';
 import type { ViewMode } from './BuilderToolbar';
 import { NodeLibrary } from './NodeLibrary';
-import { WorkflowCanvas, reactFlowToDagNodes } from './WorkflowCanvas';
+import type { QuickNodeType } from './NodeLibrary';
+import { FIT_VIEW_OPTIONS, WorkflowCanvas, reactFlowToDagNodes } from './WorkflowCanvas';
 import { NodeInspector } from './NodeInspector';
 import { ValidationPanel } from './ValidationPanel';
 import { StatusBar } from './StatusBar';
@@ -40,9 +47,11 @@ const NODE_LIBRARY_DEFAULT_WIDTH = 208; // w-52
 function NodeLibraryPanel({
   commands,
   isLoading,
+  onAddQuickNode,
 }: {
   commands: CommandEntry[];
   isLoading: boolean;
+  onAddQuickNode: (type: QuickNodeType, name: string, harness: NodeHarness) => void;
 }): React.ReactElement {
   const [width, setWidth] = useState(() => {
     try {
@@ -101,7 +110,11 @@ function NodeLibraryPanel({
   return (
     <div className="relative shrink-0 h-full overflow-hidden flex" style={{ width }}>
       <div className="flex-1 overflow-hidden">
-        <NodeLibrary commands={commands} isLoading={isLoading} />
+        <NodeLibrary
+          commands={commands}
+          isLoading={isLoading}
+          onAddQuickNode={onAddQuickNode}
+        />
       </div>
       {/* Drag handle */}
       <div
@@ -170,6 +183,7 @@ function WorkflowBuilderInner(): React.ReactElement {
 
   const { pushSnapshot, undo, redo } = useBuilderUndo();
   const { zoom } = useViewport();
+  const { fitView } = useReactFlow();
 
   const validationIssues = useBuilderValidation(workflowName, workflowDescription, nodes, edges);
   const errorCount = useMemo(
@@ -296,6 +310,50 @@ function WorkflowBuilderInner(): React.ReactElement {
     handleNodeDeleteById(selectedNodeId);
   }, [selectedNodeId, handleNodeDeleteById]);
 
+  /**
+   * Place a new node below the lowest existing one instead of always at
+   * (200, 200), where repeated adds stacked invisibly on top of each other.
+   */
+  const nextNodePosition = useCallback((): { x: number; y: number } => {
+    const current = nodesRef.current;
+    if (current.length === 0) return { x: 200, y: 120 };
+    const lowest = current.reduce((a, b) => (a.position.y >= b.position.y ? a : b));
+    return { x: lowest.position.x, y: lowest.position.y + 140 };
+  }, []);
+
+  const addNode = useCallback(
+    (nodeType: 'prompt' | 'bash', label: string, harness?: NodeHarness): void => {
+      const id = `node-${crypto.randomUUID()}`;
+      const newNode: DagFlowNode = {
+        id,
+        type: 'dagNode',
+        position: nextNodePosition(),
+        data: {
+          id,
+          label,
+          nodeType,
+          ...(harness ? { settings: { harness } } : {}),
+        },
+      };
+      pushSnapshotLatest();
+      setNodes(nds => [...nds, newNode]);
+      markDirty();
+    },
+    [nextNodePosition, pushSnapshotLatest, setNodes, markDirty]
+  );
+
+  /** Node library "add" button — the keyboard route for a harness-tagged node. */
+  const handleAddQuickNode = useCallback(
+    (type: QuickNodeType, name: string, harness: NodeHarness): void => {
+      addNode(type, name, harness);
+    },
+    [addNode]
+  );
+
+  const handleFitView = useCallback((): void => {
+    void fitView(FIT_VIEW_OPTIONS);
+  }, [fitView]);
+
   // Toolbar action handlers
   const handleValidate = useCallback(async (): Promise<void> => {
     try {
@@ -421,29 +479,12 @@ function WorkflowBuilderInner(): React.ReactElement {
       },
       onToggleValidation: handleToggleValidationPanel,
       onAddPrompt: (): void => {
-        const id = `node-${crypto.randomUUID()}`;
-        const newNode: DagFlowNode = {
-          id,
-          type: 'dagNode',
-          position: { x: 200, y: 200 },
-          data: { id, label: 'Prompt', nodeType: 'prompt' },
-        };
-        pushSnapshotLatest();
-        setNodes(nds => [...nds, newNode]);
-        markDirty();
+        addNode('prompt', 'Prompt');
       },
       onAddBash: (): void => {
-        const id = `node-${crypto.randomUUID()}`;
-        const newNode: DagFlowNode = {
-          id,
-          type: 'dagNode',
-          position: { x: 200, y: 200 },
-          data: { id, label: 'Shell', nodeType: 'bash' },
-        };
-        pushSnapshotLatest();
-        setNodes(nds => [...nds, newNode]);
-        markDirty();
+        addNode('bash', 'Shell');
       },
+      onFitView: handleFitView,
       onDeleteSelected: (): void => {
         if (selectedNodeId) {
           handleNodeDelete();
@@ -466,11 +507,13 @@ function WorkflowBuilderInner(): React.ReactElement {
       },
     }),
     [
+      addNode,
       handleSave,
       handleUndo,
       handleRedo,
       handleToggleValidationPanel,
       handleNodeDelete,
+      handleFitView,
       nodes,
       selectedNodeId,
       pushSnapshotLatest,
@@ -532,7 +575,13 @@ function WorkflowBuilderInner(): React.ReactElement {
 
       <div className="flex flex-1 overflow-hidden">
         {/* Left panel: Node Library */}
-        {showLibrary && <NodeLibraryPanel commands={commandList} isLoading={commandsLoading} />}
+        {showLibrary && (
+          <NodeLibraryPanel
+            commands={commandList}
+            isLoading={commandsLoading}
+            onAddQuickNode={handleAddQuickNode}
+          />
+        )}
 
         {/* Center area */}
         <div className="flex-1 relative overflow-hidden flex">

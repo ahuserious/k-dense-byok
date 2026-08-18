@@ -2,7 +2,14 @@ import { describe, expect, test } from 'bun:test';
 import type { WorkflowDefinition, NodeSpecV1 } from '@/lib/api';
 import type { DagFlowNode } from './DagNodeComponent';
 import { dagNodesToReactFlow } from '@/lib/dag-layout';
-import { reactFlowToDagNodes } from './WorkflowCanvas';
+import {
+  CANVAS_MAX_ZOOM,
+  CANVAS_MIN_ZOOM,
+  FIT_VIEW_OPTIONS,
+  HARNESS_DRAG_MIME,
+  nodeSetSignature,
+  reactFlowToDagNodes,
+} from './WorkflowCanvas';
 import { serializeToYaml } from './YamlCodeView';
 
 const completeNodeSpec: NodeSpecV1 = {
@@ -100,5 +107,61 @@ describe('NodeSpec DAG persistence', () => {
     expect(yaml).toContain('kind: oauth');
     expect(yaml).toContain('maxTokens: 120000');
     expect(yaml).toContain('maxCostUsd: 24.5');
+  });
+});
+
+describe('balanced canvas viewport', () => {
+  test('the shared fit leaves padding and never pins the viewport at the zoom ceiling', () => {
+    expect(FIT_VIEW_OPTIONS.padding).toBeCloseTo(0.25);
+    // The owner's "zoom is off balance": React Flow's own fitView default is
+    // maxZoom 2, which parked a small graph at 200% — the canvas "+" control
+    // then had nowhere to go. The fit must stop well below the hard ceiling.
+    expect(FIT_VIEW_OPTIONS.maxZoom).toBeLessThan(CANVAS_MAX_ZOOM);
+    expect(FIT_VIEW_OPTIONS.maxZoom).toBeLessThanOrEqual(1.25);
+    expect(FIT_VIEW_OPTIONS.minZoom).toBeGreaterThan(CANVAS_MIN_ZOOM);
+    expect(CANVAS_MIN_ZOOM).toBeLessThan(1);
+    expect(CANVAS_MAX_ZOOM).toBeGreaterThan(1);
+  });
+
+  test('re-fit tracks the node SET, so dragging a node cannot yank the viewport', () => {
+    const node = (id: string, x: number, y: number): DagFlowNode => ({
+      id,
+      type: 'dagNode',
+      position: { x, y },
+      data: { id, label: 'Prompt', nodeType: 'prompt' },
+    });
+    const loaded = [node('a', 0, 0), node('b', 0, 100)];
+    const dragged = [node('a', 640, 480), node('b', 0, 100)];
+    const reordered = [node('b', 0, 100), node('a', 0, 0)];
+    const added = [...loaded, node('c', 0, 200)];
+
+    expect(nodeSetSignature(dragged)).toBe(nodeSetSignature(loaded));
+    expect(nodeSetSignature(reordered)).toBe(nodeSetSignature(loaded));
+    expect(nodeSetSignature(added)).not.toBe(nodeSetSignature(loaded));
+    expect(nodeSetSignature([])).toBe('');
+  });
+
+  test('the palette drag payload has its own harness key', () => {
+    expect(HARNESS_DRAG_MIME).toBe('application/reactflow-harness');
+    expect(HARNESS_DRAG_MIME).not.toBe('application/reactflow-type');
+  });
+
+  test('a node created with a chosen harness persists it through save and reload', () => {
+    const dragged: DagFlowNode = {
+      id: 'dragged-node',
+      type: 'dagNode',
+      position: { x: 0, y: 0 },
+      data: {
+        id: 'dragged-node',
+        label: 'Shell',
+        nodeType: 'bash',
+        bashScript: 'echo hi',
+        settings: { harness: 'claude-code' },
+      },
+    };
+    const saved = reactFlowToDagNodes([dragged], []);
+    expect(saved[0]?.settings?.harness).toBe('claude-code');
+    const reloaded = dagNodesToReactFlow(saved);
+    expect(reloaded.nodes[0]?.data.settings?.harness).toBe('claude-code');
   });
 });

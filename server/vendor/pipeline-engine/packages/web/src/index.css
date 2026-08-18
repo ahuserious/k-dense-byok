@@ -33,7 +33,9 @@
 
   /* shadcn variables mapped to dark theme */
   --radius: 0.625rem;
-  --background: oklch(0.14 0.005 260);
+  /* --background lives once, in the kady-raindrop-chrome :root block at the end
+     of this file (backlog #55: it used to be declared here AND there, and the
+     later block silently won). */
   --foreground: oklch(0.93 0.005 260);
   --card: oklch(0.18 0.008 260);
   --card-foreground: oklch(0.93 0.005 260);

@@ -1,15 +1,16 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { Box, FileText, Terminal, Zap, Plug, ChevronRight } from 'lucide-react';
-import type { CommandEntry } from '@/lib/api';
+import type { CommandEntry, NodeHarness } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { useClickOutside } from '@/hooks/useClickOutside';
 import { CommandPicker } from './CommandPicker';
+import { DEFAULT_NODE_HARNESS, HarnessSelect } from './DagNodeComponent';
 
 interface QuickAddPickerProps {
   position: { x: number; y: number };
   onAddNode: (
     type: 'command' | 'prompt' | 'bash',
-    options?: { commandName?: string; skills?: string[]; mcp?: string }
+    options?: { commandName?: string; skills?: string[]; mcp?: string; harness?: NodeHarness }
   ) => void;
   onClose: () => void;
   commands: CommandEntry[];
@@ -27,6 +28,8 @@ export function QuickAddPicker({
   const inputRef = useRef<HTMLInputElement>(null);
   const [subView, setSubView] = useState<SubView>('main');
   const [inputValue, setInputValue] = useState('');
+  // Chosen BEFORE the node is created, so the new node's NodeSpec carries it.
+  const [harness, setHarness] = useState<NodeHarness>(DEFAULT_NODE_HARNESS);
 
   useClickOutside(containerRef, onClose);
 
@@ -41,11 +44,11 @@ export function QuickAddPicker({
     if (!val) return;
 
     if (subView === 'skill') {
-      onAddNode('prompt', { skills: [val] });
+      onAddNode('prompt', { skills: [val], harness });
     } else if (subView === 'mcp') {
-      onAddNode('prompt', { mcp: val });
+      onAddNode('prompt', { mcp: val, harness });
     }
-  }, [subView, inputValue, onAddNode]);
+  }, [subView, inputValue, onAddNode, harness]);
 
   const handleInputKeyDown = useCallback(
     (e: React.KeyboardEvent): void => {
@@ -61,7 +64,7 @@ export function QuickAddPicker({
   );
 
   function handleCommandSelect(commandName: string): void {
-    onAddNode('command', { commandName });
+    onAddNode('command', { commandName, harness });
   }
 
   // Command sub-picker
@@ -112,7 +115,7 @@ export function QuickAddPicker({
               setInputValue(e.target.value);
             }}
             onKeyDown={handleInputKeyDown}
-            placeholder={isSkill ? 'remotion-best-practices' : '.archon/mcp/ntfy.json'}
+            placeholder={isSkill ? 'remotion-best-practices' : 'mcp/ntfy.json'}
             className="w-full bg-surface border border-border rounded px-2 py-1.5 text-xs text-text-primary placeholder:text-text-tertiary font-mono focus:outline-none focus:border-primary"
           />
           <button
@@ -140,8 +143,20 @@ export function QuickAddPicker({
       style={{ position: 'absolute', left: position.x, top: position.y, zIndex: 50 }}
       className="w-56 bg-surface-elevated border border-border rounded-lg shadow-lg overflow-hidden"
     >
-      <div className="px-3 py-2 border-b border-border">
+      <div className="border-b border-border px-3 py-2">
         <span className="text-xs font-medium text-text-secondary">Add Node</span>
+      </div>
+      {/* CLI harness is chosen FIRST — every node created from this menu
+          carries it into settings.harness. */}
+      <div className="flex items-center gap-2 border-b border-border px-3 py-1.5">
+        <span className="shrink-0 font-mono text-[10px] uppercase tracking-wide text-text-tertiary">
+          CLI
+        </span>
+        <HarnessSelect
+          value={harness}
+          onChange={setHarness}
+          label="CLI harness for the node you are about to add"
+        />
       </div>
       <div className="py-1">
         {/* Command */}
@@ -166,7 +181,7 @@ export function QuickAddPicker({
         <button
           type="button"
           onClick={(): void => {
-            onAddNode('prompt');
+            onAddNode('prompt', { harness });
           }}
           className="w-full flex items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-surface-hover cursor-pointer"
         >
@@ -183,7 +198,7 @@ export function QuickAddPicker({
         <button
           type="button"
           onClick={(): void => {
-            onAddNode('bash');
+            onAddNode('bash', { harness });
           }}
           className="w-full flex items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-surface-hover cursor-pointer"
         >

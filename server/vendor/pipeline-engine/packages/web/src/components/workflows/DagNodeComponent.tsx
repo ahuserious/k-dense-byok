@@ -12,7 +12,6 @@ import type {
   NodeSubagentMode,
 } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { Liquid } from '@/components/canvasui/Liquid';
 
 export type {
   FixedNodeRequestedModel,
@@ -42,6 +41,87 @@ export const NODE_AUTH_KINDS = ['api-key', 'oauth', 'local', 'custom'] as const;
 export const NODE_HARNESSES = ['pi', 'claude-code', 'codex', 'opencode', 'copilot'] as const;
 export const NODE_SKILLS_MODES = ['auto', 'auto-manual', 'manual'] as const;
 export const NODE_SUBAGENT_MODES = ['auto', 'auto-manual'] as const;
+
+/**
+ * Human labels for the frozen NodeSpec v1 `harness` union, used by every
+ * "pick the CLI before you drag" control in the palette and the quick-add menu.
+ *
+ * The value side is exactly `HarnessSchema` in the engine
+ * (server/src/workflows/schema.ts) — the ONLY harness vocabulary the runtime
+ * dispatches on. Grok CLI is deliberately absent: it is not a member of that
+ * frozen union, so offering it here would write a workflow document the engine
+ * rejects. Adding it needs a NodeSpec v1 contract change, not a UI change.
+ */
+export const NODE_HARNESS_OPTIONS: readonly { value: NodeHarness; label: string }[] = [
+  { value: 'pi', label: 'Pi (Kady)' },
+  { value: 'claude-code', label: 'Claude Code' },
+  { value: 'codex', label: 'Codex' },
+  { value: 'opencode', label: 'OpenCode' },
+  { value: 'copilot', label: 'Copilot' },
+];
+
+export const DEFAULT_NODE_HARNESS: NodeHarness = 'pi';
+
+export function nodeHarnessLabel(harness: NodeHarness): string {
+  return NODE_HARNESS_OPTIONS.find(option => option.value === harness)?.label ?? harness;
+}
+
+/**
+ * Slim, keyboard-operable harness selector shared by the node library, the
+ * legacy palette and the canvas quick-add menu. A native <select> is used on
+ * purpose: it is compact enough for a 190px palette column and is operable with
+ * the keyboard without re-implementing roving focus.
+ */
+export function HarnessSelect({
+  value,
+  onChange,
+  label,
+  id,
+}: {
+  value: NodeHarness;
+  onChange: (harness: NodeHarness) => void;
+  /** Accessible name, e.g. "CLI harness for the Prompt node". */
+  label: string;
+  id?: string;
+}): React.ReactElement {
+  // NodeSpec v1 freezes the harness SHAPE but binds only `pi`; the builder's own
+  // fail-closed validator (nodeSpecV1InlineErrors) rejects the others until that
+  // binding lands, so a non-Pi choice must say so where it is made rather than
+  // only in the inspector's error list.
+  const isPendingBinding = value !== DEFAULT_NODE_HARNESS;
+  return (
+    <div className="min-w-0 flex-1">
+      <select
+        {...(id ? { id } : {})}
+        data-testid="quick-node-harness"
+        aria-label={label}
+        title={label}
+        value={value}
+        onChange={(event): void => {
+          onChange(event.target.value as NodeHarness);
+        }}
+        onClick={(event): void => {
+          event.stopPropagation();
+        }}
+        className="w-full min-w-0 rounded border border-border bg-surface px-1.5 py-0.5 font-mono text-[10px] text-text-secondary focus:outline-none focus:ring-1 focus:ring-accent-bright"
+      >
+        {NODE_HARNESS_OPTIONS.map(option => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+      {isPendingBinding && (
+        <p
+          data-testid="quick-node-harness-note"
+          className="mt-0.5 font-mono text-[9px] leading-tight text-warning"
+        >
+          Not bound yet — Save accepts Pi only.
+        </p>
+      )}
+    </div>
+  );
+}
 
 export interface ResolvedNodeSpecV1 {
   version: 1;
@@ -196,8 +276,19 @@ export function formatNodeModel(model: NodeModelRequest | undefined, legacyModel
   return `${model.requested.provider}/${model.requested.model}`;
 }
 
-export function shouldShowNodeDetails(isHovered: boolean, isPinned: boolean): boolean {
-  return isHovered || isPinned;
+/**
+ * Node details open ONLY through the explicit expand control.
+ *
+ * Hover used to open them (`isHovered || isPinned`), which had two owner-visible
+ * consequences: the card exploded into a full NodeSpec panel just from moving
+ * the pointer across the canvas, and the "expand +" control looked dead — you
+ * can only click it while the pointer is on the card, so the panel it toggles
+ * was already open, and "collapse -" left it open too. `isHovered` is kept in
+ * the signature (and still drives the card's hover outline) so the hover state
+ * stays a deliberate, testable non-input to this decision.
+ */
+export function shouldShowNodeDetails(_isHovered: boolean, isPinned: boolean): boolean {
+  return isPinned;
 }
 
 export function nodeExpandControlLabel(isPinned: boolean): string {
@@ -206,7 +297,7 @@ export function nodeExpandControlLabel(isPinned: boolean): string {
 
 function MetadataPill({ children }: { children: React.ReactNode }): React.ReactElement {
   return (
-    <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium bg-surface-inset text-text-secondary">
+    <span className="inline-flex items-center rounded border border-border px-1 py-px font-mono text-[10px] font-medium text-text-secondary">
       {children}
     </span>
   );
@@ -218,7 +309,7 @@ export function NodeTypeBadge({ nodeType }: { nodeType: DagNodeData['nodeType'] 
     <span
       data-testid="node-type-badge"
       className={cn(
-        'text-[9px] font-semibold px-1.5 py-0.5 rounded shrink-0',
+        'shrink-0 rounded px-1 py-px font-mono text-[10px] font-semibold',
         config.badgeBg,
         config.badgeText
       )}
@@ -232,15 +323,14 @@ export function NodeDetailsSurface({ data }: { data: DagNodeData }): React.React
   const settings = resolveNodeSpecProjection(data.settings);
   const prompt = getFullPrompt(data);
   return (
-    <Liquid
-      className="nodrag nowheel w-[360px] max-h-[420px] overflow-hidden rounded-lg border border-border bg-surface-elevated shadow-2xl"
-      simResolution={64}
-      dyeResolution={256}
-      intensity={1.25}
-      distortion={0.2}
-      blend={3}
+    // Plain surface on purpose. This used to be wrapped in the CanvasUI fluid
+    // simulation component (blue dye, pointer-driven splats), which painted the
+    // owner's "blue smoke effect" straight over the NodeSpec text.
+    <div
+      data-testid="node-details-panel"
+      className="nodrag nowheel w-[360px] max-h-[420px] overflow-hidden rounded-md border border-border bg-surface-elevated shadow-md"
     >
-      <div className="max-h-[420px] overflow-auto p-3 text-[10px] text-text-secondary">
+      <div className="max-h-[420px] overflow-auto p-3 text-[11px] text-text-secondary">
         <div className="grid grid-cols-[88px_1fr] gap-x-2 gap-y-1">
           <span className="uppercase tracking-wide text-text-tertiary">Model</span>
           <span className="break-all text-text-primary">
@@ -268,7 +358,7 @@ export function NodeDetailsSurface({ data }: { data: DagNodeData }): React.React
           </pre>
         </div>
       </div>
-    </Liquid>
+    </div>
   );
 }
 
@@ -287,6 +377,10 @@ export function DagNodeRender({ data, selected }: NodeProps<DagFlowNode>): React
     data.mcp;
   const showDetails = shouldShowNodeDetails(isHovered, isPinned);
 
+  const toggleDetails = (): void => {
+    setIsPinned(current => !current);
+  };
+
   return (
     <div
       className="relative w-[180px]"
@@ -299,7 +393,11 @@ export function DagNodeRender({ data, selected }: NodeProps<DagFlowNode>): React
     >
       <div
         className={cn(
-          'w-[180px] bg-surface border border-border rounded-lg overflow-hidden cursor-pointer transition-all flex',
+          // Hairline card, Raindrop-slim: 1px border, small radius, no fills
+          // beyond the type stripe. Hover is an affordance only (brighter
+          // hairline) — it must never expand the card.
+          'w-[180px] min-h-[56px] bg-surface border border-border rounded-md overflow-hidden cursor-pointer transition-colors flex',
+          isHovered && !selected && 'border-border-bright',
           selected && 'border-primary ring-1 ring-primary'
         )}
       >
@@ -309,32 +407,50 @@ export function DagNodeRender({ data, selected }: NodeProps<DagFlowNode>): React
         <div className={cn('w-[3px] shrink-0', config.stripeColor)} />
 
         {/* Content area */}
-        <div className="flex-1 min-w-0 px-2.5 py-2">
-          {/* Header: type + harness topology + label */}
-          <div className="flex items-center gap-1 mb-1">
+        <div className="flex-1 min-w-0 px-2 py-1.5">
+          {/* Row 1: type + harness badges. The harness name can be long
+              ("claude-code"), so it truncates here rather than pushing the
+              expand control off the fixed-width card. */}
+          <div className="flex items-center gap-1">
             <NodeTypeBadge nodeType={data.nodeType} />
             <span
               data-testid="node-harness-badge"
-              className="shrink-0 rounded bg-surface-inset px-1 py-0.5 text-[8px] font-semibold uppercase text-text-secondary"
-              title={`Harness topology: ${settings.harness}`}
+              className="min-w-0 truncate rounded border border-border px-1 py-px font-mono text-[10px] uppercase text-text-secondary"
+              title={`CLI harness: ${nodeHarnessLabel(settings.harness)}`}
             >
               {settings.harness}
             </span>
-            <span className="min-w-0 flex-1 truncate text-xs font-medium text-text-primary">
+          </div>
+
+          {/* Row 2: title + the expand control, which is always reachable. */}
+          <div className="mt-1 flex items-center gap-1">
+            <div
+              data-testid="node-title"
+              className="min-w-0 flex-1 truncate text-[13px] font-medium leading-tight text-text-primary"
+              title={data.label}
+            >
               {data.label}
-            </span>
+            </div>
             <button
               type="button"
-              className="nodrag shrink-0 rounded px-1 py-0.5 text-[9px] font-semibold text-text-secondary hover:bg-surface-hover hover:text-text-primary"
-              aria-expanded={showDetails}
+              data-testid="node-expand-control"
+              className="nodrag shrink-0 rounded border border-transparent px-1 py-px font-mono text-[10px] font-semibold text-text-secondary hover:border-border hover:bg-surface-hover hover:text-text-primary focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-bright"
+              aria-expanded={isPinned}
               aria-label={isPinned ? 'Collapse node details' : 'Expand full node details'}
               title={isPinned ? 'Collapse node details' : 'Expand full prompt and NodeSpec'}
               onPointerDown={(event): void => {
                 event.stopPropagation();
               }}
+              onKeyDown={(event): void => {
+                // React Flow binds its own node-level key handling (Backspace
+                // deletes, arrows nudge). Keep Enter/Space on the control.
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.stopPropagation();
+                }
+              }}
               onClick={(event): void => {
                 event.stopPropagation();
-                setIsPinned(current => !current);
+                toggleDetails();
               }}
             >
               {nodeExpandControlLabel(isPinned)}
@@ -343,12 +459,12 @@ export function DagNodeRender({ data, selected }: NodeProps<DagFlowNode>): React
 
           {/* Content preview */}
           {preview && (
-            <div className="mb-1 truncate font-mono text-[10px] text-text-tertiary">{preview}</div>
+            <div className="mt-0.5 truncate font-mono text-[11px] text-text-tertiary">{preview}</div>
           )}
 
           {/* Metadata pills */}
           {hasPills && (
-            <div className="flex flex-wrap gap-1">
+            <div className="mt-1 flex flex-wrap gap-1">
               {data.model && <MetadataPill>{data.model}</MetadataPill>}
               {data.output_format && <MetadataPill>{'{}'} JSON</MetadataPill>}
               {data.when && <MetadataPill>when</MetadataPill>}

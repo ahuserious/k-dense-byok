@@ -13,12 +13,17 @@ mock.module('@/lib/utils', () => ({
 }));
 
 const {
+  DagNodeRender,
+  HarnessSelect,
+  NODE_HARNESSES,
+  NODE_HARNESS_OPTIONS,
   NodeDetailsSurface,
   NodeTypeBadge,
   TYPE_CONFIG,
   getContentPreview,
   getFullPrompt,
   nodeExpandControlLabel,
+  nodeHarnessLabel,
   resolveNodeSpecProjection,
   shouldShowNodeDetails,
 } = await import('./DagNodeComponent');
@@ -52,15 +57,58 @@ describe('node content projection', () => {
     expect(getFullPrompt(data)).toBe('Please approve');
   });
 
-  test('hover and explicit expand both reveal details while the control toggles its label', () => {
+  test('only the explicit expand control reveals details — hover never does', () => {
     expect(shouldShowNodeDetails(false, false)).toBe(false);
-    expect(shouldShowNodeDetails(true, false)).toBe(true);
+    // The owner's "expanding happens when hovering": hovering alone must not
+    // open the details panel, and it must not keep it open once collapsed.
+    expect(shouldShowNodeDetails(true, false)).toBe(false);
     expect(shouldShowNodeDetails(false, true)).toBe(true);
+    expect(shouldShowNodeDetails(true, true)).toBe(true);
+  });
+
+  test('the expand control toggles its visible label', () => {
     expect(nodeExpandControlLabel(false)).toBe('expand +');
     expect(nodeExpandControlLabel(true)).toBe('collapse -');
   });
 
-  test('Liquid detail surface renders full prompt and the complete resolved NodeSpec', async () => {
+  test('a collapsed card renders the expand control with aria-expanded=false and no details', () => {
+    const data: DagNodeData = {
+      id: 'collapsed-node',
+      label: 'A readable node title',
+      nodeType: 'prompt',
+      promptText: 'hidden until expanded',
+    };
+    const html = renderToStaticMarkup(
+      createElement(DagNodeRender, { data, selected: false } as never)
+    );
+    expect(html).toContain('data-testid="node-expand-control"');
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('aria-label="Expand full node details"');
+    expect(html).toContain('expand +');
+    // Details are pinned-only, so the collapsed default renders no surface.
+    expect(html).not.toContain('data-testid="node-details-surface"');
+    // Title and type badge are on the card and legible (13px title, 10px badge).
+    expect(html).toContain('data-testid="node-title"');
+    expect(html).toContain('A readable node title');
+    expect(html).toContain('text-[13px]');
+    expect(html).toContain('PROMPT');
+  });
+
+  test('the details surface carries no fluid-canvas effect wrapper', async () => {
+    const data: DagNodeData = {
+      id: 'effect-free',
+      label: 'Prompt',
+      nodeType: 'prompt',
+      promptText: 'plain',
+    };
+    const html = await renderHookCompatibleMarkup(createElement(NodeDetailsSurface, { data }));
+    expect(html).toContain('data-testid="node-details-panel"');
+    // The blue-smoke effect was a WebGL <canvas> painted behind this content.
+    expect(html).not.toContain('<canvas');
+    expect(html).not.toContain('layoutsubtree');
+  });
+
+  test('detail surface renders full prompt and the complete resolved NodeSpec', async () => {
     const data: DagNodeData = {
       id: 'node-details',
       label: 'Prompt',
@@ -132,5 +180,70 @@ describe('Scientific DAG Studio visual contracts', () => {
     expect(html).toContain('data-testid="node-type-badge"');
     expect(html).toContain('PROMPT');
     expect(html).toContain('text-node-prompt');
+  });
+});
+
+describe('quick-node CLI harness selection', () => {
+  test('the offered harnesses are exactly the frozen NodeSpec v1 union', () => {
+    expect(NODE_HARNESS_OPTIONS.map((option: { value: string }) => option.value)).toEqual([
+      ...NODE_HARNESSES,
+    ]);
+    expect(nodeHarnessLabel('pi')).toBe('Pi (Kady)');
+    expect(nodeHarnessLabel('claude-code')).toBe('Claude Code');
+    // Grok CLI is not a member of HarnessSchema, so it must not be offered.
+    expect(NODE_HARNESS_OPTIONS.map((option: { value: string }) => option.value)).not.toContain(
+      'grok'
+    );
+  });
+
+  test('the harness picker is a labelled, keyboard-operable select of every harness', () => {
+    const html = renderToStaticMarkup(
+      createElement(HarnessSelect, {
+        value: 'codex',
+        onChange: (): void => undefined,
+        label: 'CLI harness for the Prompt quick node',
+      })
+    );
+    expect(html).toContain('data-testid="quick-node-harness"');
+    expect(html).toContain('aria-label="CLI harness for the Prompt quick node"');
+    for (const harness of NODE_HARNESSES) {
+      expect(html).toContain(`value="${harness}"`);
+    }
+  });
+
+  test('a non-Pi choice says at the picker that Save does not accept it yet', () => {
+    const pi = renderToStaticMarkup(
+      createElement(HarnessSelect, {
+        value: 'pi',
+        onChange: (): void => undefined,
+        label: 'CLI harness for the Prompt quick node',
+      })
+    );
+    expect(pi).not.toContain('data-testid="quick-node-harness-note"');
+
+    const codex = renderToStaticMarkup(
+      createElement(HarnessSelect, {
+        value: 'codex',
+        onChange: (): void => undefined,
+        label: 'CLI harness for the Prompt quick node',
+      })
+    );
+    expect(codex).toContain('data-testid="quick-node-harness-note"');
+    expect(codex).toContain('Save accepts Pi only');
+  });
+
+  test('the card badge shows the harness the node actually carries', () => {
+    const data: DagNodeData = {
+      id: 'harness-node',
+      label: 'Prompt',
+      nodeType: 'prompt',
+      settings: { harness: 'claude-code' },
+    };
+    const html = renderToStaticMarkup(
+      createElement(DagNodeRender, { data, selected: false } as never)
+    );
+    expect(html).toContain('data-testid="node-harness-badge"');
+    expect(html).toContain('claude-code');
+    expect(html).toContain('CLI harness: Claude Code');
   });
 });

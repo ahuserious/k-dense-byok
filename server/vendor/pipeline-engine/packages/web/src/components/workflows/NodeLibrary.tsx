@@ -2,11 +2,31 @@ import { useState, useMemo } from 'react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
 import { categorizeCommands } from '@/lib/command-categories';
-import type { CommandEntry } from '@/lib/api';
+import type { CommandEntry, NodeHarness } from '@/lib/api';
+import { DEFAULT_NODE_HARNESS, HarnessSelect } from './DagNodeComponent';
+import { HARNESS_DRAG_MIME } from './WorkflowCanvas';
+
+export type QuickNodeType = 'prompt' | 'bash';
+
+/** The two Quick Nodes, each with its own pre-drag harness choice. */
+export const QUICK_NODES: readonly {
+  type: QuickNodeType;
+  /** Payload name the canvas turns into the node label. */
+  name: string;
+  displayName: string;
+}[] = [
+  { type: 'prompt', name: 'Prompt', displayName: 'Prompt' },
+  { type: 'bash', name: 'Shell', displayName: 'Bash' },
+];
 
 interface NodeLibraryProps {
   commands: CommandEntry[];
   isLoading: boolean;
+  /**
+   * Keyboard/click path for adding a quick node with its selected harness.
+   * Dragging is pointer-only, so the same choice needs a non-pointer route.
+   */
+  onAddQuickNode?: (type: QuickNodeType, name: string, harness: NodeHarness) => void;
 }
 
 const NODE_TYPE_COLORS: Record<string, string> = {
@@ -15,9 +35,15 @@ const NODE_TYPE_COLORS: Record<string, string> = {
   bash: 'bg-node-bash',
 };
 
-function onDragStart(e: React.DragEvent, type: 'command' | 'prompt' | 'bash', name: string): void {
+function onDragStart(
+  e: React.DragEvent,
+  type: 'command' | 'prompt' | 'bash',
+  name: string,
+  harness?: NodeHarness
+): void {
   e.dataTransfer.setData('application/reactflow-type', type);
   e.dataTransfer.setData('application/reactflow-command', name);
+  if (harness) e.dataTransfer.setData(HARNESS_DRAG_MIME, harness);
   e.dataTransfer.effectAllowed = 'move';
 }
 
@@ -54,6 +80,61 @@ function DraggableItem({
   );
 }
 
+/**
+ * A Quick Node card: pick the CLI harness FIRST, then drag (or press Add).
+ * The selected harness rides along in the drag payload and lands in the new
+ * node's `settings.harness`, so the card badge and the saved YAML agree.
+ */
+function QuickNodeCard({
+  type,
+  name,
+  displayName,
+  onAdd,
+}: {
+  type: QuickNodeType;
+  name: string;
+  displayName: string;
+  onAdd?: (type: QuickNodeType, name: string, harness: NodeHarness) => void;
+}): React.ReactElement {
+  const [harness, setHarness] = useState<NodeHarness>(DEFAULT_NODE_HARNESS);
+
+  return (
+    <div
+      data-testid={`quick-node-${type}`}
+      draggable
+      onDragStart={(e): void => {
+        onDragStart(e, type, name, harness);
+      }}
+      className="flex cursor-grab flex-col gap-1 rounded-md border border-dashed border-border px-2 py-1.5 text-xs text-text-primary hover:border-accent-bright"
+    >
+      <div className="flex items-center gap-2">
+        <span className={cn('h-2 w-2 shrink-0 rounded-full', NODE_TYPE_COLORS[type])} />
+        <span className="truncate font-mono">{displayName}</span>
+      </div>
+      <div className="flex items-center gap-1">
+        <HarnessSelect
+          value={harness}
+          onChange={setHarness}
+          label={`CLI harness for the ${displayName} quick node`}
+        />
+        {onAdd && (
+          <button
+            type="button"
+            data-testid={`quick-node-add-${type}`}
+            onClick={(): void => {
+              onAdd(type, name, harness);
+            }}
+            title={`Add a ${displayName} node running on ${harness}`}
+            className="shrink-0 rounded border border-border px-1.5 py-0.5 font-mono text-[10px] text-text-secondary hover:bg-surface-hover hover:text-text-primary focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-bright"
+          >
+            add
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function CollapsibleSection({
   title,
   count,
@@ -85,7 +166,11 @@ function CollapsibleSection({
   );
 }
 
-export function NodeLibrary({ commands, isLoading }: NodeLibraryProps): React.ReactElement {
+export function NodeLibrary({
+  commands,
+  isLoading,
+  onAddQuickNode,
+}: NodeLibraryProps): React.ReactElement {
   const [search, setSearch] = useState('');
 
   const categories = useMemo(() => categorizeCommands(commands), [commands]);
@@ -109,8 +194,8 @@ export function NodeLibrary({ commands, isLoading }: NodeLibraryProps): React.Re
   return (
     <div className="flex flex-col h-full overflow-hidden border-r border-border bg-surface">
       {/* Header */}
-      <div className="px-3 py-2 border-b border-border">
-        <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wide mb-2">
+      <div className="border-b border-border px-2.5 py-1.5">
+        <h3 className="mb-1.5 font-mono text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">
           Node Library
         </h3>
         <input
@@ -120,7 +205,7 @@ export function NodeLibrary({ commands, isLoading }: NodeLibraryProps): React.Re
             setSearch(e.target.value);
           }}
           placeholder="Search..."
-          className="w-full rounded-md border border-border bg-surface-elevated px-2 py-1 text-xs text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-1 focus:ring-accent"
+          className="h-7 w-full rounded border border-border bg-surface-elevated px-2 font-mono text-[11px] text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-1 focus:ring-accent-bright"
         />
       </div>
 
@@ -131,9 +216,16 @@ export function NodeLibrary({ commands, isLoading }: NodeLibraryProps): React.Re
           <div className="flex flex-col gap-2 p-2">
             {/* Quick Nodes */}
             {showQuickNodes && (
-              <CollapsibleSection title="Quick Nodes" count={2} defaultOpen>
-                <DraggableItem type="prompt" name="Prompt" displayName="Prompt" />
-                <DraggableItem type="bash" name="Shell" displayName="Bash" />
+              <CollapsibleSection title="Quick Nodes" count={QUICK_NODES.length} defaultOpen>
+                {QUICK_NODES.map(quickNode => (
+                  <QuickNodeCard
+                    key={quickNode.type}
+                    type={quickNode.type}
+                    name={quickNode.name}
+                    displayName={quickNode.displayName}
+                    {...(onAddQuickNode ? { onAdd: onAddQuickNode } : {})}
+                  />
+                ))}
               </CollapsibleSection>
             )}
 

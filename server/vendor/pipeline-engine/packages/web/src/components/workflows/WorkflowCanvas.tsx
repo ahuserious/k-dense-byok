@@ -16,11 +16,48 @@ import type {
   OnEdgesChange,
   NodeTypes,
 } from '@xyflow/react';
-import type { CommandEntry, DagNode } from '@/lib/api';
-import { dagNodeComponent, type DagFlowNode } from './DagNodeComponent';
+import type { CommandEntry, DagNode, NodeHarness } from '@/lib/api';
+import { DEFAULT_NODE_HARNESS, dagNodeComponent, type DagFlowNode } from './DagNodeComponent';
 import { QuickAddPicker } from './QuickAddPicker';
 
 export { dagNodesToReactFlow } from '@/lib/dag-layout';
+
+/** Drag payload key carrying the harness the palette selected before the drag. */
+export const HARNESS_DRAG_MIME = 'application/reactflow-harness';
+
+/**
+ * One balanced viewport for every fit in the builder — initial mount, load,
+ * add-node, undo/redo and the canvas "fit" control all use this.
+ *
+ * `padding` keeps a quarter-viewport of breathing room around the graph instead
+ * of pinning nodes to the edges. The `maxZoom` clamp is the fix for the owner's
+ * "zoom is off balance": React Flow's own fitView default is maxZoom 2, so a
+ * two-node graph was blown up to 200% AND parked at the zoom ceiling, which is
+ * why the canvas "+" control did nothing. Fitting to at most 1.1 leaves the
+ * "+" control real headroom in both directions.
+ */
+export const FIT_VIEW_OPTIONS = {
+  padding: 0.25,
+  minZoom: 0.4,
+  maxZoom: 1.1,
+  duration: 200,
+} as const;
+
+/** Hard viewport limits for manual zooming (the "+" / "-" controls and the wheel). */
+export const CANVAS_MIN_ZOOM = 0.2;
+export const CANVAS_MAX_ZOOM = 2.5;
+
+/**
+ * Identity of the current node SET (not their positions). A change means nodes
+ * were loaded, added, removed or undone — the moments that deserve a re-fit.
+ * Dragging a node changes positions only, and must not yank the viewport.
+ */
+export function nodeSetSignature(nodes: readonly DagFlowNode[]): string {
+  return nodes
+    .map(node => node.id)
+    .sort()
+    .join('\u0000');
+}
 
 function resolveNodeLabel(nodeType: 'command' | 'prompt' | 'bash', commandName: string): string {
   if (nodeType === 'command') return commandName;
@@ -107,7 +144,7 @@ export function WorkflowCanvas({
   onPushSnapshot,
   commands,
 }: WorkflowCanvasProps): React.ReactElement {
-  const { screenToFlowPosition } = useReactFlow();
+  const { screenToFlowPosition, fitView } = useReactFlow();
   const [quickAddPosition, setQuickAddPosition] = useState<QuickAddPosition | null>(null);
   const [contextMenu, setContextMenu] = useState<{
     x: number;
@@ -154,6 +191,7 @@ export function WorkflowCanvas({
 
       const type = e.dataTransfer.getData('application/reactflow-type');
       const command = e.dataTransfer.getData('application/reactflow-command');
+      const draggedHarness = e.dataTransfer.getData(HARNESS_DRAG_MIME);
       if (!type) return;
 
       const position = screenToFlowPosition({ x: e.clientX, y: e.clientY });
@@ -161,6 +199,9 @@ export function WorkflowCanvas({
 
       const nodeType = type as 'command' | 'prompt' | 'bash';
       const label = resolveNodeLabel(nodeType, command);
+      // The palette picks the CLI harness BEFORE the drag; carry that choice
+      // into the node's NodeSpec so the card badge and the saved YAML agree.
+      const harness = (draggedHarness || DEFAULT_NODE_HARNESS) as NodeHarness;
 
       const newNode: DagFlowNode = {
         id,
@@ -170,6 +211,7 @@ export function WorkflowCanvas({
           id,
           label,
           nodeType,
+          settings: { harness },
         },
       };
 
@@ -220,6 +262,23 @@ export function WorkflowCanvas({
     [onEdgesChange, onDirty]
   );
 
+  // Re-fit whenever the node SET changes — graph load, add-node, delete,
+  // undo/redo. React Flow's `fitView` prop only runs once at init, which is why
+  // a workflow loaded after mount kept whatever viewport the empty canvas had.
+  // rAF defers the fit until React Flow has measured the new nodes.
+  const nodeSignature = nodeSetSignature(nodes);
+  useEffect(() => {
+    if (nodes.length === 0) return;
+    const frame = requestAnimationFrame(() => {
+      void fitView(FIT_VIEW_OPTIONS);
+    });
+    return (): void => {
+      cancelAnimationFrame(frame);
+    };
+    // Positions deliberately excluded: dragging a node must not re-fit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodeSignature, fitView]);
+
   // Clean up click timer on unmount
   useEffect(() => {
     return (): void => {
@@ -269,7 +328,7 @@ export function WorkflowCanvas({
   const handleQuickAddNode = useCallback(
     (
       type: 'command' | 'prompt' | 'bash',
-      options?: { commandName?: string; skills?: string[]; mcp?: string }
+      options?: { commandName?: string; skills?: string[]; mcp?: string; harness?: NodeHarness }
     ) => {
       if (!quickAddPosition) return;
 
@@ -284,6 +343,7 @@ export function WorkflowCanvas({
           id,
           label,
           nodeType: type,
+          settings: { harness: options?.harness ?? DEFAULT_NODE_HARNESS },
           ...(options?.skills && { skills: options.skills }),
           ...(options?.mcp && { mcp: options.mcp }),
         },
@@ -365,12 +425,23 @@ export function WorkflowCanvas({
         panOnDrag
         selectionOnDrag={false}
         fitView
+        fitViewOptions={FIT_VIEW_OPTIONS}
+        minZoom={CANVAS_MIN_ZOOM}
+        maxZoom={CANVAS_MAX_ZOOM}
         colorMode="dark"
         className="bg-background"
       >
         <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="var(--border)" />
-        <MiniMap className="!bg-surface !border-border" maskColor="rgba(0,0,0,0.6)" />
-        <Controls />
+        <MiniMap
+          className="!bg-surface !border !border-border !rounded-md"
+          maskColor="rgba(0,0,0,0.6)"
+          pannable
+          zoomable
+        />
+        <Controls
+          fitViewOptions={FIT_VIEW_OPTIONS}
+          className="!rounded-md !border !border-border !bg-surface !shadow-none"
+        />
       </ReactFlow>
 
       {/* QuickAddPicker overlay */}
