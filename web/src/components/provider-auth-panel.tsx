@@ -11,6 +11,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { OAuthLoginDialog } from "@/components/oauth-login-dialog";
+import { ModelPresetsSection } from "@/components/model-presets/model-presets-section";
 import {
   useProviderAuth,
   type ModelProviderStatus,
@@ -165,6 +166,15 @@ export function ProviderAuthPanel() {
         for Anthropic&apos;s documented metered extra usage, Kady records tokens
         but does not treat provider-managed subscription usage as project spend.
       </p>
+
+      {/*
+        Model presets live under this tab rather than under a Settings tab of
+        their own: the tab list is another lane's file this wave, and this tab
+        is already where a user goes to decide which models Kady may use. The
+        section covers all eight provider groups, including the API-key and
+        compute ones that have no OAuth panel above.
+      */}
+      <ModelPresetsSection />
 
       <OAuthLoginDialog
         provider={selected}

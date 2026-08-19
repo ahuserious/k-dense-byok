@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  BookmarkIcon,
   CheckIcon,
   BrainCircuitIcon,
   ChevronDownIcon,
@@ -64,6 +65,8 @@ const TIER_STYLES: Record<string, { dot: string; badge: string }> = {
 const FUSION_DOT = "bg-red-500";
 const FUSION_BADGE = "text-red-600 dark:text-red-400";
 
+const PRESET_GROUP_ID = "model-presets";
+
 const PROVIDER_COLORS: Record<string, string> = {
   Google:    "text-blue-600 dark:text-blue-400",
   Anthropic: "text-orange-600 dark:text-orange-400",
@@ -77,6 +80,8 @@ const PROVIDER_COLORS: Record<string, string> = {
   Ollama:    "text-teal-600 dark:text-teal-400",
   "OpenAI-Compatible": "text-teal-600 dark:text-teal-400",
   "Openrouter Fusion": "text-red-600 dark:text-red-400",
+  Groq: "text-orange-600 dark:text-orange-400",
+  Cerebras: "text-amber-600 dark:text-amber-400",
 };
 
 const isOllama = (m: Model) => m.provider === "Ollama" || m.id.startsWith("ollama/");
@@ -164,12 +169,17 @@ function ModelPickerList({ selected, onSelect, compact }: ModelPickerListProps) 
       grouped.set(sourceId, group);
     }
     const order = [
+      // Saved presets lead the picker: a preset is the user's own named
+      // decision about a provider and model, so it outranks the catalogue.
+      "model-presets",
       "fusion",
       "openai-codex",
       "anthropic",
       "github-copilot",
       "xai",
       "openrouter",
+      "groq",
+      "cerebras",
       "nvidia",
       "ollama",
       "openai-compatible",
@@ -254,7 +264,12 @@ function ModelPickerList({ selected, onSelect, compact }: ModelPickerListProps) 
                 <span>·</span>
               </>
             )}
-            {model.sourceId === "nvidia" ? (
+            {model.sourceId === PRESET_GROUP_ID ? (
+              // A preset carries no price of its own — it resolves to another
+              // provider's model, which is where the price lives. Printing
+              // "$0.00 / $0.00" here would read as free.
+              <span>Saved preset · resolves to its provider and model</span>
+            ) : model.sourceId === "nvidia" ? (
               <span>Billed via NVIDIA API credits · not metered by Kady</span>
             ) : model.billingMode === "subscription" ? (
               <span>Uses provider-managed subscription limits</span>
@@ -300,6 +315,8 @@ function ModelPickerList({ selected, onSelect, compact }: ModelPickerListProps) 
             <div className="flex items-center gap-1.5 px-3 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
               {LOCAL_GROUP_IDS.has(group.id) ? (
                 <HardDriveIcon className="size-3" aria-hidden />
+              ) : group.id === PRESET_GROUP_ID ? (
+                <BookmarkIcon className="size-3" aria-hidden />
               ) : (
                 <BrainCircuitIcon className="size-3" aria-hidden />
               )}
@@ -437,12 +454,29 @@ export function ModelSelector({
         <div
           className={cn(
             "flex min-w-0 items-center gap-1.5 rounded-lg border px-2.5 py-1.5 cursor-pointer transition-colors text-xs select-none",
+            // The trigger was tab-reachable with no focus indicator at all —
+            // a keyboard user could not see where they were. `--primary`
+            // rather than `--ring` because the ring token measures under the
+            // 3:1 §6.6 requires on this palette (see preset-editor.tsx).
+            "outline-none focus-visible:ring-[3px] focus-visible:ring-primary focus-visible:border-primary",
             open
               ? "border-border bg-muted/60"
               : "border-transparent hover:border-border hover:bg-muted/40"
           )}
           role="button"
           tabIndex={0}
+          // Radix's trigger opens on click, and a div with role="button" does
+          // not synthesize a click from Enter/Space the way a real button does
+          // — so without this the picker was tab-reachable but not openable
+          // from the keyboard. Gate U requires both.
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              setOpen((current) => !current);
+            }
+          }}
+          aria-haspopup="listbox"
+          aria-expanded={open}
           aria-label={
             selectedAvailability === "checking"
               ? `Select model, checking ${selected.label} provider`

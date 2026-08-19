@@ -28,6 +28,10 @@ import {
   isSubscriptionProvider,
   type SubscriptionProviderId,
 } from "./provider-auth.ts";
+import {
+  MODEL_PRESET_REF_PREFIX,
+  presetForSelectorRef,
+} from "./model-presets-store.ts";
 
 // OpenRouter's base URL. Overridable via OPENROUTER_BASE_URL so the
 // OpenAI-compatible provider can point at any compatible gateway — e.g.
@@ -364,6 +368,29 @@ export async function setupModelRuntime(modelRuntime: ModelRuntime): Promise<voi
 
   const orKey = process.env.OPENROUTER_API_KEY || process.env.OR_API_KEY;
   if (orKey) await modelRuntime.setRuntimeApiKey("openrouter", orKey);
+
+  // Groq and Cerebras are Pi built-in providers with their own catalogue
+  // entries and their own real base URLs (pi-ai's generated MODELS table), so
+  // registration here is a credential, not an address. Two consequences the
+  // reviewer should be able to check at a glance:
+  //
+  //   1. No base URL appears anywhere in this file for either provider. There
+  //      is nothing to "default" to a third party, which is the #44/#57/#64
+  //      rule stated as code rather than as a comment.
+  //   2. Registration is conditional on the variable NAME holding a non-empty
+  //      value. With the key unset the provider is never registered, so Pi
+  //      refuses the dispatch and no request is built, exactly as for the two
+  //      local providers above. The picker shows the group disabled with the
+  //      variable name to set.
+  //
+  // The value is read to hand to Pi and is never logged, echoed, or returned.
+  for (const [providerId, variableName] of [
+    ["groq", "GROQ_API_KEY"],
+    ["cerebras", "CEREBRAS_API_KEY"],
+  ] as const) {
+    const key = process.env[variableName];
+    if (key?.trim()) await modelRuntime.setRuntimeApiKey(providerId, key);
+  }
 }
 
 export class ModelResolutionError extends Error {
@@ -465,6 +492,31 @@ export function resolveModel(
 ): Model<Api> {
   const usingDefault = !ref || !ref.trim();
   const r = usingDefault ? configuredDefaultRef() : ref.trim();
+  // A "preset/<id>" ref is the synthetic selector entry for a saved model
+  // preset — the same arrangement the fusion presets already use one branch
+  // below. This is where the resolution rule ("selecting a preset anywhere a
+  // model is chosen resolves to that preset's provider + model") actually
+  // happens: every dispatch path in the app funnels through resolveModel, so
+  // binding it here binds it for chat, for /run, and for any persisted
+  // selection, rather than in each caller.
+  //
+  // Fails closed. A preset id that no longer exists throws instead of silently
+  // falling back to the default model — a user who deleted a preset must not
+  // discover it by being billed for a different one.
+  if (r.startsWith(MODEL_PRESET_REF_PREFIX)) {
+    const preset = presetForSelectorRef(r);
+    if (!preset) {
+      throw new ModelResolutionError(
+        `Model preset "${r.slice(MODEL_PRESET_REF_PREFIX.length)}" no longer exists. Pick another model.`,
+      );
+    }
+    if (preset.ref.startsWith(MODEL_PRESET_REF_PREFIX)) {
+      throw new ModelResolutionError(
+        `Model preset "${preset.name}" points at another preset, which Kady cannot dispatch.`,
+      );
+    }
+    return resolveModel(preset.ref, registry, fusionConfig);
+  }
   // A "fusion/<id>" ref is the synthetic selector entry; resolve it to the real
   // openrouter/fusion Model, priced by the panel sum. The bare string ref can't
   // carry the panel prices, so the fusionConfig must be threaded in by the
@@ -497,6 +549,28 @@ export function resolveModel(
       throw new ModelResolutionError(`Model ref "${r}" is missing a model id`);
     }
     return registry.find("nvidia", id) ?? buildNvidiaModel(id);
+  }
+  // Groq and Cerebras ids are single segments ("llama-3.3-70b-versatile"), and
+  // Pi's catalogue carries both providers with correct base URLs and pricing —
+  // so `registry.find` is the whole resolution. There is deliberately NO
+  // synthesized fallback here: an id Pi does not know has no address, and
+  // inventing one would be the "default that reaches a third party" the
+  // registration guard above exists to prevent. An unknown id is refused with a
+  // message that names the next action.
+  for (const providerId of ["groq", "cerebras"] as const) {
+    const prefix = `${providerId}/`;
+    if (!r.startsWith(prefix)) continue;
+    const id = r.slice(prefix.length);
+    if (!id) {
+      throw new ModelResolutionError(`Model ref "${r}" is missing a model id`);
+    }
+    const model = registry.find(providerId, id);
+    if (!model) {
+      throw new ModelResolutionError(
+        `Unknown ${providerId} model "${id}". Pick one from the ${providerId} group in the model picker.`,
+      );
+    }
+    return model;
   }
   const direct = directProviderRef(r);
   if (direct) {

@@ -3,6 +3,7 @@ import {
   ProviderAuthError,
   ProviderAuthManager,
   SUBSCRIPTION_PROVIDERS,
+  apiKeyModelForClient,
   isSubscriptionProvider,
   modelForClient,
   nvidiaModelForClient,
@@ -116,6 +117,59 @@ export async function registerModelProviderRoutes(
       return errorReply(reply, error);
     }
   });
+
+  // Groq and Cerebras discovery. Both are Pi built-in providers configured by
+  // an API key, so — exactly like /nvidia/models above and unlike the OAuth
+  // subscription providers — they live beside /model-providers/models rather
+  // than inside it.
+  //
+  // The `configured` check is the egress guard, not a display detail: with the
+  // variable unset the handler returns before `getAvailable` and NOTHING is
+  // contacted. There is no base URL anywhere in this file for either provider;
+  // the address comes from Pi's own catalogue once a key is present. The
+  // response names the variable the user must set and never reads its value.
+  for (const [providerId, variableName, label, description] of [
+    [
+      "groq",
+      "GROQ_API_KEY",
+      "Groq",
+      "Groq (api.groq.com) via GROQ_API_KEY · billed per token",
+    ],
+    [
+      "cerebras",
+      "CEREBRAS_API_KEY",
+      "Cerebras",
+      "Cerebras (api.cerebras.ai) via CEREBRAS_API_KEY · billed per token",
+    ],
+  ] as const) {
+    app.get(`/${providerId}/models`, async (_req, reply) => {
+      try {
+        if (!process.env[variableName]?.trim()) {
+          return {
+            configured: false,
+            credentialVariableName: variableName,
+            detail: `${label} is not configured. Set ${variableName} in your environment file and restart Kady.`,
+            models: [],
+          };
+        }
+        const available = await runtime.getAvailable(providerId);
+        return {
+          configured: true,
+          credentialVariableName: variableName,
+          models: available.map((model) =>
+            apiKeyModelForClient(model, {
+              sourceId: providerId,
+              sourceLabel: label,
+              providerLabel: label,
+              description,
+            }),
+          ),
+        };
+      } catch (error) {
+        return errorReply(reply, error);
+      }
+    });
+  }
 
   app.post<{ Body: { providerId?: string } | null }>(
     "/model-auth/flows",

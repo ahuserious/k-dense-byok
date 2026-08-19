@@ -1,0 +1,142 @@
+# Model presets
+
+A **model preset** is a saved bundle of *provider + model + call parameters* that you can select anywhere Kady asks you
+to choose a model.
+
+Presets exist so that "which model does this use?" is a decision you can change in one place, at any time, rather than a
+constant somewhere in the code. Anything that references a preset stores its **id** and asks the server to resolve it at
+the moment it dispatches — so editing a preset changes every consumer at once, and deleting one makes those consumers
+fail with a message rather than quietly run on some other model.
+
+Where to find them: **Settings ▸ Model providers ▸ Model presets**.
+
+---
+
+## Provider groups
+
+The section groups presets by provider. There are eight groups:
+
+| Group | How you configure it | Notes |
+|---|---|---|
+| **Cerebras** | set `CEREBRAS_API_KEY` | billed per token |
+| **OpenAI** | connect the ChatGPT subscription under Settings ▸ Model providers | OAuth |
+| **OpenRouter** | add the OpenRouter key under Settings ▸ API keys (`OPENROUTER_API_KEY`, or `OR_API_KEY`) | billed per token |
+| **Anthropic** | connect the Claude subscription under Settings ▸ Model providers | OAuth; metered extra usage |
+| **Groq** | set `GROQ_API_KEY` | billed per token |
+| **xAI** | connect the xAI subscription under Settings ▸ Model providers | OAuth |
+| **Local** | set `OLLAMA_BASE_URL` or `OPENAI_COMPATIBLE_BASE_URL` to your own server | runs on your hardware, $0 |
+| **Modal** | set `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` | remote GPU compute, not a chat endpoint |
+
+A group you have not configured is **shown, not hidden**, marked "Not configured", and tells you exactly which variable
+to set or which subscription to connect. You can still write a preset against it; you just cannot run it yet.
+
+**An unconfigured provider is never contacted.** Kady does not probe an address to find out whether a key works, and it
+ships no default address for any provider — a provider with no key is simply not registered, so a request to it is
+refused before it is built. This is the rule established by three earlier defects (#44, #57, #64) and it is enforced by
+tests that assert *no outbound request was made*, not merely that an empty list came back.
+
+Environment variables are referred to by **name** throughout Kady. Their values are never logged, echoed into an error
+message, or returned by an API.
+
+---
+
+## What a preset holds
+
+- **Name** — anything you like, up to 80 characters.
+- **Provider** — one of the eight groups above.
+- **Model id** — the provider's own id, e.g. `llama-3.3-70b-versatile` for Groq, `anthropic/claude-opus-4.8` for
+  OpenRouter. A **Local** model id names its server: `ollama/llama3`, `openai-compatible/qwen/qwen3-8b`.
+- **Hyperparameters** — temperature, top p, max tokens, reasoning level, seed. Every one is optional; leaving a field
+  empty means "send nothing and let the provider use its default".
+- **System-prompt override** — replaces the system prompt. When set, it is sent as the **only** system message; it is
+  not appended alongside a default one.
+- **Modal presets only** — a Hugging Face model id and a GPU count (see below).
+
+### Parameters your provider will not accept
+
+Not every provider accepts every parameter. Groq and Cerebras take no reasoning level; Anthropic takes no seed; a Modal
+preset takes none of them, because it describes a GPU job rather than a chat call.
+
+Where a provider will not accept a parameter, the control is **disabled and says why** — for example "Groq does not
+accept a reasoning level." It is never left live over a value that would be discarded.
+
+---
+
+## Where a preset's parameters actually apply
+
+This is the part worth reading carefully, because it is the part Kady has got wrong before.
+
+Every surface uses the preset's **provider and model**. Not every surface currently carries its **hyperparameters** and
+**system-prompt override**:
+
+| Surface | Provider + model | Hyperparameters & system-prompt override |
+|---|---|---|
+| **Test preset** (the ▶ button in Settings) | carried | **carried** |
+| **Chat and runs** | carried | not carried yet |
+| **Workflow nodes** | carried | not carried — nodes use their own settings |
+| **Hosted Fusion nodes** | carried | not carried — nodes use their own settings |
+
+The section shows this table live, from the server, so it cannot drift out of date. The same information comes back on
+every `resolve` call as a `binding` block, so any part of Kady that offers you a preset can enforce the same rule
+without re-deriving it.
+
+Use **Test preset** to see exactly what Kady sends: the result names the address, the model id and the sampling values
+that went on the wire.
+
+---
+
+## Modal presets
+
+A Modal preset describes a **Hugging Face model to load onto a number of GPUs**, rather than a chat endpoint:
+
+- **Hugging Face model** — checked for the `org/name` shape only. Kady does **not** contact Hugging Face to confirm the
+  model exists; that check will arrive with the Hugging Face integration.
+- **GPU count** — a whole number of 1 or more, handed to the Modal job as its GPU count. If you pin a Modal instance,
+  the count is bounded by that instance's maximum from Kady's existing Modal catalogue (an A10 accepts at most 4).
+
+Modal presets do not appear in the chat model picker and cannot be sent as a completion — the ▶ Test button is disabled
+with that reason. Modal credentials come from the same single path everything else Modal uses (`MODAL_TOKEN_ID` and
+`MODAL_TOKEN_SECRET`); there is no second credential path for presets. See `docs/modal-compute.md`.
+
+---
+
+## Using a preset
+
+Saved presets appear at the top of the model picker under **Model presets**. Selecting one dispatches to that preset's
+provider and model. If its provider is not configured, the entry is shown as unavailable rather than hidden, so you can
+see why it will not run.
+
+If you delete a preset that something was using, that something fails with a message naming the problem. It does not
+fall back to a default model.
+
+---
+
+## API
+
+Base path `/model-presets` on the Kady backend (no `/api` prefix).
+
+| Method | Path | Body | Returns |
+|---|---|---|---|
+| `GET` | `/model-presets` | — | `{ presets, groups, bindings }` |
+| `GET` | `/model-presets/bindings` | — | `{ surfaces, groups }` |
+| `POST` | `/model-presets` | preset input | the created preset (201) |
+| `PATCH` | `/model-presets/:id` | partial preset input | the updated preset |
+| `DELETE` | `/model-presets/:id` | — | `{ ok: true }` |
+| `POST` | `/model-presets/:id/resolve` | `{ surface? }` | the resolved preset + `binding` + `bindingBySurface` |
+| `POST` | `/model-presets/:id/test` | `{ prompt? }` | the outbound request, the status, and the reply |
+
+`surface` is one of `direct`, `chat-session`, `workflow-node`, `hosted-fusion-supervised`; it defaults to `direct`.
+
+`resolve` fails closed: an unknown id returns 404, and a preset whose provider is unconfigured returns 409 with the
+message naming the variable to set. Neither contacts a provider.
+
+### Referencing a preset from elsewhere in Kady
+
+1. Persist the preset **id** only — never a copy of its contents.
+2. At dispatch time, `POST /model-presets/:id/resolve` and use `ref`, `hyperparameters` and `systemPromptOverride`.
+3. Honour `binding`: render disabled-with-reason anything reported `dropped`, and never send a dropped value as though
+   it had landed.
+4. On 404 or an unconfigured provider, fail closed with the returned message.
+
+Presets are stored in `model-presets.json` under Kady's own home directory — outside every project sandbox, because a
+preset is a decision about which model to use, not a property of one project.
