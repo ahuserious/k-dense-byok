@@ -17,6 +17,7 @@ import {
   writeMcpConfig,
   type McpServerConfig,
 } from "../agent/mcp.ts";
+import { registerIntegrationRoutes } from "./integrations.ts";
 
 const NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
 
@@ -62,6 +63,11 @@ function isStringRecord(value: unknown): value is Record<string, string> {
 }
 
 export async function registerMcpRoutes(app: FastifyInstance): Promise<void> {
+  // The known-integration registry (rows 48-50) rides along with the connector
+  // routes it builds on, so it is live without an edit to server/src/index.ts —
+  // a file lane F12 does not own. See INTEGRATION.md at the clone root.
+  await registerIntegrationRoutes(app);
+
   app.get("/mcp", async () => {
     const paths = activePaths();
     return { mcpServers: readMcpConfig(paths), disabledServers: readMcpDisabled(paths) };
