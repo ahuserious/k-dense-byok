@@ -2102,6 +2102,13 @@
       "date": "2026-08-19",
       "path": "e2e/item-count-reporter.ts",
       "scope": "Wave F lane F13: add its own e2e/wave-f/f13/ spec files to EXPECTED_ITEMS_BY_FILE and move EXPECTED_SUBSTANTIVE_ITEMS/THIN/FIXME/SKIP in the SAME commit as the specs (ADR S11 requirement traceability); the merging orchestrator reconciles the map once per wave"
+    },
+    {
+      "from": "S5",
+      "to": "F14",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/controller.ts",
+      "scope": "Wave F lane F14 (durability watcher, rows 23/24/44 server half): the watcher's STOP AUTHORITY. #39/N-A1 records that the compaction watcher has no way to stop a run; the run controller is where a stop lands. Edits confined to the lane brief; the owner lane S5 is dormant and no Wave-F lane claims this path."
     }
   ]
 }
