@@ -308,13 +308,15 @@
       "web/src/components/model-selector.test.tsx",
       "web/src/lib/use-models.test.ts",
       "docs/model-presets.md",
-      "docs/inventory/f1-model-presets.json"
+      "docs/inventory/f1-model-presets.json",
+      "e2e/wave-f/f1/**"
     ],
     "F3": [
       "web/src/lib/fusion-presets.ts",
       "web/src/lib/fusion-presets.test.ts",
       "web/src/lib/fusion-presets*.ts",
-      "docs/inventory/f3-fusion-presets.json"
+      "docs/inventory/f3-fusion-presets.json",
+      "e2e/wave-f/f3/**"
     ],
     "F2": [
       "server/vendor/pipeline-engine/packages/providers/src/claude/binary-resolver.ts",
@@ -324,7 +326,8 @@
       "server/test/harness-*.test.ts",
       "server/test/claude-code-relay*.test.ts",
       "docs/harnesses.md",
-      "docs/inventory/f2-harness.json"
+      "docs/inventory/f2-harness.json",
+      "e2e/wave-f/f2/**"
     ],
     "F5": [
       "server/src/workflows/kinds/**",
@@ -340,7 +343,8 @@
       "server/test/formatted-output*.test.ts",
       "server/test/council-*.test.ts",
       "docs/adr/F5-*.md",
-      "docs/inventory/f5-node-kinds.json"
+      "docs/inventory/f5-node-kinds.json",
+      "e2e/wave-f/f5/**"
     ],
     "F4": [
       "server/src/api/lean4*.ts",
@@ -348,7 +352,8 @@
       "web/src/components/lean4/**",
       "web/src/lib/lean4*.ts",
       "docs/lean4.md",
-      "docs/inventory/f4-lean4.json"
+      "docs/inventory/f4-lean4.json",
+      "e2e/wave-f/f4/**"
     ],
     "F14": [
       "server/src/workflows/durability*.ts",
@@ -357,7 +362,8 @@
       "server/test/compaction-watcher*.test.ts",
       "server/test/context-watcher*.test.ts",
       "server/test/lateral-pass*.test.ts",
-      "docs/inventory/f14-durability.json"
+      "docs/inventory/f14-durability.json",
+      "e2e/wave-f/f14/**"
     ],
     "BD": [
       "docs/design/agent-teams/**",
@@ -378,7 +384,8 @@
       "server/vendor/pipeline-engine/packages/web/src/components/workflows/pipeline/**",
       "server/vendor/pipeline-engine/packages/web/src/components/workflows/*.wave-f.test.ts",
       "docs/adr/F6-*.md",
-      "docs/inventory/f6-builder.json"
+      "docs/inventory/f6-builder.json",
+      "e2e/wave-f/f6/**"
     ],
     "F7": [
       "server/seed/skills/scientific-pipelines/SKILL.md",
@@ -393,7 +400,8 @@
       "server/test/seed-pipelines*.test.ts",
       "docs/seed-pipelines.md",
       "docs/adr/F7-*.md",
-      "docs/inventory/f7-seed-import.json"
+      "docs/inventory/f7-seed-import.json",
+      "e2e/wave-f/f7/**"
     ],
     "F8": [
       "web/src/components/settings-dialog.tsx",
@@ -407,17 +415,18 @@
       "server/src/api/subscription-usage*.ts",
       "server/src/agent/subscription-usage*.ts",
       "server/test/subscription-usage*.test.ts",
-      "docs/inventory/f8-settings.json"
+      "docs/inventory/f8-settings.json",
+      "e2e/wave-f/f8/**"
     ],
     "F9": [
       "web/src/components/chat-tab.test.tsx",
       "web/src/components/chat/**",
       "web/src/lib/prompt-elevation*.ts",
       "web/src/lib/baby-view*.ts",
-      "docs/inventory/f9-chat.json"
+      "docs/inventory/f9-chat.json",
+      "e2e/wave-f/f9/**"
     ],
     "F10": [
-      "e2e/wave-f/**",
       "scripts/secrets-prefill*.mjs",
       "scripts/secret-diff-gate*.mjs",
       "scripts/smoke-openrouter*.mjs",
@@ -426,7 +435,9 @@
       "scripts/smoke-openrouter*.test.mjs",
       ".github/workflows/wave-f-*.yml",
       "docs/testing/**",
-      "docs/inventory/f10-verification.json"
+      "docs/inventory/f10-verification.json",
+      "e2e/wave-f/harness/**",
+      "e2e/wave-f/*"
     ],
     "F11": [
       "server/src/agent/skills-install.ts",
@@ -451,7 +462,8 @@
       "web/src/components/subagents-panel.test.tsx",
       "docs/skills.md",
       "docs/adr/F11-*.md",
-      "docs/inventory/f11-skills.json"
+      "docs/inventory/f11-skills.json",
+      "e2e/wave-f/f11/**"
     ],
     "F12": [
       "server/src/agent/mcp.ts",
@@ -472,7 +484,8 @@
       "web/src/components/connectors-panel.test.tsx",
       "web/src/components/modal-jobs-panel.test.tsx",
       "docs/integrations-*.md",
-      "docs/inventory/f12-integrations.json"
+      "docs/inventory/f12-integrations.json",
+      "e2e/wave-f/f12/**"
     ],
     "F13": [
       "server/src/scheduling/**",
@@ -482,7 +495,8 @@
       "web/src/lib/schedules*.ts",
       "docs/schedules.md",
       "docs/adr/F13-*.md",
-      "docs/inventory/f13-schedules.json"
+      "docs/inventory/f13-schedules.json",
+      "e2e/wave-f/f13/**"
     ]
   },
   "handoffs": [
@@ -1997,6 +2011,97 @@
       "date": "2026-08-19",
       "path": "server/src/api/console.ts",
       "scope": "Wave F lane F13 (cron jobs in the Console (row 52) \u2014 greenfield durable scheduler) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F1",
+      "date": "2026-08-19",
+      "path": "e2e/item-count-reporter.ts",
+      "scope": "Wave F lane F1: add its own e2e/wave-f/f1/ spec files to EXPECTED_ITEMS_BY_FILE and move EXPECTED_SUBSTANTIVE_ITEMS/THIN/FIXME/SKIP in the SAME commit as the specs (ADR S11 requirement traceability); the merging orchestrator reconciles the map once per wave"
+    },
+    {
+      "from": "S11",
+      "to": "F3",
+      "date": "2026-08-19",
+      "path": "e2e/item-count-reporter.ts",
+      "scope": "Wave F lane F3: add its own e2e/wave-f/f3/ spec files to EXPECTED_ITEMS_BY_FILE and move EXPECTED_SUBSTANTIVE_ITEMS/THIN/FIXME/SKIP in the SAME commit as the specs (ADR S11 requirement traceability); the merging orchestrator reconciles the map once per wave"
+    },
+    {
+      "from": "S11",
+      "to": "F2",
+      "date": "2026-08-19",
+      "path": "e2e/item-count-reporter.ts",
+      "scope": "Wave F lane F2: add its own e2e/wave-f/f2/ spec files to EXPECTED_ITEMS_BY_FILE and move EXPECTED_SUBSTANTIVE_ITEMS/THIN/FIXME/SKIP in the SAME commit as the specs (ADR S11 requirement traceability); the merging orchestrator reconciles the map once per wave"
+    },
+    {
+      "from": "S11",
+      "to": "F5",
+      "date": "2026-08-19",
+      "path": "e2e/item-count-reporter.ts",
+      "scope": "Wave F lane F5: add its own e2e/wave-f/f5/ spec files to EXPECTED_ITEMS_BY_FILE and move EXPECTED_SUBSTANTIVE_ITEMS/THIN/FIXME/SKIP in the SAME commit as the specs (ADR S11 requirement traceability); the merging orchestrator reconciles the map once per wave"
+    },
+    {
+      "from": "S11",
+      "to": "F4",
+      "date": "2026-08-19",
+      "path": "e2e/item-count-reporter.ts",
+      "scope": "Wave F lane F4: add its own e2e/wave-f/f4/ spec files to EXPECTED_ITEMS_BY_FILE and move EXPECTED_SUBSTANTIVE_ITEMS/THIN/FIXME/SKIP in the SAME commit as the specs (ADR S11 requirement traceability); the merging orchestrator reconciles the map once per wave"
+    },
+    {
+      "from": "S11",
+      "to": "F14",
+      "date": "2026-08-19",
+      "path": "e2e/item-count-reporter.ts",
+      "scope": "Wave F lane F14: add its own e2e/wave-f/f14/ spec files to EXPECTED_ITEMS_BY_FILE and move EXPECTED_SUBSTANTIVE_ITEMS/THIN/FIXME/SKIP in the SAME commit as the specs (ADR S11 requirement traceability); the merging orchestrator reconciles the map once per wave"
+    },
+    {
+      "from": "S11",
+      "to": "F6",
+      "date": "2026-08-19",
+      "path": "e2e/item-count-reporter.ts",
+      "scope": "Wave F lane F6: add its own e2e/wave-f/f6/ spec files to EXPECTED_ITEMS_BY_FILE and move EXPECTED_SUBSTANTIVE_ITEMS/THIN/FIXME/SKIP in the SAME commit as the specs (ADR S11 requirement traceability); the merging orchestrator reconciles the map once per wave"
+    },
+    {
+      "from": "S11",
+      "to": "F7",
+      "date": "2026-08-19",
+      "path": "e2e/item-count-reporter.ts",
+      "scope": "Wave F lane F7: add its own e2e/wave-f/f7/ spec files to EXPECTED_ITEMS_BY_FILE and move EXPECTED_SUBSTANTIVE_ITEMS/THIN/FIXME/SKIP in the SAME commit as the specs (ADR S11 requirement traceability); the merging orchestrator reconciles the map once per wave"
+    },
+    {
+      "from": "S11",
+      "to": "F8",
+      "date": "2026-08-19",
+      "path": "e2e/item-count-reporter.ts",
+      "scope": "Wave F lane F8: add its own e2e/wave-f/f8/ spec files to EXPECTED_ITEMS_BY_FILE and move EXPECTED_SUBSTANTIVE_ITEMS/THIN/FIXME/SKIP in the SAME commit as the specs (ADR S11 requirement traceability); the merging orchestrator reconciles the map once per wave"
+    },
+    {
+      "from": "S11",
+      "to": "F9",
+      "date": "2026-08-19",
+      "path": "e2e/item-count-reporter.ts",
+      "scope": "Wave F lane F9: add its own e2e/wave-f/f9/ spec files to EXPECTED_ITEMS_BY_FILE and move EXPECTED_SUBSTANTIVE_ITEMS/THIN/FIXME/SKIP in the SAME commit as the specs (ADR S11 requirement traceability); the merging orchestrator reconciles the map once per wave"
+    },
+    {
+      "from": "S11",
+      "to": "F11",
+      "date": "2026-08-19",
+      "path": "e2e/item-count-reporter.ts",
+      "scope": "Wave F lane F11: add its own e2e/wave-f/f11/ spec files to EXPECTED_ITEMS_BY_FILE and move EXPECTED_SUBSTANTIVE_ITEMS/THIN/FIXME/SKIP in the SAME commit as the specs (ADR S11 requirement traceability); the merging orchestrator reconciles the map once per wave"
+    },
+    {
+      "from": "S11",
+      "to": "F12",
+      "date": "2026-08-19",
+      "path": "e2e/item-count-reporter.ts",
+      "scope": "Wave F lane F12: add its own e2e/wave-f/f12/ spec files to EXPECTED_ITEMS_BY_FILE and move EXPECTED_SUBSTANTIVE_ITEMS/THIN/FIXME/SKIP in the SAME commit as the specs (ADR S11 requirement traceability); the merging orchestrator reconciles the map once per wave"
+    },
+    {
+      "from": "S11",
+      "to": "F13",
+      "date": "2026-08-19",
+      "path": "e2e/item-count-reporter.ts",
+      "scope": "Wave F lane F13: add its own e2e/wave-f/f13/ spec files to EXPECTED_ITEMS_BY_FILE and move EXPECTED_SUBSTANTIVE_ITEMS/THIN/FIXME/SKIP in the SAME commit as the specs (ADR S11 requirement traceability); the merging orchestrator reconciles the map once per wave"
     }
   ]
 }

@@ -191,3 +191,10 @@ Policy amendment by the lead orchestrator before any Wave F lane started. Each l
 | F11 | E | the seven skills + the skill curator (rows 41-47, 51) | 23 | 1 |
 | F12 | E | integrations: InfraNodus MCP, Hugging Face CLI, Modal CLI (rows 48-50) | 19 | 0 |
 | F13 | E | cron jobs in the Console (row 52) — greenfield durable scheduler | 8 | 2 |
+
+**Amendment #2 (2026-08-19, lead).** Every Wave F lane that adds Playwright items owns `e2e/wave-f/<lane>/**` and holds
+an S11 handoff for `e2e/item-count-reporter.ts` so its per-file pins and the substantive/thin/fixme/skip totals move in
+the same commit as its specs (ADR S11-requirement-traceability). F10 keeps the harness (`e2e/wave-f/harness/**`, the
+shared files directly under `e2e/wave-f/`, the configs, fixtures and the existing spec files). The reporter is therefore
+the one deliberately shared path across Wave F lanes; the merging orchestrator reconciles the map at each merge, exactly
+as the 2026-08-18 wave did, and `wave-f-intersect.py` lists it as shared-reconciled rather than as an intersection.
