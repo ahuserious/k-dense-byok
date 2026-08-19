@@ -3,6 +3,11 @@
 Three scripts, one rule: **a value is moved, never shown.** Nothing here prints, logs,
 echoes, or commits a credential. Every invocation below has actually been run.
 
+One convention in the pasted output: a **`N`** or **`M`** in place of a number is elided on
+purpose. Counts that depend on the size of the diff (added lines, files scanned) change on
+every commit, so pinning one here would make this file wrong the moment the next line
+lands. Everything that is a *behaviour* rather than a *measurement* is pasted verbatim.
+
 | Script | What it does | Run it |
 |---|---|---|
 | `scripts/secrets-prefill.mjs` | Assembles the run environment from your local sources and injects it into a child process. | `node scripts/secrets-prefill.mjs --list` |
@@ -51,7 +56,7 @@ working directory is byte-for-byte unchanged across an injection run).
 
 ### The refuse-to-write rule
 
-`--write <path>` resolves the path, then asks git twice, **in the target's own directory**:
+`--write <path>` asks git twice, **in the target's own directory**:
 
 - `git ls-files --error-unmatch -- <path>` — is it tracked?
 - `git check-ignore --quiet -- <path>` — is it ignored?
@@ -62,6 +67,35 @@ refusal that names the path and the reason and exits 1:
 - tracked → *"git tracks this path; writing a secret here would commit it"*
 - not ignored → *"git does not ignore this path; an untracked-but-unignored file is one `git add .` from being committed"*
 - not inside a git repository at all → refused, because the question cannot be answered
+
+**Both of those questions are about a NAME, not about the bytes the name reaches**, and that
+is not a detail — it was a real hole. An ignored-and-untracked **symlink** pointing at a
+tracked file answers both questions correctly *about itself* while the write lands in the
+tracked file: both branches evaluate exactly as designed and a credential still ends up one
+`git commit -a` from being published. A **hard link** does the same with no link to see.
+So the filesystem is interrogated before git is, and the name is pinned to its bytes:
+
+- a symbolic link → refused outright, before git is asked at all. Resolving the link and
+  re-asking git would also work; refusing is simpler, cannot be subtly wrong, and no
+  legitimate caller needs to write a secret through a link.
+- a file with more than one hard link → refused: another name for the same bytes may be
+  tracked, and git was only asked about this one.
+- anything that exists and is not a regular file → refused.
+
+That closes the "it is a link right now" question. The "a link was planted between the
+check and the write" question is closed separately, at the only moment that matters: the
+file is opened with **`O_NOFOLLOW`**, so `open()` itself fails on a symlinked final
+component, the hard-link count is re-read with `fstat` on the descriptor actually held, and
+**both the mode and the bytes are applied to that descriptor, never to the path**. (The
+earlier `chmod(path)` followed a symlink too, and silently rewrote a tracked file's mode.)
+`O_TRUNC` is deliberately not requested — truncating at open time would destroy the target
+before the hard-link question could be answered — so the truncation happens on the
+descriptor afterwards.
+
+**Scope.** Without `--only`, `--write` emits every reported present name, which includes
+every secret-shaped variable in the ambient environment. `--only <NAME>` governs the written
+body as well as the printed table, so `--write ./local.env --only OPENROUTER_API_KEY` writes
+exactly one name. Choose the blast radius deliberately.
 
 ### What it never does
 
@@ -105,6 +139,23 @@ content, never a line number.
   lines are searched for those. This catches the real leak the regexes miss: the actual key,
   base64'd into a fixture. It reports the variable **NAME** — a name is not a value.
 
+**A zero on this row has two opposite meanings**, and the gate says which one happened.
+"Every encoding of every secret this process holds was searched for and none appeared" is a
+verdict; "this process held no secrets, so nothing was searched for" is not one — and the
+second is what a CI job produces by default, because a job with no `env:` block ships no
+secrets. So the row renders as either
+
+```
+- env var value (any encoding): not run — 0 secret-shaped variables in the environment
+- env var value (any encoding): 0 (searched N representation(s) of M secret-shaped variable(s))
+```
+
+and **`--require-env-values`** turns the first state into exit 2. Use that flag in CI with
+the real secrets mapped into the job environment (§5): without it, the strongest half of
+this gate reports a clean zero forever. A tool that did not run is not a verdict. The counts
+are counts — a variable name is printed only next to a hit, where the leak has already
+happened.
+
 The `operator email` pattern deliberately does not embed the operator's address (that would
 itself be the leak). It matches any address outside a documented example/reserved list.
 
@@ -114,7 +165,7 @@ itself be the leak). It matches any address outside a documented example/reserve
 |---|---|
 | 0 | clean |
 | 1 | findings — at least one non-allowlisted hit |
-| 2 | usage or environment error, an allowlist entry without a reason, or a git failure |
+| 2 | usage or environment error, an allowlist entry without a reason, a git failure, or `--require-env-values` with no secret-shaped variable in the environment |
 
 It never exits 0 on an error. **Never pipe it into anything**: capture to a log and test `$?`.
 
@@ -189,10 +240,23 @@ Exit 0. It never prints `PASS` without a key. `--require-key` turns that absence
 ### Assertions — on the response, not the request
 
 - the completion text is non-empty
-- the model id the provider returned matches the one requested
+- the model id the provider returned matches the one requested — **exactly** when the
+  requested id ends in `:free`. That suffix is not cosmetic: `vendor/model` is the *paid*
+  twin of `vendor/model:free`, so normalizing it away on both sides would make a paid
+  substitution compare equal, which is the one thing this row's careful free-model ranking
+  exists to prevent. The tolerant comparison survives only for a request with no suffix,
+  where there is no paid twin to confuse.
 - token usage was recorded
+- **the call cost zero.** The row is "cheapest *free* model"; without this the cost was
+  printed and read by nothing, so a substitution could print `RESULT: PASS` with a charge
+  sitting visibly in the output. A provider that reports *no* cost figure fails this too —
+  an unknown cost is not a zero cost.
 
-Plus the elapsed time for the call and for the whole run.
+Plus the elapsed time for the call and for the whole run. A run that fails prints
+`ERROR: <message>` with the provider's own explanation (through the scrubber, so a provider
+echoing a header cannot leak), and a candidate that answers with `stopReason: error` or a
+non-null error message counts as a **failed** candidate, so the retry loop tries the next
+model exactly as its printed "will try up to N" says it will.
 
 ---
 
@@ -252,12 +316,17 @@ Counts of ADDED lines matching each pattern, by file. Values never printed.
     - (allowlisted) scripts/secret-diff-gate.test.mjs: 2
     - (allowlisted) scripts/smoke-openrouter.test.mjs: 1
 …
-- env var value (any encoding): 0
+- env var value (any encoding): 0 (searched N representation(s) of M secret-shaped variable(s))
 
-Scanned 2648 added lines across 8 files.
+Scanned N added lines across M files.
 $ echo $?
 0
 ```
+
+(`N`/`M` elided per the note at the top: those counts move with every commit. The `env var
+value` row shows the *searched* form because this run had the owner's environment loaded;
+with an empty environment the same run prints `not run — 0 secret-shaped variables in the
+environment` instead, and `--require-env-values` makes that exit 2.)
 
 ### The live BYOK smoke test, with the key injected by the prefill script
 
@@ -273,8 +342,9 @@ STOP REASON: stop
 REPLY (model output, first 200 chars): "User Safety: safe"
 ASSERT the completion text is non-empty: PASS — 17 characters
 ASSERT the returned model id matches the requested one: PASS — requested=nvidia/nemotron-3.5-content-safety:free returned=nvidia/nemotron-3.5-content-safety:free
-ASSERT token usage was recorded: PASS — input=472 output=5 total=477 costUsd=0
-ELAPSED: 578 ms for the call, 3190 ms total
+ASSERT token usage was recorded: PASS — input=472 output=5 total=477
+ASSERT the call cost zero: PASS — costUsd=0
+ELAPSED: N ms for the call, N ms total
 RESULT: PASS
 $ echo $?
 0
@@ -300,11 +370,95 @@ set, so the battery stays hermetic.
 
 ## 5. CI wiring
 
-This lane does not own `.github/workflows/`. The exact YAML to add is in `INTEGRATION.md` at
-the repository root, for the workflow-owning lane to paste in. In summary:
+This lane does not own `.github/workflows/`, so the YAML below is not installed by this
+commit — it is **printed here in full, on purpose**. An earlier draft pointed at an
+`INTEGRATION.md` at the repository root, which is deliberately never committed; post-merge
+that pointer resolved to nothing, which is exactly the drift these scripts exist to stop.
+The workflow-owning lane pastes this in as-is.
 
-- run `node scripts/secret-diff-gate.mjs --base "$BASE_SHA"` on every pull request, capturing
-  to a log and testing `$?` (never piping);
-- run `node scripts/smoke-openrouter.mjs --require-key` in a job that has
-  `OPENROUTER_API_KEY` in its environment, so an absent secret fails loudly instead of
-  passing quietly.
+```yaml
+# .github/workflows/secrets.yml
+name: secrets
+
+on:
+  pull_request:
+
+jobs:
+  secret-diff-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The gate diffs against the PR base, so the base commit has to be present.
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: secret/PII diff gate
+        # The value-derived half of the gate searches the added lines for every encoding
+        # of every secret-shaped variable IN THIS JOB'S ENVIRONMENT. With no `env:` block
+        # it has nothing to search for and reports a clean zero forever — the leak it
+        # exists to catch (the real key, base64'd into a fixture) is exactly the one the
+        # regex half misses. So the secrets are mapped in, and --require-env-values makes
+        # the job fail loudly (exit 2) if that mapping is ever dropped or renamed.
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          STABLY_API_KEY: ${{ secrets.STABLY_API_KEY }}
+          STABLY_PROJECT_ID: ${{ secrets.STABLY_PROJECT_ID }}
+        run: |
+          # Captured to a log and $? tested, never piped: a pipe would report the exit
+          # code of the pipe's last stage and turn a finding into a pass.
+          node scripts/secret-diff-gate.mjs \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            --head "${{ github.event.pull_request.head.sha }}" \
+            --require-env-values > secret-diff-gate.log 2>&1
+          status=$?
+          cat secret-diff-gate.log
+          exit $status
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: secret-diff-gate
+          path: secret-diff-gate.log
+
+  byok-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm ci
+        working-directory: server
+      - name: BYOK smoke test on the cheapest free model
+        # --require-key turns an absent secret into exit 2 instead of a SKIP at exit 0.
+        # Without it a rotated-away or misnamed secret would pass this job quietly.
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          node scripts/smoke-openrouter.mjs --require-key > smoke-openrouter.log 2>&1
+          status=$?
+          cat smoke-openrouter.log
+          exit $status
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-openrouter
+          path: smoke-openrouter.log
+```
+
+Two things in that YAML are load-bearing and easy to drop:
+
+1. **`--require-env-values` plus the `env:` block on the gate job.** Together they are the
+   difference between "searched and found nothing" and "searched for nothing". Removing
+   either one silently disarms the half of the gate that catches a base64'd key.
+2. **`--require-key` on the smoke job.** Without it, an absent `OPENROUTER_API_KEY` prints
+   a SKIP and exits 0, and the job goes green having proved nothing.
+
+Neither job pipes a script into anything. Both capture to a log, test `$?`, print the log,
+and re-exit with the captured status — a pipe reports the last stage's exit code, which is
+how a failing gate becomes a passing job.
+
+`secrets-prefill.mjs` has no role in CI: CI already has the secrets in its environment. The
+prefill script is for a local run, where they are spread across files and directories.

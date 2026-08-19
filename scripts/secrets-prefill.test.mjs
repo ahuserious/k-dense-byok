@@ -12,6 +12,8 @@ import {
   loadDirectorySource,
   parseEnvText,
   variableNameForFile,
+  WriteRefusal,
+  openGuardedWriteDescriptor,
 } from "./secrets-prefill.mjs";
 
 const scriptPath = path.resolve(
@@ -220,6 +222,192 @@ test("--write refuses a tracked path and an unignored path, and allows an ignore
   // ignores and does not track. The script's own output still must not contain it.
   assert.ok(fs.readFileSync(written, "utf-8").includes(sentinel));
   assertNoSentinel(allowed, sentinel, "--write allowed");
+
+  fs.rmSync(fixture, { recursive: true, force: true });
+});
+
+/**
+ * Build a throwaway git repository with `tracked.env` committed and `.gitignore` listing
+ * every name a test wants git to ignore. Returns { fixture, repository, envFile, sentinel }.
+ */
+function makeWriteFixture(label, ignored) {
+  const fixture = makeFixtureDirectory();
+  const sentinel = makeSentinel(label);
+  const envFile = path.join(fixture, "fixture.env");
+  fs.writeFileSync(envFile, `FIXTURE_API_KEY=${sentinel}\n`, { mode: 0o600 });
+
+  const repository = path.join(fixture, "repo");
+  fs.mkdirSync(repository);
+  const git = (...args) =>
+    spawnSync("git", args, { cwd: repository, encoding: "utf-8", stdio: "pipe" });
+  git("init", "--quiet");
+  git("config", "user.email", "lane@example.invalid");
+  git("config", "user.name", "Lane Test");
+  fs.writeFileSync(path.join(repository, ".gitignore"), `${ignored.join("\n")}\n`);
+  fs.writeFileSync(path.join(repository, "tracked.env"), "PLACEHOLDER=\n");
+  git("add", ".gitignore", "tracked.env");
+  git("commit", "--quiet", "-m", "fixture");
+  return { fixture, repository, envFile, sentinel };
+}
+
+test("--write refuses a SYMLINK, even one git calls untracked and ignored", () => {
+  // The reviewer's attack, verbatim: both git questions are about the NAME, so a link
+  // that is itself ignored and untracked answers them correctly while the bytes land in
+  // the tracked file it points at. Before the fix this printed `wrote 1 name(s)` at
+  // exit 0 and `git status` reported ` M tracked.env`.
+  const { fixture, repository, envFile, sentinel } = makeWriteFixture("symlink", ["link.env"]);
+  fs.symlinkSync("tracked.env", path.join(repository, "link.env"));
+
+  const trackedPath = path.join(repository, "tracked.env");
+  const modeBefore = fs.statSync(trackedPath).mode & 0o777;
+  const result = runScript(
+    ["--no-default-sources", "--no-ambient", "--source", envFile, "--write",
+      path.join(repository, "link.env")],
+    { cwd: repository },
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /refusing to write/);
+  assert.match(result.stderr, /symbolic link/);
+  assert.match(result.stderr, /link\.env/);
+  assertNoSentinel(result, sentinel, "--write symlink");
+  // The effect, not the message: the tracked file is byte-identical and its mode is
+  // untouched, and git sees no modification.
+  assert.equal(fs.readFileSync(trackedPath, "utf-8"), "PLACEHOLDER=\n");
+  assert.equal(fs.statSync(trackedPath).mode & 0o777, modeBefore);
+  const status = spawnSync("git", ["status", "--short"], {
+    cwd: repository,
+    encoding: "utf-8",
+  });
+  assert.equal(status.stdout.trim(), "", "git saw a modification after a refused write");
+
+  fs.rmSync(fixture, { recursive: true, force: true });
+});
+
+test("--write refuses a HARD LINK, which defeats the git questions with no link to see", () => {
+  const { fixture, repository, envFile, sentinel } = makeWriteFixture("hardlink", ["hard.env"]);
+  const trackedPath = path.join(repository, "tracked.env");
+  fs.linkSync(trackedPath, path.join(repository, "hard.env"));
+
+  const result = runScript(
+    ["--no-default-sources", "--no-ambient", "--source", envFile, "--write",
+      path.join(repository, "hard.env")],
+    { cwd: repository },
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /refusing to write/);
+  assert.match(result.stderr, /2 hard links/);
+  assertNoSentinel(result, sentinel, "--write hardlink");
+  assert.equal(fs.readFileSync(trackedPath, "utf-8"), "PLACEHOLDER=\n");
+  const status = spawnSync("git", ["status", "--short"], {
+    cwd: repository,
+    encoding: "utf-8",
+  });
+  assert.equal(status.stdout.trim(), "");
+
+  fs.rmSync(fixture, { recursive: true, force: true });
+});
+
+test("the descriptor guard refuses a link on its own, without asking git at all", () => {
+  // The second layer, tested in isolation from the first. classifyWriteTarget's lstat
+  // answers "is it a link right now"; this is what stops a link planted after that
+  // answer, so it has to refuse a link even when nothing checked beforehand.
+  const fixture = makeFixtureDirectory();
+  const realFile = path.join(fixture, "real.txt");
+  fs.writeFileSync(realFile, "untouched\n");
+  const link = path.join(fixture, "link.txt");
+  fs.symlinkSync(realFile, link);
+
+  assert.throws(
+    () => openGuardedWriteDescriptor(link),
+    (error) => error instanceof WriteRefusal && /could not be opened without following a link/.test(error.message),
+  );
+  assert.equal(fs.readFileSync(realFile, "utf-8"), "untouched\n");
+
+  const hard = path.join(fixture, "hard.txt");
+  fs.linkSync(realFile, hard);
+  assert.throws(
+    () => openGuardedWriteDescriptor(hard),
+    (error) => error instanceof WriteRefusal && /2 hard links/.test(error.message),
+  );
+  assert.equal(fs.readFileSync(realFile, "utf-8"), "untouched\n");
+
+  // And on a plain file it succeeds, returning a descriptor already 0600 and truncated.
+  const plain = path.join(fixture, "plain.txt");
+  fs.writeFileSync(plain, "a much longer previous body that must not survive\n", { mode: 0o644 });
+  const descriptor = openGuardedWriteDescriptor(plain);
+  fs.writeSync(descriptor, "new\n", 0, "utf8");
+  fs.closeSync(descriptor);
+  assert.equal(fs.readFileSync(plain, "utf-8"), "new\n");
+  assert.equal(fs.statSync(plain).mode & 0o777, 0o600);
+
+  fs.rmSync(fixture, { recursive: true, force: true });
+});
+
+test("--only bounds what --write emits, not just what --list reports", () => {
+  // Without --only, --write emits every reported present name, which on a real machine is
+  // every secret-shaped ambient variable. --only is the caller's control over that blast
+  // radius, so it has to reach the written body and not stop at the printed table.
+  const fixture = makeFixtureDirectory();
+  const wanted = makeSentinel("wanted");
+  const unwanted = makeSentinel("unwanted");
+  const envFile = path.join(fixture, "fixture.env");
+  fs.writeFileSync(
+    envFile,
+    `FIXTURE_API_KEY=${wanted}\nOTHER_API_TOKEN=${unwanted}\n`,
+    { mode: 0o600 },
+  );
+
+  const repository = path.join(fixture, "repo");
+  fs.mkdirSync(repository);
+  const git = (...args) =>
+    spawnSync("git", args, { cwd: repository, encoding: "utf-8", stdio: "pipe" });
+  git("init", "--quiet");
+  git("config", "user.email", "lane@example.invalid");
+  git("config", "user.name", "Lane Test");
+  fs.writeFileSync(path.join(repository, ".gitignore"), "secrets.env\n");
+  git("add", ".gitignore");
+  git("commit", "--quiet", "-m", "fixture");
+
+  const target = path.join(repository, "secrets.env");
+  const result = runScript(
+    ["--no-default-sources", "--no-ambient", "--source", envFile,
+      "--only", "FIXTURE_API_KEY", "--write", target],
+    { cwd: repository },
+  );
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /wrote 1 name\(s\)/);
+  const body = fs.readFileSync(target, "utf-8");
+  assert.ok(body.includes("FIXTURE_API_KEY="), "the requested name is missing");
+  assert.ok(!body.includes("OTHER_API_TOKEN"), "an unrequested name was written");
+  assert.ok(!body.includes(unwanted), "an unrequested VALUE was written");
+  assertNoSentinel(result, wanted, "--write --only");
+  assertNoSentinel(result, unwanted, "--write --only");
+
+  fs.rmSync(fixture, { recursive: true, force: true });
+});
+
+test("an allowed --write over a longer existing file leaves no tail of the old body", () => {
+  // O_TRUNC is not requested at open time (it would destroy the file before the hard-link
+  // question could be answered), so the truncation happens on the descriptor afterwards.
+  // If that were ever dropped, a shorter body would leave the previous file's tail behind.
+  const { fixture, repository, envFile, sentinel } = makeWriteFixture("truncate", ["secrets.env"]);
+  const target = path.join(repository, "secrets.env");
+  const oldTail = "PREVIOUS_LONGER_BODY_THAT_MUST_NOT_SURVIVE=" + "x".repeat(400);
+  fs.writeFileSync(target, `${oldTail}\n`, { mode: 0o644 });
+
+  const result = runScript(
+    ["--no-default-sources", "--no-ambient", "--source", envFile,
+      "--only", "FIXTURE_API_KEY", "--write", target],
+    { cwd: repository },
+  );
+  assert.equal(result.status, 0);
+  const body = fs.readFileSync(target, "utf-8");
+  assert.ok(!body.includes("PREVIOUS_LONGER_BODY"), "the previous body survived the write");
+  assert.ok(body.includes(sentinel));
+  assert.equal(fs.statSync(target).mode & 0o777, 0o600);
+  assertNoSentinel(result, sentinel, "--write truncating");
 
   fs.rmSync(fixture, { recursive: true, force: true });
 });

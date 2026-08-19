@@ -9,11 +9,19 @@
  *   1. It never prints a value. Its entire human output is built from variable NAMES,
  *      source names, and the words `present`/`absent`. As defence in depth every byte it
  *      writes is passed through `scrubText` from `hosted-evidence-secrets.mjs` and then
- *      re-scanned with `findSecretRepresentation`; if a representation of a loaded value
- *      somehow survived into the output the write fails closed instead of leaking.
- *   2. It never persists a value to a path git would keep. `--write` consults git twice —
+ *      re-scanned with `findSecretRepresentation`; if a representation somehow survived
+ *      into the output the write fails closed instead of leaking. The scrubber's inputs
+ *      are the values loaded from a FILE or DIRECTORY source — the values this script
+ *      read itself. Ambient values are not fed to it, because no code path prints an
+ *      ambient value; the claim is narrowed to what the code does rather than left
+ *      reading wider than the guard actually is.
+ *   2. It never persists a value to a path git would keep. `--write` asks git twice —
  *      `ls-files --error-unmatch` (tracked?) and `check-ignore` (ignored?) — and refuses
- *      unless the target is untracked AND ignored.
+ *      unless the target is untracked AND ignored. Both questions are about a NAME, so
+ *      the name is pinned to its bytes first: a symlink, a hard-linked file and a
+ *      non-regular file are each refused before git is consulted, and the write opens
+ *      with O_NOFOLLOW and applies mode and bytes to the descriptor, so a link planted
+ *      after the check cannot be followed either.
  *   3. A missing source is a skip with a named reason, never an error and never a silent
  *      zero; an unparseable source is an error naming the file and the LINE NUMBER, never
  *      the line's content.
@@ -421,9 +429,17 @@ Modes:
                          inheriting stdio, and exits with the child's exit code. The
                          environment is passed through the process table only — nothing
                          is written to disk to do it.
-  --write <path>         Write the assembled non-ambient names to <path> as KEY=VALUE,
-                         mode 0600. REFUSES unless git reports the path as untracked AND
+  --write <path>         Write the reported present names to <path> as KEY=VALUE, mode
+                         0600. REFUSES unless git reports the path as untracked AND
                          ignored; the refusal names the path and the reason and exits 1.
+                         It also refuses a symbolic link, a hard-linked file and a
+                         non-regular file BEFORE asking git, because both git questions
+                         are about the name and not about the bytes it reaches, and it
+                         opens with O_NOFOLLOW so a link planted after the check is not
+                         followed either.
+                         Scope: without --only this writes EVERY reported present name,
+                         which includes every secret-shaped ambient variable. Pair it
+                         with --only to choose the blast radius.
   --help                 This text.
 
 Options:
@@ -435,8 +451,11 @@ Options:
   --no-default-sources   Use only --source entries (and the ambient environment).
   --no-ambient           Do not seed from the current process environment. Injection mode
                          then hands the child only what the sources supplied.
-  --only <NAME>          Restrict the reported table to <NAME>, repeatable. Does not
-                         change what injection mode passes to the child.
+  --only <NAME>          Restrict the reported set to <NAME>, repeatable. This governs
+                         both --list and what --write emits, so "--write <path> --only
+                         OPENROUTER_API_KEY" writes exactly that one name. It does not
+                         change what injection mode passes to the child, which is the
+                         whole assembled environment.
 
 Source precedence, highest first (the defaults):
   1. ambient-env               the current process environment
@@ -457,7 +476,8 @@ Guarantees:
   · No value is printed in any mode, including --help, --list and every error path. Error
     messages about unparseable sources name the file and the LINE NUMBER only.
   · Every byte this script writes is scrubbed against the representations of every value
-    it loaded and re-scanned before it is emitted.
+    it loaded FROM A FILE OR DIRECTORY SOURCE, and re-scanned, before it is emitted.
+    Ambient values are not in the scrubber's input set because no path prints one.
   · Injection mode inherits the child's stdio: what the CHILD prints is the child's
     responsibility. Point it at a command that does not print secrets.
 
@@ -465,6 +485,7 @@ Examples:
   node scripts/secrets-prefill.mjs --list
   node scripts/secrets-prefill.mjs -- node scripts/smoke-openrouter.mjs --require-key
   node scripts/secrets-prefill.mjs --source ./my-secrets.env --no-default-sources --list
+  node scripts/secrets-prefill.mjs --only OPENROUTER_API_KEY --write ./local.env
 `;
 
 // ------------------------------------------------------------------------------- git
@@ -492,6 +513,49 @@ export function classifyWriteTarget(target, cwd = process.cwd()) {
   if (!fs.existsSync(parent)) {
     throw new UsageError(`--write target directory does not exist: ${parent}`);
   }
+  // `path.resolve` is LEXICAL: it does not resolve symlinks. Every git question below is
+  // therefore a question about this NAME, not about the bytes the name reaches. An
+  // ignored-and-untracked symlink aimed at a tracked file answers "untracked" and
+  // "ignored" correctly about itself while the write lands in the tracked file — both
+  // branches evaluate as designed and a credential still becomes committable. So the
+  // filesystem is interrogated first, with `lstat`, which never follows a link, and a
+  // link is refused outright rather than resolved and re-asked about: refusing cannot be
+  // subtly wrong, and no legitimate caller needs to write a secret through a link.
+  let targetStats = null;
+  try {
+    targetStats = fs.lstatSync(resolved);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw new UsageError(`--write target cannot be inspected: ${error.code}`);
+    }
+  }
+  if (targetStats?.isSymbolicLink()) {
+    return {
+      resolved,
+      allowed: false,
+      reason:
+        "this path is a symbolic link; git would answer about the link while the write " +
+        "landed on whatever it points at, so a link is refused without asking git",
+    };
+  }
+  if (targetStats && !targetStats.isFile()) {
+    return {
+      resolved,
+      allowed: false,
+      reason: "this path exists and is not a regular file",
+    };
+  }
+  if (targetStats && targetStats.nlink > 1) {
+    // A hard link defeats the git questions exactly as a symlink does, with no link to
+    // see: the other name for these bytes can be tracked while this one is not.
+    return {
+      resolved,
+      allowed: false,
+      reason:
+        `this path has ${targetStats.nlink} hard links; another name for the same bytes ` +
+        "may be tracked, and git was only asked about this one",
+    };
+  }
   if (!gitSays(["rev-parse", "--is-inside-work-tree"], parent)) {
     return {
       resolved,
@@ -517,6 +581,53 @@ export function classifyWriteTarget(target, cwd = process.cwd()) {
     };
   }
   return { resolved, allowed: true, reason: null };
+}
+
+/** A refusal raised by the descriptor-level guard below, distinct from a usage error. */
+class WriteRefusal extends Error {}
+
+/**
+ * Open `resolved` for writing without ever following a link, and hand back a descriptor
+ * that is already mode 0600 and truncated. Throws `WriteRefusal` instead of opening.
+ *
+ * This is the TOCTOU half of the write guard, and it is a SEPARATE layer from the `lstat`
+ * in `classifyWriteTarget` on purpose. That `lstat` answers "is this a link right now",
+ * which on its own is a check-then-use race: the name can be re-pointed in the window
+ * between the answer and the write. O_NOFOLLOW closes that window at the only moment that
+ * matters — open() itself fails if the final path component is a symlink — so a link
+ * planted inside the window is never followed. The hard-link question is then re-asked
+ * with `fstat` on the descriptor actually held rather than on a name that may since have
+ * been re-pointed.
+ *
+ * O_TRUNC is deliberately NOT requested: truncating at open time would destroy the file
+ * before the hard-link question could be answered. The truncation happens after, on the
+ * descriptor. So does the chmod — the previous `chmodSync(path)` followed a symlink and
+ * silently rewrote a tracked file's mode through exactly this hole.
+ */
+export function openGuardedWriteDescriptor(resolved) {
+  let descriptor;
+  try {
+    descriptor = fs.openSync(
+      resolved,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW,
+      0o600,
+    );
+  } catch (error) {
+    throw new WriteRefusal(
+      `the path could not be opened without following a link (${error.code})`,
+    );
+  }
+  const opened = fs.fstatSync(descriptor);
+  if (opened.nlink > 1) {
+    fs.closeSync(descriptor);
+    throw new WriteRefusal(
+      `the opened file has ${opened.nlink} hard links; another name for the same bytes ` +
+        "may be tracked",
+    );
+  }
+  fs.fchmodSync(descriptor, 0o600);
+  fs.ftruncateSync(descriptor, 0);
+  return descriptor;
 }
 
 function quoteEnvValue(value) {
@@ -662,8 +773,20 @@ export async function run(argv, environment = process.env, streams = process) {
     const body = names
       .map((name) => `${name}=${quoteEnvValue(assembly.assembled[name])}`)
       .join("\n");
-    fs.writeFileSync(verdict.resolved, `${body}\n`, { mode: 0o600 });
-    fs.chmodSync(verdict.resolved, 0o600);
+    let descriptor;
+    try {
+      descriptor = openGuardedWriteDescriptor(verdict.resolved);
+    } catch (error) {
+      writers.err(
+        `secrets-prefill: refusing to write ${verdict.resolved}: ${error.message}\n`,
+      );
+      return 1;
+    }
+    try {
+      fs.writeSync(descriptor, `${body}\n`, 0, "utf8");
+    } finally {
+      fs.closeSync(descriptor);
+    }
     writers.out(`secrets-prefill: wrote ${names.length} name(s) to ${verdict.resolved} (mode 0600)\n`);
     return 0;
   }
@@ -695,4 +818,4 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   process.exitCode = await run(process.argv.slice(2));
 }
 
-export { UsageError };
+export { UsageError, WriteRefusal };

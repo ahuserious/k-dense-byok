@@ -184,6 +184,12 @@ Options:
                    content counts as added lines). This is the mode a lane uses before its
                    work is committed.
   --repo <path>    Repository root; defaults to this script's repository.
+  --require-env-values
+                   Exit 2 if the process holds no secret-shaped variables, i.e. if the
+                   value-derived half of the gate had nothing to search for. Use this in
+                   CI with the real secrets mapped into the job environment: without it a
+                   job that ships no secrets reports a clean zero forever, which is the
+                   strongest half of this gate silently not running.
   --help           This text.
 
 Scope: ADDED lines only (git diff --unified=0), i.e. '+' lines that are not '+++' headers.
@@ -194,7 +200,8 @@ content, never a line number.
 Exit codes:
   0  clean
   1  findings (at least one non-allowlisted hit)
-  2  usage or environment error, an allowlist entry without a reason, or a git failure
+  2  usage or environment error, an allowlist entry without a reason, a git failure, or
+     --require-env-values with no secret-shaped variable in the environment
 `;
 
 class UsageError extends Error {}
@@ -351,11 +358,20 @@ export function scanAddedLines(byFile, options = {}) {
       names: [...names].sort(),
     });
   }
+  // A zero here has two completely different meanings — "every encoding of every secret
+  // this process holds was searched for and none appeared" and "this process held no
+  // secrets, so nothing was searched for" — and the second is the one CI produces by
+  // default. The row therefore carries what it actually expanded, so `formatReport` can
+  // say `not run` instead of printing an indistinguishable `0`. Counts only: a NAME is
+  // printed only alongside a hit, where the leak has already happened.
+  const variableNames = new Set(representations.map((representation) => representation.name));
   rows.push({
     id: ENV_VALUE_PATTERN.id,
     name: ENV_VALUE_PATTERN.name,
     total: envTotal,
     files: envFiles,
+    variableCount: variableNames.size,
+    representationCount: representations.length,
   });
 
   return { rows, failing };
@@ -368,8 +384,19 @@ export function formatReport({ rows, header, addedLineCount, fileCount }) {
   lines.push("Counts of ADDED lines matching each pattern, by file. Values never printed.");
   lines.push("");
   for (const row of rows) {
+    if (row.id === ENV_VALUE_PATTERN.id && row.variableCount === 0) {
+      lines.push(
+        `- ${row.name}: not run — 0 secret-shaped variables in the environment`,
+      );
+      continue;
+    }
     if (row.total === 0) {
-      lines.push(`- ${row.name}: 0`);
+      const expanded =
+        row.id === ENV_VALUE_PATTERN.id
+          ? ` (searched ${row.representationCount} representation(s) of ` +
+            `${row.variableCount} secret-shaped variable(s))`
+          : "";
+      lines.push(`- ${row.name}: 0${expanded}`);
       continue;
     }
     lines.push(`- ${row.name}: ${row.total} in ${row.files.length} files`);
@@ -392,6 +419,7 @@ export function parseArguments(argv) {
     head: "HEAD",
     worktree: false,
     repository: null,
+    requireEnvValues: false,
     help: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -402,6 +430,10 @@ export function parseArguments(argv) {
     }
     if (argument === "--worktree") {
       options.worktree = true;
+      continue;
+    }
+    if (argument === "--require-env-values") {
+      options.requireEnvValues = true;
       continue;
     }
     if (argument === "--base" || argument === "--head" || argument === "--repo") {
@@ -469,6 +501,17 @@ export function run(argv, streams = process, environment = process.env) {
           "Remove the value, or add an allowlist entry with a reason.\n",
       );
       return 1;
+    }
+    // Ordering: findings outrank a not-run complaint, because a hit is a real leak and
+    // this is a report about coverage. The report itself is already on stdout either way.
+    const envRow = rows.find((row) => row.id === ENV_VALUE_PATTERN.id);
+    if (options.requireEnvValues && (envRow?.variableCount ?? 0) === 0) {
+      streams.stderr.write(
+        "secret-diff-gate: --require-env-values was given and the environment holds 0 " +
+          "secret-shaped variables, so the value-derived half of the gate did not run. " +
+          "A tool that did not run is not a verdict. Map the secrets into this job.\n",
+      );
+      return 2;
     }
     return 0;
   } catch (error) {

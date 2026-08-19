@@ -91,8 +91,10 @@ Exit codes:
 
 Assertions (on the RESPONSE, not on the request):
   · the completion text is non-empty
-  · the model id the provider returned matches the one requested
+  · the model id the provider returned matches the one requested — EXACTLY when the
+    requested id ends in :free, because vendor/model is the paid twin of vendor/model:free
   · token usage was recorded
+  · the call cost zero (a provider that reports no cost figure fails this)
 
 Under node --test only the pure parts run. The live call is guarded by KADY_SMOKE_LIVE=1.
 `;
@@ -250,6 +252,9 @@ async function runDirectMode({ modelId, prompt, maxTokens, timeoutMs, baseUrl, k
       body: JSON.stringify({
         model: modelId,
         max_tokens: maxTokens,
+        // Ask the provider for the cost figure rather than reporting a hardcoded 0: the
+        // cost assertion below is only worth anything if the number came from the wire.
+        usage: { include: true },
         messages: [
           { role: "system", content: "You are a reachability probe. Answer in one word." },
           { role: "user", content: prompt },
@@ -269,13 +274,16 @@ async function runDirectMode({ modelId, prompt, maxTokens, timeoutMs, baseUrl, k
       modelRequested: modelId,
       modelReturned: payload?.model ?? "",
       stopReason: payload?.choices?.[0]?.finish_reason ?? null,
+      errorMessage: payload?.error?.message ?? null,
       textLength: text.length,
       textPrefix: text.slice(0, 200),
       usage: {
         input: payload?.usage?.prompt_tokens ?? 0,
         output: payload?.usage?.completion_tokens ?? 0,
         total: payload?.usage?.total_tokens ?? 0,
-        costUsd: 0,
+        // `null`, not 0, when the provider reported nothing: an unreported cost must fail
+        // the cost assertion, not silently satisfy it.
+        costUsd: payload?.usage?.cost ?? null,
       },
       elapsedMs,
     };
@@ -288,9 +296,24 @@ async function runDirectMode({ modelId, prompt, maxTokens, timeoutMs, baseUrl, k
 
 // ------------------------------------------------------------------------- assertions
 
-/** Normalize for comparison: providers may answer `vendor/model` for `vendor/model:free`. */
-function normalizeModelId(id) {
-  return String(id ?? "").trim().toLowerCase().replace(/:free$/, "");
+/**
+ * Does the id the provider answered with match the one requested?
+ *
+ * The `:free` suffix is not cosmetic. `vendor/model` is the PAID variant of
+ * `vendor/model:free`, so stripping the suffix from BOTH sides makes a paid substitution
+ * — precisely the failure this row exists to catch, after `rankFreeModels` has done real
+ * work to require every pricing field to be zero — compare equal. When the REQUEST carries
+ * the suffix the comparison is therefore exact, modulo case and surrounding space. The
+ * tolerant form survives only for a request with no suffix, where there is no paid twin to
+ * be confused with and a provider answering `vendor/model:free` is serving something
+ * cheaper than asked for.
+ */
+export function modelIdMatches(requested, returned) {
+  const normalize = (id) => String(id ?? "").trim().toLowerCase();
+  const left = normalize(requested);
+  const right = normalize(returned);
+  if (left.endsWith(":free")) return left === right;
+  return left === right.replace(/:free$/, "");
 }
 
 export function evaluateAssertions(result) {
@@ -302,7 +325,7 @@ export function evaluateAssertions(result) {
     },
     {
       name: "the returned model id matches the requested one",
-      pass: normalizeModelId(result.modelReturned) === normalizeModelId(result.modelRequested),
+      pass: modelIdMatches(result.modelRequested, result.modelReturned),
       detail: `requested=${result.modelRequested} returned=${result.modelReturned}`,
     },
     {
@@ -310,7 +333,19 @@ export function evaluateAssertions(result) {
       pass: (result.usage?.output ?? 0) > 0 && (result.usage?.total ?? 0) > 0,
       detail:
         `input=${result.usage?.input ?? 0} output=${result.usage?.output ?? 0} ` +
-        `total=${result.usage?.total ?? 0} costUsd=${result.usage?.costUsd ?? 0}`,
+        `total=${result.usage?.total ?? 0}`,
+    },
+    {
+      // The row is "cheapest FREE model". Without this the cost was printed and read by
+      // nothing, so a paid substitution could print RESULT: PASS with a charge visible in
+      // the output. `null` (the provider reported no figure) fails: an unknown cost is not
+      // a zero cost.
+      name: "the call cost zero",
+      pass: result.usage?.costUsd === 0,
+      detail:
+        result.usage?.costUsd === null || result.usage?.costUsd === undefined
+          ? "the provider reported no cost figure, so free cannot be confirmed"
+          : `costUsd=${result.usage.costUsd}`,
     },
   ];
   return { assertions, pass: assertions.every((assertion) => assertion.pass) };
@@ -426,6 +461,11 @@ export async function run(argv, environment = process.env, streams = process) {
 
   const baseUrl = options.baseUrl ?? environment[BASE_URL_VARIABLE_NAME] ?? DEFAULT_BASE_URL;
 
+  // Printed before the catalogue is fetched, not after: what this run would prove is
+  // fixed by --mode alone, so stating it must not depend on the network answering.
+  writers.out(`MODE: ${options.mode}\n`);
+  writers.out(`  ${MODE_CLAIMS[options.mode]}\n`);
+
   try {
     let candidates;
     if (options.model) {
@@ -456,9 +496,6 @@ export async function run(argv, environment = process.env, streams = process) {
       }
     }
 
-    writers.out(`MODE: ${options.mode}\n`);
-    writers.out(`  ${MODE_CLAIMS[options.mode]}\n`);
-
     const totalStartedAt = process.hrtime.bigint();
     let result = null;
     for (const candidate of candidates) {
@@ -480,11 +517,20 @@ export async function run(argv, environment = process.env, streams = process) {
               baseUrl,
               key,
             });
-      if (attempt.ok) {
+      // `ok` means "the call returned", not "the call worked". A provider that answers
+      // with finish_reason=error, or with an error message beside an empty completion,
+      // set ok:true and ended the loop after one candidate — so `will try up to N`
+      // overstated what was retried. Both shapes are now candidate failures. The message
+      // goes through the guarded writer, so a provider echoing a header cannot leak.
+      const candidateError =
+        attempt.ok && (attempt.errorMessage != null || attempt.stopReason === "error")
+          ? (attempt.errorMessage ?? `the provider stopped with reason "error"`)
+          : null;
+      if (attempt.ok && candidateError === null) {
         result = attempt;
         break;
       }
-      writers.out(`  candidate failed: ${attempt.message}\n`);
+      writers.out(`  candidate failed: ${attempt.ok ? candidateError : attempt.message}\n`);
     }
     const totalElapsedMs = Math.round(Number(process.hrtime.bigint() - totalStartedAt) / 1e6);
 
@@ -502,6 +548,11 @@ export async function run(argv, environment = process.env, streams = process) {
       writers.out(`RESOLVED REF: ${result.modelResolvedRef}\n`);
     }
     writers.out(`STOP REASON: ${result.stopReason}\n`);
+    if (result.errorMessage != null) {
+      // The driver has carried this field the whole time and nothing printed it, so a
+      // failing live run said only `STOP REASON: error` and discarded the explanation.
+      writers.out(`ERROR: ${result.errorMessage}\n`);
+    }
     writers.out(`REPLY (model output, first 200 chars): ${JSON.stringify(result.textPrefix)}\n`);
     for (const assertion of assertions) {
       writers.out(`ASSERT ${assertion.name}: ${assertion.pass ? "PASS" : "FAIL"} — ${assertion.detail}\n`);

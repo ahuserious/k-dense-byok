@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -10,6 +11,7 @@ import {
   MODE_CLAIMS,
   SKIP_MESSAGE,
   evaluateAssertions,
+  modelIdMatches,
   parseArguments,
   rankFreeModels,
   tsxBinaryPath,
@@ -102,8 +104,28 @@ test("argument validation rejects unknown options and bad values", () => {
   assert.equal(parseArguments(["--mode", "direct"]).mode, "direct");
 });
 
-test("each mode's printed claim states exactly what it proves", () => {
-  assert.match(MODE_CLAIMS.product, /this repository's own BYOK path/);
+test("each mode PRINTS its claim, before any network work, in the run's own output", () => {
+  // The previous version of this test asserted that MODE_CLAIMS.product matched a
+  // substring of itself, which cannot fail while the constant exists. What matters is
+  // that a reader of the OUTPUT is told what the run proves — so the claim is read back
+  // out of a real run. Port 1 on loopback refuses instantly: no egress, no waiting, and
+  // the run dies at the catalogue fetch, which is after the claim is printed.
+  const environment = {
+    [KEY_VARIABLE_NAME]: `sk-or-v1-${crypto.randomBytes(24).toString("hex")}`,
+    OPENROUTER_BASE_URL: "http://127.0.0.1:1/v1",
+  };
+  for (const mode of ["product", "direct"]) {
+    const result = runSmoke(["--mode", mode, "--require-key", "--timeout-ms", "3000"], environment);
+    assert.notEqual(result.status, 0, `${mode}: a refused connection must not pass`);
+    assert.ok(
+      result.stdout.includes(`MODE: ${mode}\n`),
+      `${mode}: the run did not print which mode it was`,
+    );
+    assert.ok(
+      result.stdout.includes(MODE_CLAIMS[mode]),
+      `${mode}: the run did not print what it proves`,
+    );
+  }
   assert.match(MODE_CLAIMS.direct, /does NOT prove this/);
 });
 
@@ -134,17 +156,48 @@ test("no mode prints the key, including the failure path", () => {
 test("evaluateAssertions checks the response, not the request", () => {
   const good = evaluateAssertions({
     modelRequested: "vendor/model:free",
-    modelReturned: "vendor/model",
+    modelReturned: "vendor/model:free",
     textLength: 4,
     usage: { input: 10, output: 3, total: 13, costUsd: 0 },
   });
   assert.equal(good.pass, true);
 
+  // The paid substitution. `vendor/model` is the PAID twin of `vendor/model:free`, so a
+  // provider answering the bare id for a :free request is exactly the failure this row
+  // exists to catch — and the previous normalizer stripped the suffix from both sides and
+  // called it a match.
+  const paidTwin = evaluateAssertions({
+    modelRequested: "vendor/model:free",
+    modelReturned: "vendor/model",
+    textLength: 4,
+    usage: { input: 10, output: 3, total: 13, costUsd: 0 },
+  });
+  assert.equal(paidTwin.pass, false, "a paid substitution must not pass");
+
+  // A non-zero cost fails even when everything else is perfect: the row is "cheapest FREE
+  // model", and rankFreeModels requires every pricing field to be zero before the call.
+  const charged = evaluateAssertions({
+    modelRequested: "vendor/model:free",
+    modelReturned: "vendor/model:free",
+    textLength: 4,
+    usage: { input: 10, output: 3, total: 13, costUsd: 0.00012 },
+  });
+  assert.equal(charged.pass, false, "a charged call must not pass a free-model smoke test");
+
+  // An unreported cost is not a zero cost.
+  const noCost = evaluateAssertions({
+    modelRequested: "vendor/model:free",
+    modelReturned: "vendor/model:free",
+    textLength: 4,
+    usage: { input: 10, output: 3, total: 13, costUsd: null },
+  });
+  assert.equal(noCost.pass, false, "an unknown cost must not be read as free");
+
   const emptyText = evaluateAssertions({
     modelRequested: "vendor/model",
     modelReturned: "vendor/model",
     textLength: 0,
-    usage: { input: 10, output: 3, total: 13 },
+    usage: { input: 10, output: 3, total: 13, costUsd: 0 },
   });
   assert.equal(emptyText.pass, false);
 
@@ -152,7 +205,7 @@ test("evaluateAssertions checks the response, not the request", () => {
     modelRequested: "vendor/model",
     modelReturned: "someone-else/model",
     textLength: 4,
-    usage: { input: 10, output: 3, total: 13 },
+    usage: { input: 10, output: 3, total: 13, costUsd: 0 },
   });
   assert.equal(wrongModel.pass, false);
 
@@ -160,7 +213,7 @@ test("evaluateAssertions checks the response, not the request", () => {
     modelRequested: "vendor/model",
     modelReturned: "vendor/model",
     textLength: 4,
-    usage: { input: 0, output: 0, total: 0 },
+    usage: { input: 0, output: 0, total: 0, costUsd: 0 },
   });
   assert.equal(noUsage.pass, false);
 });
@@ -168,6 +221,9 @@ test("evaluateAssertions checks the response, not the request", () => {
 test("product mode's driver is the server's tsx, and it is present in this clone", () => {
   const tsx = tsxBinaryPath();
   assert.match(tsx, /server\/node_modules\/\.bin\/tsx$/);
+  // The half of the name after the comma. Without this the test asserted a string shape
+  // and nothing about the clone, so product mode could be unrunnable and this still pass.
+  assert.ok(fs.existsSync(tsx), `product mode's driver is missing: ${tsx}`);
 });
 
 // The live leg. Off by default so `node --test scripts/*.test.mjs` stays hermetic; the
@@ -179,4 +235,16 @@ test("live: the product BYOK path completes on a free model", { skip: !process.e
   });
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, /RESULT: PASS/);
+});
+
+test("modelIdMatches is exact for a :free request and tolerant only without the suffix", () => {
+  assert.equal(modelIdMatches("vendor/model:free", "vendor/model:free"), true);
+  assert.equal(modelIdMatches("vendor/model:free", "VENDOR/MODEL:FREE "), true, "case and space are cosmetic");
+  assert.equal(modelIdMatches("vendor/model:free", "vendor/model"), false, "the paid twin is not a match");
+  assert.equal(modelIdMatches("vendor/model:free", "someone-else/model:free"), false);
+  // No suffix requested: there is no paid twin to confuse, and a provider answering the
+  // :free variant is serving something cheaper than asked for.
+  assert.equal(modelIdMatches("vendor/model", "vendor/model:free"), true);
+  assert.equal(modelIdMatches("vendor/model", "vendor/model"), true);
+  assert.equal(modelIdMatches("vendor/model", "someone-else/model"), false);
 });

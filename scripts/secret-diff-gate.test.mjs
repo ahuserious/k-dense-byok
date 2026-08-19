@@ -9,7 +9,9 @@ import { fileURLToPath } from "node:url";
 
 import {
   ALLOWLIST,
+  ENV_VALUE_PATTERN,
   PATTERNS,
+  formatReport,
   addedLinesByFile,
   environmentRepresentations,
   scanAddedLines,
@@ -280,4 +282,92 @@ test("a '*' allowlist entry covers shape patterns but never the value-derived ch
   assert.equal(envValue.total, 1);
   assert.equal(envValue.files[0].allowlisted, false, "'*' must not cover env-value");
   assert.equal(failing, 1, "only the env-value hit should fail the gate");
+});
+
+test("a zero value-derived row says 'not run' when the environment held no secrets", () => {
+  // The two zeros this row can print mean opposite things: "every encoding of every
+  // secret was searched for and none appeared" and "nothing was searched for". CI ships
+  // no secrets by default, so the second is the one it produces, and an indistinguishable
+  // `0` reads as the first. The row has to say which one happened.
+  const byFile = new Map([["fixtures/planted.txt", [["AKI", "AFAKEFAKEFAKE0000"].join("")]]]);
+  const empty = scanAddedLines(byFile, { allowlist: [], representations: [] });
+  const emptyRow = empty.rows.find((row) => row.id === ENV_VALUE_PATTERN.id);
+  assert.equal(emptyRow.variableCount, 0);
+  const emptyReport = formatReport({
+    rows: empty.rows,
+    header: "# fixture",
+    addedLineCount: 1,
+    fileCount: 1,
+  });
+  assert.match(
+    emptyReport,
+    /- env var value \(any encoding\): not run — 0 secret-shaped variables in the environment/,
+  );
+  assert.ok(
+    !emptyReport.includes(`- ${ENV_VALUE_PATTERN.name}: 0\n`),
+    "a not-run row must not also print a bare zero",
+  );
+
+  // A real zero — variables were expanded and searched for — still reads as a zero, and
+  // says how much was searched for. Counts only: no name appears without a hit.
+  const loaded = scanAddedLines(byFile, {
+    allowlist: [],
+    representations: [
+      { name: "FIXTURE_API_KEY", value: "aaaaaaaaaaaaaaaaaaaa" },
+      { name: "FIXTURE_API_KEY", value: "YWFhYWFhYWFhYWFhYWFhYWFhYWE=" },
+      { name: "OTHER_TOKEN", value: "bbbbbbbbbbbbbbbbbbbb" },
+    ],
+  });
+  const loadedRow = loaded.rows.find((row) => row.id === ENV_VALUE_PATTERN.id);
+  assert.equal(loadedRow.variableCount, 2);
+  assert.equal(loadedRow.representationCount, 3);
+  const loadedReport = formatReport({
+    rows: loaded.rows,
+    header: "# fixture",
+    addedLineCount: 1,
+    fileCount: 1,
+  });
+  assert.match(
+    loadedReport,
+    /- env var value \(any encoding\): 0 \(searched 3 representation\(s\) of 2 secret-shaped variable\(s\)\)/,
+  );
+  assert.ok(!loadedReport.includes("FIXTURE_API_KEY"), "a name leaked without a hit");
+  assert.ok(!loadedReport.includes("OTHER_TOKEN"), "a name leaked without a hit");
+});
+
+test("--require-env-values exits 2 when the value-derived half had nothing to search for", () => {
+  const { root, git, base } = makeRepository();
+  fs.writeFileSync(path.join(root, "plain.txt"), "nothing to see here\n");
+  git("add", ".");
+  git("commit", "--quiet", "-m", "clean");
+
+  // An empty environment: exactly the state the CI job is in when no secret is mapped.
+  const withoutSecrets = runGate(["--base", base, "--repo", root, "--require-env-values"], {
+    env: { PATH: process.env.PATH ?? "" },
+  });
+  assert.equal(withoutSecrets.status, 2, "a gate that did not run must not report clean");
+  assert.match(withoutSecrets.stderr, /--require-env-values was given/);
+  assert.match(withoutSecrets.stderr, /did not run/);
+  // The report is still printed; the exit code is what changes.
+  assert.match(withoutSecrets.stdout, /not run — 0 secret-shaped variables/);
+
+  // Without the flag the same state is a report, not an error — the flag is opt-in so a
+  // local run over a repository does not need the owner's secrets loaded to be useful.
+  const unflagged = runGate(["--base", base, "--repo", root], {
+    env: { PATH: process.env.PATH ?? "" },
+  });
+  assert.equal(unflagged.status, 0);
+  assert.match(unflagged.stdout, /not run — 0 secret-shaped variables/);
+
+  // With a secret-shaped variable present the flag is satisfied and the row is a real zero.
+  const sentinel = `SENTINEL-${crypto.randomBytes(24).toString("hex")}`;
+  const withSecrets = runGate(["--base", base, "--repo", root, "--require-env-values"], {
+    env: { PATH: process.env.PATH ?? "", FIXTURE_API_KEY: sentinel },
+  });
+  assert.equal(withSecrets.status, 0);
+  assert.match(withSecrets.stdout, /- env var value \(any encoding\): 0 \(searched \d+ representation/);
+  assert.ok(!withSecrets.stdout.includes(sentinel), "the sentinel reached stdout");
+  assert.ok(!withSecrets.stdout.includes("FIXTURE_API_KEY"), "a name appeared without a hit");
+
+  fs.rmSync(root, { recursive: true, force: true });
 });
