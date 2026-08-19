@@ -1,8 +1,20 @@
 # RunState v1 — FROZEN
 
-**FROZEN:** S8 and later lanes may extend this contract only through a PR that
-updates this document and `RunStateV1Schema` together. The chat adapter and UI
+**FROZEN:** S8 and later lanes may extend this contract only through a change
+that updates this document and `RunStateV1Schema` together. The chat adapter and UI
 are deliberately outside this contract-freeze lane.
+
+**How "together" is satisfied here (amended 2026-08-19, same rule as NodeSpec v1).**
+This repository has no pull requests — lanes are standalone clones reviewed by
+independent adversarial agents and the orchestrator merges locally — so the earlier
+"through a PR" wording named nothing. **The document leads:** an orchestrator commit
+describing the new fields (touching only orchestrator files, `docs/contracts/` being
+uninventoried and therefore orchestrator-only) lands BEFORE the lane merge that adds
+them to `RunStateV1Schema`. A document ahead of its schema is a specification awaiting
+implementation and is harmless; a schema ahead of its document is the misleading
+direction, and the ordering makes that state unreachable. Rationale and history:
+`docs/adr/S11-contract-freeze-mechanism.md`. Verified per commit by
+`s11/lane-briefs-20260818/freeze-check.sh` on every pushed ref.
 
 RunState v1 is the JSON-safe live-run projection exposed through
 `server/src/api/workflow-run-state.ts`. It is distinct from the durable

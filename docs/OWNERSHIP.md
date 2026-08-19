@@ -168,3 +168,26 @@ A handoff lets the recipient lane edit a path another lane owns, for the stated 
 | S4 | C5 | `server/src/workflows/supervisor/credentials.ts` | credential persistence environment-root isolation |
 | S11 | C3 | `.github/workflows/stably-cloud.yml` | hosted evidence manifest step and artifact upload |
 | C1 | C5 | `scripts/vendored-dist-build.mjs` | single guarded call of the preview env-candidate refusal helper immediately before the Bun spawn |
+
+
+## Wave F (2026-08-19) — feature wave lanes
+
+Policy amendment by the lead orchestrator before any Wave F lane started. Each lane below owns the listed globs (new files, plus existing files that were uninventoried and therefore orchestrator-only until now) and holds exact-path handoffs from the dormant lane that owns any other existing file it must edit. F2 and F5 are serialized (F5 is cut from the tree that already holds F2), so they may hold handoffs for the same paths; every other pair of Wave F lanes has zero intersection over the tracked tree, verified by `s11/lane-briefs-20260818/wave-f-policy.py` at amendment time. `server/src/index.ts`, `docs/contracts/**`, `docs/inventory/ownership.json`, `docs/OWNERSHIP.md` and `docs/inventory/lane-writers.json` stay orchestrator-only: route registrations and merge-time integrations are applied by the orchestrator from each lane's INTEGRATION.md.
+
+| Lane | Team | Scope | Globs | Handoffs |
+|---|---|---|---|---|
+| F1 | A | providers + model presets (rows 1-6) | 21 | 2 |
+| F3 | A | fusion config refresh (rows 8-9) | 4 | 0 |
+| F2 | B | harness registry reaches the executor [contract] (rows 7, 11-13, 16) | 8 | 14 |
+| F5 | B | node kinds [contract] (rows 26-36) — serialized after F2 | 14 | 14 |
+| F4 | B | Lean 4 reachability + proof output (row 10) | 6 | 2 |
+| F14 | B | durability watcher server side (rows 23/24/44 server half; one watcher, not two) | 7 | 6 |
+| BD | B | Scientific Agent Teams mode — design-first (row 37) | 3 | 0 |
+| F6 | C | builder: stitching, durability UI, fusion boost, best-of-n viz, saved-workflow nodes (rows 19, 22-25, 33) | 14 | 18 |
+| F7 | C | import DAG-Pipelines workflows and de-brand (rows 20-21) | 13 | 3 |
+| F8 | C | Settings: Kady CLI selector + subscription bar (rows 14-15) | 12 | 0 |
+| F9 | C | Prompt Elevation panel + baby view (rows 17-18) | 5 | 1 |
+| F10 | D | Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI | 10 | 27 |
+| F11 | E | the seven skills + the skill curator (rows 41-47, 51) | 23 | 1 |
+| F12 | E | integrations: InfraNodus MCP, Hugging Face CLI, Modal CLI (rows 48-50) | 19 | 0 |
+| F13 | E | cron jobs in the Console (row 52) — greenfield durable scheduler | 8 | 2 |

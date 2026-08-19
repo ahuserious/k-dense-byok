@@ -286,6 +286,203 @@
       "server/seed/skills/scientific-dag-studio/SKILL.md",
       "server/seed/skills/scientific-dag-studio/references/rescue-playbook.md",
       "server/test/rescue-skill-content.test.ts"
+    ],
+    "F1": [
+      "server/src/agent/provider-auth.ts",
+      "server/src/api/model-providers.ts",
+      "web/src/components/provider-auth-panel.tsx",
+      "web/src/components/model-selector.tsx",
+      "web/src/lib/use-models.ts",
+      "web/src/data/models.json",
+      "server/src/agent/model-presets*.ts",
+      "server/src/api/model-presets*.ts",
+      "server/src/agent/providers/**",
+      "server/test/model-presets*.test.ts",
+      "server/test/provider-registry*.test.ts",
+      "server/test/provider-auth*.test.ts",
+      "server/test/model-providers*.test.ts",
+      "web/src/lib/model-presets*.ts",
+      "web/src/components/model-presets/**",
+      "web/src/components/model-presets*.tsx",
+      "web/src/components/provider-auth-panel.test.tsx",
+      "web/src/components/model-selector.test.tsx",
+      "web/src/lib/use-models.test.ts",
+      "docs/model-presets.md",
+      "docs/inventory/f1-model-presets.json"
+    ],
+    "F3": [
+      "web/src/lib/fusion-presets.ts",
+      "web/src/lib/fusion-presets.test.ts",
+      "web/src/lib/fusion-presets*.ts",
+      "docs/inventory/f3-fusion-presets.json"
+    ],
+    "F2": [
+      "server/vendor/pipeline-engine/packages/providers/src/claude/binary-resolver.ts",
+      "server/src/api/harness*.ts",
+      "server/src/workflows/harness-*.ts",
+      "server/src/workflows/claude-code-relay*.ts",
+      "server/test/harness-*.test.ts",
+      "server/test/claude-code-relay*.test.ts",
+      "docs/harnesses.md",
+      "docs/inventory/f2-harness.json"
+    ],
+    "F5": [
+      "server/src/workflows/kinds/**",
+      "server/src/workflows/hypothesis*.ts",
+      "server/src/workflows/elevate-to-dag*.ts",
+      "server/src/workflows/reasoning-style*.ts",
+      "server/src/workflows/formatted-output*.ts",
+      "server/src/workflows/council-*.ts",
+      "server/src/api/elevate-to-dag*.ts",
+      "server/test/hypothesis*.test.ts",
+      "server/test/elevate-to-dag*.test.ts",
+      "server/test/reasoning-style*.test.ts",
+      "server/test/formatted-output*.test.ts",
+      "server/test/council-*.test.ts",
+      "docs/adr/F5-*.md",
+      "docs/inventory/f5-node-kinds.json"
+    ],
+    "F4": [
+      "server/src/api/lean4*.ts",
+      "server/test/lean4-*.test.ts",
+      "web/src/components/lean4/**",
+      "web/src/lib/lean4*.ts",
+      "docs/lean4.md",
+      "docs/inventory/f4-lean4.json"
+    ],
+    "F14": [
+      "server/src/workflows/durability*.ts",
+      "server/src/api/durability*.ts",
+      "server/test/durability*.test.ts",
+      "server/test/compaction-watcher*.test.ts",
+      "server/test/context-watcher*.test.ts",
+      "server/test/lateral-pass*.test.ts",
+      "docs/inventory/f14-durability.json"
+    ],
+    "BD": [
+      "docs/design/agent-teams/**",
+      "docs/adr/F-agent-teams*.md",
+      "docs/inventory/bd-agent-teams.json"
+    ],
+    "F6": [
+      "server/vendor/pipeline-engine/packages/web/src/components/workflows/ExecutionDagNode.tsx",
+      "server/vendor/pipeline-engine/packages/web/src/components/workflows/WorkflowDagViewer.tsx",
+      "server/vendor/pipeline-engine/packages/web/src/components/workflows/WorkflowExecution.tsx",
+      "server/vendor/pipeline-engine/packages/web/src/components/workflows/ValidationPanel.tsx",
+      "web/src/components/pipeline/**",
+      "web/src/lib/pipeline-*.ts",
+      "web/src/lib/stitch*.ts",
+      "web/src/lib/durability*.ts",
+      "web/src/lib/fusion-boost*.ts",
+      "web/src/lib/best-of-n*.ts",
+      "server/vendor/pipeline-engine/packages/web/src/components/workflows/pipeline/**",
+      "server/vendor/pipeline-engine/packages/web/src/components/workflows/*.wave-f.test.ts",
+      "docs/adr/F6-*.md",
+      "docs/inventory/f6-builder.json"
+    ],
+    "F7": [
+      "server/seed/skills/scientific-pipelines/SKILL.md",
+      "server/seed/skills/scientific-dag-studio/references/boost-and-deliberation.md",
+      "server/seed/skills/scientific-dag-studio/references/node-recipes.md",
+      "server/seed/skills/scientific-dag-studio/references/scientific-skills.md",
+      "server/seed/skills/scientific-dag-studio/references/verify-template.md",
+      "server/seed/pipelines/**",
+      "server/seed/skills/scientific-dag-studio/references/recipes/**",
+      "server/seed/skills/scientific-pipelines/references/**",
+      "server/src/workflows/seed-pipelines*.ts",
+      "server/test/seed-pipelines*.test.ts",
+      "docs/seed-pipelines.md",
+      "docs/adr/F7-*.md",
+      "docs/inventory/f7-seed-import.json"
+    ],
+    "F8": [
+      "web/src/components/settings-dialog.tsx",
+      "web/src/components/session-cost-pill.tsx",
+      "web/src/components/settings-dialog.test.tsx",
+      "web/src/components/session-cost-pill.test.tsx",
+      "web/src/components/settings/**",
+      "web/src/components/subscription-bar*.tsx",
+      "web/src/lib/subscription-usage*.ts",
+      "web/src/lib/kady-cli*.ts",
+      "server/src/api/subscription-usage*.ts",
+      "server/src/agent/subscription-usage*.ts",
+      "server/test/subscription-usage*.test.ts",
+      "docs/inventory/f8-settings.json"
+    ],
+    "F9": [
+      "web/src/components/chat-tab.test.tsx",
+      "web/src/components/chat/**",
+      "web/src/lib/prompt-elevation*.ts",
+      "web/src/lib/baby-view*.ts",
+      "docs/inventory/f9-chat.json"
+    ],
+    "F10": [
+      "e2e/wave-f/**",
+      "scripts/secrets-prefill*.mjs",
+      "scripts/secret-diff-gate*.mjs",
+      "scripts/smoke-openrouter*.mjs",
+      "scripts/secrets-prefill*.test.mjs",
+      "scripts/secret-diff-gate*.test.mjs",
+      "scripts/smoke-openrouter*.test.mjs",
+      ".github/workflows/wave-f-*.yml",
+      "docs/testing/**",
+      "docs/inventory/f10-verification.json"
+    ],
+    "F11": [
+      "server/src/agent/skills-install.ts",
+      "server/src/agent/skills-sync.ts",
+      "web/src/components/subagents-panel.tsx",
+      "server/seed/skills/autoresearch-graph-architect/**",
+      "server/seed/skills/autoresearch-squared/**",
+      "server/seed/skills/prompt-elevation-to-dag/**",
+      "server/seed/skills/workflow-supervisor/**",
+      "server/seed/skills/lean4-prover/**",
+      "server/seed/skills/create-scientific-agent/**",
+      "server/seed/skills/infranodus-ontology-creator/**",
+      "server/test/skills-*.test.ts",
+      "server/test/skill-curator*.test.ts",
+      "server/test/seed-skills*.test.ts",
+      "server/src/agent/skill-curator*.ts",
+      "server/src/api/skill-curator*.ts",
+      "server/src/api/skills*.ts",
+      "web/src/components/skills/**",
+      "web/src/components/skill-curator*.tsx",
+      "web/src/lib/skill-curator*.ts",
+      "web/src/components/subagents-panel.test.tsx",
+      "docs/skills.md",
+      "docs/adr/F11-*.md",
+      "docs/inventory/f11-skills.json"
+    ],
+    "F12": [
+      "server/src/agent/mcp.ts",
+      "server/src/api/mcp.ts",
+      "web/src/components/connectors-panel.tsx",
+      "docs/mcp-servers.md",
+      "docs/modal-compute.md",
+      "server/src/modal/manager.ts",
+      "web/src/components/modal-jobs-panel.tsx",
+      "server/src/modal/**",
+      "server/src/integrations/**",
+      "server/src/api/integrations*.ts",
+      "server/test/integrations-*.test.ts",
+      "server/test/mcp-*.test.ts",
+      "server/test/modal-*.test.ts",
+      "web/src/components/integrations/**",
+      "web/src/lib/integrations*.ts",
+      "web/src/components/connectors-panel.test.tsx",
+      "web/src/components/modal-jobs-panel.test.tsx",
+      "docs/integrations-*.md",
+      "docs/inventory/f12-integrations.json"
+    ],
+    "F13": [
+      "server/src/scheduling/**",
+      "server/src/api/schedules*.ts",
+      "server/test/schedul*.test.ts",
+      "web/src/components/console/schedules/**",
+      "web/src/lib/schedules*.ts",
+      "docs/schedules.md",
+      "docs/adr/F13-*.md",
+      "docs/inventory/f13-schedules.json"
     ]
   },
   "handoffs": [
@@ -1170,6 +1367,636 @@
       "date": "2026-08-18",
       "path": "server/test/raindrop-context.test.ts",
       "scope": "M3 reconciliation: keep the assertion that the dag-builder prompt makes no apply-to-canvas promise, and state in the test why merging W3 did not retire it"
+    },
+    {
+      "from": "S5",
+      "to": "F1",
+      "date": "2026-08-19",
+      "path": "server/src/agent/models.ts",
+      "scope": "Wave F lane F1 (providers + model presets (rows 1-6)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S4",
+      "to": "F1",
+      "date": "2026-08-19",
+      "path": "server/src/agent/workflow-model-resolution.ts",
+      "scope": "Wave F lane F1 (providers + model presets (rows 1-6)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F2",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/schema.ts",
+      "scope": "Wave F lane F2 (harness registry reaches the executor [contract] (rows 7, 11-13, 16)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F2",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/validate.ts",
+      "scope": "Wave F lane F2 (harness registry reaches the executor [contract] (rows 7, 11-13, 16)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S4",
+      "to": "F2",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/kady-node-executor.ts",
+      "scope": "Wave F lane F2 (harness registry reaches the executor [contract] (rows 7, 11-13, 16)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F2",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/supervisor/protocol.ts",
+      "scope": "Wave F lane F2 (harness registry reaches the executor [contract] (rows 7, 11-13, 16)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F2",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/supervisor/client.ts",
+      "scope": "Wave F lane F2 (harness registry reaches the executor [contract] (rows 7, 11-13, 16)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F2",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/supervisor/coordinator.ts",
+      "scope": "Wave F lane F2 (harness registry reaches the executor [contract] (rows 7, 11-13, 16)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F2",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/supervisor/runtime.ts",
+      "scope": "Wave F lane F2 (harness registry reaches the executor [contract] (rows 7, 11-13, 16)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F2",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/supervisor/entry.ts",
+      "scope": "Wave F lane F2 (harness registry reaches the executor [contract] (rows 7, 11-13, 16)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S4",
+      "to": "F2",
+      "date": "2026-08-19",
+      "path": "server/src/agent/workflow-delegation-session.ts",
+      "scope": "Wave F lane F2 (harness registry reaches the executor [contract] (rows 7, 11-13, 16)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F2",
+      "date": "2026-08-19",
+      "path": "server/test/kady-node-executor.test.ts",
+      "scope": "Wave F lane F2 (harness registry reaches the executor [contract] (rows 7, 11-13, 16)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F2",
+      "date": "2026-08-19",
+      "path": "server/test/workflow-supervisor-client.test.ts",
+      "scope": "Wave F lane F2 (harness registry reaches the executor [contract] (rows 7, 11-13, 16)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F2",
+      "date": "2026-08-19",
+      "path": "server/test/workflow-supervisor-coordinator.test.ts",
+      "scope": "Wave F lane F2 (harness registry reaches the executor [contract] (rows 7, 11-13, 16)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F2",
+      "date": "2026-08-19",
+      "path": "server/test/workflow-supervisor-protocol.test.ts",
+      "scope": "Wave F lane F2 (harness registry reaches the executor [contract] (rows 7, 11-13, 16)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F2",
+      "date": "2026-08-19",
+      "path": "server/test/supervisor-node-control-transport.test.ts",
+      "scope": "Wave F lane F2 (harness registry reaches the executor [contract] (rows 7, 11-13, 16)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F5",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/schema.ts",
+      "scope": "Wave F lane F5 (node kinds [contract] (rows 26-36) \u2014 serialized after F2) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F5",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/validate.ts",
+      "scope": "Wave F lane F5 (node kinds [contract] (rows 26-36) \u2014 serialized after F2) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S4",
+      "to": "F5",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/kady-node-executor.ts",
+      "scope": "Wave F lane F5 (node kinds [contract] (rows 26-36) \u2014 serialized after F2) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F5",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/run-state.ts",
+      "scope": "Wave F lane F5 (node kinds [contract] (rows 26-36) \u2014 serialized after F2) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F5",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/hosted-fusion.ts",
+      "scope": "Wave F lane F5 (node kinds [contract] (rows 26-36) \u2014 serialized after F2) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F5",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/behavior-registry.ts",
+      "scope": "Wave F lane F5 (node kinds [contract] (rows 26-36) \u2014 serialized after F2) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F5",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/agent-node-executor.ts",
+      "scope": "Wave F lane F5 (node kinds [contract] (rows 26-36) \u2014 serialized after F2) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F5",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/runner.ts",
+      "scope": "Wave F lane F5 (node kinds [contract] (rows 26-36) \u2014 serialized after F2) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F5",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/index.ts",
+      "scope": "Wave F lane F5 (node kinds [contract] (rows 26-36) \u2014 serialized after F2) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F5",
+      "date": "2026-08-19",
+      "path": "server/src/agent/subagents.ts",
+      "scope": "Wave F lane F5 (node kinds [contract] (rows 26-36) \u2014 serialized after F2) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F5",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/supervisor/protocol.ts",
+      "scope": "Wave F lane F5 (node kinds [contract] (rows 26-36) \u2014 serialized after F2) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F5",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/supervisor/coordinator.ts",
+      "scope": "Wave F lane F5 (node kinds [contract] (rows 26-36) \u2014 serialized after F2) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F5",
+      "date": "2026-08-19",
+      "path": "server/test/kady-node-executor.test.ts",
+      "scope": "Wave F lane F5 (node kinds [contract] (rows 26-36) \u2014 serialized after F2) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F5",
+      "date": "2026-08-19",
+      "path": "server/test/workflow-supervisor-protocol.test.ts",
+      "scope": "Wave F lane F5 (node kinds [contract] (rows 26-36) \u2014 serialized after F2) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F4",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/lean4-artifacts.ts",
+      "scope": "Wave F lane F4 (Lean 4 reachability + proof output (row 10)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F4",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/lean4-verifier.ts",
+      "scope": "Wave F lane F4 (Lean 4 reachability + proof output (row 10)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S7",
+      "to": "F14",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/compaction-watcher.ts",
+      "scope": "Wave F lane F14 (durability watcher server side (rows 23/24/44 server half; one watcher, not two)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S7",
+      "to": "F14",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/context-watcher-production.ts",
+      "scope": "Wave F lane F14 (durability watcher server side (rows 23/24/44 server half; one watcher, not two)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S7",
+      "to": "F14",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/compaction-watcher-operation-store.ts",
+      "scope": "Wave F lane F14 (durability watcher server side (rows 23/24/44 server half; one watcher, not two)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S7",
+      "to": "F14",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/context-watcher-rescue-reader.ts",
+      "scope": "Wave F lane F14 (durability watcher server side (rows 23/24/44 server half; one watcher, not two)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S7",
+      "to": "F14",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/context-watcher.ts",
+      "scope": "Wave F lane F14 (durability watcher server side (rows 23/24/44 server half; one watcher, not two)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S7",
+      "to": "F14",
+      "date": "2026-08-19",
+      "path": "server/src/context/lateral-pass.ts",
+      "scope": "Wave F lane F14 (durability watcher server side (rows 23/24/44 server half; one watcher, not two)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S2",
+      "to": "F6",
+      "date": "2026-08-19",
+      "path": "web/src/components/pipeline-builder-panel.tsx",
+      "scope": "Wave F lane F6 (builder: stitching, durability UI, fusion boost, best-of-n viz, saved-workflow nodes (rows 19, 22-25, 33)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S2",
+      "to": "F6",
+      "date": "2026-08-19",
+      "path": "web/src/components/pipelines-panel.tsx",
+      "scope": "Wave F lane F6 (builder: stitching, durability UI, fusion boost, best-of-n viz, saved-workflow nodes (rows 19, 22-25, 33)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S1b",
+      "to": "F6",
+      "date": "2026-08-19",
+      "path": "web/src/components/dag-workflows-panel.tsx",
+      "scope": "Wave F lane F6 (builder: stitching, durability UI, fusion boost, best-of-n viz, saved-workflow nodes (rows 19, 22-25, 33)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S1b",
+      "to": "F6",
+      "date": "2026-08-19",
+      "path": "web/src/components/dag-workflows-panel.test.tsx",
+      "scope": "Wave F lane F6 (builder: stitching, durability UI, fusion boost, best-of-n viz, saved-workflow nodes (rows 19, 22-25, 33)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S1",
+      "to": "F6",
+      "date": "2026-08-19",
+      "path": "web/src/components/dag-builder-surface.tsx",
+      "scope": "Wave F lane F6 (builder: stitching, durability UI, fusion boost, best-of-n viz, saved-workflow nodes (rows 19, 22-25, 33)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S3",
+      "to": "F6",
+      "date": "2026-08-19",
+      "path": "server/vendor/pipeline-engine/packages/web/src/components/workflows/NodeInspector.tsx",
+      "scope": "Wave F lane F6 (builder: stitching, durability UI, fusion boost, best-of-n viz, saved-workflow nodes (rows 19, 22-25, 33)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S3",
+      "to": "F6",
+      "date": "2026-08-19",
+      "path": "server/vendor/pipeline-engine/packages/web/src/components/workflows/NodeInspector.test.ts",
+      "scope": "Wave F lane F6 (builder: stitching, durability UI, fusion boost, best-of-n viz, saved-workflow nodes (rows 19, 22-25, 33)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S3",
+      "to": "F6",
+      "date": "2026-08-19",
+      "path": "server/vendor/pipeline-engine/packages/web/src/components/workflows/NodePalette.tsx",
+      "scope": "Wave F lane F6 (builder: stitching, durability UI, fusion boost, best-of-n viz, saved-workflow nodes (rows 19, 22-25, 33)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S3",
+      "to": "F6",
+      "date": "2026-08-19",
+      "path": "server/vendor/pipeline-engine/packages/web/src/components/workflows/NodeLibrary.tsx",
+      "scope": "Wave F lane F6 (builder: stitching, durability UI, fusion boost, best-of-n viz, saved-workflow nodes (rows 19, 22-25, 33)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S3",
+      "to": "F6",
+      "date": "2026-08-19",
+      "path": "server/vendor/pipeline-engine/packages/web/src/components/workflows/QuickAddPicker.tsx",
+      "scope": "Wave F lane F6 (builder: stitching, durability UI, fusion boost, best-of-n viz, saved-workflow nodes (rows 19, 22-25, 33)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S3",
+      "to": "F6",
+      "date": "2026-08-19",
+      "path": "server/vendor/pipeline-engine/packages/web/src/components/workflows/CommandPicker.tsx",
+      "scope": "Wave F lane F6 (builder: stitching, durability UI, fusion boost, best-of-n viz, saved-workflow nodes (rows 19, 22-25, 33)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S3",
+      "to": "F6",
+      "date": "2026-08-19",
+      "path": "server/vendor/pipeline-engine/packages/web/src/components/workflows/WorkflowCanvas.tsx",
+      "scope": "Wave F lane F6 (builder: stitching, durability UI, fusion boost, best-of-n viz, saved-workflow nodes (rows 19, 22-25, 33)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S3",
+      "to": "F6",
+      "date": "2026-08-19",
+      "path": "server/vendor/pipeline-engine/packages/web/src/components/workflows/WorkflowCanvas.test.ts",
+      "scope": "Wave F lane F6 (builder: stitching, durability UI, fusion boost, best-of-n viz, saved-workflow nodes (rows 19, 22-25, 33)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "W2",
+      "to": "F6",
+      "date": "2026-08-19",
+      "path": "server/vendor/pipeline-engine/packages/web/src/components/workflows/WorkflowBuilder.tsx",
+      "scope": "Wave F lane F6 (builder: stitching, durability UI, fusion boost, best-of-n viz, saved-workflow nodes (rows 19, 22-25, 33)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "W2",
+      "to": "F6",
+      "date": "2026-08-19",
+      "path": "server/vendor/pipeline-engine/packages/web/src/components/workflows/BuilderToolbar.tsx",
+      "scope": "Wave F lane F6 (builder: stitching, durability UI, fusion boost, best-of-n viz, saved-workflow nodes (rows 19, 22-25, 33)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S3",
+      "to": "F6",
+      "date": "2026-08-19",
+      "path": "server/vendor/pipeline-engine/packages/web/src/components/workflows/DagNodeComponent.tsx",
+      "scope": "Wave F lane F6 (builder: stitching, durability UI, fusion boost, best-of-n viz, saved-workflow nodes (rows 19, 22-25, 33)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S3",
+      "to": "F6",
+      "date": "2026-08-19",
+      "path": "server/vendor/pipeline-engine/packages/web/src/components/workflows/DagNodeComponent.test.ts",
+      "scope": "Wave F lane F6 (builder: stitching, durability UI, fusion boost, best-of-n viz, saved-workflow nodes (rows 19, 22-25, 33)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "W2",
+      "to": "F6",
+      "date": "2026-08-19",
+      "path": "server/vendor/pipeline-engine/packages/web/src/components/workflows/StatusBar.tsx",
+      "scope": "Wave F lane F6 (builder: stitching, durability UI, fusion boost, best-of-n viz, saved-workflow nodes (rows 19, 22-25, 33)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "NT1",
+      "to": "F7",
+      "date": "2026-08-19",
+      "path": "server/seed/skills/scientific-dag-studio/SKILL.md",
+      "scope": "Wave F lane F7 (import DAG-Pipelines workflows and de-brand (rows 20-21)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "NT1",
+      "to": "F7",
+      "date": "2026-08-19",
+      "path": "server/seed/skills/scientific-dag-studio/references/rescue-playbook.md",
+      "scope": "Wave F lane F7 (import DAG-Pipelines workflows and de-brand (rows 20-21)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "NT1",
+      "to": "F7",
+      "date": "2026-08-19",
+      "path": "server/test/rescue-skill-content.test.ts",
+      "scope": "Wave F lane F7 (import DAG-Pipelines workflows and de-brand (rows 20-21)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S8",
+      "to": "F9",
+      "date": "2026-08-19",
+      "path": "web/src/components/chat-tab.tsx",
+      "scope": "Wave F lane F9 (Prompt Elevation panel + baby view (rows 17-18)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "e2e/builder-typed.spec.ts",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "e2e/builder.spec.ts",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "e2e/chat.spec.ts",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "e2e/check-job-timeout-budget.mjs",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "e2e/config-contracts.node.mjs",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "e2e/console-live.spec.ts",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "e2e/console-raindrop.spec.ts",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "e2e/fixtures.ts",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "e2e/global-setup.cloud.ts",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "e2e/global-setup.ts",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "e2e/inventory.ts",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "e2e/item-count-reporter.ts",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "e2e/live-backend.spec.ts",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "e2e/live-fixtures.ts",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "e2e/quiesce-suite-processes.mjs",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "e2e/scientific-pipelines.spec.ts",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "e2e/service-origins.ts",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "e2e/spec-timing-reporter.ts",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "e2e/spec-timing-summary.mjs",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "e2e/template-source.ts",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "e2e/workspace.spec.ts",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "playwright.config.ts",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "C3",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "playwright.cloud.config.ts",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "C3",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": "playwright.live-alt.config.ts",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S11",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": ".github/workflows/stably-cloud.yml",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "C1",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": ".github/workflows/tests.yml",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S5",
+      "to": "F10",
+      "date": "2026-08-19",
+      "path": ".env.example",
+      "scope": "Wave F lane F10 (Stably suite, secret prefill, smoke test (rows 38-40) + hosted CI) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S2",
+      "to": "F11",
+      "date": "2026-08-19",
+      "path": "server/src/agent/skills.ts",
+      "scope": "Wave F lane F11 (the seven skills + the skill curator (rows 41-47, 51)) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S8",
+      "to": "F13",
+      "date": "2026-08-19",
+      "path": "web/src/components/console/kady-console.tsx",
+      "scope": "Wave F lane F13 (cron jobs in the Console (row 52) \u2014 greenfield durable scheduler) \u2014 edits confined to the lane brief; the owner lane is dormant"
+    },
+    {
+      "from": "S8",
+      "to": "F13",
+      "date": "2026-08-19",
+      "path": "server/src/api/console.ts",
+      "scope": "Wave F lane F13 (cron jobs in the Console (row 52) \u2014 greenfield durable scheduler) \u2014 edits confined to the lane brief; the owner lane is dormant"
     }
   ]
 }
