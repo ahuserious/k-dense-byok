@@ -13,6 +13,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { LoaderCircleIcon, RefreshCwIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { listLoops, listRuns } from "@/lib/console";
+import { SchedulesPanel } from "./schedules/schedules-panel";
 import type { Loop, Run } from "@/lib/console-types";
 
 const POLL_MS = 3000;
@@ -96,6 +97,11 @@ export function KadyConsole() {
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
+        {/* Lane F13 (row 52): schedules sit above the run feed because a schedule
+            is the thing that CAUSES the rows below it. It owns its own polling
+            and its own error state, so a schedules outage cannot blank the runs. */}
+        <SchedulesPanel />
+
         {error && (
           <p className="px-3 py-2 text-[11px] text-red-400">
             Couldn&apos;t reach the console: {error}

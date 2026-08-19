@@ -8,11 +8,14 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   ["chat.spec.ts", 28],
   ["console-live.spec.ts", 12],
   ["console-raindrop.spec.ts", 33],
+  // Lane F13 (row 52): schedules in the Console. Seven substantive items, all
+  // driving the real user path; none thin, fixme or skipped.
+  ["f13-schedules.spec.ts", 7],
   ["live-backend.spec.ts", 3],
   ["scientific-pipelines.spec.ts", 57],
   ["workspace.spec.ts", 46],
 ]);
-const EXPECTED_SUBSTANTIVE_ITEMS = 218;
+const EXPECTED_SUBSTANTIVE_ITEMS = 225;
 const EXPECTED_THIN_ITEMS = 35;
 const EXPECTED_FIXME_ITEMS = 3;
 const EXPECTED_SKIP_ITEMS = 0;

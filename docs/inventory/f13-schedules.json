@@ -1,0 +1,105 @@
+{
+  "lane": "F13",
+  "requirementRow": 52,
+  "requirement": "Cron jobs: add & configure in the Console",
+  "base": "b702a8b",
+  "greenfield": true,
+  "greenfieldEvidence": {
+    "command": "grep -riE '\\bcron\\b' server/src web/src",
+    "hits": 0,
+    "note": "The only tree-wide hit is a prose comment in server/vendor/pipeline-engine/packages/workflows/src/utils/github-token-policy.ts. All 55 'schedul*' hits are node-scheduling inside one run, poll debounces, or comments."
+  },
+  "reachability": {
+    "typedRuntime": "absent — WorkflowRunController schedules NODES inside active runs, never runs across wall-clock time",
+    "vendoredEngine": "absent",
+    "reachableBeforeThisLane": false,
+    "smallestChange": "a scheduling subsystem that decides WHEN and dispatches into the existing POST /dag-workflows/:workflowId/runs route"
+  },
+  "surfaces": {
+    "console": {
+      "path": "Console tab -> Agents & Loops -> Schedules",
+      "component": "web/src/components/console/schedules/schedules-panel.tsx",
+      "mountedIn": "web/src/components/console/kady-console.tsx",
+      "controls": [
+        "New schedule",
+        "Pause",
+        "Resume",
+        "Run now",
+        "Stop everything",
+        "Edit",
+        "History",
+        "Delete",
+        "Confirm delete"
+      ]
+    }
+  },
+  "api": {
+    "module": "server/src/api/schedules.ts",
+    "registeredFrom": "server/src/api/console.ts (registerConsoleRoutes), which server/src/index.ts:278 already calls",
+    "routes": [
+      { "method": "GET", "path": "/schedules" },
+      { "method": "POST", "path": "/schedules" },
+      { "method": "GET", "path": "/schedules/:scheduleId" },
+      { "method": "PATCH", "path": "/schedules/:scheduleId" },
+      { "method": "POST", "path": "/schedules/:scheduleId/enable" },
+      { "method": "POST", "path": "/schedules/:scheduleId/disable" },
+      { "method": "POST", "path": "/schedules/:scheduleId/run-now" },
+      { "method": "POST", "path": "/schedules/:scheduleId/stop" },
+      { "method": "GET", "path": "/schedules/:scheduleId/fires" },
+      { "method": "DELETE", "path": "/schedules/:scheduleId" }
+    ]
+  },
+  "storage": {
+    "schedules": "projects/<id>/sandbox/.kady/schedules/<scheduleId>.json",
+    "fireAudit": "projects/<id>/sandbox/.kady/schedules/fires.jsonl",
+    "storageVersion": 1,
+    "outcomeStored": false,
+    "outcomeSource": "derived at read time from workflowStore.readRun(...).state.status"
+  },
+  "reuseNotDuplicate": {
+    "runCreation": "POST /dag-workflows/:workflowId/runs, dispatched in-process (app.inject)",
+    "idempotency": "requestId schedule:<id>:<windowKey>; run id derived in server/src/workflows/store.ts:1265",
+    "limits": "effectiveLimits: structuredClone(definition.graph.limits) — server/src/workflows/store.ts:2427",
+    "cancellation": "POST /dag-workflow-runs/:runId/cancel",
+    "terminalStatus": "isTerminalWorkflowRunStatus — server/src/workflows/run-state.ts:502",
+    "ownFireAuditBecause": "supervisor/journal.ts has a closed operation-kind union and requires an ownerRunId, which a fire that created no run does not have"
+  },
+  "policies": {
+    "expressions": ["cron:<m> <h> <dom> <mon> <dow>", "every:<n>s|m|h"],
+    "windowKey": {
+      "cron": "local wall-clock minute in the schedule's IANA timezone",
+      "every": "epoch-aligned UTC instant"
+    },
+    "dstSpringForward": "a wall time the gap deletes is skipped, never shifted",
+    "dstFallBack": "a repeated wall time runs once (same window key); the second occurrence is recorded as duplicate-window",
+    "catchUp": "at most one, the most recent missed window, within a 15 minute grace period; every skipped window recorded",
+    "overlap": ["skip (default)", "allow"],
+    "perTickFireCap": 4,
+    "perProjectScheduleCap": 200,
+    "failClosed": "a capability probe against POST /dag-workflow-runs/<nonexistent>/cancel; 503 means execution is off and NO run is created",
+    "requestedBy": "user (the run-creation route hard-codes it); schedule provenance lives in the requestId prefix and the fire audit"
+  },
+  "lifecycle": {
+    "timers": 1,
+    "unref": true,
+    "clearedFrom": "app.addHook(\"onClose\") inside server/src/api/schedules.ts",
+    "defect": "#41 — nothing this lane starts survives app.close()"
+  },
+  "tests": {
+    "server": [
+      "server/test/scheduling.test.ts (20 items)",
+      "server/test/schedules-api.test.ts (6 items, including the real unattended fire)"
+    ],
+    "web": ["web/src/components/console/schedules/schedules-panel.test.tsx (8 items)"],
+    "e2e": ["e2e/wave-f/f13/f13-schedules.spec.ts (7 substantive items)"]
+  },
+  "e2ePins": {
+    "file": "f13-schedules.spec.ts",
+    "items": 7,
+    "expectedSubstantiveItemsBefore": 218,
+    "expectedSubstantiveItemsAfter": 225,
+    "thinUnchanged": 35,
+    "fixmeUnchanged": 3,
+    "skipUnchanged": 0
+  }
+}
