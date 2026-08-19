@@ -1,0 +1,150 @@
+{
+  "lane": "F14",
+  "title": "Durability watcher (server)",
+  "matrixRows": [23, 24, "44-server"],
+  "baseSha": "b22c84b",
+  "recordedAt": "2026-08-19",
+  "note": "There is exactly ONE durability watcher. Rows 23 and 44 are the same capability; lane F6 builds the pipeline-options UI on this API and lane F11 builds the workflow-supervisor skill on it.",
+  "modules": {
+    "watcher": "server/src/workflows/durability-watcher.ts",
+    "settings": "server/src/workflows/durability-settings.ts",
+    "modelPolicy": "server/src/workflows/durability-model-policy.ts",
+    "journal": "server/src/workflows/durability-journal.ts",
+    "api": "server/src/api/durability.ts",
+    "stopAuthority": "server/src/workflows/controller.ts (stopRun)",
+    "compositionRoot": "server/src/workflows/context-watcher-production.ts"
+  },
+  "defaultModels": {
+    "watcher": {
+      "ownerName": "Qwen 3.8 27B @ high",
+      "ref": "openrouter/qwen/qwen3.8-27b",
+      "effort": "high",
+      "resolvedAgainst": "https://openrouter.ai/api/v1/models",
+      "resolvedOn": "2026-08-18",
+      "resolves": true,
+      "contextWindow": 262144,
+      "pricing": "unpriced",
+      "pricingNote": "Absent from web/src/data/models.json (154 entries), so it prices at $0 and project spend caps do not accrue for watcher calls. web/** is Team C's; the catalogue row is requested in INTEGRATION.md."
+    },
+    "rescue": {
+      "ownerName": "GPT-5.6 Pro @ xhigh",
+      "ref": null,
+      "effort": "xhigh",
+      "resolvedAgainst": "https://openrouter.ai/api/v1/models",
+      "resolvedOn": "2026-08-18",
+      "resolves": false,
+      "failClosed": true,
+      "candidates": [
+        "openai/gpt-5.6-luna-pro",
+        "openai/gpt-5.6-terra-pro",
+        "openai/gpt-5.6-sol-pro"
+      ],
+      "reason": "There is no openai/gpt-5.6-pro. Three live ids carry the \"GPT-5.6 … Pro\" name, each with a 1,050,000 token context window. The name is ambiguous across three ids, so the shipped default is unset and escalation is disabled-with-reason until an operator chooses."
+    },
+    "reconciliation": "DEFAULT_COMPACTION_WATCHER_MODEL and DEFAULT_COMPACTION_REPAIR_MODEL (server/src/workflows/compaction-watcher.ts:13-16) are NOT a second source of default. Durability settings feed the watcher's existing watcherModel/repairModel parameters, which already take precedence over the KADY_* environment variables, which already take precedence over those constants. The constants are only reached when durability is switched off."
+  },
+  "signals": [
+    {
+      "id": "compaction",
+      "label": "Compaction",
+      "observableToday": true,
+      "observability": "full",
+      "observationSource": "pi-packages/dag-fusion-drive/compaction-audit.ts (readTrustedDagFusionCompactionAudit), delivered by installDagFusionCompactionEventSink (server/src/agent/dag-fusion-bridge.ts) and consumed at server/src/workflows/context-watcher-production.ts:418-421",
+      "firesWhen": "a compaction occurred and one of its fingerprint checks failed (fingerprintFailure, server/src/workflows/compaction-watcher.ts:526-533)",
+      "defaultAction": "escalate",
+      "test": "server/test/durability-signals.test.ts — 'fires compaction on a failed fingerprint check, and suppresses it when the toggle is off'"
+    },
+    {
+      "id": "context-rot",
+      "label": "Context rot",
+      "observableToday": true,
+      "observability": "full",
+      "observationSource": "the watcher model's semantic verdict, parseCompactionSemanticVerdict (server/src/workflows/compaction-watcher.ts:317-368)",
+      "firesWhen": "the semantic verdict is context-rot",
+      "defaultAction": "escalate",
+      "test": "server/test/durability-signals.test.ts — 'fires context-rot on the semantic verdict at the operator's watcher model'"
+    },
+    {
+      "id": "hallucination",
+      "label": "Hallucination",
+      "observableToday": true,
+      "observability": "full",
+      "observationSource": "durable run events evidence_checked / gate_evaluated with data.supported === false (server/src/workflows/run-state.ts:1228-1257); plus a non-empty hallucinations[] in a semantic verdict",
+      "firesWhen": "an evidence check or gate reports an unsupported output",
+      "defaultAction": "observe",
+      "test": "server/test/durability-signals.test.ts — 'fires hallucination on an unsupported evidence check, and not when the toggle is off'"
+    },
+    {
+      "id": "paused-no-progress",
+      "label": "Paused with no progress",
+      "observableToday": true,
+      "observability": "full",
+      "observationSource": "durable run state: WorkflowRunState.status and .lastSeq via WorkflowStore.readRun (server/src/workflows/store.ts:2500)",
+      "firesWhen": "the run is paused, waiting, or blocked and lastSeq has not advanced for stallMs",
+      "defaultAction": "restart",
+      "test": "server/test/durability-signals.test.ts — 'fires paused-no-progress from real run state, and not before the stall time'"
+    },
+    {
+      "id": "failed-script-run",
+      "label": "Failed scripts and CI runs",
+      "observableToday": true,
+      "observability": "partial",
+      "observationSource": "durable run event node_failed (server/src/workflows/run-state.ts:1219-1223) on a node kind that executes an external process — lean4, which spawns at server/src/workflows/lean4-verifier.ts:439 and checks the exit code at :769",
+      "firesWhen": "such a node fails",
+      "defaultAction": "observe",
+      "unobservablePart": "CI runs. grep found no CI integration anywhere in server/src; there is nothing to observe.",
+      "test": "server/test/durability-signals.test.ts — 'fires failed-script-run only for a node kind that runs an external process'"
+    },
+    {
+      "id": "failed-skill-fire",
+      "label": "Failed skill fires",
+      "observableToday": false,
+      "observability": "none",
+      "observationSource": null,
+      "firesWhen": "never in this build",
+      "defaultAction": "observe",
+      "unobservableReason": "Pi emits no skill-invocation event. A skill activation is inferred from a read of its SKILL.md and attached to a transient chat frame (server/src/agent/skill-label.ts:3-9, server/src/agent/events.ts:324); no skill success or failure is recorded in durable run state.",
+      "apiBehaviour": "GET /durability/signals reports observable:false with that reason; PUT /durability/settings refuses to enable it with a 400 and the same reason; lane F6 renders the toggle disabled.",
+      "test": "server/test/durability-settings.test.ts — 'refuses to enable a signal this build cannot observe, with the reason the UI shows'"
+    }
+  ],
+  "actions": ["observe", "restart", "escalate", "lateral-pass", "stop"],
+  "runTimelineEvents": {
+    "insideTheAuthoritativeRunEventStream": [
+      {
+        "event": "run_cancelled",
+        "discriminator": "data.error.code === \"DurabilityWatcherStop\"",
+        "meaning": "a durability stop; distinguished from USER_CANCELLED and from run_failed"
+      },
+      {
+        "event": "compaction_checked",
+        "discriminator": "unchanged from the pre-existing compaction path",
+        "meaning": "a compaction check"
+      }
+    ],
+    "durabilityJournal": [
+      "durability.watch.started",
+      "durability.signal.fired",
+      "durability.signal.suppressed",
+      "durability.action.dispatched",
+      "durability.action.completed",
+      "durability.action.failed",
+      "durability.escalation.started",
+      "durability.escalation.completed",
+      "durability.stop.requested",
+      "durability.stop.completed",
+      "durability.model.unresolved",
+      "durability.watch.stopped"
+    ],
+    "whyTwoPlaces": "WORKFLOW_RUN_EVENT_TYPES is frozen in server/src/workflows/run-state.ts (lanes F2/F5) and each event type's data is validated against an exact key set, so a watcher observation has no legal slot there. Every state CHANGE still goes through the run event stream; only the watcher's own observations live in the journal, stamped with the run's lastSeq so a UI can interleave them deterministically. INTEGRATION.md carries the exact event types F2/F5 would add to fold the journal into the run stream."
+  },
+  "endpoints": [
+    "GET /durability/signals",
+    "GET /durability/settings",
+    "PUT /durability/settings",
+    "GET /durability/state",
+    "GET /durability/runs/:runId/timeline",
+    "POST /durability/runs/:runId/stop"
+  ],
+  "lifecycle": "The watcher owns no timer and no process. It rides ContextEngineeringProduction.startStoppedRunFeed (one unref'd interval that already existed) and is released by ContextEngineeringProduction.close, which server/src/index.ts already calls on shutdown. Proven in server/test/durability-lifecycle.test.ts (#41)."
+}

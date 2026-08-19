@@ -24,14 +24,18 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   ["wave-f/f9/f9-chat-elevation.spec.ts", 9],
   ["wave-f/f9/f9-live.spec.ts", 2],
   ["live-backend.spec.ts", 3],
+  // Wave F lane F14 (rows 23-24, server half of 44): durability API.
+  // Seven items are pinned; they have never been executed live (routes
+  // are not registered in this clone). `--list` is not a run.
+  ["wave-f/f14/durability-api.spec.ts", 7],
   ["scientific-pipelines.spec.ts", 57],
   ["workspace.spec.ts", 46],
   ["wave-f/harness/app-shell.spec.ts", 15],
   ["wave-f/harness/evidence-contract.spec.ts", 3],
   ["wave-f/harness/smoke.spec.ts", 1],
 ]);
-// 244 after F10+F12+F13, plus F9's 11 chat items.
-const EXPECTED_SUBSTANTIVE_ITEMS = 255;
+// 255 after F9, plus F14's 7 durability API items.
+const EXPECTED_SUBSTANTIVE_ITEMS = 262;
 // 35 pre-existing thin items (labelled inventory smokes plus the 3 fixmes) + the 3 Wave-F
 // evidence-fixture contract items.
 const EXPECTED_THIN_ITEMS = 38;

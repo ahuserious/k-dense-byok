@@ -35,7 +35,21 @@ import type {
 } from "./compaction-watcher.ts";
 import { CompactionWatcherRetryableRepairError } from "./compaction-watcher.ts";
 import { registerContextEngineering } from "./context-watcher.ts";
-import type { WorkflowRunController } from "./controller.ts";
+import type { WorkflowRunController, WorkflowRunStopReceipt } from "./controller.ts";
+import {
+  FileDurabilityJournal,
+  type DurabilityJournal,
+  type DurabilityTimelinePage,
+} from "./durability-journal.ts";
+import {
+  FileDurabilitySettingsStore,
+  parseDurabilitySettings,
+  type DurabilitySettingsStore,
+  type DurabilitySettingsV1,
+} from "./durability-settings.ts";
+import { resolveDurabilityModels, type DurabilityPresetResolver } from
+  "./durability-model-policy.ts";
+import { DurabilityWatcher, type DurabilityObservation } from "./durability-watcher.ts";
 import {
   WorkflowStoreError,
   workflowStore,
@@ -58,6 +72,11 @@ export interface ContextEngineeringProductionOptions {
   store?: WorkflowStore;
   completeJson?(call: ContextEngineeringModelCall): Promise<unknown>;
   onError?(error: unknown): void;
+  /** Durability configuration and timeline seams; production uses the file-backed pair. */
+  durabilitySettings?: DurabilitySettingsStore;
+  durabilityJournal?: DurabilityJournal;
+  /** Team A's preset resolver, once F1 lands. Absent means preset refs fail closed. */
+  presetResolver?: DurabilityPresetResolver;
 }
 
 export interface DispatchLateralPassRequest {
@@ -191,12 +210,17 @@ function recoverableSourceProof(source: WorkflowRunRecord): DurableRestartProof 
 class ProjectContextEngineeringRuntime {
   readonly registry = new WorkflowBehaviorRegistry();
   readonly registration;
+  readonly durability: DurabilityWatcher;
 
   constructor(
     readonly projectId: string,
     private readonly controller: WorkflowRunController | null,
     private readonly store: WorkflowStore,
     private readonly completeJson: (call: ContextEngineeringModelCall) => Promise<unknown>,
+    settingsStore: DurabilitySettingsStore,
+    journal: DurabilityJournal,
+    presetResolver: DurabilityPresetResolver | undefined,
+    onError: (error: unknown) => void,
   ) {
     const paths = resolvePaths(projectId);
     this.registration = registerContextEngineering({
@@ -242,6 +266,37 @@ class ProjectContextEngineeringRuntime {
       budget: {
         admit: ({ model }) => assertBudgetAdmission(projectId, model),
       },
+    });
+    // ONE watcher: durability owns the toggles, the operator-selected models,
+    // stop authority and the timeline, and dispatches through the behaviors
+    // registered immediately above rather than registering its own.
+    this.durability = new DurabilityWatcher({
+      projectId,
+      readSettings: () => settingsStore.read(projectId),
+      journal,
+      registry: this.registry,
+      runs: this.store,
+      readFingerprintAudit: readTrustedDagFusionCompactionAudit,
+      semanticModel: async (request) => {
+        await assertBudgetAdmission(projectId, request.model);
+        return this.completeJson({
+          projectId,
+          model: request.model,
+          instruction: request.instruction,
+          input: request,
+        });
+      },
+      ...(presetResolver ? { presetResolver } : {}),
+      ...(this.controller
+        ? {
+          stopRun: (runId: string, reason: string): WorkflowRunStopReceipt =>
+            this.controller!.stopRun(projectId, runId, {
+              reason,
+              stoppedBy: "durability-watcher",
+            }),
+        }
+        : {}),
+      onError,
     });
   }
 
@@ -406,6 +461,9 @@ export class ContextEngineeringProduction {
   private readonly onError: (error: unknown) => void;
   private readonly removeCompactionSink: () => void;
   private readonly seenStoppedRuns = new Set<string>();
+  private readonly durabilitySettings: DurabilitySettingsStore;
+  private readonly durabilityJournal: DurabilityJournal;
+  private readonly presetResolver: DurabilityPresetResolver | undefined;
   private stoppedRunTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(
@@ -415,6 +473,9 @@ export class ContextEngineeringProduction {
     this.store = options.store ?? workflowStore;
     this.completeJson = options.completeJson ?? productionCompleteJson;
     this.onError = options.onError ?? (() => {});
+    this.durabilitySettings = options.durabilitySettings ?? new FileDurabilitySettingsStore();
+    this.durabilityJournal = options.durabilityJournal ?? new FileDurabilityJournal();
+    this.presetResolver = options.presetResolver;
     this.removeCompactionSink = installDagFusionCompactionEventSink(
       (event) => this.handleDagFusionCompaction(event),
       { onError: this.onError },
@@ -429,6 +490,10 @@ export class ContextEngineeringProduction {
         this.controller,
         this.store,
         this.completeJson,
+        this.durabilitySettings,
+        this.durabilityJournal,
+        this.presetResolver,
+        this.onError,
       );
       this.runtimes.set(projectId, runtime);
     }
@@ -445,10 +510,11 @@ export class ContextEngineeringProduction {
       if (!source) continue;
       const paths = resolvePaths(project.id);
       const records = readTrustedDagFusionCompactionRecords(paths.sandbox, event.childRunId);
+      const runtime = this.forProject(project.id);
       for (const record of records) {
-        await this.forProject(project.id).registration.watcher.watch({
+        const request = {
           runId: event.ownerRunId,
-          nodeId: event.nodeId,
+          ...(event.nodeId ? { nodeId: event.nodeId } : {}),
           childRunId: event.childRunId,
           sandboxRoot: paths.sandbox,
           preCompactionRecord: record.preCompactionRecord,
@@ -456,7 +522,14 @@ export class ContextEngineeringProduction {
           userPrompt: record.userPrompt,
           goal: record.goal,
           openTodos: record.openTodos,
-        });
+        };
+        // Durability owns the compaction and context-rot toggles. When it is
+        // switched off the pre-existing watcher runs unchanged, so nothing
+        // that worked before this lane depends on the new settings.
+        const durabilityResult = await runtime.durability.watchCompaction(request);
+        if (durabilityResult.status === "disabled") {
+          await runtime.registration.watcher.watch(request);
+        }
       }
       return;
     }
@@ -465,7 +538,71 @@ export class ContextEngineeringProduction {
     );
   }
 
+  /** Durability settings for a project, and how its models resolve right now. */
+  durabilityState(projectId: string) {
+    const settings = this.durabilitySettings.read(projectId);
+    return {
+      settings,
+      resolution: resolveDurabilityModels(settings, this.presetResolver),
+      watchedRuns: this.forProject(projectId).durability.watchedRuns(),
+    };
+  }
+
+  writeDurabilitySettings(projectId: string, patch: unknown): DurabilitySettingsV1 {
+    const merged = parseDurabilitySettings(patch, this.durabilitySettings.read(projectId));
+    return this.durabilitySettings.write(projectId, merged);
+  }
+
+  durabilityTimeline(
+    projectId: string,
+    runId: string,
+    options?: { after?: number; limit?: number },
+  ): DurabilityTimelinePage {
+    return this.durabilityJournal.read(projectId, runId, options);
+  }
+
+  /** An operator-requested stop. Same seam the watcher uses, different actor. */
+  stopRun(projectId: string, runId: string, reason: string): WorkflowRunStopReceipt {
+    if (!this.controller) {
+      throw new Error("Workflow execution is disabled in this build, so a run cannot be stopped.");
+    }
+    const receipt = this.controller.stopRun(projectId, runId, {
+      reason,
+      stoppedBy: "operator",
+    });
+    const run = this.store.readRun(projectId, runId);
+    this.durabilityJournal.append(projectId, {
+      name: "durability.stop.completed",
+      runId,
+      runLastSeq: run?.state.lastSeq ?? 0,
+      action: "stop",
+      ok: receipt.stopped,
+      detail: `An operator stopped this run: ${reason}.`,
+    });
+    return receipt;
+  }
+
+  async observeDurability(): Promise<DurabilityObservation[]> {
+    const observations: DurabilityObservation[] = [];
+    for (const project of listProjects()) {
+      // One unreadable project must not take the background feed down with it.
+      // A feed that throws is how a backend gets orphaned (#41).
+      try {
+        observations.push(...await this.forProject(project.id).durability.observeProject());
+      } catch (error) {
+        this.onError(error);
+      }
+    }
+    return observations;
+  }
+
   async scanStoppedRuns(): Promise<void> {
+    // The durability watcher rides this existing feed rather than starting a
+    // timer of its own: one lifecycle, nothing new that can be orphaned (#41).
+    await this.observeDurability().catch((error) => {
+      this.onError(error);
+      return [];
+    });
     for (const project of listProjects()) {
       for (const run of this.store.listRuns(project.id, 200)) {
         if (!["blocked", "failed", "interrupted"].includes(run.state.status)) continue;
@@ -501,6 +638,7 @@ export class ContextEngineeringProduction {
   close(): void {
     if (this.stoppedRunTimer) clearInterval(this.stoppedRunTimer);
     this.stoppedRunTimer = undefined;
+    for (const runtime of this.runtimes.values()) runtime.durability.close();
     this.removeCompactionSink();
   }
 }

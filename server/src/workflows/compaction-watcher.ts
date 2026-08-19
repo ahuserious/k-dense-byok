@@ -474,6 +474,26 @@ function durableRestartProof(value: unknown, runId: string): DurableRestartProof
   };
 }
 
+/**
+ * An explicit repair model for this dispatch, overriding the model this watcher
+ * was constructed with. This is how durability's operator-selected rescue model
+ * (policy, not a constant) reaches the actual provider call.
+ */
+function repairModelFromPayload(payload: Record<string, unknown>): string | undefined {
+  if (payload.repairModel === undefined) return undefined;
+  if (
+    typeof payload.repairModel !== "string" ||
+    !MODEL_REF_PATTERN.test(payload.repairModel) ||
+    utf8Bytes(payload.repairModel) > MAX_FINDING_BYTES
+  ) {
+    throw new CompactionWatcherError(
+      "INVALID_BEHAVIOR_DISPATCH",
+      "Fix-redeploy repair model must be a provider-qualified model reference.",
+    );
+  }
+  return payload.repairModel;
+}
+
 function auditIdentityFromPayload(payload: Record<string, unknown>): string {
   if (
     typeof payload.auditIdentity !== "string" ||
@@ -497,7 +517,8 @@ function operationKey(runId: string, nodeId: string | undefined, auditIdentity: 
     .digest("hex");
 }
 
-function compactionAuditIdentity(
+/** Exported so the durability watcher produces the SAME operation identity. */
+export function compactionAuditIdentity(
   request: WatchCompactionRequest,
   audit: TrustedDagFusionCompactionAudit,
 ): string {
@@ -523,7 +544,8 @@ function recoveryBlockReason(
   return undefined;
 }
 
-function fingerprintFailure(audit: TrustedDagFusionCompactionAudit): string | undefined {
+/** Exported so the durability watcher reuses this rule instead of restating it. */
+export function fingerprintFailure(audit: TrustedDagFusionCompactionAudit): string | undefined {
   if (audit.occurred && audit.checks.length === 0) return "audit:MISSING_CHECKS";
   const failed = audit.checks.find((check) => !check.passed);
   return failed
@@ -640,6 +662,7 @@ export function createCompactionWatcher(
       }
       const semanticVerdict = semanticVerdictFromPayload(payload);
       const auditIdentity = auditIdentityFromPayload(payload);
+      const dispatchRepairModel = repairModelFromPayload(payload) ?? repairModel;
       const resumeResponse = resumeResponseFromPayload(payload.resumeResponse);
       const key = operationKey(dispatch.runId, nodeId, auditIdentity);
       return dependencies.operationStore.runExclusive(key, async (transaction) => {
@@ -690,7 +713,7 @@ export function createCompactionWatcher(
               runId: dispatch.runId,
               ...(nodeId ? { nodeId } : {}),
               auditIdentity,
-              model: repairModel,
+              model: dispatchRepairModel,
               reason,
               ...(semanticVerdict ? { semanticVerdict } : {}),
             });

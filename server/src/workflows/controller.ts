@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import type { WorkflowRunStatus } from "./run-state.ts";
+// Lives in the durability module, not here: `workflows/index.ts` re-exports
+// this file into a reviewed public export snapshot, and the stop code is
+// durability's contract with the UI rather than the controller's.
+import { DURABILITY_STOP_ERROR_CODE } from "./durability-settings.ts";
 import {
   runWorkflowDag,
   WorkflowRunAbortError,
@@ -68,6 +72,29 @@ export interface WorkflowProjectQuiesceResult {
   projectId: string;
   cancellationRequested: string[];
   drained: boolean;
+}
+
+export type WorkflowRunStopActor = "durability-watcher" | "operator";
+
+export interface WorkflowRunStopRequest {
+  reason: string;
+  stoppedBy: WorkflowRunStopActor;
+}
+
+export interface WorkflowRunStopReceipt {
+  runId: string;
+  stopped: boolean;
+  /** A stop always lands on `cancelled`. Never `failed`. */
+  terminalStatus: "cancelled";
+  stoppedBy: WorkflowRunStopActor;
+  reason: string;
+  /**
+   * False when the run held a live execution lease: the terminal event is then
+   * written by the runner, which spells the code `USER_CANCELLED`. Callers must
+   * fall back to the durability journal for attribution in that case.
+   */
+  distinguishedInRunEvents: boolean;
+  detail: string;
 }
 
 export type WorkflowRunControllerErrorCode =
@@ -317,6 +344,133 @@ export class WorkflowRunController {
     }
     this.resolveIdleIfNeeded();
     return cancellation;
+  }
+
+  /**
+   * Stop authority (#39 / N-A1). The durability watcher can end a run, not only
+   * restart or redeploy it.
+   *
+   * This does not invent a second termination path: it reuses the cancellation
+   * the controller already owns, so in-flight node executions are settled by
+   * the run-state reducer exactly as they are for a user cancel, and the run's
+   * terminal status is `cancelled`. The only thing added is attribution — when
+   * no runner holds the lease, the terminal event carries
+   * `DURABILITY_STOP_ERROR_CODE` instead of `USER_CANCELLED`.
+   */
+  stopRun(
+    projectId: string,
+    runId: string,
+    request: WorkflowRunStopRequest,
+  ): WorkflowRunStopReceipt {
+    const reason = request.reason.trim();
+    if (!reason) {
+      throw new WorkflowRunControllerError(
+        "INVALID_LIMIT",
+        "A workflow stop requires a reason.",
+      );
+    }
+    const run = this.store.readRun(projectId, runId);
+    if (!run) {
+      throw new WorkflowRunControllerError(
+        "RUN_NOT_FOUND",
+        `No such workflow run: ${runId}`,
+      );
+    }
+    if (run.state.status === "cancelled") {
+      return {
+        runId,
+        stopped: true,
+        terminalStatus: "cancelled",
+        stoppedBy: request.stoppedBy,
+        reason,
+        distinguishedInRunEvents:
+          run.state.lastError?.code === DURABILITY_STOP_ERROR_CODE,
+        detail: `Workflow run ${runId} was already stopped.`,
+      };
+    }
+    if (
+      run.state.status === "succeeded" ||
+      run.state.status === "failed" ||
+      run.state.status === "interrupted"
+    ) {
+      throw new WorkflowRunControllerError(
+        "RUN_NOT_CANCELLABLE",
+        `Workflow run ${runId} cannot be stopped from ${run.state.status}.`,
+      );
+    }
+
+    const key = runKey(projectId, runId);
+    // An unleased run has no runner to write its terminal event, so this
+    // controller writes it — and can therefore attribute it. A leased run's
+    // event belongs to whoever holds the lease.
+    if (!this.store.hasLiveRunLease(projectId, runId)) {
+      try {
+        this.store.appendRunEvent(
+          projectId,
+          runId,
+          {
+            eventId: controllerEventId(
+              `durability-stop-${request.stoppedBy}`,
+              projectId,
+              runId,
+              run.state.lastSeq,
+            ),
+            type: "run_cancelled",
+            data: {
+              error: {
+                code: DURABILITY_STOP_ERROR_CODE,
+                message: `Stopped by the durability watcher: ${reason}`,
+                retryable: false,
+              },
+            },
+          },
+          run.state.lastSeq,
+        );
+        this.dropPending(projectId, runId);
+        this.active.get(key)?.controller.abort(new WorkflowRunAbortError(
+          "USER_CANCELLED",
+          "Workflow execution was stopped by the durability watcher.",
+        ));
+        this.resolveIdleIfNeeded();
+        return {
+          runId,
+          stopped: true,
+          terminalStatus: "cancelled",
+          stoppedBy: request.stoppedBy,
+          reason,
+          distinguishedInRunEvents: true,
+          detail: `Workflow run ${runId} was stopped and recorded as a durability stop.`,
+        };
+      } catch (error) {
+        // A lease or a concurrent terminal transition won between the read and
+        // the append. Fall through to the durable cancellation path, which is
+        // safe from any of those states.
+        if (!(error instanceof WorkflowStoreError)) throw error;
+      }
+    }
+
+    this.cancel(projectId, runId);
+    return {
+      runId,
+      stopped: true,
+      terminalStatus: "cancelled",
+      stoppedBy: request.stoppedBy,
+      reason,
+      distinguishedInRunEvents: false,
+      detail:
+        `Workflow run ${runId} is executing, so its stop was requested through the runner. ` +
+        "The run timeline records the stop as a cancellation; the durability timeline records who stopped it.",
+    };
+  }
+
+  private dropPending(projectId: string, runId: string): void {
+    const index = this.pending.findIndex(
+      (item) => item.projectId === projectId && item.runId === runId,
+    );
+    if (index >= 0) {
+      this.pending.splice(index, 1);
+      this.pendingKeys.delete(runKey(projectId, runId));
+    }
   }
 
   waitForIdle(): Promise<void> {
