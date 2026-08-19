@@ -27,6 +27,11 @@ import {
 import { workflowStore } from "./store.ts";
 import { resolvePaths, type ProjectPaths } from "../projects.ts";
 import {
+  claudeCodeManagedExecutable,
+  openClaudeCodeRelay,
+} from "./claude-code-relay.ts";
+import type { WorkflowHarnessAdapterSelection } from "./harness-registry.ts";
+import {
   assertWorkflowNodeControlPackageSeeded,
   createS4HostedFusionSession,
   dispatchWorkflowHarness,
@@ -518,7 +523,15 @@ export interface KadyNodeExecutorDependencies {
     projectId: string,
     paths: ProjectPaths,
     harness: WorkflowHarness,
-  ): Promise<{ host: DelegationHost }>;
+  ): Promise<{
+    host: DelegationHost;
+    /**
+     * Which adapter the registry selected. Optional so a stub dependency stays
+     * a two-line object, present on both production transports so a test can
+     * assert on the decision itself rather than on its absence of an exception.
+     */
+    harnessSelection?: WorkflowHarnessAdapterSelection;
+  }>;
   resolveModel(
     request: ModelRequest,
     context: WorkflowModelResolutionContext,
@@ -831,7 +844,13 @@ function dependenciesWithDefaults(
     pathsForProject: resolvePaths,
     loadManifest: defaultLoadManifest,
     getDelegationSession: (projectId, paths, harness) =>
-      dispatchWorkflowHarness(harness, projectId, paths),
+      dispatchWorkflowHarness(harness, projectId, paths, {
+        // Composition root for the second adapter. The relay lives in
+        // `claude-code-relay.ts` and is injected here rather than imported by
+        // `workflow-delegation-session.ts`, which the relay itself depends on.
+        resolveManagedExecutable: () => claudeCodeManagedExecutable(),
+        claudeCodeRelay: (selection) => openClaudeCodeRelay({ selection }),
+      }),
     resolveModel: resolveWorkflowModel,
     runHostedFusion: runS4HostedFusionWithNodeControl,
     assertChildRuntimeReady: (paths) => {
@@ -1783,7 +1802,12 @@ export function createKadyWorkflowNodeExecutor(
     const manifest = manifestForContext(context, await dependencies.loadManifest(context));
     const nodeSignal = createNodeSignal(context.signal, limits.timeoutMs);
     const deadline = dependencies.now() + limits.timeoutMs;
-    let sessionPromise: Promise<{ host: DelegationHost }> | undefined;
+    let sessionPromise:
+      | Promise<{
+        host: DelegationHost;
+        harnessSelection?: WorkflowHarnessAdapterSelection;
+      }>
+      | undefined;
     if (requiresPiSubagent) {
       sessionPromise = dependencies.getDelegationSession(
         context.projectId,
@@ -1891,7 +1915,17 @@ export function createKadyWorkflowNodeExecutor(
         paths,
         nodeControl.harness,
       );
-      const host = (await sessionPromise).host as DelegationHost;
+      const delegationSession = await sessionPromise;
+      const host = delegationSession.host as DelegationHost;
+      // The trusted pre/post-compaction audit is a pi-subagents artifact: the Pi
+      // child writes it into the sandbox when its context is compacted. A relay
+      // adapter runs one non-compacting CLI invocation and writes no such file,
+      // so demanding the audit from it would fail every relayed node. The flag
+      // comes from the dispatch decision this backend made locally, never from
+      // anything the child said, so it cannot be forged by a delegation reply.
+      const adapterCompacts =
+        (delegationSession.harnessSelection?.adapter ?? "pi-delegation") ===
+          "pi-delegation";
       // Re-read the child package/trust contract immediately before budget
       // admission so a settings edit cannot silently disable the audit hooks.
       dependencies.assertChildRuntimeReady(paths);
@@ -1968,12 +2002,14 @@ export function createKadyWorkflowNodeExecutor(
             );
           }
         }
-        recordDelegationCompactionAudit(
-          context,
-          paths.sandbox,
-          receipt,
-          dependencies.readCompactionAudit,
-        );
+        if (adapterCompacts) {
+          recordDelegationCompactionAudit(
+            context,
+            paths.sandbox,
+            receipt,
+            dependencies.readCompactionAudit,
+          );
+        }
         return validateTerminalStructured(receipt, input.parse);
       } catch (error) {
         if (!reconciliationStarted) {

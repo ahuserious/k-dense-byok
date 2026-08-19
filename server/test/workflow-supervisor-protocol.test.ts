@@ -22,6 +22,7 @@ import {
 } from "../src/workflows/supervisor/protocol.ts";
 import { workflowBudgetReservationId } from "../src/workflows/budget.ts";
 import { createSupervisedWorkflowBudgetDescriptor } from "../src/workflows/supervised-budget.ts";
+import { WORKFLOW_HARNESS_IDS } from "../src/workflows/harness-registry.ts";
 
 const TOKEN = "supervisor_token_0123456789abcdef";
 
@@ -400,6 +401,49 @@ describe("workflow supervisor IPC protocol", () => {
       const line = encodeWorkflowSupervisorResponseLine(response);
       expect(parseWorkflowSupervisorResponseLine(line)).toEqual(response);
     }
+  });
+
+  /**
+   * Lane F2: the wire's harness tuple used to be a second hand-kept copy of
+   * `HarnessSchema`. It is now derived from `harness-registry.ts`, and this is
+   * the pin — every registry literal crosses the wire, and only those do. A
+   * literal in the schema but not on the wire (or the reverse) is the exact
+   * defect class the NodeSpec v1 freeze exists to prevent, one file over.
+   */
+  it("accepts exactly the registry's harness literals on a hosted-Fusion frame", () => {
+    for (const harness of WORKFLOW_HARNESS_IDS) {
+      const request: WorkflowSupervisorRequest = {
+        version: 1,
+        messageId: "msg-harness",
+        token: TOKEN,
+        op: "hosted-fusion",
+        epoch: 4,
+        projectId: "default",
+        request: { ...hostedRequest(), nodeControl: { ...hostedNodeControl(), harness } },
+        budget: budget(),
+      } as WorkflowSupervisorRequest;
+      const parsed = parseWorkflowSupervisorRequestLine(
+        encodeWorkflowSupervisorRequestLine(request),
+      );
+      expect(parsed).toEqual(request);
+    }
+
+    const unknownHarness = {
+      version: 1,
+      messageId: "msg-harness",
+      token: TOKEN,
+      op: "hosted-fusion",
+      epoch: 4,
+      projectId: "default",
+      request: {
+        ...hostedRequest(),
+        nodeControl: { ...hostedNodeControl(), harness: "gpt-cli" },
+      },
+      budget: budget(),
+    };
+    expect(() =>
+      parseWorkflowSupervisorRequestLine(`${JSON.stringify(unknownHarness)}\n`)
+    ).toThrow(WorkflowSupervisorProtocolError);
   });
 
   it("rejects unknown fields, invalid correlation ids, weak tokens, and invalid epochs", () => {

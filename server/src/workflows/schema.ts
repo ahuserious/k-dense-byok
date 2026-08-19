@@ -1,5 +1,6 @@
 import { Type, type Static } from "typebox";
 import { PromptOptimizationNodeSchema } from "./prompt-opt-schema.ts";
+import type { WorkflowHarnessId } from "./harness-registry.ts";
 
 export const WORKFLOW_GRAPH_SCHEMA_VERSION = "1.0" as const;
 export const NODE_SPEC_V1_VERSION = 1 as const;
@@ -134,13 +135,39 @@ export const ModelRequestSchema = Type.Object(
   { additionalProperties: false },
 );
 
+/**
+ * The frozen `settings.harness` / `settings.defaultHarness` union.
+ *
+ * The literals stay spelled out here — `s11/.../freeze-check.sh` reads them out
+ * of this file and requires each to be described in `docs/contracts/NODESPEC-V1.md`,
+ * and a mapped `Type.Union(ids.map(Type.Literal))` would widen `Static<>` to
+ * `string` and dissolve the frozen type. The single table lives in
+ * `harness-registry.ts`; the guard below makes divergence a compile error rather
+ * than a runtime surprise, which is what the freeze is protecting against.
+ */
 const HarnessSchema = Type.Union([
   Type.Literal("pi"),
   Type.Literal("claude-code"),
   Type.Literal("codex"),
   Type.Literal("opencode"),
   Type.Literal("copilot"),
+  Type.Literal("deepseek"),
+  Type.Literal("grok-cli"),
+  Type.Literal("oh-my-pi"),
 ]);
+
+/**
+ * Compile-time equality between this union and the registry table. Both
+ * directions: a registry row missing here, and a literal here with no row.
+ */
+type AssertHarnessUnionMatchesRegistry<
+  A extends WorkflowHarnessId,
+  B extends Static<typeof HarnessSchema>,
+> = [A, B];
+export type HarnessSchemaMatchesRegistry = AssertHarnessUnionMatchesRegistry<
+  Static<typeof HarnessSchema>,
+  WorkflowHarnessId
+>;
 
 const SamplingValueSchema = Type.Union([
   Type.Number(),

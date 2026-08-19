@@ -5,6 +5,10 @@ import path from "node:path";
 import { Value } from "typebox/value";
 import { isWithin } from "../sandbox-fs.ts";
 import {
+  workflowHarnessDefinition,
+  type WorkflowHarnessId,
+} from "./harness-registry.ts";
+import {
   MAX_WORKFLOW_DOCUMENT_BYTES,
   WorkflowGraphDocumentSchema,
   type EvidencePolicy,
@@ -83,7 +87,7 @@ export interface ResolvedNodeSpecV1 {
     sampling: Record<string, string | number | boolean>;
   };
   conditions: { when?: string; exists: string[] };
-  harness: "pi" | "claude-code" | "codex" | "opencode" | "copilot";
+  harness: WorkflowHarnessId;
   databases: string[];
   skills: { mode: "auto" | "auto-manual" | "manual"; list: string[] };
   subagents: { mode: "auto" | "auto-manual" };
@@ -748,6 +752,7 @@ function validateNode(
   }
   validateWorkspacePolicy(node, nodePath, issues);
   validateDeliberationNodeSpec(node, nodePath, issues);
+  validateHarnessReachesDispatch(document, node, nodePath, issues);
 
   if (
     node.settings?.reasoningEffort !== undefined &&
@@ -1017,6 +1022,47 @@ function validateNode(
       }
       break;
   }
+}
+
+/**
+ * Gap (B) of the harness binding, closed here rather than in the executor.
+ *
+ * `kady-node-executor.ts` only asks for a delegation session when
+ * `requiresPiSubagent` — `callCeiling > 0 && !hostedFusionWithoutPolicyEvaluator`.
+ * A hosted-Fusion node whose entire ceiling is served by the OpenRouter router,
+ * with no evidence-policy evaluation, therefore never reaches the dispatch
+ * decision, and `harness` was inert for it on every transport.
+ *
+ * Reaching the decision anyway would select an adapter that then executes
+ * nothing: such a node has no CLI child for any harness to *be*. So the honest
+ * branch the contract offers (NodeSpec v1, "What BOUND will mean", condition 6,
+ * second clause) is taken — the declaration is refused, with a message naming
+ * the user's next action. Silently ignoring the field is what #55 was.
+ */
+function validateHarnessReachesDispatch(
+  document: WorkflowGraphDocument,
+  node: WorkflowNode,
+  nodePath: string,
+  issues: WorkflowValidationIssue[],
+): void {
+  const declaredOnNode = node.settings?.harness;
+  const effective = declaredOnNode ??
+    document.settings?.defaultHarness ??
+    DEFAULT_NODE_SPEC_V1.harness;
+  if (effective === "pi") return;
+  const hostedFusionOnly = node.kind === "fusion" &&
+    node.fusion.mode === "openrouter-router" &&
+    !requiresWorkflowEvidencePolicyEvaluation(document, node);
+  if (!hostedFusionOnly) return;
+  const label = workflowHarnessDefinition(effective).label;
+  issues.push({
+    code: declaredOnNode
+      ? "unreachable-node-harness"
+      : "unreachable-inherited-harness",
+    path: declaredOnNode ? `${nodePath}/settings/harness` : `${nodePath}/settings`,
+    message:
+      `Hosted Fusion runs this node entirely through the OpenRouter router, so no ${label} process is ever started and the harness would be discarded. Set this node's harness to pi, or give the node work that runs on a CLI harness.`,
+  });
 }
 
 function validateDeliberationNodeSpec(

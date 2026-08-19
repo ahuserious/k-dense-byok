@@ -15,6 +15,10 @@ import {
   prepareWorkflowDelegationProject,
 } from "../../agent/workflow-delegation-session.ts";
 import { resolvePaths, type ProjectPaths } from "../../projects.ts";
+import {
+  claudeCodeManagedExecutable,
+  openClaudeCodeRelay,
+} from "../claude-code-relay.ts";
 import type {
   HostedOpenRouterFusionRequest,
   HostedOpenRouterFusionResult,
@@ -1695,15 +1699,34 @@ export class WorkflowSupervisorClient {
   > {
     return {
       getDelegationSession: async (projectId, paths, harness) => {
-        // The supervised transport owns the only trusted adapter there is (a
-        // Pi session in the supervisor process), so the harness decision has
-        // to happen here. The executor awaits this seam before it reserves any
-        // budget, which is why an unavailable or unbound harness is refused
-        // with the dispatch diagnostic instead of quietly buying a Pi child.
-        assertWorkflowHarnessAdapterBound(harness);
+        // The harness decision has to happen here: `server/src/index.ts` boots
+        // the out-of-process supervisor on every real server start, so this
+        // override — not the in-process executor default — is production. The
+        // executor awaits this seam before it reserves any budget, which is why
+        // an unavailable or unbound harness is refused with the dispatch
+        // diagnostic instead of quietly buying a Pi child.
+        //
+        // The selection is returned alongside the host so a test can assert
+        // *which* adapter production chose (NodeSpec v1, "What BOUND will mean",
+        // condition 2). `claudeCodeManagedExecutable` is passed so Claude Code
+        // installed by the native installer — `~/.local/bin`, routinely absent
+        // from a service PATH — reports installed rather than missing.
+        const harnessSelection = assertWorkflowHarnessAdapterBound(
+          harness,
+          undefined,
+          () => claudeCodeManagedExecutable(),
+        );
         const canonical = assertCanonicalProjectPaths(projectId, paths);
         prepareWorkflowDelegationProject(projectId, canonical);
+        if (harnessSelection.adapter === "claude-code-relay") {
+          // The real second adapter. The relayed child is a Claude Code process
+          // owned by this backend, not a Pi session in the supervisor, so the
+          // supervised delegate path is deliberately not taken for it.
+          const relay = openClaudeCodeRelay({ selection: harnessSelection });
+          return { harnessSelection, host: relay.host, relay };
+        }
         return {
+          harnessSelection,
           host: {
             delegate: (request, options) =>
               this.delegate(projectId, request, options),
