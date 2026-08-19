@@ -1,0 +1,844 @@
+# Seeded pipeline — imported from the DAG-Pipelines branch
+# (source: composed-research-pipeline).
+#
+# Landed as a TYPED NodeSpec v1 document. The upstream file was 29942 bytes of
+# legacy dialect and the legacy translator rejects it on six separate grounds,
+# so it could not be carried across verbatim. What survived and what did not,
+# recorded in full in docs/adr/F7-seed-import.md:
+#
+#   KEPT — the three-phase structure (literature -> analysis -> synthesis), the
+#   3x adversarial fresh-node verification block after every substantive phase,
+#   the per-phase scribe nodes, the per-node scientific skills (upstream
+#   `skills:` becomes NodeSpec v1 `settings.skills.list`), and the reasoning-
+#   boosted planning and synthesis steps, which land as real `kind: fusion`
+#   nodes on the hosted OpenRouter Fusion router rather than as an agent node
+#   pointed at a compound model alias.
+#
+#   LOST — the two `approval:` human gates (after planning, before synthesis).
+#   NodeSpec v1 has no human gate; the verification chain is what stands in
+#   their place, and it is a model, not a person.
+#   LOST — per-node `context: fresh`. Each verification pass is a separate node
+#   and therefore a separate execution, which is what the upstream flag bought
+#   in practice, but there is no field that declares it.
+#   LOST — `output_format` JSON-schema constraints on the verify nodes. The
+#   prompts state the required answer shape instead.
+#   LOST — `$ARTIFACTS_DIR` interpolation. Typed artifacts are declared in the
+#   `artifacts:` block and written to declared `workspace.writePaths`.
+#
+# Upload the dataset to the sandbox before running the analysis phase.
+schemaVersion: "1.0"
+id: composed-research-pipeline
+name: Composed Research Pipeline
+description: |
+  A single scientific DAG that composes three research phases into one
+  end-to-end pipeline: a literature search, an exploratory and statistical
+  analysis of an uploaded dataset, and a written synthesis. Every substantive
+  phase is followed by three independent adversarial verification passes, and
+  each phase writes a reproducibility log.
+
+  Upstream this workflow paused twice for a human to approve. This runtime has
+  no human approval gate; the verification chain replaces it, and a model is
+  not a reviewer. Read the verification outputs before trusting the synthesis.
+entryNodeId: plan
+
+defaultModel:
+  requested:
+    source: fixed
+    provider: openrouter
+    model: anthropic/claude-opus-4.8
+    auth:
+      kind: api-key
+    reasoning: high
+  resolution:
+    mode: exact
+
+limits:
+  maxIterations: 200
+  maxModelCalls: 200
+  maxParallelism: 2
+  maxSubagents: 8
+  timeoutMs: 21600000
+  maxTokens: 60000000
+  maxCostUsd: 25
+  maxRetries: 0
+
+rescue:
+  enabled: false
+  maxAttempts: 0
+  triggers: []
+
+evidence:
+  enabled: false
+  minimumIndependentSources: 0
+  requireArtifactReferences: false
+  onUnsupportedOutput: fail
+
+artifacts:
+  - id: literature-log
+    name: Literature phase log
+    kind: log
+    writerNodeId: lit-review-scribe
+    path: reports/literature
+  - id: eda-outputs
+    name: Exploratory analysis outputs
+    kind: directory
+    writerNodeId: eda
+    path: analysis/eda
+  - id: stats-outputs
+    name: Statistical analysis outputs
+    kind: directory
+    writerNodeId: stats
+    path: analysis/stats
+  - id: analysis-log
+    name: Analysis phase log
+    kind: log
+    writerNodeId: analysis-scribe
+    path: reports/analysis
+  - id: synthesis-log
+    name: Run reproducibility record
+    kind: report
+    writerNodeId: final-scribe
+    path: reports/synthesis
+
+nodes:
+  - id: plan
+    name: Plan the research
+    kind: fusion
+    terminal: false
+    position: { x: 80, y: 80 }
+    workspace:
+      isolation: read-only
+      writePaths: []
+    settings:
+      version: 1
+      skills:
+        mode: auto-manual
+        list:
+          - hypothesis-generation
+          - scientific-critical-thinking
+    goal: |
+      Lead a research project that runs as three phases: a literature search, an
+      exploratory and statistical analysis of an uploaded dataset, and a written
+      synthesis.
+
+      Restate the run goal in your own words, then produce a concrete plan naming:
+      the scientific question and its sub-questions; the search topic that drives the
+      literature phase; the datasets and inputs the analysis phase expects; the
+      specific comparisons and tests the analysis should run; the intended final
+      deliverable; the success criteria; and the artifacts each phase must leave
+      behind. State every assumption explicitly.
+    preserveMinorityReports: true
+    fusion:
+      mode: openrouter-router
+      router:
+        requested:
+          source: fixed
+          provider: openrouter
+          model: openrouter/fusion
+          auth:
+            kind: api-key
+          reasoning: high
+        resolution:
+          mode: exact
+      members:
+        - id: methodologist
+          role: Research methodologist
+          model:
+            requested:
+              source: fixed
+              provider: openrouter
+              model: anthropic/claude-opus-4.8
+              auth:
+                kind: api-key
+              reasoning: high
+            resolution:
+              mode: exact
+        - id: domain-analyst
+          role: Domain analyst
+          model:
+            requested:
+              source: fixed
+              provider: openrouter
+              model: openai/gpt-5.5
+              auth:
+                kind: api-key
+              reasoning: high
+            resolution:
+              mode: exact
+        - id: skeptic
+          role: Adversarial skeptic
+          model:
+            requested:
+              source: fixed
+              provider: openrouter
+              model: google/gemini-3.1-pro-preview
+              auth:
+                kind: api-key
+              reasoning: high
+            resolution:
+              mode: exact
+      judge:
+        requested:
+          source: fixed
+          provider: openrouter
+          model: anthropic/claude-opus-4.8
+          auth:
+            kind: api-key
+          reasoning: high
+        resolution:
+          mode: exact
+
+  - id: plan-verify-1
+    name: Verify plan (1 of 3)
+    kind: agent
+    terminal: false
+    position: { x: 420, y: 80 }
+    workspace:
+      isolation: read-only
+      writePaths: []
+    prompt: |
+      ADVERSARIAL VERIFICATION — pass 1 of 3, run in a separate node so it does not
+      inherit the reasoning that produced the work.
+
+      The phase "plan" had this goal:
+        turn the run goal into a complete, unambiguous three-phase plan
+
+      Re-derive whether the work actually achieves that goal. Hunt for the specific
+      failure this phase is prone to: a plan that names phases but never defines what would make them succeed
+
+      Be adversarial. FAIL it if the next phase could not proceed unambiguously on
+      what this phase produced. Answer with exactly "PASS" or "FAIL: <reasons>".
+
+  - id: plan-verify-2
+    name: Verify plan (2 of 3)
+    kind: agent
+    terminal: false
+    position: { x: 760, y: 80 }
+    workspace:
+      isolation: read-only
+      writePaths: []
+    prompt: |
+      ADVERSARIAL VERIFICATION — pass 2 of 3, run in a separate node so it does not
+      inherit the reasoning that produced the work.
+
+      The phase "plan" had this goal:
+        turn the run goal into a complete, unambiguous three-phase plan
+
+      Re-derive whether the work actually achieves that goal. Hunt for the specific
+      failure this phase is prone to: a plan that names phases but never defines what would make them succeed
+
+      Be adversarial. FAIL it if the next phase could not proceed unambiguously on
+      what this phase produced. Answer with exactly "PASS" or "FAIL: <reasons>".
+
+  - id: plan-verify-3
+    name: Verify plan (3 of 3)
+    kind: agent
+    terminal: false
+    position: { x: 1100, y: 80 }
+    workspace:
+      isolation: read-only
+      writePaths: []
+    prompt: |
+      ADVERSARIAL VERIFICATION — pass 3 of 3, run in a separate node so it does not
+      inherit the reasoning that produced the work.
+
+      The phase "plan" had this goal:
+        turn the run goal into a complete, unambiguous three-phase plan
+
+      Re-derive whether the work actually achieves that goal. Hunt for the specific
+      failure this phase is prone to: a plan that names phases but never defines what would make them succeed
+
+      Be adversarial. FAIL it if the next phase could not proceed unambiguously on
+      what this phase produced. Answer with exactly "PASS" or "FAIL: <reasons>".
+
+  - id: lit-review
+    name: Literature search
+    kind: agent
+    terminal: false
+    position: { x: 80, y: 300 }
+    workspace:
+      isolation: read-only
+      writePaths: []
+    settings:
+      version: 1
+      skills:
+        mode: auto-manual
+        list:
+          - literature-review
+          - paper-lookup
+          - citation-management
+    prompt: |
+      Run the literature phase of the approved plan. Search the literature for the
+      topic the plan names, select the work that actually bears on the scientific
+      question, and synthesize it: what is established, what is contested, what is
+      unmeasured. Cite every claim to a specific source. Say plainly where the
+      literature is thin rather than filling the gap with plausible prose.
+
+  - id: lit-review-scribe
+    name: Log the literature phase
+    kind: agent
+    terminal: true
+    position: { x: 420, y: 300 }
+    workspace:
+      isolation: isolated-worktree
+      writePaths:
+        - reports/literature
+    settings:
+      version: 1
+      skills:
+        mode: auto-manual
+        list:
+          - citation-management
+    prompt: |
+      Write a reproducible log of the literature phase to `reports/literature/`: the
+      searches run, the selection criteria applied, the sources kept, the sources
+      rejected and why. Someone repeating this phase from your log alone must be able
+      to reach the same corpus.
+
+  - id: lit-review-verify-1
+    name: Verify literature search (1 of 3)
+    kind: agent
+    terminal: false
+    position: { x: 760, y: 300 }
+    workspace:
+      isolation: read-only
+      writePaths: []
+    prompt: |
+      ADVERSARIAL VERIFICATION — pass 1 of 3, run in a separate node so it does not
+      inherit the reasoning that produced the work.
+
+      The phase "literature search" had this goal:
+        produce a cited synthesis that answers the plan's literature questions
+
+      Re-derive whether the work actually achieves that goal. Hunt for the specific
+      failure this phase is prone to: claims that carry no citation, and a corpus selected to agree with the hypothesis
+
+      Be adversarial. FAIL it if the next phase could not proceed unambiguously on
+      what this phase produced. Answer with exactly "PASS" or "FAIL: <reasons>".
+
+  - id: lit-review-verify-2
+    name: Verify literature search (2 of 3)
+    kind: agent
+    terminal: false
+    position: { x: 1100, y: 300 }
+    workspace:
+      isolation: read-only
+      writePaths: []
+    prompt: |
+      ADVERSARIAL VERIFICATION — pass 2 of 3, run in a separate node so it does not
+      inherit the reasoning that produced the work.
+
+      The phase "literature search" had this goal:
+        produce a cited synthesis that answers the plan's literature questions
+
+      Re-derive whether the work actually achieves that goal. Hunt for the specific
+      failure this phase is prone to: claims that carry no citation, and a corpus selected to agree with the hypothesis
+
+      Be adversarial. FAIL it if the next phase could not proceed unambiguously on
+      what this phase produced. Answer with exactly "PASS" or "FAIL: <reasons>".
+
+  - id: lit-review-verify-3
+    name: Verify literature search (3 of 3)
+    kind: agent
+    terminal: false
+    position: { x: 80, y: 520 }
+    workspace:
+      isolation: read-only
+      writePaths: []
+    prompt: |
+      ADVERSARIAL VERIFICATION — pass 3 of 3, run in a separate node so it does not
+      inherit the reasoning that produced the work.
+
+      The phase "literature search" had this goal:
+        produce a cited synthesis that answers the plan's literature questions
+
+      Re-derive whether the work actually achieves that goal. Hunt for the specific
+      failure this phase is prone to: claims that carry no citation, and a corpus selected to agree with the hypothesis
+
+      Be adversarial. FAIL it if the next phase could not proceed unambiguously on
+      what this phase produced. Answer with exactly "PASS" or "FAIL: <reasons>".
+
+  - id: eda
+    name: Exploratory analysis
+    kind: agent
+    terminal: false
+    position: { x: 420, y: 520 }
+    workspace:
+      isolation: isolated-worktree
+      writePaths:
+        - analysis/eda
+    limits:
+      maxIterations: 8
+      maxModelCalls: 8
+    settings:
+      version: 1
+      skills:
+        mode: auto-manual
+        list:
+          - exploratory-data-analysis
+          - polars
+          - matplotlib
+    prompt: |
+      Run the exploratory phase on the uploaded dataset. Profile it first: shape,
+      types, missingness, distributions, outliers, and anything that would invalidate
+      the tests the plan proposes. Produce the figures and tables the plan asks for
+      and write them under `analysis/eda/`.
+
+      If the dataset is absent or does not match what the plan expected, stop and say
+      so. Do not synthesize a dataset.
+
+  - id: eda-verify-1
+    name: Verify exploratory analysis (1 of 3)
+    kind: agent
+    terminal: false
+    position: { x: 760, y: 520 }
+    workspace:
+      isolation: read-only
+      writePaths: []
+    prompt: |
+      ADVERSARIAL VERIFICATION — pass 1 of 3, run in a separate node so it does not
+      inherit the reasoning that produced the work.
+
+      The phase "exploratory analysis" had this goal:
+        characterize the dataset well enough that the planned tests are known to be applicable
+
+      Re-derive whether the work actually achieves that goal. Hunt for the specific
+      failure this phase is prone to: a profile that never checks the assumptions the next phase's tests depend on
+
+      Be adversarial. FAIL it if the next phase could not proceed unambiguously on
+      what this phase produced. Answer with exactly "PASS" or "FAIL: <reasons>".
+
+  - id: eda-verify-2
+    name: Verify exploratory analysis (2 of 3)
+    kind: agent
+    terminal: false
+    position: { x: 1100, y: 520 }
+    workspace:
+      isolation: read-only
+      writePaths: []
+    prompt: |
+      ADVERSARIAL VERIFICATION — pass 2 of 3, run in a separate node so it does not
+      inherit the reasoning that produced the work.
+
+      The phase "exploratory analysis" had this goal:
+        characterize the dataset well enough that the planned tests are known to be applicable
+
+      Re-derive whether the work actually achieves that goal. Hunt for the specific
+      failure this phase is prone to: a profile that never checks the assumptions the next phase's tests depend on
+
+      Be adversarial. FAIL it if the next phase could not proceed unambiguously on
+      what this phase produced. Answer with exactly "PASS" or "FAIL: <reasons>".
+
+  - id: eda-verify-3
+    name: Verify exploratory analysis (3 of 3)
+    kind: agent
+    terminal: false
+    position: { x: 80, y: 740 }
+    workspace:
+      isolation: read-only
+      writePaths: []
+    prompt: |
+      ADVERSARIAL VERIFICATION — pass 3 of 3, run in a separate node so it does not
+      inherit the reasoning that produced the work.
+
+      The phase "exploratory analysis" had this goal:
+        characterize the dataset well enough that the planned tests are known to be applicable
+
+      Re-derive whether the work actually achieves that goal. Hunt for the specific
+      failure this phase is prone to: a profile that never checks the assumptions the next phase's tests depend on
+
+      Be adversarial. FAIL it if the next phase could not proceed unambiguously on
+      what this phase produced. Answer with exactly "PASS" or "FAIL: <reasons>".
+
+  - id: stats
+    name: Statistical analysis
+    kind: agent
+    terminal: false
+    position: { x: 420, y: 740 }
+    workspace:
+      isolation: isolated-worktree
+      writePaths:
+        - analysis/stats
+    limits:
+      maxIterations: 8
+      maxModelCalls: 8
+    settings:
+      version: 1
+      skills:
+        mode: auto-manual
+        list:
+          - statistical-analysis
+          - statsmodels
+          - pymc
+    prompt: |
+      Run the statistical comparisons and tests the plan named, on the data as the
+      exploratory phase actually found it. For each test, state the assumption it
+      makes, whether the data meets it, the effect size, and the uncertainty — not
+      only the p-value. Write results under `analysis/stats/`.
+
+      Where an assumption fails, either use a method that does not need it or report
+      that the question cannot be answered with this data. Do not report a test you
+      know to be inapplicable.
+
+  - id: analysis-scribe
+    name: Log the analysis phase
+    kind: agent
+    terminal: true
+    position: { x: 760, y: 740 }
+    workspace:
+      isolation: isolated-worktree
+      writePaths:
+        - reports/analysis
+    prompt: |
+      Write a reproducible log of the analysis phase to `reports/analysis/`: the
+      dataset version, every transformation applied, every test run with its
+      parameters, and the exact commands. Someone repeating this phase from your log
+      alone must obtain the same numbers.
+
+  - id: stats-verify-1
+    name: Verify statistical analysis (1 of 3)
+    kind: agent
+    terminal: false
+    position: { x: 1100, y: 740 }
+    workspace:
+      isolation: read-only
+      writePaths: []
+    prompt: |
+      ADVERSARIAL VERIFICATION — pass 1 of 3, run in a separate node so it does not
+      inherit the reasoning that produced the work.
+
+      The phase "statistical analysis" had this goal:
+        answer the plan's comparisons with methods whose assumptions the data actually meets
+
+      Re-derive whether the work actually achieves that goal. Hunt for the specific
+      failure this phase is prone to: a significant result reported without its assumption check, its effect size, or its uncertainty
+
+      Be adversarial. FAIL it if the next phase could not proceed unambiguously on
+      what this phase produced. Answer with exactly "PASS" or "FAIL: <reasons>".
+
+  - id: stats-verify-2
+    name: Verify statistical analysis (2 of 3)
+    kind: agent
+    terminal: false
+    position: { x: 80, y: 960 }
+    workspace:
+      isolation: read-only
+      writePaths: []
+    prompt: |
+      ADVERSARIAL VERIFICATION — pass 2 of 3, run in a separate node so it does not
+      inherit the reasoning that produced the work.
+
+      The phase "statistical analysis" had this goal:
+        answer the plan's comparisons with methods whose assumptions the data actually meets
+
+      Re-derive whether the work actually achieves that goal. Hunt for the specific
+      failure this phase is prone to: a significant result reported without its assumption check, its effect size, or its uncertainty
+
+      Be adversarial. FAIL it if the next phase could not proceed unambiguously on
+      what this phase produced. Answer with exactly "PASS" or "FAIL: <reasons>".
+
+  - id: stats-verify-3
+    name: Verify statistical analysis (3 of 3)
+    kind: agent
+    terminal: false
+    position: { x: 420, y: 960 }
+    workspace:
+      isolation: read-only
+      writePaths: []
+    prompt: |
+      ADVERSARIAL VERIFICATION — pass 3 of 3, run in a separate node so it does not
+      inherit the reasoning that produced the work.
+
+      The phase "statistical analysis" had this goal:
+        answer the plan's comparisons with methods whose assumptions the data actually meets
+
+      Re-derive whether the work actually achieves that goal. Hunt for the specific
+      failure this phase is prone to: a significant result reported without its assumption check, its effect size, or its uncertainty
+
+      Be adversarial. FAIL it if the next phase could not proceed unambiguously on
+      what this phase produced. Answer with exactly "PASS" or "FAIL: <reasons>".
+
+  - id: synthesis
+    name: Synthesize the findings
+    kind: fusion
+    terminal: false
+    position: { x: 760, y: 960 }
+    workspace:
+      isolation: read-only
+      writePaths: []
+    settings:
+      version: 1
+      skills:
+        mode: auto-manual
+        list:
+          - scientific-writing
+          - scientific-critical-thinking
+    goal: |
+      Write the deliverable the plan named, drawing on the literature synthesis, the
+      exploratory profile and the statistical results.
+
+      Lead with what the work found. Then the methodology. Then the caveats, stated
+      as plainly as the findings. Every claim traces either to a cited source or to a
+      specific result from the analysis phase. A question the data could not answer is
+      reported as unanswered, not softened.
+    preserveMinorityReports: true
+    fusion:
+      mode: openrouter-router
+      router:
+        requested:
+          source: fixed
+          provider: openrouter
+          model: openrouter/fusion
+          auth:
+            kind: api-key
+          reasoning: high
+        resolution:
+          mode: exact
+      members:
+        - id: methodologist
+          role: Research methodologist
+          model:
+            requested:
+              source: fixed
+              provider: openrouter
+              model: anthropic/claude-opus-4.8
+              auth:
+                kind: api-key
+              reasoning: high
+            resolution:
+              mode: exact
+        - id: domain-analyst
+          role: Domain analyst
+          model:
+            requested:
+              source: fixed
+              provider: openrouter
+              model: openai/gpt-5.5
+              auth:
+                kind: api-key
+              reasoning: high
+            resolution:
+              mode: exact
+        - id: skeptic
+          role: Adversarial skeptic
+          model:
+            requested:
+              source: fixed
+              provider: openrouter
+              model: google/gemini-3.1-pro-preview
+              auth:
+                kind: api-key
+              reasoning: high
+            resolution:
+              mode: exact
+      judge:
+        requested:
+          source: fixed
+          provider: openrouter
+          model: anthropic/claude-opus-4.8
+          auth:
+            kind: api-key
+          reasoning: high
+        resolution:
+          mode: exact
+
+  - id: synthesis-verify-1
+    name: Verify synthesis (1 of 3)
+    kind: agent
+    terminal: false
+    position: { x: 1100, y: 960 }
+    workspace:
+      isolation: read-only
+      writePaths: []
+    prompt: |
+      ADVERSARIAL VERIFICATION — pass 1 of 3, run in a separate node so it does not
+      inherit the reasoning that produced the work.
+
+      The phase "synthesis" had this goal:
+        produce a deliverable in which every claim traces to a source or a result
+
+      Re-derive whether the work actually achieves that goal. Hunt for the specific
+      failure this phase is prone to: a confident conclusion that rests on a result the analysis phase reported as uncertain
+
+      Be adversarial. FAIL it if the next phase could not proceed unambiguously on
+      what this phase produced. Answer with exactly "PASS" or "FAIL: <reasons>".
+
+  - id: synthesis-verify-2
+    name: Verify synthesis (2 of 3)
+    kind: agent
+    terminal: false
+    position: { x: 80, y: 1180 }
+    workspace:
+      isolation: read-only
+      writePaths: []
+    prompt: |
+      ADVERSARIAL VERIFICATION — pass 2 of 3, run in a separate node so it does not
+      inherit the reasoning that produced the work.
+
+      The phase "synthesis" had this goal:
+        produce a deliverable in which every claim traces to a source or a result
+
+      Re-derive whether the work actually achieves that goal. Hunt for the specific
+      failure this phase is prone to: a confident conclusion that rests on a result the analysis phase reported as uncertain
+
+      Be adversarial. FAIL it if the next phase could not proceed unambiguously on
+      what this phase produced. Answer with exactly "PASS" or "FAIL: <reasons>".
+
+  - id: synthesis-verify-3
+    name: Verify synthesis (3 of 3)
+    kind: agent
+    terminal: false
+    position: { x: 420, y: 1180 }
+    workspace:
+      isolation: read-only
+      writePaths: []
+    prompt: |
+      ADVERSARIAL VERIFICATION — pass 3 of 3, run in a separate node so it does not
+      inherit the reasoning that produced the work.
+
+      The phase "synthesis" had this goal:
+        produce a deliverable in which every claim traces to a source or a result
+
+      Re-derive whether the work actually achieves that goal. Hunt for the specific
+      failure this phase is prone to: a confident conclusion that rests on a result the analysis phase reported as uncertain
+
+      Be adversarial. FAIL it if the next phase could not proceed unambiguously on
+      what this phase produced. Answer with exactly "PASS" or "FAIL: <reasons>".
+
+  - id: evidence-gate
+    name: Evidence gate
+    kind: evidence-gate
+    terminal: false
+    position: { x: 760, y: 1180 }
+    workspace:
+      isolation: read-only
+      writePaths: []
+    checks:
+      - citations
+      - claim-support
+      - artifact-exists
+    artifactIds:
+      - literature-log
+      - analysis-log
+      - eda-outputs
+      - stats-outputs
+    onUnsupportedOutput: fail
+    evaluator:
+      requested:
+        source: fixed
+        provider: openrouter
+        model: anthropic/claude-opus-4.8
+        auth:
+          kind: api-key
+        reasoning: high
+      resolution:
+        mode: exact
+
+  - id: final-scribe
+    name: Log the run
+    kind: agent
+    terminal: true
+    position: { x: 1100, y: 1180 }
+    workspace:
+      isolation: isolated-worktree
+      writePaths:
+        - reports/synthesis
+    prompt: |
+      Write the run's reproducibility record to `reports/synthesis/`: the plan, which
+      verification passes passed and which failed, what each phase produced, and the
+      open questions the synthesis names. This is the record someone reads a year from
+      now to decide whether to trust the result.
+
+edges:
+  - id: plan-to-plan-verify-1
+    from: plan
+    to: plan-verify-1
+    condition: always
+  - id: plan-verify-1-to-plan-verify-2
+    from: plan-verify-1
+    to: plan-verify-2
+    condition: always
+  - id: plan-verify-2-to-plan-verify-3
+    from: plan-verify-2
+    to: plan-verify-3
+    condition: always
+  - id: plan-verify-3-to-lit-review
+    from: plan-verify-3
+    to: lit-review
+    condition: always
+  - id: lit-review-to-lit-review-scribe
+    from: lit-review
+    to: lit-review-scribe
+    condition: always
+  - id: lit-review-to-lit-review-verify-1
+    from: lit-review
+    to: lit-review-verify-1
+    condition: always
+  - id: lit-review-verify-1-to-lit-review-verify-2
+    from: lit-review-verify-1
+    to: lit-review-verify-2
+    condition: always
+  - id: lit-review-verify-2-to-lit-review-verify-3
+    from: lit-review-verify-2
+    to: lit-review-verify-3
+    condition: always
+  - id: lit-review-verify-3-to-eda
+    from: lit-review-verify-3
+    to: eda
+    condition: always
+  - id: eda-to-eda-verify-1
+    from: eda
+    to: eda-verify-1
+    condition: always
+  - id: eda-verify-1-to-eda-verify-2
+    from: eda-verify-1
+    to: eda-verify-2
+    condition: always
+  - id: eda-verify-2-to-eda-verify-3
+    from: eda-verify-2
+    to: eda-verify-3
+    condition: always
+  - id: eda-verify-3-to-stats
+    from: eda-verify-3
+    to: stats
+    condition: always
+  - id: stats-to-analysis-scribe
+    from: stats
+    to: analysis-scribe
+    condition: always
+  - id: stats-to-stats-verify-1
+    from: stats
+    to: stats-verify-1
+    condition: always
+  - id: stats-verify-1-to-stats-verify-2
+    from: stats-verify-1
+    to: stats-verify-2
+    condition: always
+  - id: stats-verify-2-to-stats-verify-3
+    from: stats-verify-2
+    to: stats-verify-3
+    condition: always
+  - id: stats-verify-3-to-synthesis
+    from: stats-verify-3
+    to: synthesis
+    condition: always
+  - id: synthesis-to-synthesis-verify-1
+    from: synthesis
+    to: synthesis-verify-1
+    condition: always
+  - id: synthesis-verify-1-to-synthesis-verify-2
+    from: synthesis-verify-1
+    to: synthesis-verify-2
+    condition: always
+  - id: synthesis-verify-2-to-synthesis-verify-3
+    from: synthesis-verify-2
+    to: synthesis-verify-3
+    condition: always
+  - id: synthesis-verify-3-to-evidence-gate
+    from: synthesis-verify-3
+    to: evidence-gate
+    condition: always
+  - id: evidence-gate-to-final-scribe
+    from: evidence-gate
+    to: final-scribe
+    condition: evidence-supported

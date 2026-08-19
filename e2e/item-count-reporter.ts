@@ -48,13 +48,18 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   ["wave-f/f1/model-presets.spec.ts", 7],
   ["scientific-pipelines.spec.ts", 57],
   ["workspace.spec.ts", 46],
+  // Wave F, lane F7 — seeded pipelines (rows 20-21). Path-keyed to dest's
+  // inventoryKey (relative to e2e/), not basename.
+  ["wave-f/f7/pipeline-builder-skill.spec.ts", 5],
+  ["wave-f/f7/seeded-pipelines.spec.ts", 8],
   ["wave-f/harness/app-shell.spec.ts", 15],
   ["wave-f/harness/evidence-contract.spec.ts", 3],
   ["wave-f/harness/smoke.spec.ts", 1],
 ]);
 // 270 after F8. F5's 4 items are thin (Gate U is F6). F14 adds 7.
-// F11 adds 3 substantive curator items. F1 adds 7. F3 adds 2.
-const EXPECTED_SUBSTANTIVE_ITEMS = 289;
+// F11 adds 3. F1 adds 7. F3 adds 2. F7 adds pipeline-builder-skill (5)
+// and seeded-pipelines (8).
+const EXPECTED_SUBSTANTIVE_ITEMS = 302;
 // 35 pre-existing thin items (labelled inventory smokes plus the 3 fixmes) + the 3 Wave-F
 // evidence-fixture contract items + F5's 4.
 const EXPECTED_THIN_ITEMS = 42;

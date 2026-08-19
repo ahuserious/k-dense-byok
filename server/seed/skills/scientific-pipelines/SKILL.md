@@ -46,3 +46,24 @@ detail.
 
 When reporting a run, include its workflow name, run id, current state, active
 or failed node when available, and any approval action still required.
+
+## Two runtimes, one registry
+
+The sequence above operates the **vendored pipeline engine** through the
+`/pipelines` proxy. This app also runs a **typed** workflow runtime with its own
+endpoints, its own run states, and a budget that is reserved before any model
+call. Both surface in the same Scientific Pipelines registry, so "list the
+pipelines" is ambiguous until you know which the user means. Never report one
+runtime's empty library as "no pipelines".
+
+## Reference files
+
+- `references/typed-workflow-operations.md` — the typed runtime's routes
+  (definitions, conditional writes, runs, cancel, resume), its run states and
+  event order, why it has **no** approve/reject endpoint, and the budget
+  refusal that looks exactly like a run that never started. Read it before
+  operating anything that is not behind `/pipelines`.
+- `references/seeded-pipelines.md` — the three pipelines seeded into every
+  project's library: what each needs before it will run, what each lost in
+  translation from its upstream form, and the three reasons a seeded pipeline
+  refuses to start.

@@ -357,3 +357,35 @@ playbook is for the ordinary project agent and for maintainers.
 - `references/rescue-playbook.md` — the long-form rescue reference behind the
   section above. Read it when diagnosing a blocked run *outside* the confined
   rescue helper, which cannot reach it.
+
+### The authoring corpus — `references/recipes/`
+
+The five files above tell you *what to ask* and *what shape to emit*. These tell
+you *what the two runtimes in this app actually accept*, field by field. Read
+`two-runtimes.md` before you emit a single node; the rest when you reach them.
+
+- `references/recipes/two-runtimes.md` — **read this first.** This app has two
+  execution surfaces with different grammars: the typed NodeSpec v1 runtime and
+  the vendored pipeline engine. A capability table says which one has loops,
+  human approval gates, shell steps, councils, fusion and evidence gates. Emit
+  the wrong dialect and the document is rejected on save — or, worse, saves and
+  silently drops the behaviour the researcher asked for.
+- `references/recipes/typed-node-vocabulary.md` — every field of a
+  `schemaVersion: "1.0"` document: limits (including the two that fail
+  validation at zero), workspaces, artifacts, the full NodeSpec v1 `settings`
+  object, all eight node kinds, both fusion modes with the constraints the
+  validator enforces, and the edge routing rules. Read it in Step 8.
+- `references/recipes/legacy-dialect-nodes.md` — the vendored engine's dialect:
+  `bash`, `script`, `loop`, `approval`, `cancel`, `when:`, `trigger_rule`,
+  `output_format`, `hooks`, `mcp`. Read it only when the researcher needs a
+  human gate, a loop, or a step that runs no model, and say what they trade.
+- `references/recipes/variables-and-outputs.md` — how state moves between steps.
+  The vendored engine substitutes `$ARGUMENTS` / `$node.output`; the typed
+  runtime has **no** variable syntax and passes state through declared
+  artifacts. Also: exactly which two `$` forms the legacy importer accepts.
+- `references/recipes/good-practices.md` — the practices and anti-patterns that
+  are true in *this* app, and the four things to check first when a run does not
+  do what the document says.
+- `references/recipes/example-pipelines.md` — a reading guide to the three
+  seeded pipelines in `server/seed/pipelines/`, which are the worked examples
+  for everything above, including how to record what an adaptation lost.
