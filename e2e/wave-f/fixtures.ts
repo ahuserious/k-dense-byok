@@ -23,6 +23,7 @@
  *   - Gate D (design-compliant): partially. Screenshots support a contrast/keyboard argument; they do
  *     not replace measured numbers.
  */
+import fs from "node:fs";
 import path from "node:path";
 
 import type { TestInfo } from "@playwright/test";
@@ -73,19 +74,32 @@ function waveFSpecIdentity(testInfo: TestInfo): WaveFSpecIdentity {
   };
 }
 
+/** The per-item provenance file written next to that item's screenshots. */
+export const WAVE_F_EVIDENCE_MANIFEST_NAME = "run.json";
+
 export interface WaveFEvidence {
   /** The lane id this spec's evidence is filed under (its directory under `e2e/wave-f/`). */
   readonly lane: string;
-  /** Absolute directory this spec's screenshots are written to. */
+  /**
+   * Absolute directory THIS TEST ITEM's screenshots are written to:
+   * `.stably/wave-f-evidence/<lane>/<spec-basename>/<testId>/`. The last segment is
+   * `testInfo.testId`, so two items in one spec file never share a directory however they are
+   * titled, and the directory is emptied when this item starts.
+   */
   readonly directory: string;
   /**
    * Take a full-page screenshot at a deterministic path and attach it to the Playwright report.
    *
    *   await evidence.shot("settings-model-presets");
    *
-   * Writes `.stably/wave-f-evidence/<lane>/<spec-basename>/<NN>-<name>.png`, where `<NN>` is a
-   * two-digit counter that makes the on-disk order the call order. Returns the absolute path so a
-   * spec can name it in an assertion message or a lane can copy it into its evidence report.
+   * Writes `.stably/wave-f-evidence/<lane>/<spec-basename>/<testId>/<NN>-<name>.png`, where `<NN>`
+   * is a per-item counter that makes the on-disk order the call order. Returns the absolute path so
+   * a spec can name it in an assertion message or a lane can copy it into its evidence report.
+   *
+   * NAMES MUST BE UNIQUE WITHIN AN ITEM. A second `shot("same-name")` in the same item REJECTS
+   * rather than overwriting the first: a silently-lost screenshot is worse than a red test, because
+   * a lane pastes a path into an evidence file and never learns the file it names came from
+   * somewhere else.
    */
   shot(name: string): Promise<string>;
 }
@@ -93,13 +107,29 @@ export interface WaveFEvidence {
 export const test = liveTest.extend<{ evidence: WaveFEvidence }>({
   evidence: async ({ page }, use, testInfo) => {
     const identity = waveFSpecIdentity(testInfo);
+    // `testInfo.testId` and NOT a slug of the title: a parameterised title
+    // (`test(\`preset ${preset.id}\`, …)`) can produce two identical slugs, and a slug of a title
+    // with unicode or punctuation in it is a second escaping problem. The id is Playwright's own
+    // per-item key -- it already folds in the project, the file, the full title path and the
+    // repeat-each index -- so two items cannot collide, and it is stable across runs of the same
+    // item, so a path quoted in a lane's evidence file keeps resolving.
     const directory = path.join(
       identity.repositoryRoot,
       WAVE_F_EVIDENCE_DIRECTORY,
       identity.lane,
       identity.specName,
+      testInfo.testId,
     );
+    // Emptied, not merely created. `.stably/wave-f-evidence` is never cleaned between local runs,
+    // so without this a screenshot from an earlier run -- or from attempt 1 of a retried item --
+    // sits in the directory a lane is about to quote from, indistinguishable from what this run
+    // produced. After this line every file under this directory was written by this attempt, and
+    // the manifest below says which attempt that was.
+    fs.rmSync(directory, { recursive: true, force: true });
+    fs.mkdirSync(directory, { recursive: true });
+
     let shotCount = 0;
+    const writtenFileNameByName = new Map<string, string>();
     await use({
       lane: identity.lane,
       directory,
@@ -110,9 +140,30 @@ export const test = liveTest.extend<{ evidence: WaveFEvidence }>({
               "evidence tree stays sortable and quotable in a report.",
           );
         }
+        const alreadyWritten = writtenFileNameByName.get(name);
+        if (alreadyWritten !== undefined) {
+          throw new Error(
+            `Evidence name ${JSON.stringify(name)} was already used by this test item; it wrote ` +
+              `${alreadyWritten}. Screenshot names must be unique within an item -- pass a ` +
+              "different name (for example a suffix naming the step: " +
+              `${JSON.stringify(`${name}-after`)}) rather than reusing this one. Refusing to ` +
+              "overwrite, because a lane that quotes the first path would silently be shown the " +
+              "second screenshot.",
+          );
+        }
         shotCount += 1;
         const fileName = `${String(shotCount).padStart(2, "0")}-${name}.png`;
         const absolutePath = path.join(directory, fileName);
+        // Belt and braces behind the name map: the map cannot see a file some other writer put
+        // here. Nothing should be able to -- the directory is keyed by this item's id and was
+        // emptied above -- so if this ever fires it is a real collision and not a naming slip.
+        if (fs.existsSync(absolutePath)) {
+          throw new Error(
+            `Evidence path ${absolutePath} already exists in this run. Two writers are sharing one ` +
+              "Wave-F evidence path, which means one screenshot is about to be lost.",
+          );
+        }
+        writtenFileNameByName.set(name, fileName);
         await page.screenshot({ path: absolutePath, fullPage: true });
         // Attached as well as written: the written copy is what a lane quotes by path in its
         // evidence file and what the CI artifact step uploads, the attachment is what makes it
@@ -124,6 +175,33 @@ export const test = liveTest.extend<{ evidence: WaveFEvidence }>({
         return absolutePath;
       },
     });
+
+    // Written on the way out, so a failed item still leaves provenance for whatever it did shoot.
+    // This is the other half of the stale-artifact answer: a directory whose test was renamed or
+    // deleted keeps its old manifest and is visibly from another run, and a reader who pastes a
+    // path into a report can `cat run.json` beside it to see which item, attempt and run made it.
+    fs.writeFileSync(
+      path.join(directory, WAVE_F_EVIDENCE_MANIFEST_NAME),
+      `${JSON.stringify(
+        {
+          lane: identity.lane,
+          spec: path
+            .relative(identity.repositoryRoot, testInfo.file)
+            .split(path.sep)
+            .join("/"),
+          title: testInfo.titlePath.join(" › "),
+          testId: testInfo.testId,
+          project: testInfo.project.name,
+          retry: testInfo.retry,
+          workerIndex: testInfo.workerIndex,
+          writtenAt: new Date().toISOString(),
+          ciRunId: process.env.GITHUB_RUN_ID ?? null,
+          shots: [...writtenFileNameByName.values()],
+        },
+        null,
+        2,
+      )}\n`,
+    );
   },
 });
 

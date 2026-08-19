@@ -4,6 +4,13 @@
 # floor result the whole wave's hosted-run claim rests on (ADR S11); if a Wave-F lane lands a flaky
 # spec, the failure has to be legible on its own and must not turn the floor result red or bury it.
 #
+# ROUND 2 CORRECTION: separating the workflows did not, on its own, separate the RUNS. Round 1's
+# header claimed a Wave-F failure could not mask the floor result, and that was false: Job A's suite
+# steps ran a bare `npx playwright test`, which collects BOTH projects, so every Wave-F item from
+# every lane also ran inside the floor job under its own 35m budget. Those two steps now pass
+# `--project=chromium` and Job A asserts the full inventory in a separate `--list` step, which is
+# what makes this header's claim true. See stably-cloud.yml's comments on both changes.
+#
 # What it runs: `npx playwright test --project=wave-f` -- the unmocked tier under e2e/wave-f/, whose
 # fixtures install no route interception at all. Its items therefore need the real three-process
 # preview, which this job boots the same way stably-cloud.yml's Job A does.
@@ -44,17 +51,25 @@ jobs:
     runs-on: ubuntu-24.04
     # Same phase-budget discipline as stably-cloud.yml's Job A, scaled to a much smaller suite. The
     # ceiling is a literal because `env` is not available in the job-level context; the phase
-    # variables below are the single source of truth for the step budgets.
-    #   pre-suite steps excluding the browser install   3m
-    #   browser install                                 5m
-    #   the wave-F suite                                15m
-    #   post-suite steps (evidence, upload)             3m
-    #   runner scheduling slop                          1m
+    # variables below are the single source of truth for the step budgets, and every one of the five
+    # phases now HAS a variable. Round 1 wrote the five-phase sum in this comment, declared two of
+    # the five as variables, and enforced none of them -- so raising the suite budget to 20 would
+    # have put the sum above the ceiling, cancelled the job rather than failed the step, and skipped
+    # every `if: always()` evidence step. `Check job timeout budget` below is what closes that: it
+    # reads the 28 back out of this file, sums these five variables, and fails in the first seconds.
+    #   pre-suite steps excluding the browser install   3m  (E2E_WAVE_F_PRE_SUITE_BUDGET_MINUTES)
+    #   browser install                                 5m  (E2E_WAVE_F_BROWSER_INSTALL_TIMEOUT_MINUTES)
+    #   the wave-F suite                               15m  (E2E_WAVE_F_SUITE_TIMEOUT_MINUTES)
+    #   post-suite steps (evidence, scan, upload)       3m  (E2E_WAVE_F_POST_SUITE_BUDGET_MINUTES)
+    #   runner scheduling slop                          1m  (E2E_WAVE_F_RUNNER_SLOP_MINUTES)
     #                                            phase total 27m
     timeout-minutes: 28
     env:
+      E2E_WAVE_F_PRE_SUITE_BUDGET_MINUTES: "3"
       E2E_WAVE_F_BROWSER_INSTALL_TIMEOUT_MINUTES: "5"
       E2E_WAVE_F_SUITE_TIMEOUT_MINUTES: "15"
+      E2E_WAVE_F_POST_SUITE_BUDGET_MINUTES: "3"
+      E2E_WAVE_F_RUNNER_SLOP_MINUTES: "1"
       KADY_BACKEND_PORT: "18401"
       KADY_FRONTEND_PORT: "13000"
       KADY_ENGINE_PORT: "13091"
@@ -71,6 +86,13 @@ jobs:
             package-lock.json
             server/package-lock.json
             web/package-lock.json
+
+      # Before anything expensive, so a budget that no longer fits is a ten-second failure with a
+      # printed table rather than something discovered 25 minutes in. `--target wave-f` selects this
+      # workflow file and this job id; with no argument the script still checks Job A, unchanged.
+      # No dependencies needed: it reads a YAML file and this job's own env.
+      - name: Check job timeout budget
+        run: node e2e/check-job-timeout-budget.mjs --target wave-f
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -247,17 +269,39 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload Wave-F evidence
+      # The credential-hygiene half of Job A's shape, which round 1 left out. It caps the two raw
+      # logs, scrubs them into `.scrubbed.log` siblings, and walks the screenshot tree, the traces
+      # (whose entries hold full request and response bodies) and the fingerprint for any
+      # representation of any secret in this job's environment. It throws rather than uploading.
+      # The upload below is gated on its outcome exactly the way Job A gates on `artifact-scan`.
+      #
+      # This is not theoretical. Run against a Wave-F trace tree produced on a development host whose
+      # environment DID hold credentials, this scan exits 1 on the Wave-F traces alone -- so round 1's
+      # raw upload of `.stably/test-results/**` was a live hazard on any host with secrets, not merely
+      # an untidy one.
+      #
+      # HONEST LIMIT, so nobody over-reads a green: the scanner searches for representations of the
+      # secrets IN THIS JOB'S ENVIRONMENT. This job passes no secrets, so today the set is empty and a
+      # green here means "no secret this job knows about leaked". It cannot see a credential that
+      # exists only in seeded data or in a lane's fixture. A lane whose spec drives a real credential
+      # surface must put that secret in this job's `env:` so the scanner can look for it.
+      - name: Scan Wave-F evidence artifacts
+        id: evidence-scan
         if: always()
+        run: node e2e/wave-f/evidence-scan.mjs
+
+      - name: Upload Wave-F evidence
+        if: always() && steps.evidence-scan.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: wave-f-evidence-${{ github.run_id }}
           if-no-files-found: warn
           include-hidden-files: true
           retention-days: 14
+          # The scrubbed logs, not the raw ones: the raw files stay on the runner and die with it.
           path: |
             .stably/wave-f-evidence/**
             .stably/test-results/**
-            wave-f-test.log
-            wave-f-preview-up.log
+            wave-f-test.scrubbed.log
+            wave-f-preview-up.scrubbed.log
             wave-f-runner-fingerprint.json

@@ -17,12 +17,19 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   ["scientific-pipelines.spec.ts", 57],
   ["workspace.spec.ts", 46],
   ["wave-f/harness/app-shell.spec.ts", 15],
+  ["wave-f/harness/evidence-contract.spec.ts", 3],
   ["wave-f/harness/smoke.spec.ts", 1],
 ]);
 // 218 + 16 Wave-F harness items (15 app-shell reachability + 1 smoke), all substantive: every one of
 // them drives a real user path against a real backend and asserts on something named.
+//
+// evidence-contract.spec.ts's 3 items are NOT in that figure. They test the `evidence` fixture --
+// the harness itself -- rather than a product surface, so they carry the thin label and land in the
+// count below. A test of my own scaffolding must not raise the wave's substantive floor.
 const EXPECTED_SUBSTANTIVE_ITEMS = 234;
-const EXPECTED_THIN_ITEMS = 35;
+// 35 pre-existing thin items (labelled inventory smokes plus the 3 fixmes) + the 3 Wave-F
+// evidence-fixture contract items.
+const EXPECTED_THIN_ITEMS = 38;
 const EXPECTED_FIXME_ITEMS = 3;
 const EXPECTED_SKIP_ITEMS = 0;
 

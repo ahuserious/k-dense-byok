@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import test from "node:test";
 
+import { TARGETS, checkJobTimeoutBudget } from "./check-job-timeout-budget.mjs";
 import cloudGlobalSetup from "./global-setup.cloud.ts";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
@@ -104,19 +106,24 @@ test("the default collection holds every item exactly once across both projects"
   // "218 substantive items" claim without adding a single new assertion.
   const result = collectConfig("playwright.config.ts", {});
   assert.equal(result.status, 0, result.output);
+  // `wave-f/`, not `wave-f/harness/`. `harness/` is F10's own directory; filtering on it would let
+  // a future `testIgnore` edit that stops covering `wave-f/f1/**` sail through this assertion while
+  // F1's items were collected twice. The `Total:` pin below would catch that only until the next
+  // lane bumped the total, which every lane is instructed to do. The invariant is "no Wave-F item
+  // is collected by chromium", so the filter has to be every Wave-F item.
   const waveFLines = result.output
     .split("\n")
-    .filter((line) => line.includes("wave-f/harness/"));
+    .filter((line) => line.includes("wave-f/"));
   const chromiumCollectedWaveF = waveFLines.filter((line) => line.includes("[chromium]"));
   assert.deepEqual(
     chromiumCollectedWaveF,
     [],
     `The chromium project must ignore e2e/wave-f/**.\n${result.output}`,
   );
-  assert.match(result.output, /Total: 269 tests in 10 files/);
+  assert.match(result.output, /Total: 272 tests in 11 files/);
   assert.match(
     result.output,
-    /E2E inventory verified: 269 total = 234 executing-substantive \+ 35 thin; 3 fixme \+ 0 skip\./,
+    /E2E inventory verified: 272 total = 234 executing-substantive \+ 38 thin; 3 fixme \+ 0 skip\./,
   );
 });
 
@@ -246,3 +253,61 @@ test("cloud root probe rejects redirects without requesting the redirect target"
     if (backendListening) await closeServer(backendServer);
   }
 });
+
+// --- Job phase budgets -------------------------------------------------------------------------
+//
+// `check-job-timeout-budget.mjs` runs as the first step of both budgeted jobs, so a violation is a
+// ten-second CI failure. These tests are the LOCAL half: they read each job's declared phase
+// variables straight out of its workflow file and drive the same check over them, so a budget that
+// no longer fits is caught before the branch is pushed, and so the parameterisation itself has
+// coverage (round 1's `wave-f` job documented five phases, declared two, and enforced none).
+
+/**
+ * The `env:` block of a job, read the same deliberately-unclever way the checker reads the job's
+ * `timeout-minutes`: `jobs:` at column 0, the job id at two spaces, its keys at four, and its `env:`
+ * entries at six. Scanning stops at the next key at the job's own indent.
+ */
+function readJobEnvironment(workflowPath, jobId) {
+  const lines = fs.readFileSync(path.join(repositoryRoot, workflowPath), "utf8").split("\n");
+  const jobHeader = lines.indexOf(`  ${jobId}:`);
+  assert.notEqual(jobHeader, -1, `no job \`${jobId}\` in ${workflowPath}`);
+  const environment = {};
+  let insideEnvironment = false;
+  for (let index = jobHeader + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^ {0,2}\S/.test(line)) break;
+    if (/^ {4}env:\s*$/.test(line)) { insideEnvironment = true; continue; }
+    if (/^ {4}\S/.test(line)) { insideEnvironment = false; continue; }
+    if (!insideEnvironment) continue;
+    const match = /^ {6}([A-Za-z_][A-Za-z0-9_]*):\s*"?([^"\n]*?)"?\s*$/.exec(line);
+    if (match) environment[match[1]] = match[2];
+  }
+  return environment;
+}
+
+for (const targetName of Object.keys(TARGETS)) {
+  const target = TARGETS[targetName];
+  test(`the ${targetName} job's declared phase budgets fit under its own job ceiling`, () => {
+    const environment = readJobEnvironment(target.workflowPath, target.jobId);
+    // Every phase must have a variable IN THE WORKFLOW FILE. A phase documented only in a comment
+    // is the exact decoration this check exists to stop -- `collectPhaseMinutes` throws on it.
+    const result = checkJobTimeoutBudget({ targetName, environment });
+    assert.ok(
+      result.marginMinutes >= 1,
+      `${target.workflowPath} job \`${target.jobId}\`:\n${result.report}`,
+    );
+  });
+
+  test(`the ${targetName} job's budget check fails when a phase budget outgrows the ceiling`, () => {
+    const environment = readJobEnvironment(target.workflowPath, target.jobId);
+    const inflated = { ...environment };
+    const lastPhase = target.phases[target.phases.length - 1];
+    // One phase raised past the whole ceiling: the check has to reject it. Without this, a green
+    // "budgets fit" test proves nothing about whether the checker can ever say no.
+    inflated[lastPhase.variable] = "600";
+    assert.throws(
+      () => checkJobTimeoutBudget({ targetName, environment: inflated }),
+      /leaving -?\d+m of margin/,
+    );
+  });
+}

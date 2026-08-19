@@ -1,5 +1,9 @@
 # Job A runs the repository's Playwright process on a GitHub-hosted runner and records a runner
 # fingerprint. It is the hosted-runner proof path; it deliberately does not use `--browser cloud`.
+# It runs `--project=chromium` -- the mocked tier only -- because it is the job the wave's
+# 218-substantive floor result is measured on. The unmocked Wave-F click-through tier has its own
+# workflow, .github/workflows/wave-f-e2e.yml. The full-inventory pins are still asserted here, by the
+# `Assert the full E2E inventory` step, which lists both projects without running either.
 #
 # Job B is exploratory AND ITS QUESTION IS NOW ANSWERED, in the negative. The action's own accepted-
 # input list contains no path, glob, config file or Playwright project name -- only Stably-platform
@@ -38,6 +42,9 @@ jobs:
     # Derived from the measured phases of run 32006038040 (a clean 24m10s job) rather than rounded
     # up from the previous 45:
     #   pre-suite steps excluding the browser install   119s measured, x1.5 runner variance =  3m
+    #     (round 2 added `Assert the full E2E inventory` to this phase: a `--list` collection, 1.4s
+    #      warm on the author's machine, no browser and no preview. The 3m allowance already carries
+    #      ~61s of headroom over the 119s measurement, so the ceiling is unchanged.)
     #   browser install, Stably                         its own budget                      =  8m
     #   browser install, Playwright fallback            its own budget                      =  3m
     #   the suite                                       its own budget                      = 35m
@@ -108,6 +115,25 @@ jobs:
 
       - name: Check vendored builder dist
         run: npm run check:vendored-dist
+
+      # THE HOSTED FULL-INVENTORY ASSERTION. The two suite steps below run `--project=chromium`, which
+      # e2e/item-count-reporter.ts classifies as a filtered run, so neither of them asserts the pins
+      # any more. Before round 2 this job was the run that did assert them on a machine that is not
+      # the author's laptop, and losing that would have traded one defect for another.
+      #
+      # An unfiltered `--list` collects BOTH projects and the reporter's `onBegin` runs the full
+      # check: per-file item counts, substantive, thin, fixme and skip. It throws "E2E inventory
+      # drifted" here, on the runner, in a step that starts no browser, boots no preview and takes a
+      # few seconds. Collection only -- it runs no test.
+      #
+      # Invoked through the CLI entry point rather than through the `npx` form deliberately.
+      # scripts/hosted-evidence-reporter.test.mjs:92 counts the `npx` invocations in this file and
+      # pins them at 2, because this workflow must run the SUITE exactly twice (the unfiltered leg and
+      # the --grep leg, one of which is always skipped). A collection is not a suite run and must not
+      # be counted as one; this form keeps that pin measuring what it means. That test file belongs to
+      # another lane, so the workflow adapts to the pin rather than the pin to the workflow.
+      - name: Assert the full E2E inventory
+        run: node node_modules/@playwright/test/cli.js test --list
 
       # `--with-deps` pulls 114 MB of apt archives (the full browser dependency set, not just
       # Chromium's). Run 32006038040 fetched them in 3s at 33.5 MB/s; run 32094043747 fetched the
@@ -284,7 +310,18 @@ jobs:
           NO_COLOR: "1"
           STABLY_API_KEY: ${{ secrets.STABLY_API_KEY }}
           STABLY_PROJECT_ID: ${{ secrets.STABLY_PROJECT_ID }}
-        run: npx playwright test --workers="$E2E_WORKERS" --trace on > stably-test.log 2>&1
+        # `--project=chromium`, added in Wave-F round 2. The committed config gained a second project
+        # (`wave-f`, the unmocked click-through tier), and an unfiltered run collects BOTH of them:
+        # every Wave-F item from all five lanes was running inside THIS job, under this budget, with
+        # `video: "on"`. That made the wave's "a Wave-F failure cannot mask the floor result" claim
+        # false -- one flaky unmocked spec from any lane turned the floor job red. This job is the
+        # FLOOR job; the floor is the mocked tier's 218-substantive count; the Wave-F tier has its own
+        # workflow (.github/workflows/wave-f-e2e.yml) and its own budget.
+        #
+        # `--project=` makes this a filtered run, so e2e/item-count-reporter.ts (correctly) stops
+        # asserting the full inventory here. The `Assert the full E2E inventory` step above is what
+        # keeps that assertion on this runner -- do not delete it and leave this flag.
+        run: npx playwright test --project=chromium --workers="$E2E_WORKERS" --trace on > stably-test.log 2>&1
 
       - name: Run filtered Playwright suite
         id: suite-grep
@@ -298,7 +335,9 @@ jobs:
           STABLY_API_KEY: ${{ secrets.STABLY_API_KEY }}
           STABLY_PROJECT_ID: ${{ secrets.STABLY_PROJECT_ID }}
           INPUT_GREP: ${{ inputs.grep }}
-        run: npx playwright test --workers="$E2E_WORKERS" --grep "$INPUT_GREP" --trace on > stably-test.log 2>&1
+        # `--project=chromium` for the same reason as the step above: this job runs the mocked tier
+        # that the substantive floor is measured on, and nothing else.
+        run: npx playwright test --project=chromium --workers="$E2E_WORKERS" --grep "$INPUT_GREP" --trace on > stably-test.log 2>&1
 
       # Stamped here rather than inferred later, so the elapsed figure covers the suite step and
       # nothing else, whichever of the two suite steps above ran.
@@ -433,9 +472,20 @@ jobs:
     #      warned ("Unexpected input(s) 'playwright-project-name'") and ignored it, so the argument that
     #      was supposed to make this job meaningful never did anything.
     #   2. It failed in 7 seconds on every run -- including all six greens -- with
-    #      "Input required and not supplied: api-key", because the fork secrets are unset. A red job
-    #      that means "the owner has not set a secret" is noise. It is now a legible skip with the
-    #      reason written into the job summary; the action step runs only when both secrets are present.
+    #      "Input required and not supplied: api-key", because the secrets were not configured at the
+    #      time. A red job that means "the owner has not set a secret" is noise. It is now a legible
+    #      skip with the reason written into the job summary; the action step runs only when both
+    #      secrets are present.
+    #
+    # WHY THIS JOB IS `workflow_dispatch` ONLY. `STABLY_API_KEY` and `STABLY_PROJECT_ID` ARE now set
+    # on ahuserious/k-dense-byok (both stamped 2026-08-19T03:08:25Z; names read from
+    # `gh secret list`, no value read). An earlier F10 report said they were unset -- that was wrong,
+    # and it hid a cost consequence: with the credential gate satisfied, the action step above is no
+    # longer skipped, so leaving this job on the `push: integration/**` trigger would spend a paid
+    # Stably run on every integration push. This job's own analysis, three paragraphs up, is that no
+    # input to that action names a file in this repository, so those runs cannot be evidence for this
+    # suite. Spending one has to be a deliberate act, so the job runs only when a person dispatches
+    # the workflow. Remove this `if` when someone actually wants a run per push.
     #
     # Secrets needed on ahuserious/k-dense-byok, by NAME only: STABLY_API_KEY, STABLY_PROJECT_ID.
     # (Owner action; project "My Team fc881" per `stably whoami`.) Their VALUES never appear here, in a
@@ -443,6 +493,7 @@ jobs:
     name: Stably Cloud action spike
     runs-on: ubuntu-latest
     continue-on-error: true
+    if: github.event_name == 'workflow_dispatch'
     # No `needs` dependency: this spike starts in parallel with Job A.
     steps:
       - name: Check out repository

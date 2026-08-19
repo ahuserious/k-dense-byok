@@ -95,9 +95,24 @@ async function tabUntilFocused(
 ): Promise<{ presses: number; chain: string[] }> {
   const chain: string[] = [];
   for (let presses = 0; presses <= MAX_TAB_PRESSES; presses += 1) {
+    // "Could not answer" is treated as "not focused" -- the target may legitimately not be attached
+    // yet on the early presses of a walk. A STRICT-MODE VIOLATION is not that: it means the caller's
+    // locator matches several elements, so "is it focused?" has no single answer, and swallowing it
+    // makes all 41 iterations report "not focused" and ends the walk in a "was not reachable within
+    // 40 Tab presses" whose focus chain explains nothing. Lanes copy this helper out of the harness
+    // against less unique selectors than the ones here, so the misdiagnosis is theirs to hit.
     const focused = await target.evaluate(
       (element) => element === document.activeElement,
-    ).catch(() => false);
+    ).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("strict mode violation")) {
+        throw new Error(
+          `${what}: the locator matches more than one element, so "is it focused?" has no single ` +
+            `answer. Narrow the selector before handing it to tabUntilFocused.\n${message}`,
+        );
+      }
+      return false;
+    });
     if (focused) {
       await expect(target, `${what} holds focus but is not visible.`).toBeVisible();
       return { presses, chain };
@@ -156,6 +171,10 @@ test.describe("Wave-F reachability sweep: workspace surfaces", () => {
  * keys. The observed focus cycle inside the dialog was
  * `tab:API keys -> tabpanel -> button:Close -> (wrap)`, which is the ARIA-prescribed shape, not a
  * defect. So the honest keyboard proof is two-legged: Tab into the tablist, then arrow along it.
+ *
+ * `arrowPresses` counts presses ISSUED, which equals the distance around the ring when no press is
+ * swallowed (see the loop below) and is otherwise larger. Read it as an upper bound on the ring
+ * distance, not as the distance itself.
  */
 async function keyboardReachSettingsTab(
   page: Page,
@@ -181,17 +200,37 @@ async function keyboardReachSettingsTab(
   }
 
   const tabCount = await settings.getByRole("tab").count();
-  for (let arrowPresses = 0; arrowPresses <= tabCount; arrowPresses += 1) {
+  // Three trips around the ring, not one, and each press waits for focus to actually move.
+  //
+  // These tabs activate on focus and their panels fetch from the REAL backend, so an ArrowDown
+  // dispatched while the newly-activated panel is still rendering can be swallowed. A budget of one
+  // press per tab then measures how loaded the machine is rather than whether the tab is reachable:
+  // this item failed exactly that way in a full-suite run (272 items, 4 workers) with
+  // `Settings tab "Specialists" was not reachable with ArrowDown ... Focus stopped at tab:API keys` --
+  // eight presses had moved focus one step. Waiting for the move makes a swallowed press a retry
+  // instead of a lost step, and the ring is small enough that a genuinely unreachable tab still
+  // fails, just after 24 presses instead of 8.
+  const maxArrowPresses = tabCount * 3;
+  let focusedBeforePress = await describeFocusedElement(page);
+  for (let arrowPresses = 0; arrowPresses <= maxArrowPresses; arrowPresses += 1) {
     const focused = await target.evaluate((element) => element === document.activeElement);
     if (focused) {
       await expect(target, `Settings tab "${tabName}" holds focus but is not visible.`).toBeVisible();
       return { tabPresses, arrowPresses };
     }
     await page.keyboard.press("ArrowDown");
+    // A press that moves focus resolves this in milliseconds. A swallowed one costs the timeout and
+    // is then simply pressed again; the loop bound is what stops it from being infinite.
+    await expect
+      .poll(() => describeFocusedElement(page), { timeout: 2_000 })
+      .not.toBe(focusedBeforePress)
+      .catch(() => undefined);
+    focusedBeforePress = await describeFocusedElement(page);
   }
   throw new Error(
     `Settings tab "${tabName}" was not reachable with ArrowDown from the tablist ` +
-      `(${String(tabCount)} tabs present). Focus stopped at ${await describeFocusedElement(page)}.`,
+      `(${String(tabCount)} tabs present, ${String(maxArrowPresses)} presses issued). ` +
+      `Focus stopped at ${await describeFocusedElement(page)}.`,
   );
 }
 
