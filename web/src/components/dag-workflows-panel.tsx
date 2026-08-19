@@ -22,6 +22,7 @@ import {
   type DagWorkflowDefinitionSummary,
   type VersionedDagWorkflowDefinition,
 } from "@/lib/dag-workflows";
+import { BestOfNBranchView } from "@/components/pipeline/best-of-n-branch-view";
 import {
   createDefaultWorkflowGraph,
   isWorkflowIdentifier,
@@ -388,6 +389,13 @@ function DefinitionDetails({
   const [launching, setLaunching] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [runNotice, setRunNotice] = useState<string | null>(null);
+  /**
+   * Row 33: the run this panel just launched, so its best-of-n candidates can
+   * be watched here rather than only in Console. Held as the run id alone —
+   * the branch view reads the run's OWN state from the server, so nothing about
+   * candidate progress is cached in this component.
+   */
+  const [watchedRunId, setWatchedRunId] = useState<string | null>(null);
   const pendingRunRequest = useRef<{ intentKey: string; requestId: string } | null>(null);
   const previousRunIntentKey = useRef<string | null>(null);
   const restoredRunIntent = useRef(false);
@@ -506,6 +514,7 @@ function DefinitionDetails({
       setRunNotice(
         `Created run ${run.manifest.id} with status ${run.state.status}. Open Console for runner progress.`,
       );
+      setWatchedRunId(run.manifest.id);
       if (
         pendingRunRequest.current?.intentKey === request.intentKey &&
         pendingRunRequest.current.requestId === request.requestId
@@ -697,6 +706,9 @@ function DefinitionDetails({
         <p role="status" className="border-b bg-emerald-500/5 px-4 py-2 text-xs text-emerald-700 dark:text-emerald-300">
           {runNotice}
         </p>
+      ) : null}
+      {watchedRunId ? (
+        <BestOfNBranchView projectId={projectId} runId={watchedRunId} />
       ) : null}
       {graph.description ? (
         <p className="border-b px-4 py-3 text-xs text-muted-foreground">{graph.description}</p>

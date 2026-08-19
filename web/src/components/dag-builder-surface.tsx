@@ -141,6 +141,8 @@ import {
   issueLocation,
 } from "@/components/builder/issue-text";
 import { SourcePicker } from "@/components/builder/source-picker";
+import { FusionBoostOptions } from "@/components/pipeline/fusion-boost-options";
+import { SavedWorkflowPalette } from "@/components/pipeline/saved-workflow-palette";
 import { HelperAgentChat } from "@/components/helper-agent-chat";
 import { PipelineBuilderPanel } from "@/components/pipeline-builder-panel";
 import {
@@ -162,6 +164,7 @@ import {
   type DagWorkflowDefinitionSummary,
   type WorkflowGraphDocument,
 } from "@/lib/dag-workflows";
+import { exactKadyCurrentModel } from "@/lib/dag-workflow-builder";
 import {
   DAG_WORKFLOW_TEMPLATES,
   createDagWorkflowTemplateGraph,
@@ -169,6 +172,13 @@ import {
   type DagWorkflowTemplateId,
 } from "@/lib/dag-workflow-templates";
 import { PIPELINE_ENGINE_URL } from "@/lib/embed-config";
+import {
+  FUSION_BOOST_DEFAULT,
+  applyFusionBoost,
+  readFusionBoost,
+  type FusionBoostConfig,
+} from "@/lib/fusion-boost";
+import { StitchError, stitchWorkflows } from "@/lib/stitch-workflows";
 import { applyDelta, rejectStaleDeltas, type CanvasDeltaOp } from "@/lib/typed-canvas-adapter";
 import { typedToView, type GraphViewModel } from "@/lib/typed-graph-view";
 import { useModels } from "@/lib/use-models";
@@ -323,6 +333,13 @@ export function DagBuilderSurface({
   const [enginePipelines, setEnginePipelines] = useState<BuilderSourceGroup["entries"]>([]);
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(true);
+  // Rows 19/22/25 live behind their own disclosure rather than in the always-on
+  // strip: the toolbar already carries eight controls, and §6.4 bans chrome
+  // that does not carry information. Closed by default, labelled, in tab order.
+  const [composeOpen, setComposeOpen] = useState(false);
+  const [composeBusyId, setComposeBusyId] = useState<string | null>(null);
+  /** The full summaries, kept beside the picker's projection of them. */
+  const [savedSummaries, setSavedSummaries] = useState<DagWorkflowDefinitionSummary[]>([]);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [loaded, setLoaded] = useState<LoadedWorkflow | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -384,6 +401,7 @@ export function DagBuilderSurface({
       .then((summaries) => {
         if (cancelled) return;
         setSourceError(null);
+        setSavedSummaries(summaries);
         setKadyWorkflows(
           summaries.map((summary) => ({
             id: summary.id,
@@ -398,6 +416,7 @@ export function DagBuilderSurface({
         // Reported in the surface, never thrown into the render or the console:
         // an unreachable list must not take the legacy builder down with it.
         setSourceError(error instanceof Error ? error.message : "Could not read the workflow list.");
+        setSavedSummaries([]);
         setKadyWorkflows([]);
       });
     return () => {
@@ -536,6 +555,101 @@ export function DagBuilderSurface({
     [projectId, publishDocument],
   );
 
+  // --- composing: rows 19, 22 and 25 -------------------------------------
+
+  /**
+   * Row 19 + row 22: append a saved workflow to the loaded document as a new
+   * PHASE.
+   *
+   * The phase boundary is real topology, not a label: `stitchWorkflows` routes
+   * the loaded document's terminal nodes into the appended workflow's entry
+   * node, so the ordinary DAG scheduler runs phase 1 to completion before phase
+   * 2 starts. Every appended node carries `meta.compositeOf` naming the source
+   * workflow AND the exact `graphSha256` it was taken from.
+   *
+   * The loaded document keeps its own node ids (`idPrefix: ""`): re-prefixing
+   * them on every append would churn the author's ids for nothing.
+   */
+  const addPhaseFromSaved = useCallback(
+    async (workflowId: string) => {
+      const current = loadedRef.current;
+      if (!current) {
+        setStatus("Load a workflow before adding a phase to it.");
+        return;
+      }
+      setComposeBusyId(workflowId);
+      try {
+        const { definition } = await readDagWorkflowDefinition(projectId, workflowId);
+        const { document, phases } = stitchWorkflows(
+          [
+            {
+              document: current.document,
+              sourceId: current.document.id,
+              ...(current.graphSha256 ? { graphSha256: current.graphSha256 } : {}),
+              label: current.document.name,
+              idPrefix: "",
+            },
+            {
+              document: definition.graph,
+              sourceId: definition.id,
+              graphSha256: definition.graphSha256,
+              label: definition.graph.name,
+              idPrefix: `${definition.id}-`,
+            },
+          ],
+          { id: current.document.id, name: current.document.name },
+        );
+        publishDocument({ ...current, document });
+        setDirty(true);
+        setStatus(
+          `Added ${definition.graph.name} (revision ${String(definition.revision)}) as a phase after ${String(phases[0]?.handoverNodeIds.length ?? 0)} handover node(s). Save to keep it.`,
+        );
+      } catch (error: unknown) {
+        setStatus(
+          error instanceof StitchError
+            ? `Could not add that phase: ${error.message}`
+            : error instanceof Error
+              ? `Could not read that workflow: ${error.message}`
+              : "Could not add that phase.",
+        );
+      } finally {
+        setComposeBusyId(null);
+      }
+    },
+    [projectId, publishDocument],
+  );
+
+  /**
+   * Row 25. The checkbox state is DERIVED from the loaded document rather than
+   * held beside it, so a saved-and-reloaded workflow shows the boost it
+   * actually carries. A control that remembered its own value while the
+   * document dropped it is the pattern this wave exists to stop (#54, #55).
+   */
+  const fusionBoost: FusionBoostConfig = loaded
+    ? readFusionBoost(loaded.document)
+    : FUSION_BOOST_DEFAULT;
+
+  const changeFusionBoost = useCallback(
+    (next: FusionBoostConfig) => {
+      const current = loadedRef.current;
+      if (!current) return;
+      const { document, appliedStages } = applyFusionBoost(current.document, next, {
+        // Supplied by the host rather than invented inside the policy — see
+        // fusion-boost.ts. Every document this builder creates already carries a
+        // `defaultModel`, so this is the belt to that braces.
+        fallbackModel: exactKadyCurrentModel(),
+      });
+      publishDocument({ ...current, document });
+      setDirty(true);
+      setStatus(
+        appliedStages.length > 0
+          ? `Fusion boost on at: ${appliedStages.join(", ")}. Save to keep it.`
+          : "Fusion boost off. Save to keep it.",
+      );
+    },
+    [publishDocument],
+  );
+
   // --- saving ------------------------------------------------------------
 
   const saveDocument = useCallback(
@@ -573,6 +687,7 @@ export function DagBuilderSurface({
         setStatus(`Saved ${saved.definition.id} at revision ${saved.definition.revision}.`);
         const summaries = await listDagWorkflowDefinitions(projectId).catch(() => null);
         if (summaries) {
+          setSavedSummaries(summaries);
           setKadyWorkflows(
             summaries.map((summary) => ({
               id: summary.id,
@@ -835,6 +950,21 @@ export function DagBuilderSurface({
             )}
           </button>
 
+          <button
+            type="button"
+            data-testid="compose-toggle"
+            onClick={() => setComposeOpen((open) => !open)}
+            aria-expanded={composeOpen}
+            className="flex items-center gap-1 rounded-md border px-2 py-1 text-xs hover:bg-muted/50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground"
+          >
+            Compose
+            {composeOpen ? (
+              <ChevronUpIcon className="size-3.5" />
+            ) : (
+              <ChevronDownIcon className="size-3.5" />
+            )}
+          </button>
+
           <span className="min-w-0 truncate text-xs font-medium" data-testid="loaded-workflow-name">
             {loaded ? loaded.document.name : "No workflow loaded"}
           </span>
@@ -896,6 +1026,34 @@ export function DagBuilderSurface({
                 The workflow list could not be read: {sourceError}
               </p>
             )}
+          </div>
+        )}
+
+        {composeOpen && (
+          <div
+            data-testid="compose-panel"
+            className="flex flex-col gap-2.5 border-t px-2.5 py-2"
+          >
+            <SavedWorkflowPalette
+              workflows={savedSummaries}
+              busyWorkflowId={composeBusyId}
+              canAddPhase={loaded !== null}
+              cannotAddPhaseReason={
+                loaded === null
+                  ? "Load a workflow first — a phase is added to the workflow you are editing."
+                  : undefined
+              }
+              listError={sourceError}
+              onAddPhase={(workflowId) => void addPhaseFromSaved(workflowId)}
+            />
+            <FusionBoostOptions
+              config={fusionBoost}
+              onChange={changeFusionBoost}
+              disabled={loaded === null}
+              disabledReason={
+                loaded === null ? "Load a workflow first." : undefined
+              }
+            />
           </div>
         )}
 
