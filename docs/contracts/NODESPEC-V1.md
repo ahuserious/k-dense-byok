@@ -88,6 +88,7 @@ duplicate kind alongside an existing one is rejected at review.
 | `hypothesis` | 34 | Generates n hypotheses with matched nulls, runs them, and produces the terminal analysis artifact. |
 | `reasoning-style` | 35 | Selects which personas a downstream council instantiates: auto (best fit of n scientists), manual, or from an InfraNodus map. The InfraNodus source is an external service and is gated behind explicit configuration, failing closed when unset (#44/#57/#64). |
 | `formatted-output` | 36 | Constrains and validates the shape of a node's actual output. |
+| `workflow-ref` | 19 | A saved workflow embedded as a node: `workflowId`, optional `expectedRevision`, plus `CommonNodeProperties`. Authorised on 2026-08-19 after lane F6 measured that row 19's Gate B is unreachable today — every object in the schema is closed (`additionalProperties: false`, 43 occurrences), the only provenance slot `meta.compositeOf` is documented as outside validation semantics, and `server/src/workflows/store.ts:2427` `structuredClone`s the definition graph into the run manifest with **no expansion pass**, so a reference would resolve to nothing. The kind is therefore only half the change: F5 also expands every `workflow-ref` at manifest build, namespacing the embedded node ids, stamping each expanded node's `meta.compositeOf` with the source id and its `graphSha256`, and refusing a reference chain that reaches the referencing workflow. Resolving at manifest build is what makes it resolve "at run time" while leaving the executor unchanged and the run reproducible from its own manifest. Evidence: `s11/wave-f/requests/c-f6-4.md`. |
 
 **Existing kinds lane F5 is authorised to extend:**
 
@@ -98,6 +99,16 @@ duplicate kind alongside an existing one is rejected at review.
 | `evidence-gate` | A **council evaluator** alongside the single-LLM `evaluator` (`:493`), so "verification style" is LLM *or* LLM council and the council one actually runs a council. | 31 |
 | `best-of-n` | No schema change is authorised. It already executes (`candidateCount` 2-16, `candidateModels`, `evaluator`); the missing half is the visualisation, which is lane F6's. F5 publishes the run-state fields that visualisation reads. | 33 |
 | `rescue` (`RescuePolicySchema`, `:268`) | No new field is authorised without a further contract commit. F5 audits what of `enabled` / `maxAttempts` / `triggers` is not reachable and exposes it; both branches (retry n, and supervisor-fixes-the-DAG) are proven with an induced failure. | 32 |
+
+**Best-of-n candidate concurrency is a runtime question, not a contract one, and it must be answered
+either way.** Row 33 says the graph view renders the n-way split as n *parallel* branches; lane F6 measured
+that `kady-node-executor.ts:2862-2872` awaits inside the `for`, so candidate *k+1* is not even declared until
+candidate *k* resolves. F5 decides: make it bounded-concurrent (keeping the `candidate-${index}` slot ids
+stable, and only if `run-state.ts` slot accounting and `supervised-budget.ts` admit concurrent declaration —
+`run-state.ts:1631-1650` fatals on a duplicate slot but imposes no ordering for this kind, unlike
+`research-until-goal` at `:1640`), or leave it sequential and publish "n branches, resolved in sequence" so
+no lane builds a visualisation against a promise the runtime does not keep. Whichever it is goes in
+`$W/interfaces/F5-palette-mapping.md` and in the evidence file. Evidence: `s11/wave-f/requests/c-f6-5.md`.
 
 **`graphSha256` and the new fields.** `graphSha256 = sha256(canonicalJson(document))` and the canonicaliser
 strips nothing, so every field F5 adds is inside the content address. All of them are **content-derived and
