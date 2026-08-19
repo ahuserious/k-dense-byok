@@ -21,8 +21,7 @@
       "tab": "Scientific Pipelines",
       "view": "scientific-pipelines",
       "mounts": [
-        "web/src/components/dag-workflows-panel.tsx",
-        "web/src/components/pipelines-panel.tsx"
+        "web/src/components/dag-workflows-panel.tsx"
       ]
     },
     {
@@ -61,7 +60,6 @@
     "web/src/components/workflows-panel.tsx",
     "web/src/data/workflows.json",
     "web/src/components/dag-workflows-panel.tsx",
-    "web/src/components/pipelines-panel.tsx",
     "web/src/components/dag-builder-surface.tsx",
     "web/src/components/pipeline-builder-panel.tsx",
     "web/src/components/engine-iframe-panel.tsx",
