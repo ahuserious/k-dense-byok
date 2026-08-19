@@ -51,6 +51,29 @@ other way round.
 | `errorRouting.error` | Bounded code/message/retryability payload for the surfaced error. |
 | `updatedAt` | Non-negative epoch-millisecond projection timestamp. |
 
+## Recruitment and branch observability — authorised for lane F5 (2026-08-19, specification ahead of implementation)
+
+Matrix row 30 requires that judge-initiated council recruitment be **observable in RunState**, and row 33
+requires that a best-of-n split be renderable as n live parallel branches rather than a static fan-out
+drawing. Neither is representable today: a `nodes[]` entry carries `id`, `status`, `progress` and
+`executionId` under `additionalProperties: false`, so a run cannot say a head was recruited or that a
+candidate branch is running.
+
+The document leads (`docs/adr/S11-contract-freeze-mechanism.md`), so the two fields are described here
+before `RunStateV1Schema` carries them. **Lane F5 may add exactly these, with exactly these names.** A
+third field, a different name, or a new *top-level* key needs another orchestrator commit first — ask,
+do not improvise.
+
+| Field | Semantics |
+| --- | --- |
+| `nodes[].recruitment` | Optional. Present only on a node that can recruit (today: `council`). `{ recruited, maxRecruits, reason? }`: `recruited` is a non-negative count of heads added beyond the authored `members`, `maxRecruits` is the bound the node was admitted under, and `reason` is an optional bounded label for the most recent recruitment. `recruited` must never exceed `maxRecruits`, and the bound must not exceed the run's effective `maxSubagents`. Absent means the node cannot recruit; `recruited: 0` means it can and has not. |
+| `nodes[].branches` | Optional. The live parallel branches of a node that splits its work (today: `best-of-n`, and any kind that fans out into candidate attempts). An array of `{ id, status, label?, executionId? }`, `id` unique within the node, `status` drawn from the same node-status union and subject to the same run-to-node coherence matrix as `nodes[].status`. It is a projection of real candidate state — a renderer may draw exactly what is here and nothing it infers. Absent means the node does not split. |
+
+Both are optional, so every persisted and in-flight projection stays valid without them, and both are
+derived from run state the executor already has rather than from a second source of truth. Neither is a new
+top-level key, so the frozen top-level union is unchanged; `parseRunStateV1()` validates them under the same
+detached-value rules as the rest of the projection.
+
 ## Run-to-node status coherence
 
 The matrix applies to every `nodes[].status` and to

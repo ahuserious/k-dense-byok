@@ -327,7 +327,8 @@
       "server/test/claude-code-relay*.test.ts",
       "docs/harnesses.md",
       "docs/inventory/f2-harness.json",
-      "e2e/wave-f/f2/**"
+      "e2e/wave-f/f2/**",
+      "server/src/workflows/prompt-opt-schema.ts"
     ],
     "F5": [
       "server/src/workflows/kinds/**",
@@ -2102,6 +2103,34 @@
       "date": "2026-08-19",
       "path": "e2e/item-count-reporter.ts",
       "scope": "Wave F lane F13: add its own e2e/wave-f/f13/ spec files to EXPECTED_ITEMS_BY_FILE and move EXPECTED_SUBSTANTIVE_ITEMS/THIN/FIXME/SKIP in the SAME commit as the specs (ADR S11 requirement traceability); the merging orchestrator reconciles the map once per wave"
+    },
+    {
+      "from": "S5",
+      "to": "F14",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/controller.ts",
+      "scope": "Wave F lane F14 (durability watcher, rows 23/24/44 server half): the watcher's STOP AUTHORITY. #39/N-A1 records that the compaction watcher has no way to stop a run; the run controller is where a stop lands. Edits confined to the lane brief; the owner lane S5 is dormant and no Wave-F lane claims this path."
+    },
+    {
+      "from": "S5",
+      "to": "F5",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/store.ts",
+      "scope": "Wave F lane F5: row 19 needs the workflow-ref expansion pass at manifest build (measured in $W/requests/c-f6-4.md: store.ts:2427 structuredClone's the graph with no expansion pass, so a reference could never resolve). Edits confined to the lane brief; the owner lane S5 is dormant and no Wave-F lane claims this path."
+    },
+    {
+      "from": "S4",
+      "to": "F5",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/supervised-budget.ts",
+      "scope": "Wave F lane F5: row 33 asks whether best-of-n candidates may run concurrently (kady-node-executor.ts:2862-2872 awaits inside the for). Deciding that requires reading, and possibly correcting, the budget accounting's assumption of serialised model calls. Edits confined to the lane brief; the owner lane S4 is dormant and no Wave-F lane claims this path."
+    },
+    {
+      "from": "S5",
+      "to": "F5",
+      "date": "2026-08-19",
+      "path": "server/src/workflows/service.ts",
+      "scope": "Wave F lane F5: the composition root that wires new node-kind executors and the elevate-to-dag engine into the runtime. Edits confined to the lane brief; the owner lane S5 is dormant and no Wave-F lane claims this path."
     }
   ]
 }
