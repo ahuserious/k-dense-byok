@@ -198,3 +198,10 @@ the same commit as its specs (ADR S11-requirement-traceability). F10 keeps the h
 shared files directly under `e2e/wave-f/`, the configs, fixtures and the existing spec files). The reporter is therefore
 the one deliberately shared path across Wave F lanes; the merging orchestrator reconciles the map at each merge, exactly
 as the 2026-08-18 wave did, and `wave-f-intersect.py` lists it as shared-reconciled rather than as an intersection.
+
+**Amendment #3 (2026-08-19, lead; found by Team C / lane F6).** Amendment #2 granted `e2e/wave-f/<lane>/**` to lanes that
+S11's `e2e/**` already covered, so the first lane to inventory one of its specs tripped the checker's intersection rule
+(`Ownership intersection: e2e/wave-f/f6/compose.spec.ts -> S11, F6`). S11 is narrowed to `e2e/*.ts` + `e2e/*.mjs` —
+measured to be everything it holds (21 top-level files, no subdirectories) — so `e2e/wave-f/` belongs to Wave F alone:
+`e2e/wave-f/*` and `e2e/wave-f/harness/**` to F10, `e2e/wave-f/<lane>/**` to each lane. S11's handoffs
+(`e2e/item-count-reporter.ts` and the existing top-level files) are unchanged.
