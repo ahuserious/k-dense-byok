@@ -1,12 +1,15 @@
 # Job A runs the repository's Playwright process on a GitHub-hosted runner and records a runner
 # fingerprint. It is the hosted-runner proof path; it deliberately does not use `--browser cloud`.
 #
-# Job B is exploratory. The Stably action claims Stably Cloud execution, but its public contract does
-# not explain how this checkout, dependencies, or the three-process localhost preview reach that
-# environment. A pass is a signal to inspect the reported run for the checkout SHA, item count, and
-# app startup evidence; it is not sufficient by itself. A failure records which implicit assumption
-# (checkout materialization, dependency installation, preview startup, or localhost reachability)
-# the action does not satisfy. Job B is non-blocking while this spike remains unresolved.
+# Job B is exploratory AND ITS QUESTION IS NOW ANSWERED, in the negative. The action's own accepted-
+# input list contains no path, glob, config file or Playwright project name -- only Stably-platform
+# selectors and a target override -- so nothing in its contract consumes this repository's
+# e2e/*.spec.ts, and a green Job B is not evidence that this suite ran in Stably Cloud. The job stays
+# (non-blocking) as the place that records that finding against a real API response rather than
+# against a doc page. See the comment block inside the `stably-cloud` job for the full reasoning.
+#
+# Honest one-liner for any report that cites this workflow:
+#   remote execution: yes (Job A, GitHub-hosted ubuntu runner). Stably-Cloud browsers: no.
 name: Stably hosted-runner E2E
 
 on:
@@ -407,6 +410,36 @@ jobs:
           path: hosted-evidence-bundle.tar
 
   stably-cloud:
+    # WHAT THIS JOB ACTUALLY DOES -- rewritten from evidence, not from the doc page the original spike
+    # was written against.
+    #
+    # `stablyai/stably-runner-action@v4` accepts exactly these inputs (the list the action itself printed
+    # when it rejected the original arguments):
+    #
+    #   api-key, project-id, run-group-name, env-overrides, test-group-id, test-suite-id,
+    #   domain-override, url-replacement, github-comment, github-token, async, environment,
+    #   variable-overrides, note
+    #
+    # Every input that SELECTS work is a Stably-platform selector (test-suite-id, test-group-id,
+    # run-group-name). Every input that AIMS it is a target selector (domain-override, url-replacement).
+    # There is no input that takes a path, a glob, a config file, or a Playwright project name.
+    #
+    #   => NOTHING IN THIS ACTION'S CONTRACT CONSUMES THIS REPOSITORY'S e2e/*.spec.ts.
+    #   => A GREEN JOB B IS THEREFORE **NOT** EVIDENCE THAT THIS SUITE RAN IN STABLY CLOUD.
+    #      It would be evidence that tests authored in the Stably platform ran there.
+    #
+    # Two concrete defects in the original spike, both fixed here:
+    #   1. It passed `playwright-project-name: chromium`, which is not in the list above. The action
+    #      warned ("Unexpected input(s) 'playwright-project-name'") and ignored it, so the argument that
+    #      was supposed to make this job meaningful never did anything.
+    #   2. It failed in 7 seconds on every run -- including all six greens -- with
+    #      "Input required and not supplied: api-key", because the fork secrets are unset. A red job
+    #      that means "the owner has not set a secret" is noise. It is now a legible skip with the
+    #      reason written into the job summary; the action step runs only when both secrets are present.
+    #
+    # Secrets needed on ahuserious/k-dense-byok, by NAME only: STABLY_API_KEY, STABLY_PROJECT_ID.
+    # (Owner action; project "My Team fc881" per `stably whoami`.) Their VALUES never appear here, in a
+    # log, or in the summary -- the gate below tests emptiness and exports a boolean.
     name: Stably Cloud action spike
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -415,13 +448,31 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      # `[ -n "$X" ]` only. Nothing is echoed, printed, or written anywhere except as true/false.
+      - name: Check Stably credentials are configured
+        id: stably-credentials
+        env:
+          STABLY_API_KEY: ${{ secrets.STABLY_API_KEY }}
+          STABLY_PROJECT_ID: ${{ secrets.STABLY_PROJECT_ID }}
+        run: |
+          missing=""
+          if [ -z "$STABLY_API_KEY" ]; then missing="STABLY_API_KEY"; fi
+          if [ -z "$STABLY_PROJECT_ID" ]; then missing="${missing:+$missing, }STABLY_PROJECT_ID"; fi
+          if [ -n "$missing" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "missing=$missing" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "missing=" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run exploratory Stably Cloud action
         id: stably
+        if: steps.stably-credentials.outputs.configured == 'true'
         uses: stablyai/stably-runner-action@v4
         with:
           api-key: ${{ secrets.STABLY_API_KEY }}
           project-id: ${{ secrets.STABLY_PROJECT_ID }}
-          playwright-project-name: chromium
           env-overrides: |
             KADY_E2E_BASE_URL: http://127.0.0.1:13000
           async: false
@@ -430,6 +481,8 @@ jobs:
       - name: Write Stably Cloud spike summary
         if: always()
         env:
+          CREDENTIALS_CONFIGURED: ${{ steps.stably-credentials.outputs.configured }}
+          CREDENTIALS_MISSING: ${{ steps.stably-credentials.outputs.missing }}
           ACTION_OUTCOME: ${{ steps.stably.outcome }}
           STABLY_SUCCESS: ${{ steps.stably.outputs.success }}
           STABLY_RUN_ID: ${{ steps.stably.outputs.runId }}
@@ -438,9 +491,19 @@ jobs:
           {
             echo "## Stably Cloud action spike"
             echo
-            printf '%s\n' "- Action outcome: ${ACTION_OUTCOME:-not recorded}"
+            if [ "$CREDENTIALS_CONFIGURED" != "true" ]; then
+              printf '%s\n' "- **Skipped, not failed.** Missing repository secret(s): ${CREDENTIALS_MISSING:-unknown}."
+              printf '%s\n' "- Set them on this repository to run the spike. Names only; no value is ever printed by this workflow."
+              echo
+            fi
+            printf '%s\n' "- Action outcome: ${ACTION_OUTCOME:-not run}"
             printf '%s\n' "- success: ${STABLY_SUCCESS:-not recorded}"
             printf '%s\n' "- runId: ${STABLY_RUN_ID:-not recorded}"
             printf '%s\n' "- testSuiteRunId: ${STABLY_TEST_SUITE_RUN_ID:-not recorded}"
-            echo "- Interpretation: exploratory only; inspect the Stably run before making any checkout, startup, item-count, or localhost-reachability claim."
+            echo
+            echo "### What a green here would and would not prove"
+            printf '%s\n' "- \`stablyai/stably-runner-action@v4\` selects work by \`test-suite-id\` / \`test-group-id\` / \`run-group-name\` and aims it with \`domain-override\` / \`url-replacement\`. It accepts no path, glob, config file, or Playwright project name."
+            printf '%s\n' "- **Nothing in its contract consumes this repository's \`e2e/*.spec.ts\`.** A green Job B is NOT evidence that this suite ran in Stably Cloud."
+            printf '%s\n' "- Hosted execution of THIS suite is proven by Job A (GitHub-hosted ubuntu runner) and by the \`wave-f-e2e.yml\` workflow, not by this job."
+            printf '%s\n' "- The Stably project link is per-directory: an unlinked directory runs LOCAL browsers while looking exactly like a cloud run. Verify the link and \`stably runs list\` before believing any \"cloud\" result."
           } >> "$GITHUB_STEP_SUMMARY"

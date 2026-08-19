@@ -24,8 +24,23 @@ if (!tunnelOrigin) {
   );
 }
 
+// This overlay used to spread `baseConfig` wholesale, which meant it inherited whatever project list
+// the committed config happened to have. When the Wave-F tier added a second project, that inheritance
+// would have pulled every Wave-F item into a public-origin run that cannot serve them: the Wave-F tier
+// is unmocked by construction and this topology deliberately does not expose the backend. Declaring the
+// project list explicitly makes the cloud collection a fixed number no matter how many Wave-F lanes add
+// specs -- e2e/config-contracts.node.mjs pins that number and names this as the reason.
+const chromiumProject = baseConfig.projects?.find((project) => project.name === "chromium");
+if (!chromiumProject) {
+  throw new Error(
+    "playwright.cloud.config.ts requires the committed `chromium` project; the public-origin overlay " +
+      "must never collect the unmocked Wave-F tier, which this topology cannot serve.",
+  );
+}
+
 export default {
   ...baseConfig,
+  projects: [chromiumProject],
   // Backend-dependent page warm-up is impossible because this topology does not expose the backend.
   globalSetup: "./e2e/global-setup.cloud.ts",
   // This topology does not expose the real backend required by the unmocked tier.

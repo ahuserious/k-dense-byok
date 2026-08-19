@@ -50,7 +50,74 @@ test("cloud collection resolves the web-root-only global setup", () => {
     ),
     result.output,
   );
-  assert.match(result.output, /Total: 246 tests in 6 files/);
+  // 250 in 7 files, not the 246 in 6 this assertion carried until Wave F. The overlay's grepInvert
+  // drops the 3 @live items in live-backend.spec.ts, and that file with them: 253 - 3 = 250, 8 - 1 = 7.
+  // The old pair was already failing on a clean tree at the Wave-F base sha b702a8b -- it was a stale
+  // number, not a regression -- and the test below is what stops it going stale again.
+  assert.match(result.output, /Total: 250 tests in 7 files/);
+});
+
+test("cloud collection never grows when a Wave-F lane adds a spec, because it declares its projects", () => {
+  // This is the structural half of the pin above. playwright.cloud.config.ts used to spread
+  // baseConfig wholesale and inherit whatever project list the committed config had; the Wave-F tier
+  // added a second project (`wave-f`, testDir ./e2e/wave-f) and five lanes are about to add specs
+  // under it. Without an explicit project list, every one of those specs would have joined a
+  // public-origin collection that cannot serve them -- the Wave-F tier is unmocked and this topology
+  // deliberately does not expose the backend -- and the total above would have moved once per lane.
+  const result = collectConfig("playwright.cloud.config.ts", {
+    KADY_E2E_BASE_URL: "https://example.test",
+  });
+  assert.equal(result.status, 0, result.output);
+  assert.ok(
+    !result.output.includes("[wave-f]"),
+    `The cloud overlay must not collect the unmocked Wave-F tier.\n${result.output}`,
+  );
+  assert.ok(
+    !/wave-f\//.test(result.output),
+    `The cloud overlay must not collect anything under e2e/wave-f/.\n${result.output}`,
+  );
+});
+
+test("the @live-alt leg still derives from the mocked chromium project, not from whatever is at index 0", () => {
+  // playwright.live-alt.config.ts used to take baseConfig.projects[0] positionally. With a second
+  // project in the committed config, a reorder would silently have pointed the @live-alt leg at the
+  // Wave-F tier -- which has its own testDir and would have collected zero @live-alt items while
+  // still exiting 0. It now resolves by name; this pins both the resolution and the resulting count.
+  const result = collectConfig("playwright.live-alt.config.ts", {
+    KADY_E2E_BASE_URL: "http://127.0.0.1:13600",
+    KADY_PORT: "18600",
+    KADY_PIPELINE_ENGINE_PORT: "13691",
+  });
+  assert.equal(result.status, 0, result.output);
+  assert.match(result.output, /\[live-alt\] › live-backend\.spec\.ts/);
+  assert.ok(
+    !result.output.includes("wave-f/"),
+    `The @live-alt leg must not collect the Wave-F tier.\n${result.output}`,
+  );
+  assert.match(result.output, /Total: 3 tests in 1 file/);
+});
+
+test("the default collection holds every item exactly once across both projects", () => {
+  // The Wave-F tier is a second project over a subdirectory of the first project's testDir. The
+  // `testIgnore: "wave-f/**"` on `chromium` is the only thing stopping every Wave-F item from being
+  // collected twice, and a duplicate collection is precisely the kind of drift that inflates a
+  // "218 substantive items" claim without adding a single new assertion.
+  const result = collectConfig("playwright.config.ts", {});
+  assert.equal(result.status, 0, result.output);
+  const waveFLines = result.output
+    .split("\n")
+    .filter((line) => line.includes("wave-f/harness/"));
+  const chromiumCollectedWaveF = waveFLines.filter((line) => line.includes("[chromium]"));
+  assert.deepEqual(
+    chromiumCollectedWaveF,
+    [],
+    `The chromium project must ignore e2e/wave-f/**.\n${result.output}`,
+  );
+  assert.match(result.output, /Total: 269 tests in 10 files/);
+  assert.match(
+    result.output,
+    /E2E inventory verified: 269 total = 234 executing-substantive \+ 35 thin; 3 fixme \+ 0 skip\./,
+  );
 });
 
 test("live-alt accepts canonical alternate ports and effective origins", () => {

@@ -1,0 +1,263 @@
+# Wave-F click-through tier on a GitHub-hosted runner (master brief §4 row 38).
+#
+# This is a SEPARATE workflow from stably-cloud.yml on purpose. That one produces the 218-substantive
+# floor result the whole wave's hosted-run claim rests on (ADR S11); if a Wave-F lane lands a flaky
+# spec, the failure has to be legible on its own and must not turn the floor result red or bury it.
+#
+# What it runs: `npx playwright test --project=wave-f` -- the unmocked tier under e2e/wave-f/, whose
+# fixtures install no route interception at all. Its items therefore need the real three-process
+# preview, which this job boots the same way stably-cloud.yml's Job A does.
+#
+# What it produces: the Gate U evidence bundle -- deterministic screenshots written by the `evidence`
+# fixture, plus the videos, traces and per-test screenshots the `wave-f` project retains on success
+# (trace/video/screenshot are all "on" for that project, unlike the mocked tier's
+# retain-on-failure/only-on-failure).
+#
+# Ports: 13000 (frontend) / 13091 (engine) / 18401 (backend). The backend is NOT on 18000: on the
+# owner's development host 18000 is a live instance, and pinning the wave to a port that is
+# unbindable there would mean the CI leg and the local leg could never be run the same way. KADY_PORT
+# is exported so e2e/service-origins.ts resolves the backend origin to the same 18401.
+name: Wave-F click-through E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      grep:
+        description: Optional Playwright grep expression, applied within --project=wave-f
+        required: false
+        type: string
+      workers:
+        description: Playwright worker count
+        required: false
+        default: "2"
+        type: string
+  push:
+    branches:
+      - "integration/**"
+
+permissions:
+  contents: read
+
+jobs:
+  wave-f:
+    name: Wave-F unmocked click-through
+    runs-on: ubuntu-24.04
+    # Same phase-budget discipline as stably-cloud.yml's Job A, scaled to a much smaller suite. The
+    # ceiling is a literal because `env` is not available in the job-level context; the phase
+    # variables below are the single source of truth for the step budgets.
+    #   pre-suite steps excluding the browser install   3m
+    #   browser install                                 5m
+    #   the wave-F suite                                15m
+    #   post-suite steps (evidence, upload)             3m
+    #   runner scheduling slop                          1m
+    #                                            phase total 27m
+    timeout-minutes: 28
+    env:
+      E2E_WAVE_F_BROWSER_INSTALL_TIMEOUT_MINUTES: "5"
+      E2E_WAVE_F_SUITE_TIMEOUT_MINUTES: "15"
+      KADY_BACKEND_PORT: "18401"
+      KADY_FRONTEND_PORT: "13000"
+      KADY_ENGINE_PORT: "13091"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+            web/package-lock.json
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.x
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install backend dependencies
+        working-directory: server
+        run: npm ci
+
+      - name: Install frontend dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Install vendored engine dependencies
+        working-directory: server/vendor/pipeline-engine
+        run: bun install --frozen-lockfile
+
+      # vendored-dist-check binds to exact git HEAD by design, so the build has to happen immediately
+      # before the check -- and before the preview, which re-verifies the bundle under its own build
+      # environment.
+      - name: Build vendored builder dist
+        run: npm run build:vendored-dist
+
+      - name: Check vendored builder dist
+        run: npm run check:vendored-dist
+
+      - name: Install Chromium
+        timeout-minutes: ${{ fromJSON(env.E2E_WAVE_F_BROWSER_INSTALL_TIMEOUT_MINUTES) }}
+        run: npx playwright install --with-deps chromium
+
+      # The fingerprint is what lets a later reader prove the suite did not run on the author's laptop.
+      # Job A in stably-cloud.yml records the same fields; keeping the shape identical means one
+      # deny-list method covers both legs.
+      - name: Collect runner fingerprint fields
+        run: |
+          {
+            echo "RUNNER_HOSTNAME=$(hostname)"
+            echo "RUNNER_UNAME=$(uname -a)"
+            echo "RUNNER_EGRESS_IPV4=$(curl -4 -fsS --max-time 20 https://api.ipify.org)"
+            echo "RUNNER_NODE_VERSION=$(node --version)"
+            echo "RUNNER_BUN_VERSION=$(bun --version)"
+          } >> "$GITHUB_ENV"
+
+      - name: Record runner fingerprint
+        run: |
+          jq -n '{
+            hostname: env.RUNNER_HOSTNAME,
+            uname: env.RUNNER_UNAME,
+            egressIpv4: env.RUNNER_EGRESS_IPV4,
+            GITHUB_RUN_ID: env.GITHUB_RUN_ID,
+            GITHUB_SHA: env.GITHUB_SHA,
+            nodeVersion: env.RUNNER_NODE_VERSION,
+            bunVersion: env.RUNNER_BUN_VERSION,
+            leg: "wave-f"
+          }' > wave-f-runner-fingerprint.json
+          cat wave-f-runner-fingerprint.json
+
+      - name: Start hermetic preview
+        id: preview
+        shell: bash
+        run: |
+          set +e
+          node scripts/preview-up.mjs \
+            --backend-port "$KADY_BACKEND_PORT" \
+            --frontend-port "$KADY_FRONTEND_PORT" \
+            --engine-port "$KADY_ENGINE_PORT" > wave-f-preview-up.log 2>&1
+          preview_exit=$?
+          set -e
+          cat wave-f-preview-up.log
+          exit "$preview_exit"
+
+      - name: Preview log (failure diagnostics)
+        if: failure() && steps.preview.outcome == 'failure'
+        run: |
+          preview_log="$(sed -n 's/^Preview log: //p' wave-f-preview-up.log | tail -1)"
+          if [ -n "$preview_log" ] && [ -f "$preview_log" ]; then
+            echo "--- $preview_log (last 400 lines)"
+            tail -n 400 "$preview_log"
+          else
+            echo "(no preview log path found)"
+          fi
+
+      - name: Warm the main page
+        run: curl --fail --silent --show-error "http://127.0.0.1:${KADY_FRONTEND_PORT}/" > /dev/null
+
+      - name: Validate suite inputs
+        env:
+          INPUT_WORKERS: ${{ inputs.workers || '2' }}
+        run: |
+          worker_count="${INPUT_WORKERS:-2}"
+          if [[ ! "$worker_count" =~ ^[1-9][0-9]*$ ]]; then
+            echo "workers must be a positive integer, got: $worker_count" >&2
+            exit 2
+          fi
+          echo "E2E_WORKERS=$worker_count" >> "$GITHUB_ENV"
+
+      # A step budget, not a job budget: when the job-level ceiling fires the job is cancelled and no
+      # evidence step runs. When this one fires the step merely fails and every `if: always()` step
+      # below still writes and uploads what the suite did produce.
+      #
+      # Not piped into anything. The log is captured to a file and $? is what decides the outcome --
+      # #77 (a suite that exits 1 while printing "0 failed") is exactly why a printed tally can never
+      # be the gate.
+      - name: Run Wave-F suite
+        id: suite
+        timeout-minutes: ${{ fromJSON(env.E2E_WAVE_F_SUITE_TIMEOUT_MINUTES) }}
+        env:
+          CI: "1"
+          KADY_E2E_BASE_URL: http://127.0.0.1:13000
+          KADY_PORT: "18401"
+          KADY_PIPELINE_ENGINE_PORT: "13091"
+          FORCE_COLOR: "0"
+          NO_COLOR: "1"
+          INPUT_GREP: ${{ inputs.grep }}
+        shell: bash
+        run: |
+          set +e
+          if [ -n "$INPUT_GREP" ]; then
+            npx playwright test --project=wave-f --workers="$E2E_WORKERS" \
+              --grep "$INPUT_GREP" > wave-f-test.log 2>&1
+          else
+            npx playwright test --project=wave-f --workers="$E2E_WORKERS" > wave-f-test.log 2>&1
+          fi
+          suite_exit=$?
+          set -e
+          cat wave-f-test.log
+          exit "$suite_exit"
+
+      # A step stopped by `timeout-minutes` leaves the Playwright process tree behind, and those
+      # orphans keep writing into and deleting from the artifact directory the upload walks.
+      - name: Quiesce leftover suite processes
+        if: always()
+        run: node e2e/quiesce-suite-processes.mjs
+
+      - name: Stop hermetic preview
+        if: always()
+        run: node scripts/preview-down.mjs
+
+      - name: Summarise per-spec timings
+        if: always()
+        run: node e2e/spec-timing-summary.mjs --top 10
+
+      - name: Inventory the Wave-F evidence tree
+        if: always()
+        shell: bash
+        run: |
+          # shellcheck disable=SC2016
+          # The single-quoted strings below are markdown code fences and inline code spans. Their
+          # backticks are literal output, not command substitution, which is precisely why they are
+          # single-quoted; SC2016's "expressions don't expand here" is the intended behaviour.
+          {
+            echo "## Wave-F click-through evidence"
+            echo
+            echo "- Suite outcome: ${{ steps.suite.outcome }}"
+            echo "- Tier: UNMOCKED. e2e/wave-f/** installs no route interception; these items reached the real backend on :18401 and the real engine on :13091."
+            echo "- This is Gate U evidence only. Gate B requires a server test asserting on the effect."
+            echo
+            echo '### Deterministic screenshots (`.stably/wave-f-evidence/`)'
+            echo '```'
+            if [ -d .stably/wave-f-evidence ]; then find .stably/wave-f-evidence -type f | sort; else echo "(none written)"; fi
+            echo '```'
+            echo
+            echo '### Videos and traces (`.stably/test-results/`)'
+            echo '```'
+            if [ -d .stably/test-results ]; then
+              find .stably/test-results \( -name 'video.webm' -o -name 'trace.zip' \) | sort
+            else
+              echo "(none written)"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Wave-F evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wave-f-evidence-${{ github.run_id }}
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 14
+          path: |
+            .stably/wave-f-evidence/**
+            .stably/test-results/**
+            wave-f-test.log
+            wave-f-preview-up.log
+            wave-f-runner-fingerprint.json

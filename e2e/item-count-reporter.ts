@@ -2,6 +2,11 @@ import path from "node:path";
 
 import type { FullConfig, Reporter, Suite } from "@playwright/test/reporter";
 
+// Keys are POSIX-relative to the `e2e/` directory, NOT basenames. Five Wave-F lanes are each adding
+// `e2e/wave-f/<lane>/*.spec.ts` under policy amendment #2, and two of them naming a file
+// `settings.spec.ts` would have silently shared one basename pin -- one file's items would have
+// satisfied the other's expectation and a whole spec file could go missing without the gate noticing.
+// Every pre-existing key sits at the `e2e/` root, so none of their key text changed.
 const EXPECTED_ITEMS_BY_FILE = new Map([
   ["builder-typed.spec.ts", 14],
   ["builder.spec.ts", 60],
@@ -11,11 +16,31 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   ["live-backend.spec.ts", 3],
   ["scientific-pipelines.spec.ts", 57],
   ["workspace.spec.ts", 46],
+  ["wave-f/harness/app-shell.spec.ts", 15],
+  ["wave-f/harness/smoke.spec.ts", 1],
 ]);
-const EXPECTED_SUBSTANTIVE_ITEMS = 218;
+// 218 + 16 Wave-F harness items (15 app-shell reachability + 1 smoke), all substantive: every one of
+// them drives a real user path against a real backend and asserts on something named.
+const EXPECTED_SUBSTANTIVE_ITEMS = 234;
 const EXPECTED_THIN_ITEMS = 35;
 const EXPECTED_FIXME_ITEMS = 3;
 const EXPECTED_SKIP_ITEMS = 0;
+
+/**
+ * The inventory key for a collected item: its path relative to the `e2e/` directory, in POSIX form.
+ *
+ * Derived from the absolute file path rather than from `config.rootDir` or a project `testDir`,
+ * because the two projects that collect these files have *different* testDirs (`./e2e` for the
+ * mocked tier, `./e2e/wave-f` for the Wave-F tier) and a testDir-relative key would give the same
+ * file two different names depending on which project collected it. The last `e2e` path segment is
+ * the anchor, so a checkout that itself lives under a directory called `e2e` still keys correctly.
+ */
+function inventoryKey(absoluteFile: string): string {
+  const segments = absoluteFile.split(path.sep);
+  const e2eIndex = segments.lastIndexOf("e2e");
+  if (e2eIndex === -1) return path.basename(absoluteFile);
+  return segments.slice(e2eIndex + 1).join("/");
+}
 
 function isFullInventoryRun(config: FullConfig) {
   const configuredGrep = Array.isArray(config.grep) ? config.grep : [config.grep];
@@ -38,7 +63,16 @@ function isFullInventoryRun(config: FullConfig) {
   const hasSubsetMode = config.argv.some((argument) => (
     argument === "--last-failed" || argument === "--only-changed"
   ));
-  return !configuredFilter && !hasTitleFilter && !hasLocationFilter && !hasSubsetMode && config.shard === null;
+  // `--project=<name>` selects a subset of the collection just as surely as a path or a grep does,
+  // and it was in none of the buckets above. The committed config had a single project, so nothing
+  // ever exercised that hole; the moment the Wave-F tier added a second one, the command every lane
+  // runs -- `npx playwright test --project=wave-f` -- would have been classified as a full inventory
+  // run, collected only the Wave-F items, and thrown "E2E inventory drifted" against the full pins.
+  const hasProjectFilter = config.argv.some((argument) => (
+    argument === "--project" || argument.startsWith("--project=")
+  ));
+  return !configuredFilter && !hasTitleFilter && !hasLocationFilter && !hasSubsetMode &&
+    !hasProjectFilter && config.shard === null;
 }
 
 export default class ItemCountReporter implements Reporter {
@@ -51,7 +85,7 @@ export default class ItemCountReporter implements Reporter {
     let skippedItems = 0;
 
     for (const test of tests) {
-      const file = path.basename(test.location.file);
+      const file = inventoryKey(test.location.file);
       actualItemsByFile.set(file, (actualItemsByFile.get(file) ?? 0) + 1);
       const labelledThin = test.titlePath().some(
         (title) => title.includes("excluded from the substantive count"),

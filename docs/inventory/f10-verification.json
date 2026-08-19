@@ -1,0 +1,226 @@
+{
+  "$comment": "Machine-readable inventory of the Wave-F verification surface. Facts only: what exists, where it lives, what it proves. Owned by lane F10 (docs/inventory/f10-verification.json). Every number here was measured in this clone at base sha b702a8b, not copied from a brief.",
+  "schemaVersion": 1,
+  "lane": "F10",
+  "measuredAt": "2026-08-18",
+  "measuredAtBaseSha": "b702a8b",
+  "tiers": [
+    {
+      "id": "mocked",
+      "testDir": "e2e",
+      "playwrightProject": "chromium",
+      "interception": {
+        "installed": true,
+        "installer": "e2e/fixtures.ts:installApiMocks",
+        "backendRoute": "e2e/fixtures.ts:513",
+        "engineRoute": "e2e/fixtures.ts:436",
+        "unexpectedRequestStatus": 501
+      },
+      "provesServerBehaviour": false,
+      "substantiveItems": 215,
+      "note": "A green run here proves front-end behaviour against a fixture the suite itself authored. Never cite it as server evidence."
+    },
+    {
+      "id": "live",
+      "testDir": "e2e",
+      "playwrightProject": "chromium",
+      "tag": "@live",
+      "files": ["e2e/live-backend.spec.ts"],
+      "interception": { "installed": false, "fixture": "e2e/live-fixtures.ts" },
+      "provesServerBehaviour": true,
+      "substantiveItems": 3
+    },
+    {
+      "id": "wave-f",
+      "testDir": "e2e/wave-f",
+      "playwrightProject": "wave-f",
+      "interception": { "installed": false, "fixture": "e2e/wave-f/fixtures.ts" },
+      "fixtureExtends": "e2e/live-fixtures.ts",
+      "provesServerBehaviour": true,
+      "gateScope": { "gateU": true, "gateB": false, "gateD": "partial" },
+      "substantiveItems": 16,
+      "retains": { "trace": "on", "video": "on", "screenshot": "on" }
+    }
+  ],
+  "playwrightProjects": [
+    {
+      "name": "chromium",
+      "configFile": "playwright.config.ts",
+      "index": 0,
+      "testDir": "./e2e",
+      "testIgnore": "wave-f/**",
+      "use": { "trace": "on", "video": "retain-on-failure", "screenshot": "only-on-failure" }
+    },
+    {
+      "name": "wave-f",
+      "configFile": "playwright.config.ts",
+      "index": 1,
+      "testDir": "./e2e/wave-f",
+      "use": { "trace": "on", "video": "on", "screenshot": "on", "viewport": { "width": 1600, "height": 1000 } }
+    }
+  ],
+  "configOverlays": [
+    {
+      "file": "playwright.cloud.config.ts",
+      "declaresProjects": ["chromium"],
+      "grepInvert": "@live",
+      "collection": { "total": 250, "files": 7 },
+      "pinnedBy": "e2e/config-contracts.node.mjs",
+      "stableUnderLaneAdditions": true
+    },
+    {
+      "file": "playwright.live-alt.config.ts",
+      "derivesFrom": "chromium",
+      "resolution": "by name",
+      "grep": "@live-alt",
+      "collection": { "total": 3, "files": 1 },
+      "pinnedBy": "e2e/config-contracts.node.mjs"
+    }
+  ],
+  "laneSpecDirectoryConvention": {
+    "pattern": "e2e/wave-f/<lane-lowercase>/*.spec.ts",
+    "examples": ["e2e/wave-f/f1/model-presets.spec.ts", "e2e/wave-f/harness/app-shell.spec.ts"],
+    "ownership": "policy amendment #2 — each lane creates and owns its own directory; F10 owns e2e/wave-f/harness/** and the shared files directly under e2e/wave-f/",
+    "sharedFiles": ["e2e/wave-f/fixtures.ts"],
+    "laneIdDerivation": "first path segment under e2e/wave-f/; a spec directly under e2e/wave-f/ is attributed to the lane id 'wave-f'"
+  },
+  "evidencePaths": {
+    "screenshots": {
+      "root": ".stably/wave-f-evidence",
+      "pattern": ".stably/wave-f-evidence/<lane>/<spec-basename>/<NN>-<name>.png",
+      "writtenBy": "the `evidence` fixture in e2e/wave-f/fixtures.ts",
+      "alsoAttachedToReport": true,
+      "gitIgnored": true,
+      "gitIgnoreSource": ".stably/.gitignore (* plus !.gitignore)"
+    },
+    "videos": {
+      "root": ".stably/test-results",
+      "pattern": ".stably/test-results/<sanitised-spec-and-title>-wave-f/video.webm",
+      "verifiedExample": ".stably/test-results/harness-smoke-Wave-F-smoke-f14c4-erver-and-survives-a-reload-wave-f/video.webm"
+    },
+    "traces": {
+      "root": ".stably/test-results",
+      "pattern": ".stably/test-results/<sanitised-spec-and-title>-wave-f/trace.zip",
+      "verifiedExample": ".stably/test-results/harness-smoke-Wave-F-smoke-f14c4-erver-and-survives-a-reload-wave-f/trace.zip"
+    },
+    "perTestScreenshot": {
+      "pattern": ".stably/test-results/<sanitised-spec-and-title>-wave-f/test-finished-1.png",
+      "note": "written by screenshot:\"on\" for a passing item; test-failed-1.png for a failing one"
+    },
+    "evidenceRootCopyTarget": "$W/reports/screenshots/<lane>/"
+  },
+  "appShellSweep": {
+    "spec": "e2e/wave-f/harness/app-shell.spec.ts",
+    "items": 15,
+    "workspaceTabs": {
+      "source": "web/src/components/workspace-navigation.tsx:16-27",
+      "landmark": "nav[aria-label=\"Project workspace\"]",
+      "surfaces": [
+        { "view": "chat", "label": "Chat", "anchor": "placeholder /^Ask Kady anything/" },
+        { "view": "workflows", "label": "Workflows", "anchor": "placeholder \"Search workflows...\"" },
+        { "view": "scientific-pipelines", "label": "Scientific Pipelines", "anchor": "heading /Scientific Pipelines/i" },
+        { "view": "dag-builder", "label": "Builder", "anchor": "title \"DAG Builder\"" },
+        { "view": "console", "label": "Console", "anchor": "button /DAG Runs/i" },
+        { "view": "raindrop", "label": "Raindrop", "anchor": "heading /Raindrop/i" }
+      ]
+    },
+    "settingsTabs": {
+      "source": "web/src/components/settings-dialog.tsx:655-711",
+      "opener": "button \"Open settings\"",
+      "dialog": "dialog \"Settings\"",
+      "defaultTab": "api-keys",
+      "keyboardModel": "roving tabindex — Tab reaches the selected trigger only; the rest are reached with ArrowDown/ArrowUp",
+      "surfaces": [
+        { "value": "model-providers", "label": "Model providers", "heading": "Model providers", "panel": "ProviderAuthPanel" },
+        { "value": "api-keys", "label": "API keys", "heading": "API keys", "panel": "ApiKeysPanel" },
+        { "value": "skills", "label": "Skills", "heading": "Skills", "panel": "SkillsPanel" },
+        { "value": "specialists", "label": "Specialists", "heading": "Sub-agents", "panel": "SubagentsPanel" },
+        { "value": "connectors", "label": "Connectors", "heading": "Connectors", "panel": "ConnectorsPanel" },
+        { "value": "fusion", "label": "Fusion", "heading": "Fusion Configurations", "panel": "FusionPanel" },
+        { "value": "pipelines", "label": "Pipelines", "heading": "DAG Runtime", "panel": "PipelinesPanel (settings-dialog.tsx:593)" },
+        { "value": "appearance", "label": "Appearance", "heading": "Appearance", "panel": "AppearancePanel" }
+      ]
+    },
+    "nodePalette": {
+      "surface": "iframe[title=\"DAG Builder\"] .react-flow",
+      "opener": "double-click on the canvas",
+      "anchor": "button /^Prompt\\s+Inline AI prompt$/"
+    }
+  },
+  "smokeSpec": {
+    "spec": "e2e/wave-f/harness/smoke.spec.ts",
+    "items": 1,
+    "durableEffect": "PUT /dag-workflows/<id> returns outcome \"created\" from the real store, and the record is still listed after a browser reload"
+  },
+  "itemInventory": {
+    "reporter": "e2e/item-count-reporter.ts",
+    "keying": "path relative to e2e/, POSIX separators",
+    "total": 269,
+    "substantive": 234,
+    "thin": 35,
+    "fixme": 3,
+    "skip": 0,
+    "byFile": {
+      "builder-typed.spec.ts": 14,
+      "builder.spec.ts": 60,
+      "chat.spec.ts": 28,
+      "console-live.spec.ts": 12,
+      "console-raindrop.spec.ts": 33,
+      "live-backend.spec.ts": 3,
+      "scientific-pipelines.spec.ts": 57,
+      "workspace.spec.ts": 46,
+      "wave-f/harness/app-shell.spec.ts": 15,
+      "wave-f/harness/smoke.spec.ts": 1
+    },
+    "filteredRunDetection": ["--grep", "-g", "--grep-invert", "--project", "path arguments", "--last-failed", "--only-changed", "shards"]
+  },
+  "ports": {
+    "never": [18000],
+    "neverReason": "the owner's own instance is live on 18000; binding it destroys their session and points every mocked spec at the wrong server",
+    "canonicalWaveF": { "frontend": 13000, "engine": 13091, "backend": 18401 },
+    "f10Alternate": { "frontend": 13401, "engine": 13411, "backend": 18401 },
+    "up": "node scripts/preview-up.mjs --backend-port 18401 --frontend-port 13000 --engine-port 13091",
+    "down": "node scripts/preview-down.mjs",
+    "suiteEnvironment": { "KADY_PORT": "18401", "KADY_PIPELINE_ENGINE_PORT": "13091", "KADY_E2E_BASE_URL": "http://127.0.0.1:13000" }
+  },
+  "commands": {
+    "collectEverything": "npx playwright test --list",
+    "runOneLane": "npx playwright test --project=wave-f e2e/wave-f/<lane>/",
+    "runOneItem": "npx playwright test --project=wave-f e2e/wave-f/<lane>/<file>.spec.ts:<line>",
+    "runWholeWaveFTier": "npx playwright test --project=wave-f",
+    "configContracts": "npm run test:e2e-config"
+  },
+  "ciLegs": [
+    {
+      "workflow": ".github/workflows/stably-cloud.yml",
+      "job": "github-runner",
+      "proves": "remote execution of this repository's suite on a GitHub-hosted ubuntu runner",
+      "provesStablyCloudBrowsers": false
+    },
+    {
+      "workflow": ".github/workflows/stably-cloud.yml",
+      "job": "stably-cloud",
+      "action": "stablyai/stably-runner-action@v4",
+      "acceptedInputs": ["api-key", "project-id", "run-group-name", "env-overrides", "test-group-id", "test-suite-id", "domain-override", "url-replacement", "github-comment", "github-token", "async", "environment", "variable-overrides", "note"],
+      "consumesRepositorySpecs": false,
+      "consumesRepositorySpecsReason": "no input accepts a path, glob, config file or Playwright project name; work is selected by Stably-platform ids only",
+      "proves": "nothing about this repository's suite",
+      "skipsWhenSecretsAbsent": true,
+      "requiredSecretNames": ["STABLY_API_KEY", "STABLY_PROJECT_ID"]
+    },
+    {
+      "workflow": ".github/workflows/wave-f-e2e.yml",
+      "job": "wave-f",
+      "runsOn": "ubuntu-24.04",
+      "command": "npx playwright test --project=wave-f",
+      "proves": "remote execution of the unmocked Wave-F tier plus the Gate U evidence bundle",
+      "artifact": "wave-f-evidence-<run_id>"
+    }
+  ],
+  "honestClaim": {
+    "remoteExecution": true,
+    "remoteExecutionEvidence": "GitHub-hosted runner, ubuntu-24.04, fingerprinted per run",
+    "stablyCloudBrowsers": false,
+    "stablyCloudBrowsersReason": "the Stably runner action's contract consumes no repository spec files; no run has ever executed this suite on a Stably-hosted browser"
+  }
+}
