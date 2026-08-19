@@ -327,7 +327,8 @@
       "server/test/claude-code-relay*.test.ts",
       "docs/harnesses.md",
       "docs/inventory/f2-harness.json",
-      "e2e/wave-f/f2/**"
+      "e2e/wave-f/f2/**",
+      "server/src/workflows/prompt-opt-schema.ts"
     ],
     "F5": [
       "server/src/workflows/kinds/**",
