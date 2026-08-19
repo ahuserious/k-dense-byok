@@ -27,6 +27,27 @@
  *  2. A final PATH scan for the registry's `claude-code` candidates. The vendored
  *     resolver can return `undefined` and let the Claude Agent SDK find its own
  *     bundled binary; a host that must `spawn()` has no such fallback.
+ *
+ * **A relayed node leaves the supervised transport.** When the registry selects
+ * this adapter, `supervisor/client.ts` returns a host that spawns the CLI *in
+ * the backend process* instead of routing through `this.delegate(...)` to the
+ * supervisor. The out-of-process isolation that is the supervised transport's
+ * reason to exist does not apply to a relayed child, and
+ * `delegateOptions.supervisedBudget` (`kady-node-executor.ts:1966-1968`) is not
+ * read here, so the supervisor-side budget descriptor never sees a relayed run.
+ * That is deliberate — the CLI is host-owned and there is no supervisor-side
+ * process to own it — but it is a material property Teams A and C would
+ * otherwise assume the other way, so it is stated here, in `docs/harnesses.md`
+ * and in the interface file, and published as an `unboundControls` entry.
+ *
+ * **The node's bindings are honoured or the node is refused.** The tool policy
+ * becomes real `--allowedTools` / `--disallowedTools` / `--permission-mode`
+ * argv, the turn budget becomes `--max-turns`, the structured-output schema
+ * travels on stdin, and the model reference is validated before it becomes
+ * `--model`. Anything left — sampling, subagents, named skills, a non-Anthropic
+ * model — fails the node before `spawn`. Dropping a binding silently would be
+ * defect #54 one harness over, and for the tool policy it would also be a
+ * security-relevant drop.
  */
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
@@ -204,7 +225,22 @@ export interface ClaudeCodeRelayInvocation {
   readonly argv: readonly string[];
   readonly stdin: string;
   readonly systemPrompt: string | undefined;
-  /** sha256 over binary path + argv + system prompt: pathless proof of the launch. */
+  /**
+   * The JSON Schema the node's slot demands, as sent to the child, or
+   * `undefined` for a text result. The executor builds every delegation as
+   * `result: { kind: "structured", schema }` (`kady-node-executor.ts:1905`) and
+   * `validateTerminalStructured` then fails the node unless the receipt carries
+   * a structured value, so a relay that did not send the schema could not
+   * satisfy the contract it is measured against.
+   */
+  readonly structuredSchema: unknown | undefined;
+  /** Controls that reached the relay and that the CLI cannot express (see above). */
+  readonly unboundControls: readonly string[];
+  /**
+   * sha256 over binary path + argv + system prompt + stdin — every byte the
+   * relay handed the operating system, and therefore a complete proof of the
+   * launch that still carries no filesystem path into the receipt (#71).
+   */
   readonly launchContractDigest: string;
   readonly requestId: string;
 }
@@ -283,6 +319,12 @@ interface DecodedNodeControl {
     top_p?: unknown;
     sampling?: Record<string, unknown>;
   };
+  /** `resolveS4NodeExecutionBindings` (`kady-node-executor.ts:337-340`). */
+  toolPolicy?: { allowedTools?: unknown };
+  subagents?: { mode?: unknown; permitted?: unknown };
+  autonomy?: unknown;
+  skills?: { mode?: unknown; configured?: unknown };
+  billingMode?: unknown;
 }
 
 export interface StrippedRelayTask {
@@ -346,12 +388,261 @@ export function unbindableClaudeCodeControls(
   return unbindable;
 }
 
+/**
+ * Kady tool-policy id → the Claude Code CLI tool names that express it.
+ *
+ * `resolveS4NodeExecutionBindings` builds `toolPolicy.allowedTools` out of Pi's
+ * tool vocabulary (`kady-node-executor.ts:337-340`) and the trusted Pi child
+ * enforces it with `pi.setActiveTools` (`workflow-delegation-session.ts:527-529`).
+ * The relay has to enforce the *same* policy with the CLI's own vocabulary, or
+ * `autonomy` — which NodeSpec v1 calls "the child tool/subagent access gate" —
+ * is false for this harness. A `null` entry means no faithful translation
+ * exists, and a node that asks for it is refused rather than quietly granted
+ * something wider.
+ *
+ * `subagent` is deliberately `null`. The CLI's nearest equivalent is `Task`, and
+ * a Task child is not itself constrained by this allowlist, so translating it
+ * would grant strictly more than the node declared — the exact failure the
+ * allowlist exists to prevent.
+ */
+export const CLAUDE_CODE_TOOL_TRANSLATION: Readonly<
+  Record<string, readonly string[] | null>
+> = {
+  read: ["Read"],
+  grep: ["Grep"],
+  // The CLI has no separate directory-listing tool; Glob is the read-only
+  // path-enumeration tool that `find` and `ls` both map onto.
+  find: ["Glob"],
+  ls: ["Glob"],
+  subagent: null,
+};
+
+/**
+ * Named on `--disallowedTools` on every relayed launch, whatever the allowlist
+ * says. `--allowedTools` plus `--permission-mode default` already denies these
+ * (an unlisted tool needs an interactive approval that `-p` cannot obtain), so
+ * this is the second lock, not the first: if a future CLI changes the default
+ * for unlisted tools, a relayed node must still not be able to write, execute
+ * or reach the network.
+ */
+export const CLAUDE_CODE_DENIED_TOOLS = [
+  "Bash",
+  "BashOutput",
+  "KillShell",
+  "Write",
+  "Edit",
+  "MultiEdit",
+  "NotebookEdit",
+  "Task",
+  "WebFetch",
+  "WebSearch",
+] as const;
+
+/**
+ * Not `bypassPermissions`, and not `acceptEdits`. In `-p` mode an approval
+ * prompt cannot be answered, so `default` means "anything outside
+ * `--allowedTools` fails" — fail-closed by construction.
+ */
+export const CLAUDE_CODE_PERMISSION_MODE = "default";
+
+/**
+ * Controls that reach the relay and that the CLI has no way to express. They are
+ * NOT dropped silently: they are reported here, carried on every invocation, and
+ * published on `GET /harnesses` so lane F8 and lane F1 render the corresponding
+ * control disabled with this reason rather than live over a value nothing reads.
+ */
+export const CLAUDE_CODE_UNBOUND_CONTROLS: readonly {
+  readonly control: string;
+  readonly reason: string;
+}[] = [
+  {
+    control: "toolBudget",
+    reason:
+      "The Claude Code CLI counts turns, not tool calls, so the node's soft/hard tool-call budget cannot be enforced on a relayed run. --max-turns bounds the loop and the read-only allowlist bounds what a turn can do.",
+  },
+  {
+    control: "billingMode",
+    reason:
+      "A relayed run is billed to the credentials the local Claude Code binary holds, not to the Kady provider the node's billingMode was admitted against.",
+  },
+  {
+    control: "supervisedBudget",
+    reason:
+      "A relayed run leaves the supervised transport: the CLI is spawned in the backend process, so the supervisor-side budget descriptor never sees it.",
+  },
+];
+
+export type ClaudeCodeToolPolicyTranslation =
+  | { ok: true; allowed: readonly string[] }
+  | { ok: false; unbindable: readonly string[] };
+
+/**
+ * Translate the node's allowlist, or say which entries cannot be translated.
+ * An id absent from the table is refused too: a tool added to Pi's vocabulary
+ * later must fail this build rather than silently vanish from the relayed
+ * child's policy.
+ */
+export function translateClaudeCodeToolPolicy(
+  allowedTools: readonly string[],
+): ClaudeCodeToolPolicyTranslation {
+  const allowed = new Set<string>();
+  const unbindable: string[] = [];
+  for (const tool of allowedTools) {
+    const translated = CLAUDE_CODE_TOOL_TRANSLATION[tool];
+    if (!translated) {
+      unbindable.push(tool);
+      continue;
+    }
+    for (const name of translated) allowed.add(name);
+  }
+  if (unbindable.length > 0) return { ok: false, unbindable };
+  return { ok: true, allowed: [...allowed] };
+}
+
+export const CLAUDE_CODE_MODEL_PROVIDER = "anthropic";
+
+export type ClaudeCodeModelArgument =
+  | { ok: true; model: string | undefined }
+  | { ok: false; detail: string };
+
+/**
+ * `request.model` is `modelReference(resolution.model)`, i.e.
+ * `` `${provider}/${id}` `` (`agent/models.ts:387-391`) — `openrouter/anthropic/
+ * claude-sonnet-4`, `openai/gpt-5`, `openrouter/fusion`. `claude --model` takes
+ * an Anthropic alias or model id, so handing it a provider-qualified slug either
+ * errors or runs on a *different* model than the run receipted.
+ *
+ * Only `anthropic/<id>` translates. Everything else is refused with the same
+ * fail-closed diagnostic sampling gets: rewriting `openrouter/anthropic/...` to
+ * the bare Anthropic id would silently move the call — and the bill — to another
+ * provider than the one the node resolved and the receipt records.
+ */
+export function claudeCodeModelArgument(
+  reference: string | undefined,
+): ClaudeCodeModelArgument {
+  const raw = reference?.trim();
+  // No model on the request is not a node declaration; the CLI picks its own.
+  if (!raw) return { ok: true, model: undefined };
+  const separator = raw.indexOf("/");
+  const provider = separator > 0 ? raw.slice(0, separator) : "";
+  const id = separator > 0 ? raw.slice(separator + 1) : "";
+  if (provider !== CLAUDE_CODE_MODEL_PROVIDER || id.length === 0) {
+    return {
+      ok: false,
+      detail:
+        `resolved the model ${raw}, which the Claude Code CLI cannot run: it accepts Anthropic model ids only, and relaying a ${provider || "provider-less"} model reference would run the node somewhere other than the run receipt says`,
+    };
+  }
+  return { ok: true, model: id };
+}
+
+/** One control the relay refuses, and the sentence that names the next action. */
+export interface ClaudeCodeBindingRefusal {
+  readonly control: string;
+  readonly detail: string;
+}
+
+export interface ClaudeCodeBindingRefusalInput {
+  readonly request: Pick<OwnedDelegationRequest, "model">;
+  readonly nodeControl: DecodedNodeControl | undefined;
+}
+
+/**
+ * Every node binding the relay cannot honour, in one place.
+ *
+ * The principle is the one sampling already gets: a control that reaches this
+ * adapter and cannot be applied fails the node before the process is spawned.
+ * Dropping it silently would be defect #54 one harness over — and for the tool
+ * policy and `subagents` it would also be a security-relevant drop, because
+ * those are what stop a delegated child from doing more than the node declared.
+ */
+export function claudeCodeBindingRefusals(
+  input: ClaudeCodeBindingRefusalInput,
+): ClaudeCodeBindingRefusal[] {
+  const refusals: ClaudeCodeBindingRefusal[] = [];
+  for (const control of unbindableClaudeCodeControls(input.nodeControl)) {
+    refusals.push({
+      control,
+      detail:
+        `the Claude Code CLI has no ${control.replace("hyperparameters.", "")} flag`,
+    });
+  }
+
+  const model = claudeCodeModelArgument(input.request.model);
+  if (!model.ok) refusals.push({ control: "model", detail: model.detail });
+
+  const nodeControl = input.nodeControl;
+  if (nodeControl) {
+    const allowedTools = Array.isArray(nodeControl.toolPolicy?.allowedTools)
+      ? (nodeControl.toolPolicy.allowedTools as unknown[]).filter(
+        (tool): tool is string => typeof tool === "string",
+      )
+      : undefined;
+    if (allowedTools) {
+      const translated = translateClaudeCodeToolPolicy(allowedTools);
+      if (!translated.ok) {
+        refusals.push({
+          control: "autonomy/toolPolicy",
+          detail:
+            `the Claude Code CLI cannot express the tool grant ${translated.unbindable.join(", ")} without granting more than the node declared`,
+        });
+      }
+    }
+    if (nodeControl.subagents?.permitted === true) {
+      refusals.push({
+        control: "subagents",
+        detail:
+          "a Claude Code subagent is not itself bound by this node's tool policy, so permitting subagents on a relayed node would grant more than the node declared",
+      });
+    }
+    const configuredSkills = Array.isArray(nodeControl.skills?.configured)
+      ? (nodeControl.skills.configured as unknown[])
+      : [];
+    if (configuredSkills.length > 0) {
+      refusals.push({
+        control: "skills",
+        detail:
+          "the relay has no way to inject the node's named skills into the Claude Code CLI",
+      });
+    }
+  }
+  return refusals;
+}
+
+/**
+ * The refusal thrown when `claudeCodeBindingRefusals` is non-empty. Shaped like
+ * the registry's own dispatch diagnostic: a code, the harness, and a message
+ * that names the user's next action and no filesystem path (#71).
+ */
+function claudeCodeBindingRefusalError(
+  refusals: readonly ClaudeCodeBindingRefusal[],
+): WorkflowHarnessDispatchError {
+  const controls = refusals.map((refusal) => refusal.control).join(", ");
+  const reasons = refusals.map((refusal) => refusal.detail).join("; ");
+  return new WorkflowHarnessDispatchError(
+    "WORKFLOW_HARNESS_NOT_BOUND",
+    "claude-code",
+    `This node cannot run on the Claude Code CLI: ${reasons}. Change ${controls} on this node, or run it on the pi harness.`,
+  );
+}
+
+/** The JSON-Schema block the relayed child is told to satisfy. */
+function structuredOutputInstruction(schema: unknown): string {
+  return [
+    "Respond with a single JSON object and nothing else.",
+    "It must validate against this JSON Schema:",
+    JSON.stringify(schema),
+  ].join("\n");
+}
+
 export interface BuildClaudeCodeInvocationInput {
-  request: Pick<OwnedDelegationRequest, "requestId" | "task" | "model">;
+  request: Pick<
+    OwnedDelegationRequest,
+    "requestId" | "task" | "model" | "result" | "turnBudget"
+  >;
   binaryPath: string;
   binarySource: ClaudeCodeBinarySource;
   systemPrompt: string | undefined;
-  structuredOutput: boolean;
 }
 
 /**
@@ -359,18 +650,63 @@ export interface BuildClaudeCodeInvocationInput {
  * exported so a test can assert on the invocation without spawning anything —
  * which is what "the system-prompt override reaches the invoked binary" means
  * as a checkable claim.
+ *
+ * Throws `WorkflowHarnessDispatchError` when any binding the node declared
+ * cannot be honoured, so there is exactly one place where a relayed node is
+ * refused and it is upstream of `spawn`.
  */
 export function buildClaudeCodeInvocation(
   input: BuildClaudeCodeInvocationInput,
 ): ClaudeCodeRelayInvocation {
-  const { prompt } = stripNodeControlEnvelope(input.request.task);
+  const { prompt, nodeControl } = stripNodeControlEnvelope(input.request.task);
+  const refusals = claudeCodeBindingRefusals({
+    request: input.request,
+    nodeControl,
+  });
+  if (refusals.length > 0) throw claudeCodeBindingRefusalError(refusals);
+
   const argv: string[] = ["-p", "--output-format", "json"];
-  if (input.request.model) argv.push("--model", input.request.model);
+  const model = claudeCodeModelArgument(input.request.model);
+  if (model.ok && model.model) argv.push("--model", model.model);
   if (input.systemPrompt) argv.push("--system-prompt", input.systemPrompt);
+
+  // The node's tool grant, in the CLI's vocabulary. Present on every launch,
+  // including the case where the node granted nothing: an empty --allowedTools
+  // is the strongest policy, not the absence of one.
+  const declaredTools = Array.isArray(nodeControl?.toolPolicy?.allowedTools)
+    ? (nodeControl.toolPolicy.allowedTools as unknown[]).filter(
+      (tool): tool is string => typeof tool === "string",
+    )
+    : undefined;
+  if (declaredTools) {
+    const translated = translateClaudeCodeToolPolicy(declaredTools);
+    // Refused above; the guard is for the type, not for control flow.
+    const allowed = translated.ok ? translated.allowed : [];
+    argv.push("--allowedTools", allowed.join(","));
+    argv.push("--disallowedTools", CLAUDE_CODE_DENIED_TOOLS.join(","));
+    argv.push("--permission-mode", CLAUDE_CODE_PERMISSION_MODE);
+  }
+
+  const turnBudget = input.request.turnBudget;
+  if (turnBudget && Number.isSafeInteger(turnBudget.maxTurns)) {
+    const graceTurns = turnBudget.graceTurns ?? 0;
+    argv.push("--max-turns", String(Math.max(1, turnBudget.maxTurns + graceTurns)));
+  }
+
+  const structuredSchema = input.request.result?.kind === "structured"
+    ? input.request.result.schema
+    : undefined;
+  const stdin = structuredSchema === undefined
+    ? prompt
+    : `${prompt}\n\n${structuredOutputInstruction(structuredSchema)}`;
+
+  // stdin is in the digest: the prompt and the schema are the only place the
+  // node's actual work travels, so a digest without them is not a proof of what
+  // was launched. The digest, not the path, is what reaches the receipt (#71).
   const launchContractDigest = crypto
     .createHash("sha256")
     .update(
-      JSON.stringify([input.binaryPath, argv, input.systemPrompt ?? null]),
+      JSON.stringify([input.binaryPath, argv, input.systemPrompt ?? null, stdin]),
       "utf8",
     )
     .digest("hex");
@@ -379,10 +715,10 @@ export function buildClaudeCodeInvocation(
     binaryPath: input.binaryPath,
     binarySource: input.binarySource,
     argv,
-    stdin: input.structuredOutput
-      ? `${prompt}\n\nRespond with a single JSON object and nothing else.`
-      : prompt,
+    stdin,
     systemPrompt: input.systemPrompt,
+    structuredSchema,
+    unboundControls: CLAUDE_CODE_UNBOUND_CONTROLS.map((entry) => entry.control),
     launchContractDigest,
     requestId: input.request.requestId,
   };
@@ -472,31 +808,26 @@ export function createClaudeCodeRelaySession(
       nodeId: request.nodeId,
     };
     const started = Date.now();
-    const { nodeControl } = stripNodeControlEnvelope(request.task);
-    const unbindable = unbindableClaudeCodeControls(nodeControl);
-    if (unbindable.length > 0) {
-      // Fail before spawning, and before any usage is reported: a control the
-      // harness cannot express is refused, not dropped (#54's defect class).
+    let invocation: ClaudeCodeRelayInvocation;
+    try {
+      invocation = buildClaudeCodeInvocation({
+        request,
+        binaryPath: options.resolution.binaryPath,
+        binarySource: options.resolution.source,
+        systemPrompt: options.systemPrompt,
+      });
+    } catch (error) {
+      // Fail before spawning, and before any usage is reported: a binding the
+      // harness cannot honour is refused, not dropped (#54's defect class), and
+      // the pre-reserved node budget is still settled rather than leaked.
       await delegateOptions.reconcileUsage({
         identity,
         reason: "protocol-error",
         progress: { started: false, tokens: 0, toolCalls: 0, durationMs: 0 },
       });
-      throw new WorkflowHarnessDispatchError(
-        "WORKFLOW_HARNESS_NOT_BOUND",
-        "claude-code",
-        `The Claude Code CLI cannot apply ${unbindable.join(", ")}. Remove those node settings, or run this node on the pi harness.`,
-      );
+      throw error;
     }
-
-    const structuredOutput = request.result?.kind === "structured";
-    const invocation = buildClaudeCodeInvocation({
-      request,
-      binaryPath: options.resolution.binaryPath,
-      binarySource: options.resolution.source,
-      systemPrompt: options.systemPrompt,
-      structuredOutput,
-    });
+    const structuredOutput = invocation.structuredSchema !== undefined;
     invocations.push(invocation);
 
     const outcome = await runProcess({

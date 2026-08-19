@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { promptOptimizationModelCallSlots } from "./prompt-opt-model-slots.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -31,6 +30,10 @@ import {
   openClaudeCodeRelay,
 } from "./claude-code-relay.ts";
 import type { WorkflowHarnessAdapterSelection } from "./harness-registry.ts";
+import {
+  workflowHarnessDispatchReachability,
+  type HarnessDispatchReachability,
+} from "./harness-dispatch-reachability.ts";
 import {
   assertWorkflowNodeControlPackageSeeded,
   createS4HostedFusionSession,
@@ -912,43 +915,32 @@ function effectiveNodeLimits(context: WorkflowNodeExecutorContext): EffectiveNod
   };
 }
 
+/**
+ * The node's model-call ceiling. The per-kind arithmetic moved to
+ * `harness-dispatch-reachability.ts` so that `validate.ts` decides whether
+ * `harness` reaches this dispatch decision using *this* function's answer rather
+ * than a second copy of it (gap (B); the round-1 validator closed only the
+ * hosted-Fusion conjunct and silently discarded `harness` on every other
+ * zero-model-call node kind).
+ */
 function maximumModelCalls(
   context: WorkflowNodeExecutorContext,
   limits: EffectiveNodeLimits,
 ): number {
-  const node = context.node;
-  let coreCalls: number;
-  switch (node.kind) {
-    case "research-until-goal":
-      coreCalls = limits.maxIterations;
-      break;
-    case "council":
-      coreCalls = (node.members.length + 1) * node.rounds;
-      break;
-    case "fusion":
-      coreCalls = node.fusion.mode === "openrouter-router"
-        ? node.fusion.members.length + 2
-        : node.fusion.members.length * node.fusion.rounds + 1;
-      break;
-    case "best-of-n":
-      coreCalls = (node.candidateCount ?? node.candidateModels?.length ?? 2) + 1;
-      break;
-    case "evidence-gate":
-      coreCalls = node.evaluator || node.checks.some((check) => check !== "artifact-exists")
-        ? 1
-        : 0;
-      break;
-    case "lean4":
-      coreCalls = node.mode === "solve" ? 1 : 0;
-      break;
-    case "agent":
-      coreCalls = 1;
-      break;
-    case "prompt-optimization":
-      coreCalls = promptOptimizationModelCallSlots(node).length;
-      break;
-  }
-  return coreCalls + (requiresWorkflowEvidencePolicyEvaluation(context.graph, node) ? 1 : 0);
+  return harnessDispatchReachability(context, limits).callCeiling;
+}
+
+function harnessDispatchReachability(
+  context: WorkflowNodeExecutorContext,
+  limits: EffectiveNodeLimits,
+): HarnessDispatchReachability {
+  return workflowHarnessDispatchReachability(context.node, {
+    maxIterations: limits.maxIterations,
+    requiresEvidencePolicyEvaluation: requiresWorkflowEvidencePolicyEvaluation(
+      context.graph,
+      context.node,
+    ),
+  });
 }
 
 function assertReadOnlyWorkspace(node: WorkflowNode): void {
@@ -1760,7 +1752,8 @@ export function createKadyWorkflowNodeExecutor(
       paths,
       limits.maxSubagents,
     );
-    const callCeiling = maximumModelCalls(context, limits);
+    const reachability = harnessDispatchReachability(context, limits);
+    const callCeiling = reachability.callCeiling;
     const configuredRounds = context.node.kind === "council"
       ? context.node.rounds
       : context.node.kind === "fusion" && context.node.fusion.mode === "kady-panel"
@@ -1772,11 +1765,9 @@ export function createKadyWorkflowNodeExecutor(
         `Node ${context.node.id} requires ${configuredRounds} rounds but its effective iteration limit is ${limits.maxIterations}.`,
       );
     }
-    const hostedFusionWithoutPolicyEvaluator =
-      context.node.kind === "fusion" &&
-      context.node.fusion.mode === "openrouter-router" &&
-      !requiresWorkflowEvidencePolicyEvaluation(context.graph, context.node);
-    const requiresPiSubagent = callCeiling > 0 && !hostedFusionWithoutPolicyEvaluator;
+    // `validate.ts` refuses a non-pi harness on exactly the nodes for which this
+    // is false, computed from the same helper, so the two cannot drift.
+    const requiresPiSubagent = reachability.reachesDispatchDecision;
     if (
       callCeiling > limits.maxModelCalls ||
       (requiresPiSubagent && limits.maxSubagents < 1)

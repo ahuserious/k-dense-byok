@@ -18,6 +18,58 @@ import {
   type WorkflowHarnessId,
 } from "../src/workflows/harness-registry.ts";
 import { NodeSpecV1Schema, WorkflowSettingsV1Schema } from "../src/workflows/schema.ts";
+import { PromptOptimizationNodeSchema } from "../src/workflows/prompt-opt-schema.ts";
+
+function promptOptimizationModel(id: string) {
+  return {
+    requested: {
+      source: "fixed" as const,
+      provider: "openrouter",
+      model: id,
+      auth: { kind: "api-key" as const },
+      reasoning: "high" as const,
+    },
+    resolution: { mode: "exact" as const },
+  };
+}
+
+/** A prompt-optimization node the schema accepts, carrying one harness. */
+function promptOptimizationNode(harness: string): unknown {
+  return {
+    id: "optimize-prompt",
+    name: "Optimize target prompt",
+    kind: "prompt-optimization",
+    terminal: true,
+    workspace: { isolation: "read-only", writePaths: [] },
+    settings: { version: 1, harness },
+    originalPrompt: "Summarize the experiment.",
+    objective: "Make the request precise and explicit about evidence.",
+    artifactId: "prompt-artifact",
+    iterations: 2,
+    fusionDeliberation: {
+      enabled: false,
+      council: {
+        members: [
+          { id: "methods", role: "Methods reviewer", model: promptOptimizationModel("model-a") },
+          { id: "critic", role: "Adversarial reviewer", model: promptOptimizationModel("model-b") },
+        ],
+        chair: promptOptimizationModel("model-chair"),
+        rounds: 1,
+        preserveMinorityReports: true,
+      },
+      fusion: {
+        mode: "kady-panel",
+        members: [
+          { id: "writer", role: "Prompt writer", model: promptOptimizationModel("model-a") },
+          { id: "judge", role: "Prompt critic", model: promptOptimizationModel("model-b") },
+        ],
+        synthesizer: promptOptimizationModel("model-synthesizer"),
+        rounds: 1,
+      },
+      preserveMinorityReports: true,
+    },
+  };
+}
 
 const NEVER_INSTALLED = (): string | null => null;
 const ALWAYS_INSTALLED = (command: string): string | null => `/opt/kady/bin/${command}`;
@@ -51,6 +103,26 @@ describe("workflow harness registry", () => {
     }
     expect(Value.Check(NodeSpecV1Schema, { harness: "gpt-cli" })).toBe(false);
     expect(Value.Check(WorkflowSettingsV1Schema, { defaultHarness: "gpt-cli" }))
+      .toBe(false);
+  });
+
+  /**
+   * The fifth spelling. `prompt-opt-schema.ts` carried its own five-literal
+   * harness union, so a prompt-optimization node declaring `deepseek`,
+   * `grok-cli` or `oh-my-pi` was rejected at schema validation while every
+   * other node kind accepted it — and no gate caught it: `freeze-check.py`
+   * reads only `schema.ts`, and the parity case above pins only
+   * `NodeSpecV1Schema` / `WorkflowSettingsV1Schema`. It is a derivation now
+   * (`harness-schema.ts`), and this is the pin that keeps it one.
+   */
+  it("is the source the prompt-optimization node's own union agrees with", () => {
+    for (const id of WORKFLOW_HARNESS_IDS) {
+      expect(
+        Value.Check(PromptOptimizationNodeSchema, promptOptimizationNode(id)),
+        `prompt-optimization node rejected harness "${id}"`,
+      ).toBe(true);
+    }
+    expect(Value.Check(PromptOptimizationNodeSchema, promptOptimizationNode("gpt-cli")))
       .toBe(false);
   });
 

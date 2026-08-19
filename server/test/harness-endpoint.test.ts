@@ -95,10 +95,46 @@ describe("GET /harnesses", () => {
         "resolvedExecutable",
         "summary",
         "supportsBinaryPathOverride",
+        "unboundControls",
       ]);
       expect(typeof entry.label).toBe("string");
       expect(entry.executables.length).toBeGreaterThan(0);
+      // Always an array, so a render loop is safe even for a harness with none.
+      expect(Array.isArray(entry.unboundControls)).toBe(true);
     }
+  });
+
+  /**
+   * §6.7 as a payload. A control the selected harness's adapter refuses is
+   * rendered disabled **with this reason**, not live over a value nothing
+   * reads. The relay refuses sampling, subagents and named skills outright, so
+   * what remains here is what it accepts-but-cannot-apply.
+   */
+  it("tells the picker which node controls the claude-code relay cannot apply", () => {
+    const payload = buildHarnessList({
+      findExecutable: (command) => `/opt/kady/bin/${command}`,
+      resolveClaudeCode: () => ({
+        state: "resolved",
+        binaryPath: "/opt/kady/bin/claude",
+        source: "path",
+      }),
+      readSettings: () => ({ version: 1, claudeCode: {} }),
+    });
+    const claude = payload.harnesses.find((entry) => entry.id === "claude-code");
+    expect(claude?.unboundControls.map((entry) => entry.control))
+      .toEqual(["toolBudget", "billingMode", "supervisedBudget"]);
+    for (const control of claude?.unboundControls ?? []) {
+      expect(control.reason.length).toBeGreaterThan(40);
+      // #71: a rendered reason never carries a filesystem path.
+      expect(control.reason).not.toMatch(/(?:^|\s)\/[^\s]/);
+    }
+    // Pi applies everything the node declares; the honest answer is an empty list.
+    expect(payload.harnesses.find((entry) => entry.id === "pi")?.unboundControls)
+      .toEqual([]);
+    // An adapterless harness is disabled outright; listing what it would ignore
+    // would be noise on a control the user cannot select anyway.
+    expect(payload.harnesses.find((entry) => entry.id === "grok-cli")?.unboundControls)
+      .toEqual([]);
   });
 
   it("marks the three new harnesses adapterless and disabled, with a reason", () => {

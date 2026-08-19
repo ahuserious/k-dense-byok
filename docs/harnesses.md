@@ -65,17 +65,32 @@ throw, so a caller can assert which adapter was chosen.
 | `WORKFLOW_HARNESS_NOT_INSTALLED` | no candidate command exists on this machine | `Workflow harness <id> is not installed. Install one of: <candidates>.` |
 | `WORKFLOW_HARNESS_NOT_BOUND` | a candidate exists, but this build has no adapter | `Workflow harness <id> is installed as <command>, but this Kady build has no trusted delegation adapter for it. Select a harness with an adapter, or keep the node on pi.` |
 | `WORKFLOW_HARNESS_NOT_BOUND` | `claude-code` selected, but the binary does not resolve | the resolution detail — install instructions, or the rejection of the path the user supplied |
-| `WORKFLOW_HARNESS_NOT_BOUND` | `claude-code` selected on a node declaring sampling controls | `The Claude Code CLI cannot apply <fields>. Remove those node settings, or run this node on the pi harness.` |
+| `WORKFLOW_HARNESS_NOT_BOUND` | `claude-code` selected on a node whose bindings the relay cannot honour | `This node cannot run on the Claude Code CLI: <reasons>. Change <controls> on this node, or run it on the pi harness.` |
 
 No message contains a filesystem path the user did not themselves supply (#71). The *fact* that a candidate
 resolved is reported; the path it resolved to is not.
 
-### Hosted-Fusion-only nodes
+### Nodes that reach no dispatch decision
 
-A hosted-Fusion node whose whole call ceiling is served by the OpenRouter router requests no delegation
-session, so it starts no CLI process for any harness to be. A non-`pi` `harness` or inherited
-`defaultHarness` on such a node is **refused at validation** (`unreachable-node-harness` /
-`unreachable-inherited-harness`) rather than accepted and discarded.
+`kady-node-executor.ts` asks for a delegation session only when
+`callCeiling > 0 && !hostedFusionWithoutPolicyEvaluator`. When that is false the node starts no child
+process, so `harness` would be accepted and then discarded — the shape of #55. Such a node's non-`pi`
+`harness`, or inherited `defaultHarness`, is **refused at validation**
+(`unreachable-node-harness` / `unreachable-inherited-harness`) rather than silently dropped.
+
+Both the executor's predicate and the validator's are computed by
+`workflowHarnessDispatchReachability` (`workflows/harness-dispatch-reachability.ts`), so they cannot
+drift. The node kinds it covers today:
+
+| Node | Reaches the decision? |
+| --- | --- |
+| hosted Fusion (`fusion.mode: "openrouter-router"`) with no evidence-policy evaluation | **no** — refused |
+| `lean4` with `mode: "verify"` | **no** — refused (no model call; the lean4 branch delegates only on `solve`) |
+| `evidence-gate` with no `evaluator` and only `artifact-exists` checks | **no** — refused |
+| `lean4` with `mode: "solve"` | yes |
+| `evidence-gate` with an evaluator, or any check other than `artifact-exists` | yes |
+| hosted Fusion with evidence-policy evaluation | yes |
+| `agent`, `research-until-goal`, `council`, `best-of-n`, `kady-panel` fusion, `prompt-optimization` | yes |
 
 ## Claude Code: resolution, override, and the relay
 
@@ -120,20 +135,56 @@ vendored resolver's behaviour. Anything else is rejected — never silently repl
 `harness: "claude-code"` dispatches to `claude-code-relay`, which invokes the resolved binary as:
 
 ```
-<binary> -p --output-format json [--model <model>] [--system-prompt <override>]
+<binary> -p --output-format json [--model <id>] [--system-prompt <override>] \
+         --allowedTools <mapped> --disallowedTools <denied> --permission-mode default \
+         --max-turns <n>
 ```
 
 with the node's task on **stdin** (never as an argument, and never through a shell). The `-p` argv is built
 here rather than taken from the vendored provider: that provider calls the Claude Agent SDK's `query()` and
 the SDK applies `-p` internally, so there is no argv in this repo to reuse.
 
+**A relayed node leaves the supervised transport.** When the registry selects this adapter,
+`supervisor/client.ts` returns a host that spawns the CLI **in the backend process** rather than routing
+through `delegate(...)` to the out-of-process supervisor. The isolation that is the supervised transport's
+reason to exist does not apply to a relayed child, and `delegateOptions.supervisedBudget` is not read by
+the relay, so the supervisor-side budget descriptor never sees a relayed run. This is deliberate — the CLI
+is host-owned and there is no supervisor-side process to own it — but Teams A and C would otherwise assume
+the opposite.
+
+#### What the relay binds, and what it refuses
+
+| Node binding | On the relay |
+| --- | --- |
+| `settings.harness` | **bound** — selects this adapter at the shared dispatch decision |
+| the node task / prompt | **bound** — stdin |
+| `claudeCode.systemPrompt` | **bound** — `--system-prompt` |
+| structured-output `result.schema` | **bound** — the exact JSON Schema the slot demands is appended to stdin, and the parsed object goes back on the receipt as `result.kind: "structured"` |
+| `autonomy` / `toolPolicy.allowedTools` | **bound** — translated into `--allowedTools`, plus an explicit `--disallowedTools` of every write/exec/network tool and `--permission-mode default`. Mapping: `read`→`Read`, `grep`→`Grep`, `find`→`Glob`, `ls`→`Glob`. An id with no mapping is **refused**, so a tool added to Pi's vocabulary later cannot silently vanish from the relayed child's policy |
+| `turnBudget` | **bound** — `--max-turns (maxTurns + graceTurns)` |
+| `model` | **bound after validation** — `request.model` is `provider/id`; only `anthropic/<id>` translates, and the provider prefix is stripped. Anything else is **refused** |
+| `hyperparameters.temperature` / `top_p` / `sampling` | **refused** — the CLI has no sampling flags |
+| `subagents.permitted` (i.e. `autonomy: "loose"`) | **refused** — the CLI's nearest equivalent is `Task`, whose children are *not* bound by this node's allowlist, so granting it would grant strictly more than the node declared |
+| `skills.configured` (a node that names skills) | **refused** — the relay cannot inject them |
+| `toolBudget` | **not bound** — the CLI counts turns, not tool calls. Published as an `unboundControls` entry on `GET /harnesses`; F8/F1 render the control disabled with that reason |
+| `billingMode` | **not bound** — see the billing boundary below |
+| `supervisedBudget` | **not bound** — see the supervised-transport note above |
+
+`--permission-mode` is `default`, never `bypassPermissions`: in `-p` mode an approval prompt cannot be
+answered, so an unlisted tool fails closed by construction.
+
+**The billing boundary.** `billingMode` is admitted against the Kady provider/auth the node *resolved*
+(`assertS4BillingMode`), while the actual call is billed to whatever credentials the local `claude` binary
+holds. Refusing a non-Anthropic model reference keeps the model identity honest; it does not make the
+billing identity the same one. A billing-mode control must not be rendered as if the relay honoured it.
+
 - The `KADY_NODE_CONTROL_V1:` envelope the executor prefixes onto the task is a Pi-extension protocol. The
-  relay decodes it, keeps it out of the Claude prompt, and uses it to refuse — before spawning — a node
-  whose `hyperparameters.temperature` / `top_p` / `sampling` the CLI has no flags for. Dropping them
-  silently would be defect #54 one harness over.
+  relay decodes it, keeps it out of the Claude prompt, and uses it for the table above. Dropping any of it
+  silently would be defect #54 one harness over — and for the tool policy it would also be a
+  security-relevant drop.
 - The receipt records the relay path: `resolved.agent` is `claude-code-relay` and
-  `resolved.launchContractDigest` is a sha256 over the binary path, the argv and the system prompt — a
-  pathless proof of exactly what was launched.
+  `resolved.launchContractDigest` is a sha256 over the binary path, the argv, the system prompt **and
+  stdin** — every byte handed to the operating system, and still no filesystem path in the receipt (#71).
 - The trusted pre/post-compaction audit is a `pi-subagents` artifact and is not demanded of a relay
   adapter, which runs one non-compacting invocation. The decision is made from the local dispatch
   selection, never from anything the child said.
@@ -156,7 +207,10 @@ Registered by `registerHarnessRoutes` (`server/src/api/harness.ts`).
 | `DELETE` | `/harnesses/claude-code/system-prompt` | clear it |
 
 Every `GET` field is always present (`null`, never absent), so a client destructuring the payload cannot
-throw in render phase (#62). The wire shapes are specified field by field in
+throw in render phase (#62). `unboundControls` is always an array — empty for a harness with nothing to
+report — and each entry is `{ control, reason }`: the node control the selected adapter cannot apply, and
+one renderable sentence saying why. That is §6.7's "disabled with a visible reason" delivered as data, so
+a picker never has to guess. The wire shapes are specified field by field in
 `s11/wave-f/interfaces/F2-harness-and-nodecontrol.md`.
 
 ## Where settings live

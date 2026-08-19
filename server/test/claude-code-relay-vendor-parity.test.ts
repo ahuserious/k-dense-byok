@@ -79,6 +79,51 @@ describe("claude code relay ↔ vendored resolver parity", () => {
     expect(autodetectIndex).toBeGreaterThan(configIndex);
   });
 
+  /**
+   * Ordering assertions between three known anchors cannot see a *fourth*. The
+   * round-1 test caught a moved installer location and a moved dev short circuit
+   * but stayed green when a new highest-priority source was inserted above the
+   * environment variable — and an added source is the drift most likely to
+   * actually happen, because it is what "support npm global installs" looks
+   * like as a patch. So the *complete* ordered sequence of discovery-relevant
+   * call sites inside `resolveClaudeBinaryPath` is asserted here: an added
+   * source moves the sequence and fails the build.
+   */
+  it("has exactly these discovery call sites, in exactly this order", () => {
+    const start = source.indexOf("export async function resolveClaudeBinaryPath");
+    expect(start).toBeGreaterThan(-1);
+    // The function body ends at the first closing brace in column 0 after it.
+    const end = source.indexOf("\n}", start);
+    expect(end).toBeGreaterThan(start);
+    const body = source
+      .slice(start, end)
+      // Comments are documentation, not behaviour; a reworded comment must not
+      // fail the build, but a new branch must.
+      .replace(/\/\*[\s\S]*?\*\//g, " ")
+      .replace(/\/\/[^\n]*/g, " ");
+
+    const anchors =
+      /process\.env\[[A-Za-z_$][\w$]*\]|validateAndExpand\(|pathKind\(|claudeNativeInstallerPath\(\)|BUNDLED_IS_BINARY|return [A-Za-z_$][\w$]*|throw new Error\(/g;
+    expect(body.match(anchors)).toEqual([
+      // 1. the environment override, honoured in dev mode too
+      "process.env[CLAUDE_BIN_PATH_ENV_VAR]",
+      "validateAndExpand(",
+      "return resolvedEnv",
+      // 2. the dev-mode short circuit, above the config override
+      "BUNDLED_IS_BINARY",
+      "return undefined",
+      // 3. the config-file override
+      "validateAndExpand(",
+      "return resolvedConfig",
+      // 4. autodetect: the native installer location
+      "claudeNativeInstallerPath()",
+      "pathKind(",
+      "return nativeInstallerPath",
+      // 5. not found
+      "throw new Error(",
+    ]);
+  });
+
   it("still short-circuits dev mode above the config override — why the host applies its own", () => {
     // This is the reason the relay does not route the user's override through
     // `resolveClaudeBinaryPath`: in dev mode that function returns before it

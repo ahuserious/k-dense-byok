@@ -26,6 +26,7 @@ import {
   type WorkflowHarnessId,
 } from "../workflows/harness-registry.ts";
 import {
+  CLAUDE_CODE_UNBOUND_CONTROLS,
   resolveClaudeCodeBinary,
   type ClaudeCodeBinaryResolution,
 } from "../workflows/claude-code-relay.ts";
@@ -64,6 +65,25 @@ export interface HarnessListEntry {
   supportsBinaryPathOverride: boolean;
   /** Only ever non-null for a harness with `supportsBinaryPathOverride`. */
   binaryPath: HarnessBinaryPathState | null;
+  /**
+   * Node controls this harness's adapter cannot apply. Always an array, empty
+   * when there are none, so a render loop is safe (#62). Non-empty only for a
+   * harness with an adapter: an adapterless harness is disabled outright, and
+   * saying "and by the way it would ignore X" would be noise.
+   *
+   * This is §6.7 as a payload rather than as a promise: F8 (and F1, for the
+   * sampling row) renders the matching control **disabled with `reason`** when
+   * the effective harness is this one, instead of rendering it live over a
+   * value the adapter refuses.
+   */
+  unboundControls: HarnessUnboundControl[];
+}
+
+export interface HarnessUnboundControl {
+  /** The NodeSpec-facing control name, e.g. `toolBudget`. */
+  control: string;
+  /** One sentence, safe to render, naming why. Never a filesystem path (#71). */
+  reason: string;
 }
 
 export interface HarnessBinaryPathState {
@@ -181,6 +201,9 @@ export function buildHarnessList(
       detail,
       supportsBinaryPathOverride,
       binaryPath,
+      unboundControls: definition.adapter === "claude-code-relay"
+        ? CLAUDE_CODE_UNBOUND_CONTROLS.map((entry) => ({ ...entry }))
+        : [],
     };
   });
 
