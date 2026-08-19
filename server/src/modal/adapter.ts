@@ -9,6 +9,7 @@ import {
   type Volume,
 } from "modal";
 import { gpuString, type ModalInstanceSpec } from "./catalog.ts";
+import { MODAL_NOT_CONFIGURED_MESSAGE } from "./credentials.ts";
 import { ModalJobError, type ModalImageRequest } from "./types.ts";
 
 export interface ModalRemoteProcess {
@@ -86,7 +87,7 @@ function credentials(): { tokenId: string; tokenSecret: string } {
   if (!tokenId || !tokenSecret) {
     throw new ModalJobError(
       "NOT_CONFIGURED",
-      "Modal is not configured. Add both MODAL_TOKEN_ID and MODAL_TOKEN_SECRET in Settings.",
+      MODAL_NOT_CONFIGURED_MESSAGE,
       503,
     );
   }

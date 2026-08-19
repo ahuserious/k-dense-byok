@@ -8,11 +8,13 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   ["chat.spec.ts", 28],
   ["console-live.spec.ts", 12],
   ["console-raindrop.spec.ts", 33],
+  // Wave F lane F12 (matrix rows 48-50): integrations registry in Settings ▸ Connectors.
+  ["f12-integrations.spec.ts", 3],
   ["live-backend.spec.ts", 3],
   ["scientific-pipelines.spec.ts", 57],
   ["workspace.spec.ts", 46],
 ]);
-const EXPECTED_SUBSTANTIVE_ITEMS = 218;
+const EXPECTED_SUBSTANTIVE_ITEMS = 221;
 const EXPECTED_THIN_ITEMS = 35;
 const EXPECTED_FIXME_ITEMS = 3;
 const EXPECTED_SKIP_ITEMS = 0;

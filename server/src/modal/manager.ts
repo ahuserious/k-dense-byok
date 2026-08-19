@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import path from "node:path";
 import { modalConfigured } from "../config.ts";
+import { MODAL_NOT_CONFIGURED_MESSAGE } from "./credentials.ts";
 import { listProjects, resolvePaths } from "../projects.ts";
 import {
   listComputeReservations,
@@ -256,7 +257,7 @@ export class DurableModalJobManager {
     if (this.requireCredentials && !modalConfigured()) {
       throw new ModalJobError(
         "NOT_CONFIGURED",
-        "Modal is not configured. Add both MODAL_TOKEN_ID and MODAL_TOKEN_SECRET in Settings.",
+        MODAL_NOT_CONFIGURED_MESSAGE,
         503,
       );
     }
