@@ -160,8 +160,19 @@ What the CLI is used for is the two things the built-in path cannot tell you:
 - **which Modal workspace your configured tokens belong to** — useful if you have more than one Modal
   account and want to know which one a job will bill to.
 
-**Settings → Connectors → Known integrations → Modal** reports both. If the program is not installed,
-that is stated plainly; nothing else stops working, because nothing else depends on it.
+**Settings → Connectors → Known integrations → Modal** reports both, on two lines:
+
+- `CLI: found at <path> (<version>)`, or `CLI: not found — …`;
+- `Workspace: <what "modal profile current" printed>`, or `Workspace: unavailable — <reason>` when
+  Modal is not configured, the program is not installed, or the command failed.
+
+Nothing else stops working when the program is missing, because nothing else depends on it. The
+workspace text is the CLI's own output, unparsed — its format is not pinned across CLI versions, and
+parsing it would be inventing a contract.
+
+Both readings run only when that panel asks for them (`GET /integrations/modal/cli`), never while the
+connector list is merely being listed, and the version reading is reused for five minutes rather than
+re-run on every visit.
 
 The CLI reuses the credentials you already saved in **Settings → API keys**. There is no second place
 to enter a Modal token, and there is no second environment variable. The credentials are passed to the

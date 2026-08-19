@@ -18,12 +18,8 @@
  */
 import type { FastifyInstance } from "fastify";
 import { activePaths } from "../projects.ts";
-import { readMcpConfig, writeMcpConfig } from "../agent/mcp.ts";
-import {
-  findIntegration,
-  listIntegrationStatuses,
-  describeIntegration,
-} from "../integrations/registry.ts";
+import { readMcpConfig, readMcpDisabled, writeMcpConfig } from "../agent/mcp.ts";
+import { findIntegration, listIntegrationStatuses } from "../integrations/registry.ts";
 import {
   HuggingFaceNotConfiguredError,
   HuggingFaceRequestError,
@@ -62,6 +58,29 @@ export async function registerIntegrationRoutes(app: FastifyInstance): Promise<v
         code: "NOT_CONFIGURED",
         envVar: definition.envVars[0].name,
         detail: INFRANODUS_NOT_CONFIGURED_MESSAGE,
+      };
+    }
+
+    // Disabling a connector MOVES its entry from mcp.json into
+    // mcp-disabled.json, so a name absent from mcp.json may still be configured
+    // and merely switched off. Writing it again here would land the SAME name in
+    // BOTH stores, which agent/mcp.ts's moveServer() then refuses to resolve in
+    // either direction (409, "Remove one of them first"), and the connector list
+    // offers no remove for a disabled row — a wedge the user cannot exit.
+    //
+    // This refuses rather than moving the entry back, because the disabled copy
+    // is the USER's: they may have hand-edited its command, args or key through
+    // PUT /mcp, and silently replacing it with the registry's default entry
+    // would discard that edit. The connector list directly above this section
+    // already has the toggle that performs the move correctly.
+    if (INFRANODUS_MCP_SERVER_NAME in readMcpDisabled(activePaths())) {
+      reply.code(409);
+      return {
+        code: "ALREADY_DISABLED",
+        serverName: INFRANODUS_MCP_SERVER_NAME,
+        detail:
+          `${definition.displayName} is already configured but disabled. ` +
+          "Enable it in the connector list above.",
       };
     }
 
@@ -113,15 +132,18 @@ export async function registerIntegrationRoutes(app: FastifyInstance): Promise<v
     },
   );
 
+  // The Modal row's installation-and-workspace detail, rendered by
+  // web/src/components/integrations/integrations-section.tsx. It is a route of
+  // its own rather than a field on GET /integrations because both readings spawn
+  // a process: keeping them here means the registry listing stays a pure read,
+  // and both spawns are async and memoised so neither blocks the event loop.
+  //
+  // `profile` is always present, never null, so the panel can state WHY the
+  // workspace is unavailable instead of rendering an empty line. runModalCli
+  // fails closed on the shared credential module before PATH is consulted, so an
+  // unconfigured install still spawns nothing here.
   app.get("/integrations/modal/cli", async () => {
-    const probe = probeModalCli();
-    const definition = findIntegration("modal");
-    const status = definition
-      ? describeIntegration(definition, { paths: activePaths() })
-      : null;
-    // The workspace read needs credentials; skip it entirely when unconfigured
-    // so an unconfigured install spawns nothing.
-    const profile = status?.configured && probe.found ? runModalCli("profile") : null;
-    return { cli: probe, profile };
+    const [cli, profile] = await Promise.all([probeModalCli(), runModalCli("profile")]);
+    return { cli, profile };
   });
 }

@@ -8,26 +8,50 @@
  * information — the same idiom as the connector rows above it.
  *
  * Every state here is designed rather than defaulted: loading, error,
- * configured, not-configured, already-connected. A row that cannot act renders
- * its action DISABLED with the reason visible next to it (§6.7), never live.
- * State is never carried by opacity or colour alone — each row states its status
- * in words.
+ * configured, not-configured, connected, connected-but-disabled. A row that
+ * cannot act renders its action DISABLED with the reason visible next to it
+ * (§6.7), never live. State is never carried by opacity or colour alone — each
+ * row states its status in words, and the Connect control's focus indicator is a
+ * full-opacity ring plus a --foreground outline rather than a dimmed ring.
  */
 
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   getIntegrations,
+  getModalCliState,
   registerIntegration,
+  type IntegrationCliStatus,
   type IntegrationStatus,
+  type ModalCliState,
 } from "@/lib/integrations";
+
+/**
+ * The focus indicator for this section's own controls.
+ *
+ * The shared primitive focuses with `ring-ring/50` — the token at HALF alpha,
+ * which composites to about 1.5:1 against the panel in light mode, under the 3:1
+ * §6.6 requires for a focus indicator. This overrides the alpha to full and adds
+ * a --foreground outline, which is the part that actually carries the ratio.
+ * Tokens only; no literal is introduced, and no `ui/*` primitive is forked (§6.3)
+ * — this is a className on lane F12's own element.
+ */
+const FOCUS_INDICATOR =
+  "focus-visible:ring-ring focus-visible:outline-solid focus-visible:outline-2 " +
+  "focus-visible:outline-offset-2 focus-visible:outline-foreground";
 
 /** The short status word each row states in text, so colour is never the only signal. */
 function statusLabel(integration: IntegrationStatus): string {
   if (!integration.configured) return "Not configured";
-  if (integration.mcp && !integration.mcp.registered) return "Configured · not connected";
-  if (integration.mcp && !integration.mcp.enabled) return "Connected · disabled";
-  return "Configured";
+  if (!integration.mcp) return "Configured";
+  // Disabling MOVES the entry out of mcp.json, so `registered` alone cannot tell
+  // "switched off" from "never connected". Say which one it is.
+  if (integration.mcp.disabled && integration.mcp.registered) {
+    return "Connected · listed in both the enabled and disabled lists";
+  }
+  if (integration.mcp.disabled) return "Configured · connected but disabled";
+  if (!integration.mcp.registered) return "Configured · not connected";
+  return "Connected";
 }
 
 function EnvVarList({ integration }: { integration: IntegrationStatus }) {
@@ -46,16 +70,70 @@ function EnvVarList({ integration }: { integration: IntegrationStatus }) {
   );
 }
 
-function CliLine({ integration }: { integration: IntegrationStatus }) {
-  if (!integration.cli) return null;
+function cliLineText(cli: IntegrationCliStatus): string {
+  if (!cli.found) {
+    return `CLI: not found — ${cli.binary} is not on this machine's PATH. The features above do not depend on it.`;
+  }
+  return `CLI: found at ${cli.path}${cli.version ? ` (${cli.version})` : ""}`;
+}
+
+function CliLine({ cli }: { cli: IntegrationCliStatus | null }) {
+  if (!cli) return null;
+  return <p className="mt-1.5 text-[11px] text-muted-foreground">{cliLineText(cli)}</p>;
+}
+
+/**
+ * The Modal row's CLI detail: installation AND the workspace the configured
+ * tokens bill to. Read from GET /integrations/modal/cli, which is a separate
+ * request because both readings spawn a process and the listing must not.
+ *
+ * The workspace has an honest unavailable state for every way it can be missing
+ * — backend unreachable, Modal unconfigured, program not installed, CLI failed —
+ * and the reason is always on screen rather than an empty line.
+ */
+function ModalCliDetail({ listedCli }: { listedCli: IntegrationCliStatus | null }) {
+  const [state, setState] = useState<ModalCliState | null>(null);
+  const [unreachable, setUnreachable] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    getModalCliState()
+      .then((next) => {
+        if (!cancelled) setState(next);
+      })
+      .catch(() => {
+        if (!cancelled) setUnreachable(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const cli = state?.cli ?? listedCli;
+  let workspace: string;
+  if (unreachable) {
+    workspace = "unavailable — the backend could not be reached.";
+  } else if (state === null) {
+    workspace = "reading…";
+  } else if (state.profile.ok && state.profile.stdout) {
+    workspace = state.profile.stdout;
+  } else {
+    workspace = `unavailable — ${state.profile.detail ?? "the Modal CLI returned nothing to report."}`;
+  }
+
   return (
-    <p className="mt-1.5 text-[11px] text-muted-foreground">
-      {integration.cli.found
-        ? `CLI: found at ${integration.cli.path}${
-            integration.cli.version ? ` (${integration.cli.version})` : ""
-          }`
-        : `CLI: not found — ${integration.cli.binary} is not on this machine's PATH. The features above do not depend on it.`}
-    </p>
+    <>
+      <CliLine cli={cli} />
+      <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+        Workspace:{" "}
+        <span
+          className="font-mono whitespace-pre-wrap"
+          data-testid="modal-workspace"
+        >
+          {workspace}
+        </span>
+      </p>
+    </>
   );
 }
 
@@ -96,6 +174,15 @@ export function IntegrationsSection() {
             : response.detail ?? "Connect failed",
         });
         if (response.ok) await load();
+      } catch {
+        // registerIntegration turns every HTTP status into a result, so reaching
+        // here means the request never completed. Without this the spinner would
+        // clear and the button would return to "Connect" with no explanation.
+        setResult({
+          id: integration.id,
+          ok: false,
+          text: "Connect failed. Check that the backend is reachable, then try again.",
+        });
       } finally {
         setConnecting(null);
       }
@@ -132,13 +219,20 @@ export function IntegrationsSection() {
       ) : (
         <ul className="flex flex-col gap-1.5">
           {integrations.map((integration) => {
-            const canConnect = Boolean(integration.mcp) && integration.configured;
             const alreadyConnected = integration.mcp?.registered === true;
+            const mcpDisabled = integration.mcp?.disabled === true;
+            const canConnect =
+              Boolean(integration.mcp) &&
+              integration.configured &&
+              !alreadyConnected &&
+              !mcpDisabled;
             const disabledReason = !integration.configured
               ? integration.notConfiguredReason
-              : alreadyConnected
-                ? "Already connected. Manage it in the connector list above."
-                : null;
+              : mcpDisabled
+                ? `${integration.displayName} is already configured but disabled. Enable it in the connector list above.`
+                : alreadyConnected
+                  ? "Already connected. Manage it in the connector list above."
+                  : null;
             return (
               <li key={integration.id} className="rounded-lg border px-3 py-2.5">
                 <div className="flex items-start gap-2">
@@ -163,7 +257,11 @@ export function IntegrationsSection() {
                       Reaches: {integration.reaches}
                     </p>
                     <EnvVarList integration={integration} />
-                    <CliLine integration={integration} />
+                    {integration.id === "modal" ? (
+                      <ModalCliDetail listedCli={integration.cli ?? null} />
+                    ) : (
+                      <CliLine cli={integration.cli ?? null} />
+                    )}
                     {integration.mcp && (
                       <p className="mt-1.5 text-[11px] text-muted-foreground">
                         Tools:{" "}
@@ -176,8 +274,8 @@ export function IntegrationsSection() {
                     <Button
                       variant="outline"
                       size="sm"
-                      className="shrink-0 text-xs"
-                      disabled={!canConnect || alreadyConnected || connecting === integration.id}
+                      className={`shrink-0 text-xs ${FOCUS_INDICATOR}`}
+                      disabled={!canConnect || connecting === integration.id}
                       aria-describedby={
                         disabledReason ? `integration-reason-${integration.id}` : undefined
                       }

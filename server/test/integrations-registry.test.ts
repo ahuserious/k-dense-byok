@@ -11,7 +11,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/index.ts";
 import { PROJECTS_ROOT } from "../src/config.ts";
 import { ensureProjectExists, resolvePaths } from "../src/projects.ts";
-import { readMcpConfig, writeMcpConfig } from "../src/agent/mcp.ts";
+import {
+  mcpToolName,
+  readMcpConfig,
+  readMcpDisabled,
+  writeMcpConfig,
+} from "../src/agent/mcp.ts";
 import {
   describeIntegration,
   findIntegration,
@@ -31,12 +36,17 @@ import {
 } from "../src/integrations/infranodus.ts";
 import {
   MODAL_CLI_NOT_FOUND_MESSAGE,
+  modalCliPresence,
   probeModalCli,
+  resetModalCliVersionCache,
   runModalCli,
+  type ModalExecFile,
 } from "../src/integrations/modal-cli.ts";
 import {
   MODAL_NOT_CONFIGURED_MESSAGE,
+  missingModalEnvVars,
   modalConfigured,
+  modalCredentialEnv,
 } from "../src/modal/credentials.ts";
 
 const MANAGED_VARS = [
@@ -53,6 +63,7 @@ beforeEach(() => {
   fs.rmSync(PROJECTS_ROOT, { recursive: true, force: true });
   fs.mkdirSync(PROJECTS_ROOT, { recursive: true });
   for (const name of MANAGED_VARS) delete process.env[name];
+  resetModalCliVersionCache();
 });
 
 afterEach(() => {
@@ -134,10 +145,12 @@ describe("row 48 — InfraNodus registers through the existing MCP stack", () =>
     // Registration must not clobber the connectors already configured.
     expect(servers.existing).toEqual({ url: "https://mcp.example.test/mcp" });
 
-    // The tool name a run would see, built by the same rule as agent/mcp.ts's
-    // wrapTool: `mcp__${serverName}__${toolName}`.
+    // The tool name a run would see. Asserted against agent/mcp.ts's OWN naming
+    // rule — the exported helper wrapTool() calls — not against a literal
+    // concatenated from the same constant, which would prove nothing about what
+    // the bridge produces.
     expect(`${INFRANODUS_TOOL_PREFIX}generate_knowledge_graph`).toBe(
-      "mcp__infranodus__generate_knowledge_graph",
+      mcpToolName(INFRANODUS_MCP_SERVER_NAME, "generate_knowledge_graph"),
     );
   });
 
@@ -173,9 +186,89 @@ describe("row 48 — InfraNodus registers through the existing MCP stack", () =>
       serverName: "infranodus",
       toolPrefix: "mcp__infranodus__",
       registered: true,
+      disabled: false,
       enabled: true,
       toolDiscovery: "on-connect",
     });
+  });
+
+  it("register → disable → register leaves the connector in EXACTLY ONE store", async () => {
+    ensureProjectExists("default");
+    const paths = resolvePaths("default");
+    process.env[INFRANODUS_API_KEY_ENV_VAR] = "test-key-not-a-real-credential";
+
+    const app = await buildApp();
+    try {
+      const register = () => app.inject({
+        method: "POST",
+        url: "/integrations/infranodus/register",
+        headers: { "x-project-id": "default" },
+      });
+
+      expect((await register()).statusCode).toBe(200);
+
+      // The user flips the connector off with the existing toggle, which MOVES
+      // the entry from mcp.json into mcp-disabled.json.
+      const disable = await app.inject({
+        method: "POST",
+        url: `/mcp/${INFRANODUS_MCP_SERVER_NAME}/disable`,
+        headers: { "x-project-id": "default" },
+      });
+      expect(disable.statusCode).toBe(200);
+      expect(INFRANODUS_MCP_SERVER_NAME in readMcpConfig(paths)).toBe(false);
+      expect(INFRANODUS_MCP_SERVER_NAME in readMcpDisabled(paths)).toBe(true);
+
+      // The panel must now say "disabled", not "never connected" — otherwise it
+      // offers a live Connect over a connector that already exists.
+      const listing = await app.inject({
+        method: "GET",
+        url: "/integrations",
+        headers: { "x-project-id": "default" },
+      });
+      const infranodus = (listing.json() as {
+        integrations: Array<{ id: string; mcp?: { registered: boolean; disabled: boolean; enabled: boolean } }>;
+      }).integrations.find((entry) => entry.id === "infranodus")!;
+      expect(infranodus.mcp).toEqual({
+        serverName: "infranodus",
+        toolPrefix: "mcp__infranodus__",
+        registered: false,
+        disabled: true,
+        enabled: false,
+        toolDiscovery: "on-connect",
+      });
+
+      // Registering again must NOT write a second copy.
+      const second = await register();
+      expect(second.statusCode).toBe(409);
+      expect(second.json()).toEqual({
+        code: "ALREADY_DISABLED",
+        serverName: "infranodus",
+        detail:
+          "InfraNodus is already configured but disabled. Enable it in the connector list above.",
+      });
+    } finally {
+      await app.close();
+    }
+
+    // THE EFFECT: exactly one store holds the connector, so the toggle still
+    // works in both directions instead of 409-ing forever.
+    expect(INFRANODUS_MCP_SERVER_NAME in readMcpConfig(paths)).toBe(false);
+    expect(Object.keys(readMcpDisabled(paths))).toEqual([INFRANODUS_MCP_SERVER_NAME]);
+
+    // And the recovery path the panel points at is genuinely open.
+    const recovered = await buildApp();
+    try {
+      const enable = await recovered.inject({
+        method: "POST",
+        url: `/mcp/${INFRANODUS_MCP_SERVER_NAME}/enable`,
+        headers: { "x-project-id": "default" },
+      });
+      expect(enable.statusCode).toBe(200);
+    } finally {
+      await recovered.close();
+    }
+    expect(Object.keys(readMcpConfig(paths))).toEqual([INFRANODUS_MCP_SERVER_NAME]);
+    expect(readMcpDisabled(paths)).toEqual({});
   });
 
   it("ships no hardcoded tool list — discovery is declared as on-connect", () => {
@@ -298,6 +391,50 @@ describe("row 49 — Hugging Face query path", () => {
     }
   });
 
+  it("the route's OWN search and limit reach the outbound URL, not a hardcoded pair", async () => {
+    process.env[HUGGING_FACE_TOKEN_ENV_VAR] = "token-value";
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify([{ id: "acme/some-model" }]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const app = await buildApp();
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: "/integrations/huggingface/models?search=mistral-7b&limit=3",
+        headers: { "x-project-id": "default" },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({
+        models: [
+          {
+            id: "acme/some-model",
+            pipelineTag: null,
+            libraryName: null,
+            gated: false,
+            downloads: null,
+            likes: null,
+          },
+        ],
+      });
+    } finally {
+      await app.close();
+    }
+
+    // THE EFFECT: the CALLER's parameters, not the module's defaults, are what
+    // left the machine. A handler that hardcoded either one would still satisfy
+    // every other test in this file.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const requested = new URL(fetchSpy.mock.calls[0][0] as string);
+    expect(requested.origin).toBe("https://huggingface.co");
+    expect(requested.pathname).toBe("/api/models");
+    expect(requested.searchParams.get("search")).toBe("mistral-7b");
+    expect(requested.searchParams.get("limit")).toBe("3");
+  });
+
   it("rejects an empty search before any configuration question", async () => {
     const app = await buildApp();
     try {
@@ -318,12 +455,55 @@ describe("row 49 — Hugging Face query path", () => {
 });
 
 describe("row 50 — the Modal CLI reuses the ONE existing credential path", () => {
-  it("resolves 'configured' through the same computation manager.ts uses", () => {
+  it("runModalCli itself, on process.env, refuses until BOTH variables are present", async () => {
+    // This drives the PRODUCTION branch: no `environment` is injected, so
+    // runModalCli reads process.env exactly as it does when the route calls it.
+    const lookPathImpl = vi.fn(() => null);
+    const execFileImpl = vi.fn(() => {
+      throw new Error("must not spawn");
+    }) as unknown as ModalExecFile;
+
+    const withNothing = await runModalCli("profile", { lookPathImpl, execFileImpl });
+    expect(withNothing.code).toBe("NOT_CONFIGURED");
     expect(modalConfigured()).toBe(false);
+
     process.env.MODAL_TOKEN_ID = "id-value";
-    expect(modalConfigured()).toBe(false); // half a pair is still unconfigured
+    const withHalf = await runModalCli("profile", { lookPathImpl, execFileImpl });
+    expect(withHalf.code).toBe("NOT_CONFIGURED"); // half a pair is still unconfigured
+    expect(modalConfigured()).toBe(false);
+    // THE EFFECT so far: not one PATH lookup, not one spawn.
+    expect(lookPathImpl).not.toHaveBeenCalled();
+
     process.env.MODAL_TOKEN_SECRET = "secret-value";
+    const withPair = await runModalCli("profile", { lookPathImpl, execFileImpl });
     expect(modalConfigured()).toBe(true);
+    // It got PAST the credential gate on process.env alone and went looking for
+    // the binary — which is the branch a production caller takes.
+    expect(lookPathImpl).toHaveBeenCalledWith("modal");
+    expect(withPair.code).toBe("CLI_NOT_FOUND");
+  });
+
+  it("there is ONE pair test: modalCredentialEnv agrees with modalConfigured and missingModalEnvVars", () => {
+    // The CLI path's only "is Modal configured?" question is
+    // `modalCredentialEnv(env) === null`. These three must never disagree, or
+    // the second computation §3.4 forbids is back by another name.
+    for (const tokenId of [undefined, "id-value"]) {
+      for (const tokenSecret of [undefined, "secret-value"]) {
+        const environment = {
+          ...(tokenId ? { MODAL_TOKEN_ID: tokenId } : {}),
+          ...(tokenSecret ? { MODAL_TOKEN_SECRET: tokenSecret } : {}),
+        } as NodeJS.ProcessEnv;
+        const byCredentialEnv = modalCredentialEnv(environment) !== null;
+        expect(byCredentialEnv).toBe(missingModalEnvVars(environment).length === 0);
+
+        // And against config.ts's modalConfigured(), which manager.ts calls.
+        if (tokenId) process.env.MODAL_TOKEN_ID = tokenId;
+        else delete process.env.MODAL_TOKEN_ID;
+        if (tokenSecret) process.env.MODAL_TOKEN_SECRET = tokenSecret;
+        else delete process.env.MODAL_TOKEN_SECRET;
+        expect(modalConfigured()).toBe(byCredentialEnv);
+      }
+    }
   });
 
   it("the not-configured message is the SAME constant manager.ts throws, not a new one", () => {
@@ -350,13 +530,13 @@ describe("row 50 — the Modal CLI reuses the ONE existing credential path", () 
     );
   });
 
-  it("unconfigured: the CLI path fails closed with the manager's message and spawns NOTHING", () => {
+  it("unconfigured: the CLI path fails closed with the manager's message and spawns NOTHING", async () => {
     const lookPathImpl = vi.fn(() => "/usr/local/bin/modal");
-    const spawnSyncImpl = vi.fn();
-    const result = runModalCli("profile", {
+    const execFileImpl = vi.fn();
+    const result = await runModalCli("profile", {
       environment: {} as NodeJS.ProcessEnv,
       lookPathImpl: lookPathImpl as unknown as typeof import("../src/binaries.ts").lookPath,
-      spawnSyncImpl: spawnSyncImpl as unknown as typeof import("node:child_process").spawnSync,
+      execFileImpl: execFileImpl as unknown as ModalExecFile,
     });
     expect(result).toEqual({
       ok: false,
@@ -364,25 +544,25 @@ describe("row 50 — the Modal CLI reuses the ONE existing credential path", () 
       detail: MODAL_NOT_CONFIGURED_MESSAGE,
     });
     // THE EFFECT: no process was started, and PATH was never even consulted.
-    expect(spawnSyncImpl).not.toHaveBeenCalled();
+    expect(execFileImpl).not.toHaveBeenCalled();
     expect(lookPathImpl).not.toHaveBeenCalled();
   });
 
-  it("configured: credentials reach the child through env and NEVER through argv", () => {
-    const spawnSyncImpl = vi.fn(() => ({ status: 0, stdout: "workspace: acme\n" }));
-    const result = runModalCli("profile", {
+  it("configured: credentials reach the child through env and NEVER through argv", async () => {
+    const execFileImpl = vi.fn(async () => ({ stdout: "workspace: acme\n", stderr: "" }));
+    const result = await runModalCli("profile", {
       environment: {
         PATH: "/usr/bin",
         MODAL_TOKEN_ID: "id-value",
         MODAL_TOKEN_SECRET: "secret-value",
       } as NodeJS.ProcessEnv,
       lookPathImpl: (() => "/usr/local/bin/modal") as unknown as typeof import("../src/binaries.ts").lookPath,
-      spawnSyncImpl: spawnSyncImpl as unknown as typeof import("node:child_process").spawnSync,
+      execFileImpl: execFileImpl as unknown as ModalExecFile,
     });
     expect(result).toEqual({ ok: true, stdout: "workspace: acme" });
 
-    expect(spawnSyncImpl).toHaveBeenCalledTimes(1);
-    const [binary, args, options] = spawnSyncImpl.mock.calls[0] as [
+    expect(execFileImpl).toHaveBeenCalledTimes(1);
+    const [binary, args, options] = execFileImpl.mock.calls[0] as [
       string,
       string[],
       { env: Record<string, string> },
@@ -398,16 +578,16 @@ describe("row 50 — the Modal CLI reuses the ONE existing credential path", () 
     expect(options.env.MODAL_TOKEN_SECRET).toBe("secret-value");
   });
 
-  it("a missing binary is a legible state, not a crash, and leaks no path", () => {
-    const result = runModalCli("version", {
+  it("a missing binary is a legible state, not a crash, and leaks no path", async () => {
+    const result = await runModalCli("version", {
       environment: {
         MODAL_TOKEN_ID: "id-value",
         MODAL_TOKEN_SECRET: "secret-value",
       } as NodeJS.ProcessEnv,
       lookPathImpl: (() => null) as unknown as typeof import("../src/binaries.ts").lookPath,
-      spawnSyncImpl: (() => {
+      execFileImpl: (() => {
         throw new Error("must not spawn");
-      }) as unknown as typeof import("node:child_process").spawnSync,
+      }) as unknown as ModalExecFile,
     });
     expect(result).toEqual({
       ok: false,
@@ -417,12 +597,77 @@ describe("row 50 — the Modal CLI reuses the ONE existing credential path", () 
     expect(result.detail).not.toContain("/");
   });
 
-  it("probeModalCli reports a missing binary without throwing", () => {
-    expect(
+  it("probeModalCli reports a missing binary without throwing", async () => {
+    await expect(
       probeModalCli({
         lookPathImpl: (() => null) as unknown as typeof import("../src/binaries.ts").lookPath,
       }),
-    ).toEqual({ binary: "modal", found: false, path: null, version: null });
+    ).resolves.toEqual({ binary: "modal", found: false, path: null, version: null });
+  });
+
+  it("the version is read ONCE per process and never on the listing path", async () => {
+    const lookPathImpl = (() => "/usr/local/bin/modal") as unknown as typeof import("../src/binaries.ts").lookPath;
+    const execFileImpl = vi.fn(async () => ({ stdout: "modal client version: 1.4.2\n", stderr: "" }));
+
+    // 1. The listing path. modalCliPresence() is what GET /integrations serves
+    //    from, and it CANNOT spawn — it takes no runner at all — so the version
+    //    is honestly null until something has read one.
+    expect(modalCliPresence({ lookPathImpl })).toEqual({
+      binary: "modal",
+      found: true,
+      path: "/usr/local/bin/modal",
+      version: null,
+    });
+
+    // 2. The explicit route reads it once...
+    const first = await probeModalCli({
+      lookPathImpl,
+      execFileImpl: execFileImpl as unknown as ModalExecFile,
+    });
+    expect(first.version).toBe("modal client version: 1.4.2");
+    expect(execFileImpl).toHaveBeenCalledTimes(1);
+    expect(execFileImpl.mock.calls[0][1]).toEqual(["--version"]);
+
+    // 3. ...and a second call inside the TTL spawns NOTHING more, which is the
+    //    fix for a ~0.7s Python start on every mount of the Connectors tab.
+    const second = await probeModalCli({
+      lookPathImpl,
+      execFileImpl: execFileImpl as unknown as ModalExecFile,
+    });
+    expect(second.version).toBe("modal client version: 1.4.2");
+    expect(execFileImpl).toHaveBeenCalledTimes(1);
+
+    // 4. And the listing now reuses that reading, still without spawning.
+    expect(modalCliPresence({ lookPathImpl }).version).toBe("modal client version: 1.4.2");
+  });
+
+  it("GET /integrations/modal/cli reports the workspace as UNAVAILABLE with the manager's message when unconfigured", async () => {
+    const app = await buildApp();
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: "/integrations/modal/cli",
+        headers: { "x-project-id": "default" },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json() as {
+        cli: { binary: string; found: boolean };
+        profile: { ok: boolean; code: string; detail: string };
+      };
+      // THE EFFECT: the route the panel's "Workspace:" line renders answers with
+      // the manager's own not-configured sentence, not a new one, and the
+      // workspace read never happened — runModalCli returns before PATH is
+      // consulted, so nothing was spawned with absent credentials.
+      expect(body.profile).toEqual({
+        ok: false,
+        code: "NOT_CONFIGURED",
+        detail: MODAL_NOT_CONFIGURED_MESSAGE,
+      });
+      expect(body.cli.binary).toBe("modal");
+      expect(typeof body.cli.found).toBe("boolean");
+    } finally {
+      await app.close();
+    }
   });
 });
 

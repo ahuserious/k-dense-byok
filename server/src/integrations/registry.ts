@@ -13,7 +13,13 @@
  *
  * Fail-closed egress (#44 / #57 / #64): an unconfigured integration reaches
  * nothing, and `describeIntegration` reports that in words the panel renders
- * verbatim. Nothing here probes a network on read.
+ * verbatim.
+ *
+ * Nothing here probes a network on read, and nothing here SPAWNS on read either:
+ * the CLI columns are resolved from PATH only (a few `stat` calls). Reading a
+ * `modal --version` costs ~0.7s of blocked event loop, so it happens on the
+ * explicit GET /integrations/modal/cli route instead, asynchronously and
+ * memoised — see ./modal-cli.ts.
  */
 import type { ProjectPaths } from "../projects.ts";
 import { readMcpConfig, readMcpDisabled } from "../agent/mcp.ts";
@@ -22,7 +28,7 @@ import {
   MODAL_TOKEN_ENV_VARS,
   missingModalEnvVars,
 } from "../modal/credentials.ts";
-import { MODAL_CLI_BINARY, probeModalCli } from "./modal-cli.ts";
+import { MODAL_CLI_BINARY, modalCliPresence } from "./modal-cli.ts";
 import {
   HUGGING_FACE_CLI_BINARY,
   HUGGING_FACE_NOT_CONFIGURED_MESSAGE,
@@ -131,6 +137,14 @@ export interface IntegrationMcpStatus {
   toolPrefix: string;
   /** The entry exists in this project's mcp.json, so a run would dial it. */
   registered: boolean;
+  /**
+   * The entry sits in this project's mcp-disabled.json. Reported separately
+   * because disabling MOVES the entry out of mcp.json: without this field a
+   * connector the user turned off is indistinguishable on the wire from one
+   * that was never connected, and the panel would offer a live Connect that
+   * lands the same name in both stores.
+   */
+  disabled: boolean;
   /** Registered and not sitting in mcp-disabled.json. */
   enabled: boolean;
   toolDiscovery: "on-connect";
@@ -169,7 +183,9 @@ export interface DescribeIntegrationDeps {
 
 function defaultProbeCli(binary: string): IntegrationCliStatus {
   if (binary === MODAL_CLI_BINARY) {
-    const probe = probeModalCli();
+    // Presence only. `version` is null until GET /integrations/modal/cli has
+    // taken a reading; see the module header for why this must not spawn.
+    const probe = modalCliPresence();
     return { binary, found: probe.found, path: probe.path, version: probe.version };
   }
   if (binary === HUGGING_FACE_CLI_BINARY) {
@@ -229,6 +245,7 @@ export function describeIntegration(
       serverName: definition.mcpServerName,
       toolPrefix: definition.mcpToolPrefix,
       registered,
+      disabled,
       enabled: registered && !disabled,
       toolDiscovery: "on-connect",
     };

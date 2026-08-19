@@ -2,7 +2,11 @@
   "lane": "F12",
   "wave": "F",
   "base": "b702a8b",
-  "rows": [48, 49, 50],
+  "rows": [
+    48,
+    49,
+    50
+  ],
   "summary": "One integration registry declares InfraNodus, Hugging Face and Modal; each states the env-var NAMES it needs, computes 'configured' from their presence, and reaches nothing when unconfigured.",
   "integrations": [
     {
@@ -11,7 +15,9 @@
       "displayName": "InfraNodus",
       "kind": "mcp",
       "preExisting": false,
-      "envVars": ["INFRANODUS_API_KEY"],
+      "envVars": [
+        "INFRANODUS_API_KEY"
+      ],
       "reachesWhenUnconfigured": "nothing",
       "transport": "stdio",
       "mcpServerName": "infranodus",
@@ -27,7 +33,9 @@
       ],
       "notVerified": [
         "the upstream tool inventory — the server was never dialed, so no tool names are hardcoded"
-      ]
+      ],
+      "registerRefusesWhenDisabled": "409 ALREADY_DISABLED",
+      "wireReportsDisabledStore": true
     },
     {
       "id": "huggingface",
@@ -35,7 +43,9 @@
       "displayName": "Hugging Face",
       "kind": "http",
       "preExisting": false,
-      "envVars": ["HF_TOKEN"],
+      "envVars": [
+        "HF_TOKEN"
+      ],
       "envVarNamePinnedBy": "server/vendor/pipeline-engine/packages/providers/src/community/pi/pi-vendor-map.generated.ts:34 and packages/core/src/credentials/delivery.test.ts:213",
       "reachesWhenUnconfigured": "nothing",
       "queryTransport": "https",
@@ -43,7 +53,9 @@
       "endpointVerifiedLive": "2026-08-18",
       "cliBinary": "huggingface-cli",
       "cliGatesAnything": false,
-      "publishedFor": ["row 6 — Modal preset selects a Hugging Face model"]
+      "publishedFor": [
+        "row 6 — Modal preset selects a Hugging Face model"
+      ]
     },
     {
       "id": "modal",
@@ -58,22 +70,48 @@
         "web/src/components/modal-jobs-panel.tsx",
         "docs/modal-compute.md"
       ],
-      "envVars": ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"],
+      "envVars": [
+        "MODAL_TOKEN_ID",
+        "MODAL_TOKEN_SECRET"
+      ],
       "credentialPaths": 1,
       "sharedCredentialModule": "server/src/modal/credentials.ts",
       "reachesWhenUnconfigured": "nothing",
       "cliBinary": "modal",
-      "cliAllowedCommands": ["--version", "profile current"],
+      "cliAllowedCommands": [
+        "--version",
+        "profile current"
+      ],
       "cliCredentialsInArgv": false,
       "cliAddsJobSubmission": false,
-      "duplicateOfExistingCapability": false
+      "duplicateOfExistingCapability": false,
+      "cliRoute": "GET /integrations/modal/cli",
+      "cliRenderedInUi": [
+        "installation (found/path/version)",
+        "workspace (modal profile current)"
+      ],
+      "cliSpawnsOnListing": false,
+      "cliSpawnIsAsync": true,
+      "cliVersionCacheTtlMs": 300000
     }
   ],
   "routes": [
-    { "method": "GET", "path": "/integrations" },
-    { "method": "POST", "path": "/integrations/:id/register" },
-    { "method": "GET", "path": "/integrations/huggingface/models" },
-    { "method": "GET", "path": "/integrations/modal/cli" }
+    {
+      "method": "GET",
+      "path": "/integrations"
+    },
+    {
+      "method": "POST",
+      "path": "/integrations/:id/register"
+    },
+    {
+      "method": "GET",
+      "path": "/integrations/huggingface/models"
+    },
+    {
+      "method": "GET",
+      "path": "/integrations/modal/cli"
+    }
   ],
   "routeRegistration": {
     "indexTsEdited": false,
@@ -109,6 +147,18 @@
     {
       "id": "F-3",
       "summary": "The Modal not-configured message was duplicated verbatim at manager.ts:259 and adapter.ts:89. Both now import one shared constant."
+    },
+    {
+      "id": "F-4",
+      "summary": "Round 2, from adversarial review: GET /integrations spawned `modal --version` synchronously on every call (~0.7s of blocked event loop). The listing now resolves PATH only; the version and the workspace are read asynchronously and memoised on GET /integrations/modal/cli."
+    },
+    {
+      "id": "F-5",
+      "summary": "Round 2, from adversarial review: POST /integrations/:id/register wrote into mcp.json without consulting mcp-disabled.json, so registering an already-disabled connector put the same name in both stores and wedged the toggle in both directions. It now answers 409 ALREADY_DISABLED, and the wire carries mcp.disabled so the panel can say so."
+    },
+    {
+      "id": "D-1-corrected",
+      "summary": "Round 2: the round-1 Gate D focus-ring numbers (2.58 light / 4.18 dark) were the FULL-OPACITY --ring token, not the rendered 50%-alpha ring. Remeasured from rendered pixels; see wave-f/reports/F12-evidence.md."
     }
   ]
 }

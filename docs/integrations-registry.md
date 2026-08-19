@@ -11,10 +11,16 @@ Declared today: **InfraNodus**, **Hugging Face**, **Modal**.
 
 ## The fail-closed rule
 
-An unconfigured integration **reaches nothing**. There is no default host, no fallback endpoint, and
-no probe on page load. This is not a style preference — it is the standing rule after three defects
-where an unconfigured integration silently contacted something (`RAINDROP_BASE_URL`,
-`OPENAI_COMPATIBLE_BASE_URL`, `OLLAMA_BASE_URL`).
+An unconfigured integration **reaches nothing**. There is no default host and no fallback endpoint.
+This is not a style preference — it is the standing rule after three defects where an unconfigured
+integration silently contacted something (`RAINDROP_BASE_URL`, `OPENAI_COMPATIBLE_BASE_URL`,
+`OLLAMA_BASE_URL`).
+
+`GET /integrations` also **starts no process**. Whether a local binary exists is resolved from `PATH`
+alone; reading a version means running the program, which for the Modal CLI is a ~0.7s Python start
+that would block the whole server for every client on every mount of the Connectors tab. The version
+and the Modal workspace are read by the separate `GET /integrations/modal/cli` route instead —
+asynchronously, and memoised for five minutes per resolved binary path.
 
 Concretely, for each of the three:
 
@@ -66,6 +72,7 @@ Served by `server/src/api/integrations.ts`, registered from `registerMcpRoutes()
         "serverName": "infranodus",
         "toolPrefix": "mcp__infranodus__",
         "registered": false,
+        "disabled": false,
         "enabled": false,
         "toolDiscovery": "on-connect"
       }
@@ -78,11 +85,26 @@ Served by `server/src/api/integrations.ts`, registered from `registerMcpRoutes()
 additionally means the entry exists in **this project's** `mcp.json`, i.e. a run would actually see
 its tools. A caller that needs the tools available must check `mcp.registered`, not `configured`.
 
+`mcp.disabled` means the entry sits in this project's `mcp-disabled.json`. Turning a connector off
+**moves** its entry out of `mcp.json`, so `registered: false` alone cannot distinguish "switched off"
+from "never connected" — a panel that treats them alike offers a live Connect for a connector that
+already exists, and registering it again would land the same name in both stores. Read the pair:
+`registered` for "a run sees its tools", `disabled` for "it exists but is off".
+
+`cli.version` is `null` until something has taken a reading — see `GET /integrations/modal/cli`.
+
 ### `POST /integrations/:id/register`
 
 Writes a known MCP connector's entry through the existing `writeMcpConfig()`. Idempotent, and it
 preserves every other connector. `503 { code: "NOT_CONFIGURED", envVar, detail }` when unconfigured —
 and in that case nothing is written. `404` for an integration that is not MCP-backed.
+
+`409 { code: "ALREADY_DISABLED", serverName, detail }` when the connector is already in this
+project's disabled list. It refuses rather than moving the entry back, because that disabled copy is
+the user's: they may have edited its command, args or key through `PUT /mcp`, and replacing it with
+the registry's default entry would discard that edit. The message names the next action — enable it
+from the connector list — and the panel renders the same state as
+"Configured · connected but disabled" with Connect disabled.
 
 ### `GET /integrations/huggingface/models?search=&limit=`
 
@@ -92,8 +114,19 @@ and in that case nothing is written. `404` for an integration that is not MCP-ba
 
 ### `GET /integrations/modal/cli`
 
-`200 { cli: { binary, found, path, version }, profile }`. `profile` is `null` unless Modal is
-configured **and** the binary was found, so an unconfigured install spawns nothing.
+`200 { cli: { binary, found, path, version }, profile: { ok, code, detail, stdout } }`.
+
+This is the only route that runs the `modal` program, and both readings are asynchronous, so a slow
+or hung CLI cannot block the event loop. `cli.version` comes from `modal --version`, memoised for
+five minutes per resolved path. `profile` comes from `modal profile current` and is **always
+present**: `{ ok: true, stdout }` with the workspace the configured tokens belong to, or
+`{ ok: false, code, detail }` naming why it is unavailable —
+`NOT_CONFIGURED` (the shared Modal message; nothing is spawned, because the credential check precedes
+the `PATH` lookup), `CLI_NOT_FOUND`, or `CLI_FAILED`. `stdout` is the CLI's own output, unparsed: its
+format is not pinned across CLI versions, and parsing it would be inventing a contract.
+
+The panel renders it as the Modal row's `Workspace:` line, with the reason on screen whenever the
+workspace itself is not available.
 
 ## Adding an integration
 
