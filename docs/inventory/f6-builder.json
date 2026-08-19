@@ -20,9 +20,11 @@
     "web/src/components/pipeline/best-of-n-branch-view.tsx",
     "web/src/components/dag-builder-surface.tsx",
     "web/src/components/dag-workflows-panel.tsx",
-    "e2e/wave-f/f6/compose.spec.ts",
     "e2e/item-count-reporter.ts"
   ],
+  "notInFilesArray": {
+    "e2e/wave-f/f6/compose.spec.ts": "Authored, pinned and run by F6, and owned by F6 through its e2e/wave-f/f6/** glob. Kept out of the files array because lane S11 still holds e2e/** , so an inventoried path there resolves to two owners and ownership-check.mjs:284 fails. Escalated as W/requests/c-1.md; this changes no ownership."
+  },
   "deleted": [
     "web/src/components/pipelines-panel.tsx"
   ],
