@@ -66,6 +66,45 @@ applied, and an optional field under `additionalProperties: false` is not free �
 a document written with it is a document an older server rejects as CORRUPT on
 read.
 
+### Node kinds, and what lane F5 is authorised to add (2026-08-19)
+
+Node **kinds** are outside the frozen `settings` surface — `WorkflowNodeSchema` is a union of per-kind
+objects, and `NodeSpecV1Schema` is one optional property inside each of them. `freeze-check.sh` does not
+read the union. They are recorded here anyway, before the lane that changes them, for the same reason the
+W3 fields above are: the boundary is easy to misread, and a reader who finds a kind in the schema and not
+in the contract cannot tell which of the two is wrong.
+
+**Kinds that exist today** (`server/src/workflows/schema.ts`, union at `:520`): `agent`,
+`research-until-goal`, `council`, `fusion`, `prompt-optimization`, `best-of-n`, `evidence-gate`, `lean4`.
+Matrix rows 27, 28, 31, 32 and 33 are asking for kinds this list already contains — **lane F5 delivers the
+mapping from the owner's vocabulary to these kinds, not a second implementation of any of them.** A
+duplicate kind alongside an existing one is rejected at review.
+
+**Kinds lane F5 is authorised to add** (specification ahead of implementation):
+
+| Kind | Row | What it is |
+| --- | --- | --- |
+| `elevate-to-dag` | 26 | Takes a prompt and emits a durable DAG definition that validates against this contract and saves. **One implementation, three entry points** — the chat panel (row 17, lane F9) and the skill (row 43, lane F11) call F5's engine and API; they do not each build an elevator. |
+| `hypothesis` | 34 | Generates n hypotheses with matched nulls, runs them, and produces the terminal analysis artifact. |
+| `reasoning-style` | 35 | Selects which personas a downstream council instantiates: auto (best fit of n scientists), manual, or from an InfraNodus map. The InfraNodus source is an external service and is gated behind explicit configuration, failing closed when unset (#44/#57/#64). |
+| `formatted-output` | 36 | Constrains and validates the shape of a node's actual output. |
+
+**Existing kinds lane F5 is authorised to extend:**
+
+| Kind | Change | Row |
+| --- | --- | --- |
+| `council` | A **`fuser`** role. `CouncilNodeSchema` (`:413`) has `members` (2-16), `chair`, `rounds` (1-20) and `preserveMinorityReports` — a chair and members, two roles against the three the owner asked for. The owner's default is **4 heads + 1 neutral judge + 1 fuser**. F5 either adds the role to the schema or maps judge→`chair` plus a downstream `fusion` node, and **records which in `docs/adr/F5-council-roles.md`**. Both directions are authorised here; exactly one may land, and this table is corrected to match at merge. | 29 |
+| `council` | Head auto-selection by workflow type, and judge-initiated **recruitment** of additional heads on detecting a blind spot: a bounded `maxRecruits` that respects the effective `maxSubagents` and is observable in RunState v1 (see `RUNSTATE-V1.md`). Recruitment must not let a node exceed the subagent bound it was admitted under. | 30 |
+| `evidence-gate` | A **council evaluator** alongside the single-LLM `evaluator` (`:493`), so "verification style" is LLM *or* LLM council and the council one actually runs a council. | 31 |
+| `best-of-n` | No schema change is authorised. It already executes (`candidateCount` 2-16, `candidateModels`, `evaluator`); the missing half is the visualisation, which is lane F6's. F5 publishes the run-state fields that visualisation reads. | 33 |
+| `rescue` (`RescuePolicySchema`, `:268`) | No new field is authorised without a further contract commit. F5 audits what of `enabled` / `maxAttempts` / `triggers` is not reachable and exposes it; both branches (retry n, and supervisor-fixes-the-DAG) are proven with an induced failure. | 32 |
+
+**`graphSha256` and the new fields.** `graphSha256 = sha256(canonicalJson(document))` and the canonicaliser
+strips nothing, so every field F5 adds is inside the content address. All of them are **content-derived and
+hash-stable**: they carry authored configuration, not timestamps, run ids or counters, so a retried save of
+the same logical document hashes identically. Whether `meta`/`provenance` — or anything else — *should* be
+inside that address is an owner decision (§12.4 of the wave brief) and is **not** decided here or by F5.
+
 ## Enforcement status
 
 `BOUND` means the current production runtime consumes the field. `FAIL-CLOSED(unit)`
