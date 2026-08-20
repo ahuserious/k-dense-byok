@@ -57,6 +57,15 @@ export function FusionBoostOptions({
         Fusion boost
       </legend>
 
+      <p
+        data-testid="fusion-boost-binding"
+        className="mb-1 text-[10px] text-muted-foreground"
+      >
+        Inserts in-graph fusion nodes the dest executor already runs. This is
+        not the OpenRouter Fusion picker and is not live on dest until this
+        lane merges.
+      </p>
+
       <label className="flex items-center gap-2 text-[11px]">
         <input
           type="checkbox"

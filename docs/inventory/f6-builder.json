@@ -81,7 +81,8 @@
         "elevation-to-dag": "Requires the elevate-to-DAG node kind, landing in lane F5.",
         "hypothesis": "Requires the hypothesis node kind, landing in lane F5."
       },
-      "hostState": "enabled is held in dag-builder-surface and seeded from readFusionBoost(loaded.document). Per-stage checks still derive from the document after apply.",
+      "hostState": "enabled is held in dag-builder-surface and seeded from readFusionBoost(loaded.document). Per-stage checks still derive from the document after apply. The control prints that it inserts in-graph fusion nodes, not OpenRouter Fusion presets, and is not dest-live until merge.",
+      "destOwnershipLeftover": "Dest 33a13ea ownership.json never granted server/test/wave-f/f6-stitch-fusion.test.ts, web/package.json, web/package-lock.json, or docs/inventory/web-tabs.json. Lead request: s11/wave-f/requests/f6-handoff.md. Do not edit dest policy from this lane.",
       "evidence": "server/test/wave-f/f6-stitch-fusion.test.ts: boost ON executed kinds ['fusion','agent','agent','fusion']; boost OFF executed ['subject-head','subject-tail']. compose.spec.ts turns the toggle on and checks Planning."
     },
     "33": {
