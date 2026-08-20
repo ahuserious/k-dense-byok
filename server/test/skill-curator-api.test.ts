@@ -158,23 +158,23 @@ describe("F11 skill curator API", () => {
     });
   });
 
-  it("reads dest index honestly: F2 harness published, F5 elevate and F14 durability unpublished", async () => {
+  it("reads dest index honestly: F2 harness, F5 elevate, and F14 durability published", async () => {
     const harness = await request("GET", "/harnesses");
     const elevate = await request("POST", "/elevate-to-dag", {});
     const durability = await request("GET", "/durability/settings");
     expect([200, 503]).toContain(harness.statusCode);
-    expect(elevate.statusCode).toBe(404);
-    expect(durability.statusCode).toBe(404);
+    expect(elevate.statusCode).not.toBe(404);
+    expect(durability.statusCode).toBe(200);
 
     const response = await request("GET", "/skills/curator/capabilities");
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({
       promptElevation: {
-        available: false,
+        available: true,
         interfaceDocument: "wave-f/interfaces/F5-elevate-to-dag.md",
         endpoint: "/elevate-to-dag",
         engine: "server/src/workflows/elevate-to-dag.ts",
-        reason: expect.stringMatching(/unpublished on this dest index/i),
+        reason: null,
       },
       harness: {
         available: true,
@@ -187,11 +187,11 @@ describe("F11 skill curator API", () => {
         reason: expect.stringMatching(/frozen contract/i),
       },
       durability: {
-        available: false,
+        available: true,
         settingsEndpoint: "/durability/settings",
         signalsEndpoint: "/durability/signals",
         ownsStore: false,
-        reason: "Durability settings endpoint not available on this build.",
+        reason: null,
       },
       modelPresets: {
         available: false,
