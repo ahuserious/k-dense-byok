@@ -6,10 +6,11 @@
  *   GET  /integrations/huggingface/models     → search Hugging Face models
  *   GET  /integrations/modal/cli              → the Modal CLI's local state
  *
- * Registration note: these routes are registered from registerMcpRoutes() in
- * ./mcp.ts, which server/src/index.ts:262 already calls. That is deliberate —
- * lane F12 does not own index.ts, and a route that is never registered cannot
- * satisfy the "reachable in the UI" gate. See INTEGRATION.md at the clone root.
+ * Registration note: registerIntegrationRoutes() is called exactly once, from
+ * buildApp() in server/src/index.ts (orchestrator commit e5a929e). An earlier
+ * lane revision registered it from registerMcpRoutes() in ./mcp.ts because the
+ * lane did not own index.ts; that nested registration was removed when the
+ * orchestrator applied the INTEGRATION.md route move at merge time.
  *
  * Every route holds the fail-closed rule (#44 / #57 / #64): an unconfigured
  * integration answers 503 with the variable NAME it needs and reaches nothing.
