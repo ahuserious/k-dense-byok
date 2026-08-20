@@ -136,7 +136,7 @@
       "perItemDirectorySegment": "testInfo.testId",
       "perItemDirectorySegmentReason": "two items in one spec file that pass the same shot name must not share a path; <NN> resets per item, so without this they did",
       "nameUniquenessRule": "names must be unique within an item; evidence.shot() rejects a reused name rather than overwriting",
-      "concurrentInvocationRule": "a sibling <testId>.lock directory is claimed with atomic mkdir for the complete fixture lifetime; a second Playwright process running the same item fails before it can clear or write the deterministic directory",
+      "concurrentInvocationRule": "a sibling <testId>.lock directory is claimed with atomic mkdir for the complete fixture lifetime; a second live Playwright process running the same item fails before it can clear or write the deterministic directory; a leftover lock is reclaimed only when owner.json records a dead pid on the same host and GitHub run (CI retries after SIGKILL/OOM/step-timeout), otherwise the claim stays fail-closed",
       "atomicFileCreation": "page.screenshot() returns bytes first, then the final PNG is created with flag wx (O_EXCL); no exists-check/write TOCTOU and no overwrite",
       "staleArtifactHandling": "each item's own directory is emptied at fixture setup; a directory this run did not touch keeps its old run.json and is visibly stale",
       "perItemManifest": ".stably/wave-f-evidence/<lane>/<spec-basename>/<testId>/run.json",

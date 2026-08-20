@@ -24,6 +24,7 @@
  *     not replace measured numbers.
  */
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import type { TestInfo } from "@playwright/test";
@@ -84,8 +85,85 @@ function hasNodeErrorCode(error: unknown, code: string): boolean {
     (error as { code?: unknown }).code === code;
 }
 
+interface EvidenceLockOwner {
+  pid: number;
+  host: string | null;
+  ciRunId: string | null;
+}
+
+function ownerProcessIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (hasNodeErrorCode(error, "ESRCH")) {
+      return false;
+    }
+    // EPERM and unknown errors mean we cannot prove the owner is dead. Fail closed.
+    return true;
+  }
+}
+
+function readEvidenceLockOwner(lockDirectory: string): EvidenceLockOwner | null {
+  try {
+    const parsed: unknown = JSON.parse(
+      fs.readFileSync(path.join(lockDirectory, "owner.json"), "utf8"),
+    );
+    if (typeof parsed !== "object" || parsed === null) {
+      return null;
+    }
+    const record = parsed as { pid?: unknown; host?: unknown; ciRunId?: unknown };
+    if (typeof record.pid !== "number" || !Number.isInteger(record.pid) || record.pid <= 0) {
+      return null;
+    }
+    return {
+      pid: record.pid,
+      host: typeof record.host === "string" ? record.host : null,
+      ciRunId: typeof record.ciRunId === "string" ? record.ciRunId : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function lockOwnerMatchesThisInvocation(owner: EvidenceLockOwner, host: string): boolean {
+  const currentRunId = process.env.GITHUB_RUN_ID ?? null;
+  if (currentRunId !== null) {
+    return owner.ciRunId === currentRunId;
+  }
+  if (owner.ciRunId !== null) {
+    return false;
+  }
+  return owner.host === null || owner.host === host;
+}
+
+function tryReclaimDeadOwnerLock(lockDirectory: string, host: string): boolean {
+  const owner = readEvidenceLockOwner(lockDirectory);
+  if (owner === null || ownerProcessIsAlive(owner.pid) || !lockOwnerMatchesThisInvocation(owner, host)) {
+    return false;
+  }
+  try {
+    fs.rmSync(lockDirectory, { recursive: true, force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function concurrentEvidenceLockError(directory: string, lockDirectory: string): Error {
+  return new Error(
+    `Wave-F evidence directory ${directory} is already owned by another Playwright invocation ` +
+      `(lock: ${lockDirectory}). Refusing to clear or write it, because concurrent runs of the ` +
+      "same item would race. A CI retry after a hard-killed worker reclaims this lock only when " +
+      "owner.json records a dead pid on the same host and GitHub run. If no Playwright run is " +
+      "active and the recorded pid is still alive or unreadable, remove the stale lock directory " +
+      "and run the item again.",
+  );
+}
+
 function acquireEvidenceDirectoryLock(directory: string, testInfo: TestInfo): string {
   const lockDirectory = `${directory}${WAVE_F_EVIDENCE_LOCK_SUFFIX}`;
+  const host = os.hostname();
   fs.mkdirSync(path.dirname(directory), { recursive: true });
   try {
     // `mkdir` is the cross-platform atomic claim. The item id is unique only within one Playwright
@@ -94,15 +172,23 @@ function acquireEvidenceDirectoryLock(directory: string, testInfo: TestInfo): st
     // `rmSync` the other process's screenshots or both can write the same PNG/run.json.
     fs.mkdirSync(lockDirectory);
   } catch (error) {
-    if (hasNodeErrorCode(error, "EEXIST")) {
-      throw new Error(
-        `Wave-F evidence directory ${directory} is already owned by another Playwright invocation ` +
-          `(lock: ${lockDirectory}). Refusing to clear or write it, because concurrent runs of the ` +
-          "same item would race. If no Playwright run is active, remove the stale lock directory " +
-          "and run the item again.",
-      );
+    if (!hasNodeErrorCode(error, "EEXIST")) {
+      throw error;
     }
-    throw error;
+    // A hard-killed worker (SIGKILL, OOM, step timeout) skips the fixture `finally`, leaving the
+    // lock behind. Playwright retries reuse the same testId, so reclaim only a proven-dead owner
+    // from this host/run. A live pid, a foreign run, or an unreadable owner.json stays fail-closed.
+    if (!tryReclaimDeadOwnerLock(lockDirectory, host)) {
+      throw concurrentEvidenceLockError(directory, lockDirectory);
+    }
+    try {
+      fs.mkdirSync(lockDirectory);
+    } catch (retryError) {
+      if (hasNodeErrorCode(retryError, "EEXIST")) {
+        throw concurrentEvidenceLockError(directory, lockDirectory);
+      }
+      throw retryError;
+    }
   }
 
   try {
@@ -111,6 +197,7 @@ function acquireEvidenceDirectoryLock(directory: string, testInfo: TestInfo): st
       `${JSON.stringify(
         {
           pid: process.pid,
+          host,
           testId: testInfo.testId,
           project: testInfo.project.name,
           retry: testInfo.retry,

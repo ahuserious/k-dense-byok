@@ -6,8 +6,8 @@
 # `Assert the full E2E inventory` step, which lists both projects without running either.
 #
 # Job B is exploratory AND ITS QUESTION IS NOW ANSWERED, in the negative. The action's own accepted-
-# input list contains no path, glob, config file or Playwright project name -- only Stably-platform
-# selectors and a target override -- so nothing in its contract consumes this repository's
+# input list contains no repository path, glob, or config file -- only Stably-platform selectors
+# and a target override -- so nothing in its contract consumes this repository's
 # e2e/*.spec.ts, and a green Job B is not evidence that this suite ran in Stably Cloud. The job stays
 # (non-blocking) as the place that records that finding against a real API response rather than
 # against a doc page. See the comment block inside the `stably-cloud` job for the full reasoning.
@@ -460,8 +460,10 @@ jobs:
     #   variable-overrides, note
     #
     # Every input that SELECTS work is a Stably-platform selector (test-suite-id, test-group-id,
-    # run-group-name). Every input that AIMS it is a target selector (domain-override, url-replacement).
-    # There is no input that takes a path, a glob, a config file, or a Playwright project name.
+    # run-group-name). `run-group-name` is documented by the action as "The Playwright project name
+    # to run (v2 only)": it filters platform-side runs by Playwright project name and does not
+    # consume this checkout. Every input that AIMS it is a target selector (domain-override,
+    # url-replacement). There is no input that takes a repository path, a glob, or a config file.
     #
     #   => NOTHING IN THIS ACTION'S CONTRACT CONSUMES THIS REPOSITORY'S e2e/*.spec.ts.
     #   => A GREEN JOB B IS THEREFORE **NOT** EVIDENCE THAT THIS SUITE RAN IN STABLY CLOUD.
@@ -553,7 +555,7 @@ jobs:
             printf '%s\n' "- testSuiteRunId: ${STABLY_TEST_SUITE_RUN_ID:-not recorded}"
             echo
             echo "### What a green here would and would not prove"
-            printf '%s\n' "- \`stablyai/stably-runner-action@v4\` selects work by \`test-suite-id\` / \`test-group-id\` / \`run-group-name\` and aims it with \`domain-override\` / \`url-replacement\`. It accepts no path, glob, config file, or Playwright project name."
+            printf '%s\n' "- \`stablyai/stably-runner-action@v4\` selects work by \`test-suite-id\` / \`test-group-id\` / \`run-group-name\` and aims it with \`domain-override\` / \`url-replacement\`. It accepts no repository path, glob, or config file. \`run-group-name\` filters platform-side runs by Playwright project name and does not consume this checkout."
             printf '%s\n' "- **Nothing in its contract consumes this repository's \`e2e/*.spec.ts\`.** A green Job B is NOT evidence that this suite ran in Stably Cloud."
             printf '%s\n' "- Hosted execution of THIS suite is proven by Job A (GitHub-hosted ubuntu runner) and by the \`wave-f-e2e.yml\` workflow, not by this job."
             printf '%s\n' "- The Stably project link is per-directory: an unlinked directory runs LOCAL browsers while looking exactly like a cloud run. Verify the link and \`stably runs list\` before believing any \"cloud\" result."
