@@ -192,8 +192,21 @@ export function registerLateralPassBehavior(
         throw new LateralPassError("INVALID_DISPATCH", "Lateral pass todos are invalid.");
       }
       const transcript = parseMessages(payload.transcript);
+      // An explicit model for this dispatch, so the durability watcher's
+      // operator-selected rescue model (policy, not a constant) reaches the
+      // provider call instead of being silently replaced by the registered one.
+      let dispatchModel = model;
+      if (payload.model !== undefined) {
+        if (typeof payload.model !== "string" || !MODEL_REF_PATTERN.test(payload.model)) {
+          throw new LateralPassError(
+            "INVALID_DISPATCH",
+            "Lateral pass model must be a provider-qualified model reference.",
+          );
+        }
+        dispatchModel = payload.model;
+      }
       const summary = parseLateralPassSummary(await dependencies.summarize({
-        model,
+        model: dispatchModel,
         runId: dispatch.runId,
         sourceSessionId,
         userPrompt: payload.userPrompt,
@@ -228,7 +241,7 @@ export function registerLateralPassBehavior(
         sourceSessionId,
         targetSessionId: cleanWindow.sessionId,
         compacted: false,
-        model,
+        model: dispatchModel,
         detail: `Created clean session ${cleanWindow.sessionId} from ${sourceSessionId}.`,
       };
     },

@@ -121,6 +121,23 @@ export interface WatcherRestartReceipt {
   detail?: string;
 }
 
+/**
+ * The failing run's context, carried from the durability watcher through the
+ * escalate dispatch so the rescue model repairs the DAG knowing what went
+ * wrong. Bounded and shape-checked at the dispatch boundary like every other
+ * payload field; absent for a repair triggered by the pre-existing compaction
+ * path, which has the semantic verdict instead.
+ */
+export interface WatcherCarriedContext {
+  runId: string;
+  signal: string;
+  runStatus: string;
+  goal: string;
+  userPrompt: string;
+  openTodos: string[];
+  transcript: Array<{ role: string; content: string }>;
+}
+
 export interface WatcherRepairRequest {
   runId: string;
   nodeId?: string;
@@ -128,6 +145,8 @@ export interface WatcherRepairRequest {
   model: string;
   reason: string;
   semanticVerdict?: CompactionSemanticVerdict;
+  /** Row 24: what the durability watcher observed, carried to the rescue model. */
+  carriedContext?: WatcherCarriedContext;
 }
 
 export interface WatcherRepairReceipt {
@@ -312,7 +331,12 @@ function boundedFindings(value: unknown): value is string[] {
   );
 }
 
-function validateSemanticRecord(record: CompactionSemanticRecord): void {
+/**
+ * Exported for lane F14's durability watcher, which reimplements the
+ * audit-to-verdict-to-escalate sequence with per-signal toggles and MUST apply
+ * the same bound before a billed provider call.
+ */
+export function validateSemanticRecord(record: CompactionSemanticRecord): void {
   if (
     !boundedText(record.preCompactionRecord) ||
     !boundedText(record.compactedSummary) ||
@@ -474,6 +498,70 @@ function durableRestartProof(value: unknown, runId: string): DurableRestartProof
   };
 }
 
+/**
+ * An explicit repair model for this dispatch, overriding the model this watcher
+ * was constructed with. This is how durability's operator-selected rescue model
+ * (policy, not a constant) reaches the actual provider call.
+ */
+function repairModelFromPayload(payload: Record<string, unknown>): string | undefined {
+  if (payload.repairModel === undefined) return undefined;
+  if (
+    typeof payload.repairModel !== "string" ||
+    !MODEL_REF_PATTERN.test(payload.repairModel) ||
+    utf8Bytes(payload.repairModel) > MAX_FINDING_BYTES
+  ) {
+    throw new CompactionWatcherError(
+      "INVALID_BEHAVIOR_DISPATCH",
+      "Fix-redeploy repair model must be a provider-qualified model reference.",
+    );
+  }
+  return payload.repairModel;
+}
+
+/**
+ * The failing run's context, bounded exactly like every other dispatch field.
+ * A malformed carried context is refused rather than forwarded to the model.
+ */
+function carriedContextFromPayload(
+  payload: Record<string, unknown>,
+): WatcherCarriedContext | undefined {
+  if (payload.carriedContext === undefined) return undefined;
+  const value = payload.carriedContext;
+  const invalid = () => {
+    throw new CompactionWatcherError(
+      "INVALID_BEHAVIOR_DISPATCH",
+      "Fix-redeploy carried context is malformed.",
+    );
+  };
+  if (!plainRecord(value)) invalid();
+  const record = value as Record<string, unknown>;
+  for (const field of ["runId", "signal", "runStatus", "goal", "userPrompt"]) {
+    if (!boundedText(record[field])) invalid();
+  }
+  if (!boundedFindings(record.openTodos)) invalid();
+  if (
+    !Array.isArray(record.transcript) || record.transcript.length === 0 ||
+    record.transcript.length > MAX_FINDINGS ||
+    !record.transcript.every((message) =>
+      plainRecord(message) && typeof message.role === "string" &&
+      typeof message.content === "string" && message.content.length > 0 &&
+      utf8Bytes(message.content) <= MAX_TEXT_BYTES
+    )
+  ) invalid();
+  return {
+    runId: record.runId as string,
+    signal: record.signal as string,
+    runStatus: record.runStatus as string,
+    goal: record.goal as string,
+    userPrompt: record.userPrompt as string,
+    openTodos: [...(record.openTodos as string[])],
+    transcript: (record.transcript as Array<Record<string, unknown>>).map((message) => ({
+      role: message.role as string,
+      content: message.content as string,
+    })),
+  };
+}
+
 function auditIdentityFromPayload(payload: Record<string, unknown>): string {
   if (
     typeof payload.auditIdentity !== "string" ||
@@ -497,7 +585,8 @@ function operationKey(runId: string, nodeId: string | undefined, auditIdentity: 
     .digest("hex");
 }
 
-function compactionAuditIdentity(
+/** Exported so the durability watcher produces the SAME operation identity. */
+export function compactionAuditIdentity(
   request: WatchCompactionRequest,
   audit: TrustedDagFusionCompactionAudit,
 ): string {
@@ -523,7 +612,8 @@ function recoveryBlockReason(
   return undefined;
 }
 
-function fingerprintFailure(audit: TrustedDagFusionCompactionAudit): string | undefined {
+/** Exported so the durability watcher reuses this rule instead of restating it. */
+export function fingerprintFailure(audit: TrustedDagFusionCompactionAudit): string | undefined {
   if (audit.occurred && audit.checks.length === 0) return "audit:MISSING_CHECKS";
   const failed = audit.checks.find((check) => !check.passed);
   return failed
@@ -640,6 +730,8 @@ export function createCompactionWatcher(
       }
       const semanticVerdict = semanticVerdictFromPayload(payload);
       const auditIdentity = auditIdentityFromPayload(payload);
+      const dispatchRepairModel = repairModelFromPayload(payload) ?? repairModel;
+      const carriedContext = carriedContextFromPayload(payload);
       const resumeResponse = resumeResponseFromPayload(payload.resumeResponse);
       const key = operationKey(dispatch.runId, nodeId, auditIdentity);
       return dependencies.operationStore.runExclusive(key, async (transaction) => {
@@ -690,9 +782,10 @@ export function createCompactionWatcher(
               runId: dispatch.runId,
               ...(nodeId ? { nodeId } : {}),
               auditIdentity,
-              model: repairModel,
+              model: dispatchRepairModel,
               reason,
               ...(semanticVerdict ? { semanticVerdict } : {}),
+              ...(carriedContext ? { carriedContext } : {}),
             });
           } catch (error) {
             if (error instanceof CompactionWatcherRetryableRepairError) {

@@ -1,0 +1,222 @@
+import fs from "node:fs";
+import path from "node:path";
+import { resolvePaths } from "../projects.ts";
+import type {
+  DurabilityAction,
+  DurabilityEffort,
+  DurabilitySignalId,
+} from "./durability-settings.ts";
+
+/**
+ * The durability journal is NOT a second run state.
+ *
+ * `WORKFLOW_RUN_EVENT_TYPES` is frozen and each type's `data` is validated
+ * against an exact key set, so a watcher observation has no legal slot in the
+ * run event stream. Every state CHANGE the watcher causes still goes through
+ * that stream (a stop is a real `run_cancelled`; a compaction check is a real
+ * `compaction_checked`). What lands here is only the watcher's own reasoning,
+ * stamped with the run's `lastSeq` at the moment of observation so the UI can
+ * interleave it with run events deterministically.
+ */
+export const DURABILITY_EVENT_NAMES = [
+  "durability.watch.started",
+  "durability.signal.fired",
+  "durability.signal.suppressed",
+  "durability.action.dispatched",
+  "durability.action.completed",
+  "durability.action.failed",
+  "durability.escalation.started",
+  "durability.escalation.completed",
+  "durability.escalation.deferred",
+  "durability.stop.requested",
+  "durability.stop.completed",
+  "durability.model.unresolved",
+  "durability.watch.stopped",
+] as const;
+export type DurabilityEventName = (typeof DURABILITY_EVENT_NAMES)[number];
+
+export const MAX_DURABILITY_TIMELINE_EVENTS = 2_000;
+export const MAX_DURABILITY_DETAIL_LENGTH = 2_048;
+export const MAX_DURABILITY_TIMELINE_PAGE = 200;
+
+export interface DurabilityTimelineEvent {
+  seq: number;
+  ts: number;
+  name: DurabilityEventName;
+  runId: string;
+  runLastSeq: number;
+  signal?: DurabilitySignalId;
+  action?: DurabilityAction;
+  model?: string;
+  effort?: DurabilityEffort;
+  /**
+   * The unapplied rescue proposal an escalation produced instead of a
+   * replacement run. Present ONLY on `durability.escalation.deferred`, which is
+   * how F6 tells "the run continued" apart from "a proposal is waiting".
+   */
+  proposalId?: string;
+  detail: string;
+  ok?: boolean;
+}
+
+export type DurabilityTimelineEventInput = Omit<DurabilityTimelineEvent, "seq" | "ts">;
+
+export interface DurabilityTimelinePage {
+  runId: string;
+  events: DurabilityTimelineEvent[];
+  lastSeq: number;
+  hasMore: boolean;
+}
+
+const RUN_ID_PATTERN = /^wrun_[a-f0-9]{32}$/;
+
+export function isDurabilityJournalRunId(value: string): boolean {
+  return RUN_ID_PATTERN.test(value);
+}
+
+/** Trim to the bound and strip control characters; never leak a path (#71). */
+export function boundedDurabilityDetail(detail: string): string {
+  const cleaned = detail.replace(/[\u0000-\u001f\u007f]/g, " ").trim();
+  return cleaned.length <= MAX_DURABILITY_DETAIL_LENGTH
+    ? cleaned
+    : `${cleaned.slice(0, MAX_DURABILITY_DETAIL_LENGTH - 1)}…`;
+}
+
+export interface DurabilityJournal {
+  append(
+    projectId: string,
+    event: DurabilityTimelineEventInput,
+  ): DurabilityTimelineEvent;
+  read(
+    projectId: string,
+    runId: string,
+    options?: { after?: number; limit?: number },
+  ): DurabilityTimelinePage;
+}
+
+function timelinePage(
+  runId: string,
+  events: DurabilityTimelineEvent[],
+  options: { after?: number; limit?: number } | undefined,
+): DurabilityTimelinePage {
+  const after = options?.after ?? 0;
+  const limit = Math.min(
+    options?.limit ?? MAX_DURABILITY_TIMELINE_PAGE,
+    MAX_DURABILITY_TIMELINE_PAGE,
+  );
+  const remaining = events.filter((event) => event.seq > after);
+  return {
+    runId,
+    events: remaining.slice(0, limit),
+    lastSeq: events.at(-1)?.seq ?? 0,
+    hasMore: remaining.length > limit,
+  };
+}
+
+/** Test double, and the journal used when a project has no sandbox on disk. */
+export class MemoryDurabilityJournal implements DurabilityJournal {
+  readonly #runs = new Map<string, DurabilityTimelineEvent[]>();
+
+  #key(projectId: string, runId: string): string {
+    return `${projectId}\u0000${runId}`;
+  }
+
+  append(projectId: string, event: DurabilityTimelineEventInput): DurabilityTimelineEvent {
+    const key = this.#key(projectId, event.runId);
+    const events = this.#runs.get(key) ?? [];
+    const stored: DurabilityTimelineEvent = {
+      ...event,
+      detail: boundedDurabilityDetail(event.detail),
+      seq: (events.at(-1)?.seq ?? 0) + 1,
+      ts: Date.now(),
+    };
+    events.push(stored);
+    // Oldest observations are dropped first; the newest are what an operator is
+    // looking at when something is going wrong.
+    if (events.length > MAX_DURABILITY_TIMELINE_EVENTS) {
+      events.splice(0, events.length - MAX_DURABILITY_TIMELINE_EVENTS);
+    }
+    this.#runs.set(key, events);
+    return stored;
+  }
+
+  read(
+    projectId: string,
+    runId: string,
+    options?: { after?: number; limit?: number },
+  ): DurabilityTimelinePage {
+    return timelinePage(runId, this.#runs.get(this.#key(projectId, runId)) ?? [], options);
+  }
+}
+
+/** Durable journal beside the project's workflow state, one file per run. */
+export class FileDurabilityJournal implements DurabilityJournal {
+  #file(projectId: string, runId: string): string {
+    if (!isDurabilityJournalRunId(runId)) {
+      throw new Error("A durability timeline requires a workflow run id.");
+    }
+    return path.join(
+      resolvePaths(projectId).workflowsDir,
+      "durability",
+      "timeline",
+      `${runId}.jsonl`,
+    );
+  }
+
+  #load(projectId: string, runId: string): DurabilityTimelineEvent[] {
+    let raw: string;
+    try {
+      raw = fs.readFileSync(this.#file(projectId, runId), "utf8");
+    } catch {
+      return [];
+    }
+    const events: DurabilityTimelineEvent[] = [];
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const parsed = JSON.parse(line) as DurabilityTimelineEvent;
+        // A torn or hand-edited line is skipped, never thrown: a corrupt
+        // journal must not take the timeline panel down (#62).
+        if (Number.isSafeInteger(parsed?.seq) && typeof parsed?.name === "string") {
+          events.push(parsed);
+        }
+      } catch {
+        continue;
+      }
+    }
+    return events;
+  }
+
+  append(projectId: string, event: DurabilityTimelineEventInput): DurabilityTimelineEvent {
+    const file = this.#file(projectId, event.runId);
+    const existing = this.#load(projectId, event.runId);
+    const stored: DurabilityTimelineEvent = {
+      ...event,
+      detail: boundedDurabilityDetail(event.detail),
+      seq: (existing.at(-1)?.seq ?? 0) + 1,
+      ts: Date.now(),
+    };
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    if (existing.length >= MAX_DURABILITY_TIMELINE_EVENTS) {
+      const kept = [
+        ...existing.slice(existing.length - MAX_DURABILITY_TIMELINE_EVENTS + 1),
+        stored,
+      ];
+      fs.writeFileSync(file, `${kept.map((item) => JSON.stringify(item)).join("\n")}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+      return stored;
+    }
+    fs.appendFileSync(file, `${JSON.stringify(stored)}\n`, { encoding: "utf8", mode: 0o600 });
+    return stored;
+  }
+
+  read(
+    projectId: string,
+    runId: string,
+    options?: { after?: number; limit?: number },
+  ): DurabilityTimelinePage {
+    return timelinePage(runId, this.#load(projectId, runId), options);
+  }
+}

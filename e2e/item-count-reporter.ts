@@ -32,14 +32,18 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   // Gate U is F6's palette/inspector, which this lane must not invent.
   ["wave-f/f5/f5-node-kinds.spec.ts", 4],
   ["live-backend.spec.ts", 3],
+  // Wave F lane F14 (rows 23-24, server half of 44): durability API.
+  // Seven items are pinned. `--list` is not a live run; dest apply
+  // registers the routes, but the @live leg is still unearned.
+  ["wave-f/f14/durability-api.spec.ts", 7],
   ["scientific-pipelines.spec.ts", 57],
   ["workspace.spec.ts", 46],
   ["wave-f/harness/app-shell.spec.ts", 15],
   ["wave-f/harness/evidence-contract.spec.ts", 3],
   ["wave-f/harness/smoke.spec.ts", 1],
 ]);
-// 270 after F8. F5's 4 items are thin (Gate U is F6).
-const EXPECTED_SUBSTANTIVE_ITEMS = 270;
+// 270 after F8. F5's 4 items are thin (Gate U is F6). F14 adds 7 substantive.
+const EXPECTED_SUBSTANTIVE_ITEMS = 277;
 // 35 pre-existing thin items (labelled inventory smokes plus the 3 fixmes) + the 3 Wave-F
 // evidence-fixture contract items + F5's 4.
 const EXPECTED_THIN_ITEMS = 42;
