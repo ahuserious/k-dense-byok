@@ -14,10 +14,10 @@ check whether they are looking at a different project.
 
 Three steps: scope the question, gather and synthesize, write it up.
 
-- **Before running:** set `limits.maxCostUsd`. This one arrives through the
-  legacy import path, which sets the cap to `0` on purpose, so a paid run is
-  refused before dispatch until someone reviews and edits it. That is the
-  intended state, not a defect.
+- **Before running:** `limits.maxCostUsd` is `0` on purpose. Run is disabled
+  with reason `This workflow's cost cap is $0. Raise limits.maxCostUsd before
+  running.` until someone reviews the seed and raises the cap. That is the
+  intended state, not a defect. The seeder call site is already live.
 - Read-only workspaces throughout; it writes no artifacts.
 
 ## `data-scientist` — Data Scientist

@@ -66,13 +66,19 @@ is cascade.** Report the first one.
 ## Budget — the failure that looks like nothing happening
 
 Typed runs reserve budget **before** dispatching a model call. A workflow whose
-`limits.maxCostUsd` is `0` refuses every cap-counted call before it is made, so
-the run fails with nodes that appear never to have started.
+`limits.maxCostUsd` is `0` must not present a live-looking Run control. Run is
+disabled with `aria-disabled` and reason
+`This workflow's cost cap is $0. Raise limits.maxCostUsd before running.`
+If that disable is missing, a cap-counted call is still refused before dispatch
+and the run fails with nodes that appear never to have started — that is the
+failure mode Gate B exists to stop.
 
 Every pipeline that arrived through the legacy import path lands with
 `maxCostUsd: 0` deliberately — it is imported for review, not for execution.
-When a user reports "it just fails immediately", check the budget first, and
-tell them the fix is to set a real cap on the definition, not to retry.
+When a user reports "Run is disabled" or "it just fails immediately", check the
+budget first, and tell them the fix is to set a real cap on the definition, not
+to retry. Do not treat a missing seeder as the reason: `ensureProjectExists`
+already calls `seedProjectPipelines`.
 
 ## Reporting a typed run
 

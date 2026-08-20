@@ -15,15 +15,18 @@ renders it with no client change.
 
 | Workflow | id | Nodes | Ready to run as seeded? |
 |---|---|---:|---|
-| Research Starter | `research-starter` | 3 | **No** — `limits.maxCostUsd` is `0`; set a budget first |
+| Research Starter | `research-starter` | 3 | **No** — `limits.maxCostUsd` is `0`; Run must be disabled-with-reason, not live-looking |
 | Data Scientist | `data-scientist` | 5 | Yes, with an OpenRouter key and an uploaded dataset |
 | Composed Research Pipeline | `composed-research-pipeline` | 24 | Yes, with an OpenRouter key and an uploaded dataset — but it is expensive |
 
 `research-starter` arrives through the legacy import path, which sets the spend
 cap to zero on purpose: an imported pipeline is opened for review, not for
-execution. A cap-counted model call is refused *before dispatch* while the cap is
-zero, so the run fails with nodes that look as though they never started. That is
-the intended state. Edit the definition and set a real cap.
+execution. Run on that seed must not look live. The panel F7 does not own should
+set `aria-disabled` and show reason
+`This workflow's cost cap is $0. Raise limits.maxCostUsd before running.`
+See `reports/F7-INTEGRATION.md`. The seeder already has a production call site
+in `ensureProjectExists`; do not disable Run for a missing seed. Edit the
+definition and raise `limits.maxCostUsd` to enable Run.
 
 ## Two things the seeded pipelines do not have
 

@@ -17,8 +17,10 @@ description: |
   A three-step research pipeline: scope the question, gather and synthesize the
   findings, then write the result up. A gentle starting point for a new project —
   open it, read the three prompts, and edit them into your own question. Imported
-  legacy workflows start with a $0 workflow cost limit, so increase the limit
-  after review before launching a provider-backed run.
+  legacy workflows start with a $0 workflow cost limit, so Run is disabled with
+  reason "This workflow's cost cap is $0. Raise limits.maxCostUsd before running."
+  until that cap is raised. The seeder call site is live; the disable is the cap,
+  not a missing seed.
 provider: pi
 interactive: false
 
