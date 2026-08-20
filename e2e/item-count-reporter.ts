@@ -15,7 +15,7 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   ["scientific-pipelines.spec.ts", 57],
   ["workspace.spec.ts", 46],
 ]);
-const EXPECTED_SUBSTANTIVE_ITEMS = 221;
+const EXPECTED_SUBSTANTIVE_ITEMS = 224;
 const EXPECTED_THIN_ITEMS = 35;
 const EXPECTED_FIXME_ITEMS = 3;
 const EXPECTED_SKIP_ITEMS = 0;
