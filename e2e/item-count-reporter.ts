@@ -13,6 +13,9 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   ["chat.spec.ts", 28],
   ["console-live.spec.ts", 12],
   ["console-raindrop.spec.ts", 33],
+  // Wave F lane F11 (rows 41-47, 51): substantive skills, curator, and live adapters.
+  // Path-keyed after F10; the file lives under e2e/wave-f/f11/, not the e2e/ root.
+  ["wave-f/f11/f11-skills-curator.spec.ts", 3],
   // Wave F lane F12 (matrix rows 48-50): integrations registry in Settings ▸ Connectors.
   // Path-keyed after F10; the file lives under e2e/wave-f/f12/, not the e2e/ root.
   ["wave-f/f12/f12-integrations.spec.ts", 3],
@@ -42,8 +45,9 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   ["wave-f/harness/evidence-contract.spec.ts", 3],
   ["wave-f/harness/smoke.spec.ts", 1],
 ]);
-// 270 after F8. F5's 4 items are thin (Gate U is F6). F14 adds 7 substantive.
-const EXPECTED_SUBSTANTIVE_ITEMS = 277;
+// 270 after F8. F5's 4 items are thin (Gate U is F6). F14 adds 7.
+// F11 adds 3 substantive curator items.
+const EXPECTED_SUBSTANTIVE_ITEMS = 280;
 // 35 pre-existing thin items (labelled inventory smokes plus the 3 fixmes) + the 3 Wave-F
 // evidence-fixture contract items + F5's 4.
 const EXPECTED_THIN_ITEMS = 42;

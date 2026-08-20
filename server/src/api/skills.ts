@@ -44,6 +44,7 @@ import {
   writeSkillSource,
 } from "../agent/skills-install.ts";
 import { syncSandboxVenv } from "../sandbox-seed.ts";
+import { registerSkillCuratorRoutes } from "./skill-curator.ts";
 
 interface ScopeQuery {
   scope?: string;
@@ -348,4 +349,8 @@ export async function registerSkillRoutes(app: FastifyInstance): Promise<void> {
       return { ok: true, skills: count, venvSynced };
     },
   );
+
+  // F11 extends the existing Skills capability surface. Keeping registration
+  // here avoids a second top-level API mount or a parallel installer.
+  await registerSkillCuratorRoutes(app);
 }

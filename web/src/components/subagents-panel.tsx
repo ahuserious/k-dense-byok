@@ -35,6 +35,11 @@ import {
   THINKING_LEVELS,
   type AgentFile,
 } from "@/lib/agents";
+import {
+  AutoresearchMonitorPanel,
+  SkillCuratorPanel,
+  WorkflowSupervisorSettings,
+} from "@/components/skills";
 
 interface AgentFormState {
   /** Name being edited, or null when creating a new agent. */
@@ -62,6 +67,20 @@ const EMPTY_FORM: AgentFormState = {
   inheritProjectContext: true,
   inheritSkills: true,
   systemPrompt: "",
+};
+
+const SCIENTIFIC_AGENT_FORM: AgentFormState = {
+  originalName: null,
+  name: "",
+  description: "Review a scientific question using explicit evidence and uncertainty.",
+  model: "",
+  thinking: "high",
+  tools: "read, grep, find, ls",
+  systemPromptMode: "append",
+  inheritProjectContext: true,
+  inheritSkills: true,
+  systemPrompt:
+    "You are a scientific specialist for this project. Reconstruct the question, inspect the smallest sufficient set of project artifacts with read-only tools, and distinguish observed evidence from inference and recommendation. Cite exact artifacts for material claims, surface contradictory evidence and uncertainty, and state what additional check would change the conclusion. Never read credentials, mutate files, start another agent, or claim a check ran when it did not. Return findings in descending decision impact with a concise evidence-backed conclusion.",
 };
 
 function formFromAgent(agent: AgentFile, asCopy: boolean): AgentFormState {
@@ -218,6 +237,33 @@ export function SubagentsPanel() {
           <code className="rounded bg-muted px-1 py-0.5 text-[11px]">.pi/agents/</code>.
           Changes apply to new chat tabs.
         </p>
+      </div>
+
+      <div className="space-y-2" aria-label="Scientific agent skills">
+        <details className="rounded-lg border">
+          <summary className="cursor-pointer px-3 py-2 text-xs font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground">
+            Curate skills into workflow nodes
+          </summary>
+          <div className="border-t p-3">
+            <SkillCuratorPanel compact />
+          </div>
+        </details>
+        <details className="rounded-lg border">
+          <summary className="cursor-pointer px-3 py-2 text-xs font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground">
+            Monitor a live autoresearch run
+          </summary>
+          <div className="border-t p-3">
+            <AutoresearchMonitorPanel />
+          </div>
+        </details>
+        <details className="rounded-lg border">
+          <summary className="cursor-pointer px-3 py-2 text-xs font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground">
+            Configure the workflow supervisor
+          </summary>
+          <div className="border-t p-3">
+            <WorkflowSupervisorSettings compact />
+          </div>
+        </details>
       </div>
 
       {error && (
@@ -415,6 +461,15 @@ export function SubagentsPanel() {
             >
               <PlusIcon className="size-3.5" />
               Add agent
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5 text-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground"
+              onClick={() => setForm({ ...SCIENTIFIC_AGENT_FORM })}
+            >
+              <BotIcon className="size-3.5" />
+              Create scientific agent
             </Button>
             <Button
               variant="ghost"
