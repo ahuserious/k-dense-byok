@@ -5,7 +5,8 @@ Lane: F11, rows 41–47 and 51
 Clone: `/Users/DanBot/Documents/ChatGPT/sds-lane-f11`
 Branch: `feat/wave-f-f11-skills-curator`
 Base: `33a13ea222f64d05248e34f99c7e5dc9d5eea202` (dest `feat/sds-wave-f-cursor-local`, F2+F8 merged)
-Tip: `07e05684d29308a44b8c123afcae8dfb31d4bb65`
+Product tip: `07e05684d29308a44b8c123afcae8dfb31d4bb65`
+This evidence file: `d1bf30c` and later commits on the same branch
 Commits on dest: `d289c99` (feat), `07e0568` (dest-index probe)
 This file is **not** an independent review PASS.
 Supersedes the stale packet that named tip `54c9bd0` / base `51f0b7d`.
