@@ -49,9 +49,37 @@ export default defineConfig({
     video: "retain-on-failure",
   },
   projects: [
+    // `chromium` must stay at index 0: playwright.live-alt.config.ts builds its single project from
+    // the base project list, and e2e/global-setup.ts reads config.projects[0].use for the baseURL it
+    // warms. Both now resolve by name rather than by position, but the ordering is still the shape a
+    // reader expects, and the contract tests in e2e/config-contracts.node.mjs pin the result.
     {
       name: "chromium",
+      // The Wave-F tier lives in its own project below with its own testDir. Without this ignore the
+      // default `./e2e` collection would walk e2e/wave-f as well and every Wave-F item would be
+      // collected twice -- once per project -- which the item-count reporter would (correctly) call
+      // inventory drift.
+      testIgnore: "wave-f/**",
       use: { ...devices["Desktop Chrome"], viewport: { width: 1600, height: 1000 } },
+    },
+    // The Wave-F click-through tier (row 38). Three things make it different from `chromium`, and
+    // all three are the point of it:
+    //   1. testDir is e2e/wave-f, whose fixtures install NO route interception -- these items reach
+    //      the real backend. The mocked tier at ./e2e proves front-end behaviour and nothing about
+    //      the server, which is why Gate U asks for evidence from here instead.
+    //   2. video and screenshot are "on", not "retain-on-failure"/"only-on-failure". A passing item
+    //      has to leave a visual record behind; that record IS the row-38 deliverable.
+    //   3. trace stays "on" so a passing item keeps its filmstrip too.
+    {
+      name: "wave-f",
+      testDir: "./e2e/wave-f",
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 1600, height: 1000 },
+        trace: "on",
+        video: "on",
+        screenshot: "on",
+      },
     },
   ],
   expect: { timeout: 10_000 },

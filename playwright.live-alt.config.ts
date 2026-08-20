@@ -48,7 +48,13 @@ const backendPort = requiredNonDefaultPort("KADY_PORT", 18_000);
 const enginePort = requiredNonDefaultPort("KADY_PIPELINE_ENGINE_PORT", 13_091);
 requireEffectivePort("backend", baseURL, "KADY_PORT", backendPort);
 requireEffectivePort("engine", baseURL, "KADY_PIPELINE_ENGINE_PORT", enginePort);
-const baseProject = baseConfig.projects?.[0];
+// Resolved by name, not by position. The committed config now carries a second project (`wave-f`,
+// the unmocked click-through tier), and the @live-alt leg must keep deriving from the mocked-tier
+// project exactly as it always did -- a positional lookup would silently follow any future reorder.
+const baseProject = baseConfig.projects?.find((project) => project.name === "chromium");
+if (!baseProject) {
+  throw new Error("The @live-alt leg requires the committed `chromium` project as its base.");
+}
 
 export default defineConfig({
   ...baseConfig,
