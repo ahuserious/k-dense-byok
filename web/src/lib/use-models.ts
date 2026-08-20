@@ -15,6 +15,14 @@ import {
   PROVIDER_AUTH_CHANGED_EVENT,
   type ModelProviderStatus,
 } from "@/lib/use-provider-auth";
+import {
+  MODEL_PRESETS_CHANGED_EVENT,
+  fetchModelPresets,
+  presetSelectorId,
+  type ModelPreset,
+  type ProviderGroupId,
+  type ProviderGroupStatus,
+} from "@/lib/model-presets";
 
 const OPENROUTER_MODELS = staticModels as Model[];
 
@@ -36,7 +44,55 @@ interface NvidiaListResponse {
   models?: Model[];
 }
 
+/**
+ * Groq and Cerebras speak the same `{configured, models}` envelope NVIDIA does
+ * — they are API-key providers whose entries the backend has already shaped.
+ * `credentialVariableName` is a variable NAME, echoed so the picker can tell
+ * the user exactly what to set; it is never a value.
+ */
+interface ApiKeyProviderListResponse {
+  configured?: boolean;
+  credentialVariableName?: string;
+  models?: Model[];
+}
+
+/** The API-key providers discovered through their own `/{id}/models` route. */
+const API_KEY_PROVIDERS = [
+  { id: "groq", label: "Groq", path: "/groq/models" },
+  { id: "cerebras", label: "Cerebras", path: "/cerebras/models" },
+] as const;
+
+type ApiKeyProviderId = (typeof API_KEY_PROVIDERS)[number]["id"];
+
 export type ModelAvailability = "checking" | "available" | "unavailable";
+
+/**
+ * Keep a synthetic preset entry's spend-cap behavior identical to the provider
+ * it resolves to. Hard-coding every preset to `payg` made local and
+ * subscription-backed presets unusable after the project cap was reached even
+ * though selecting the same underlying model directly remained allowed.
+ */
+const PRESET_BILLING_MODE: Record<
+  ProviderGroupId,
+  NonNullable<Model["billingMode"]>
+> = {
+  cerebras: "payg",
+  openai: "subscription",
+  openrouter: "payg",
+  anthropic: "metered_oauth",
+  groq: "payg",
+  xai: "subscription",
+  local: "local",
+  // Modal presets are filtered out of the chat-model list. Keep the remote
+  // compute classification conservative if that invariant is ever relaxed.
+  modal: "payg",
+};
+
+export function presetBillingMode(
+  providerId: ProviderGroupId,
+): NonNullable<Model["billingMode"]> {
+  return PRESET_BILLING_MODE[providerId];
+}
 
 interface ProviderDiscovery {
   providers: ModelProviderStatus[];
@@ -63,6 +119,14 @@ let nvidiaDiscoveryCache:
   | { value: NvidiaListResponse; loadedAt: number }
   | undefined;
 let nvidiaDiscoveryInFlight: Promise<NvidiaListResponse> | undefined;
+const apiKeyDiscoveryCache = new Map<
+  ApiKeyProviderId,
+  { value: ApiKeyProviderListResponse; loadedAt: number }
+>();
+const apiKeyDiscoveryInFlight = new Map<
+  ApiKeyProviderId,
+  Promise<ApiKeyProviderListResponse>
+>();
 
 function discoverProviders(force = false): Promise<ProviderDiscovery> {
   if (
@@ -195,6 +259,42 @@ function discoverNvidia(force = false): Promise<NvidiaListResponse> {
   return inFlight;
 }
 
+/**
+ * One discovery per API-key provider, cached exactly like the others.
+ *
+ * The backend returns `configured: false` with an empty list and contacts
+ * nothing when the credential variable is unset, so an unconfigured provider
+ * costs one local request and reaches no third party.
+ */
+function discoverApiKeyProvider(
+  provider: (typeof API_KEY_PROVIDERS)[number],
+  force = false,
+): Promise<ApiKeyProviderListResponse> {
+  const cached = apiKeyDiscoveryCache.get(provider.id);
+  if (!force && cached && Date.now() - cached.loadedAt < DISCOVERY_CACHE_MS) {
+    return Promise.resolve(cached.value);
+  }
+  const existing = apiKeyDiscoveryInFlight.get(provider.id);
+  if (existing) return existing;
+  const request = apiFetch(provider.path).then(async (response) =>
+    response.ok
+      ? ((await response.json()) as ApiKeyProviderListResponse)
+      : { configured: false, models: [] },
+  );
+  const inFlight = request
+    .then((value) => {
+      apiKeyDiscoveryCache.set(provider.id, { value, loadedAt: Date.now() });
+      return value;
+    })
+    .finally(() => {
+      if (apiKeyDiscoveryInFlight.get(provider.id) === inFlight) {
+        apiKeyDiscoveryInFlight.delete(provider.id);
+      }
+    });
+  apiKeyDiscoveryInFlight.set(provider.id, inFlight);
+  return inFlight;
+}
+
 export interface UseModelsReturn {
   /** Every model available to the user: static OpenRouter catalogue + live Ollama tags + user Fusion configs. */
   models: Model[];
@@ -219,6 +319,14 @@ export interface UseModelsReturn {
   nvidiaModels: Model[];
   /** True when the backend resolved an NVIDIA API key. */
   nvidiaConfigured: boolean;
+  /** Groq and Cerebras entries, keyed by provider id. */
+  apiKeyProviderModels: Record<ApiKeyProviderId, Model[]>;
+  /** Whether each API-key provider's credential variable is set. */
+  apiKeyProviderConfigured: Record<ApiKeyProviderId, boolean>;
+  /** Saved model presets, as synthetic `preset/<id>` picker entries. */
+  presetModels: Model[];
+  /** The stored presets behind `presetModels`. */
+  presets: ModelPreset[];
   modelAvailability: (model: Pick<Model, "id">) => ModelAvailability;
   /** Whether a current or persisted model can accept a new request. */
   isModelAvailable: (model: Pick<Model, "id">) => boolean;
@@ -247,6 +355,19 @@ export function useModels(): UseModelsReturn {
   const [nvidiaModels, setNvidiaModels] = useState<Model[]>([]);
   const [nvidiaConfigured, setNvidiaConfigured] = useState(false);
   const [nvidiaLoaded, setNvidiaLoaded] = useState(false);
+  const [apiKeyModels, setApiKeyModels] = useState<Record<ApiKeyProviderId, Model[]>>({
+    groq: [],
+    cerebras: [],
+  });
+  const [apiKeyConfigured, setApiKeyConfigured] = useState<
+    Record<ApiKeyProviderId, boolean>
+  >({ groq: false, cerebras: false });
+  const [apiKeyLoaded, setApiKeyLoaded] = useState<Record<ApiKeyProviderId, boolean>>({
+    groq: false,
+    cerebras: false,
+  });
+  const [presets, setPresets] = useState<ModelPreset[]>([]);
+  const [presetGroups, setPresetGroups] = useState<ProviderGroupStatus[]>([]);
   const [openrouterConfigured, setOpenrouterConfigured] = useState<boolean | null>(
     null,
   );
@@ -295,6 +416,42 @@ export function useModels(): UseModelsReturn {
       });
   }, []);
 
+  const fetchApiKeyProviders = useCallback((force = false) => {
+    for (const provider of API_KEY_PROVIDERS) {
+      void discoverApiKeyProvider(provider, force)
+        .then((data) => {
+          setApiKeyConfigured((current) => ({
+            ...current,
+            [provider.id]: Boolean(data.configured),
+          }));
+          setApiKeyModels((current) => ({
+            ...current,
+            [provider.id]: Array.isArray(data.models) ? data.models : [],
+          }));
+          setApiKeyLoaded((current) => ({ ...current, [provider.id]: true }));
+        })
+        .catch(() => {
+          setApiKeyConfigured((current) => ({ ...current, [provider.id]: false }));
+          setApiKeyModels((current) => ({ ...current, [provider.id]: [] }));
+          setApiKeyLoaded((current) => ({ ...current, [provider.id]: true }));
+        });
+    }
+  }, []);
+
+  const fetchPresets = useCallback(() => {
+    void fetchModelPresets()
+      .then((payload) => {
+        setPresets(payload.presets);
+        setPresetGroups(payload.groups);
+      })
+      .catch(() => {
+        // A preset list that will not load must not take the picker with it —
+        // the rest of the catalogue stays usable and no preset row is shown.
+        setPresets([]);
+        setPresetGroups([]);
+      });
+  }, []);
+
   const fetchProviders = useCallback((force = false) => {
     const requestId = ++providerRequestId.current;
     void discoverProviders(force)
@@ -317,8 +474,23 @@ export function useModels(): UseModelsReturn {
     fetchOllama();
     fetchOpenAICompatible();
     fetchNvidia();
+    fetchApiKeyProviders();
+    fetchPresets();
     fetchProviders();
-  }, [fetchOllama, fetchOpenAICompatible, fetchNvidia, fetchProviders]);
+  }, [
+    fetchOllama,
+    fetchOpenAICompatible,
+    fetchNvidia,
+    fetchApiKeyProviders,
+    fetchPresets,
+    fetchProviders,
+  ]);
+
+  useEffect(() => {
+    const reload = () => fetchPresets();
+    window.addEventListener(MODEL_PRESETS_CHANGED_EVENT, reload);
+    return () => window.removeEventListener(MODEL_PRESETS_CHANGED_EVENT, reload);
+  }, [fetchPresets]);
 
   useEffect(
     () =>
@@ -326,9 +498,18 @@ export function useModels(): UseModelsReturn {
         fetchOllama(true);
         fetchOpenAICompatible(true);
         fetchNvidia(true);
+        fetchApiKeyProviders(true);
+        fetchPresets();
         fetchProviders();
       }),
-    [fetchOllama, fetchOpenAICompatible, fetchNvidia, fetchProviders],
+    [
+      fetchOllama,
+      fetchOpenAICompatible,
+      fetchNvidia,
+      fetchApiKeyProviders,
+      fetchPresets,
+      fetchProviders,
+    ],
   );
 
   useEffect(() => {
@@ -336,11 +517,12 @@ export function useModels(): UseModelsReturn {
     const refreshProviders = () => {
       fetchProviders(true);
       fetchNvidia(true);
+      fetchApiKeyProviders(true);
     };
     window.addEventListener(PROVIDER_AUTH_CHANGED_EVENT, refreshProviders);
     return () =>
       window.removeEventListener(PROVIDER_AUTH_CHANGED_EVENT, refreshProviders);
-  }, [fetchProviders, fetchNvidia]);
+  }, [fetchProviders, fetchNvidia, fetchApiKeyProviders]);
 
   // Re-read Fusion configs when Settings saves them (or another tab edits them).
   const [fusionRevision, setFusionRevision] = useState(0);
@@ -474,21 +656,95 @@ export function useModels(): UseModelsReturn {
     [oaiCompatAvailable, oaiCompatModels],
   );
 
+  const enrichedApiKeyModels = useMemo<Record<ApiKeyProviderId, Model[]>>(() => {
+    const out = {} as Record<ApiKeyProviderId, Model[]>;
+    for (const provider of API_KEY_PROVIDERS) {
+      out[provider.id] = apiKeyModels[provider.id].map((model) => ({
+        ...model,
+        sourceId: provider.id,
+        sourceLabel: provider.label,
+        // Both bill per token in USD, so their spend must reach the project cap
+        // — which is what `billingForProvider`'s default branch already decides
+        // server-side. The picker must not contradict the ledger.
+        billingMode: "payg" as const,
+        available: apiKeyConfigured[provider.id],
+      }));
+    }
+    return out;
+  }, [apiKeyConfigured, apiKeyModels]);
+
+  /**
+   * Saved presets as synthetic picker entries, the same arrangement the Fusion
+   * presets above use. The id is `preset/<id>`; the server resolves it back to
+   * the preset's provider + model, so selecting one here dispatches to exactly
+   * that provider and model rather than to a copy of its contents.
+   *
+   * A preset whose provider is unconfigured is shown and marked unavailable
+   * rather than hidden: a user who saved it should be able to see why it will
+   * not run. A Modal preset is not selectable as a chat model at all, because
+   * it describes a compute job.
+   */
+  const presetModels = useMemo<Model[]>(() => {
+    const groupById = new Map(presetGroups.map((group) => [group.id, group] as const));
+    const out: Model[] = [];
+    for (const preset of presets) {
+      const group = groupById.get(preset.providerId);
+      if (group && !group.dispatchableAsChatModel) continue;
+      const parts: string[] = [];
+      const hyperparameters = preset.hyperparameters ?? {};
+      if (hyperparameters.temperature !== undefined) {
+        parts.push(`temp ${hyperparameters.temperature}`);
+      }
+      if (hyperparameters.topP !== undefined) parts.push(`top_p ${hyperparameters.topP}`);
+      if (hyperparameters.maxTokens !== undefined) {
+        parts.push(`${hyperparameters.maxTokens} max tokens`);
+      }
+      if (hyperparameters.reasoningEffort) {
+        parts.push(`${hyperparameters.reasoningEffort} reasoning`);
+      }
+      if (hyperparameters.seed !== undefined) parts.push(`seed ${hyperparameters.seed}`);
+      if (preset.systemPromptOverride) parts.push("system prompt override");
+      out.push({
+        id: presetSelectorId(preset),
+        label: preset.name,
+        provider: group?.label ?? preset.providerId,
+        tier: "mid",
+        context_length: 0,
+        pricing: { prompt: 0, completion: 0 },
+        modality: "text->text",
+        description:
+          `${preset.ref}${parts.length > 0 ? ` · ${parts.join(" · ")}` : ""}` +
+          "\nChat uses this preset's provider and model. Settings shows which controls its provider carries on chat and test calls.",
+        sourceId: "model-presets",
+        sourceLabel: "Model presets",
+        billingMode: presetBillingMode(preset.providerId),
+        reasoning: false,
+        available: group ? group.configured : false,
+      });
+    }
+    return out;
+  }, [presetGroups, presets]);
+
   const models = useMemo(
     () => [
+      ...presetModels,
       ...fusionModels,
       ...providerModels,
       ...openrouterModels,
+      ...enrichedApiKeyModels.groq,
+      ...enrichedApiKeyModels.cerebras,
       ...nvidiaModels,
       ...enrichedOllamaModels,
       ...enrichedOpenAICompatibleModels,
     ],
     [
+      enrichedApiKeyModels,
       enrichedOllamaModels,
       enrichedOpenAICompatibleModels,
       fusionModels,
       nvidiaModels,
       openrouterModels,
+      presetModels,
       providerModels,
     ],
   );
@@ -510,6 +766,11 @@ export function useModels(): UseModelsReturn {
         return "checking";
       }
       if (model.id.startsWith("nvidia/") && !nvidiaLoaded) return "checking";
+      for (const provider of API_KEY_PROVIDERS) {
+        if (model.id.startsWith(`${provider.id}/`) && !apiKeyLoaded[provider.id]) {
+          return "checking";
+        }
+      }
       if (
         (model.id.startsWith("openrouter/") || model.id.startsWith("fusion/")) &&
         openrouterConfigured === null
@@ -534,6 +795,17 @@ export function useModels(): UseModelsReturn {
       if (model.id.startsWith("nvidia/")) {
         return nvidiaConfigured ? "available" : "unavailable";
       }
+      // A persisted Groq/Cerebras selection whose id Pi does not list still
+      // resolves server-side only if the key is present, so the key decides.
+      for (const provider of API_KEY_PROVIDERS) {
+        if (model.id.startsWith(`${provider.id}/`)) {
+          return apiKeyConfigured[provider.id] ? "available" : "unavailable";
+        }
+      }
+      // A preset id that no longer exists resolves to nothing on the server and
+      // fails closed there; the picker reports it as unavailable rather than
+      // quietly substituting another model.
+      if (model.id.startsWith("preset/")) return "unavailable";
       if (model.id.startsWith("openrouter/") || model.id.startsWith("fusion/")) {
         return openrouterConfigured === false ? "unavailable" : "available";
       }
@@ -545,6 +817,8 @@ export function useModels(): UseModelsReturn {
       return "available";
     },
     [
+      apiKeyConfigured,
+      apiKeyLoaded,
       connectedProviders,
       models,
       nvidiaConfigured,
@@ -567,8 +841,17 @@ export function useModels(): UseModelsReturn {
     fetchOllama(true);
     fetchOpenAICompatible(true);
     fetchNvidia(true);
+    fetchApiKeyProviders(true);
+    fetchPresets();
     fetchProviders(true);
-  }, [fetchOllama, fetchOpenAICompatible, fetchNvidia, fetchProviders]);
+  }, [
+    fetchOllama,
+    fetchOpenAICompatible,
+    fetchNvidia,
+    fetchApiKeyProviders,
+    fetchPresets,
+    fetchProviders,
+  ]);
 
   return {
     models,
@@ -581,6 +864,10 @@ export function useModels(): UseModelsReturn {
     providerStatuses,
     nvidiaModels,
     nvidiaConfigured,
+    apiKeyProviderModels: enrichedApiKeyModels,
+    apiKeyProviderConfigured: apiKeyConfigured,
+    presetModels,
+    presets,
     modelAvailability,
     isModelAvailable,
     refresh,

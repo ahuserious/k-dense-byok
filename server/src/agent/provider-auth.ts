@@ -651,3 +651,63 @@ export function nvidiaModelForClient(model: Model<Api>): ClientNvidiaModel {
     available: true,
   };
 }
+
+/**
+ * Picker entries for an API-key provider that bills per token in USD — Groq and
+ * Cerebras today. `billingMode` is "payg" so the entry agrees with what
+ * `billingForProvider` decides for them and the project spend cap meters the
+ * usage. Contrast `ClientNvidiaModel` directly above, which is "subscription"
+ * for the reason its own comment gives; a reader copying one of these two must
+ * copy the right one.
+ */
+export interface ClientApiKeyModel
+  extends Omit<ClientProviderModel, "sourceId" | "billingMode"> {
+  sourceId: string;
+  billingMode: "payg";
+}
+
+export interface ApiKeyProviderPresentation {
+  /** Picker group id, e.g. "groq". Matches the Kady runtime provider id. */
+  sourceId: string;
+  /** Group heading in the picker, e.g. "Groq". */
+  sourceLabel: string;
+  /** Per-row vendor label, e.g. "Groq". */
+  providerLabel: string;
+  description: string;
+}
+
+/**
+ * Picker entries for an API-key provider that is NOT a SUBSCRIPTION_PROVIDERS
+ * member — Groq and Cerebras today.
+ *
+ * Deliberately separate from `nvidiaModelForClient`: NIM draws NVIDIA-managed
+ * API credits and is therefore presented as `subscription` billing, while these
+ * two bill per token in USD and must reach the project spend cap. That is what
+ * `billingForProvider`'s default branch already decides for them ("payg"), and
+ * these entries must not contradict the ledger — a picker that showed
+ * subscription billing over metered spend would understate the cap exactly the
+ * way the Fusion pricing bug did.
+ */
+export function apiKeyModelForClient(
+  model: Model<Api>,
+  presentation: ApiKeyProviderPresentation,
+): ClientApiKeyModel {
+  return {
+    id: `${presentation.sourceId}/${model.id}`,
+    label: model.name,
+    provider: presentation.providerLabel,
+    sourceId: presentation.sourceId,
+    sourceLabel: presentation.sourceLabel,
+    tier: tierFor(model),
+    context_length: model.contextWindow,
+    pricing: {
+      prompt: model.cost.input,
+      completion: model.cost.output,
+    },
+    modality: model.input.includes("image") ? "text+image->text" : "text->text",
+    description: presentation.description,
+    reasoning: model.reasoning,
+    billingMode: "payg",
+    available: true,
+  };
+}

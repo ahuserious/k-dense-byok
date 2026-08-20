@@ -34,6 +34,19 @@ import {
   modelReference,
   resolveModel,
 } from "../agent/models.ts";
+import {
+  MODEL_PRESET_REF_PREFIX,
+  presetForSelectorRef,
+} from "../agent/model-presets-store.ts";
+import {
+  resolveModelPreset,
+  setSessionModelPreset,
+  type ResolvedModelPreset,
+} from "../agent/model-presets.ts";
+import {
+  credentialVariablesPresent,
+  providerGroup,
+} from "../agent/providers/registry.ts";
 import { parseRunImages } from "../agent/prompt-images.ts";
 import {
   buildDagBuilderContext,
@@ -1069,14 +1082,34 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
         }
       }
       const isFusion = Boolean(body.model && body.model.startsWith("fusion/"));
+      const selectedPreset =
+        body.model?.startsWith(MODEL_PRESET_REF_PREFIX)
+          ? presetForSelectorRef(body.model)
+          : undefined;
       let requestedModel: ReturnType<typeof resolveModel>;
       let runBilling: BillingContext;
+      let resolvedChatPreset: ResolvedModelPreset | null = null;
       try {
         requestedModel = body.model
           ? resolveModel(body.model, getModelRegistry(), body.fusionConfig)
           : session.model ?? resolveModel(undefined, getModelRegistry());
         await assertModelAuthentication(requestedModel, getModelRuntime());
         runBilling = await billingForModel(requestedModel, getModelRuntime());
+        if (selectedPreset) {
+          const group = providerGroup(selectedPreset.providerId);
+          const providerConfigured = Boolean(
+            group &&
+              (
+                group.kind === "oauth-subscription" ||
+                credentialVariablesPresent(group)
+              ),
+          );
+          resolvedChatPreset = resolveModelPreset(selectedPreset, {
+            surface: "chat-session",
+            providerConfigured,
+            providerNotConfiguredReason: group?.notConfiguredReason,
+          });
+        }
       } catch (error) {
         unpinSession(projectId, session.sessionId);
         activeRuns.delete(runKey);
@@ -1192,6 +1225,7 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
           session.setActiveToolsByName(savedToolNames);
           savedToolNames = null;
         }
+        setSessionModelPreset(projectId, session.sessionId, null);
         setSessionRunId(projectId, session.sessionId, null);
         // Runs after the ledger row is written (the owner's inner finally),
         // so the run's spend is never invisible to a concurrent admission.
@@ -1200,6 +1234,9 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
         activeRuns.delete(runKey);
       };
       try {
+        // Clear first so a preparation failure can never leave the prior run's
+        // preset controls armed on this long-lived session.
+        setSessionModelPreset(projectId, session.sessionId, null);
         // Stash this run's selected compute instance so the modal_run tool uses
         // it as the default when the agent doesn't name one ("local"/unset clears it).
         setSessionComputeTarget(projectId, session.sessionId, body.computeTarget ?? null);
@@ -1263,6 +1300,11 @@ export async function registerSessionRoutes(app: FastifyInstance): Promise<void>
               };
             }
           }
+          setSessionModelPreset(
+            projectId,
+            session.sessionId,
+            resolvedChatPreset,
+          );
         }
         if (body.thinkingLevel !== undefined) {
           const level = parseThinkingLevel(body.thinkingLevel);
