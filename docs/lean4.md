@@ -69,9 +69,9 @@ No error body carries a filesystem path, an `errno`, or a stack.
 import { Lean4ProofArtifact } from "@/components/lean4";
 ```
 
-Purely presentational: the mounting surface owns both fetches (`web/src/lib/lean4-proof.ts`). Lane F6's node
-inspector mounts it and lane F11's `lean4-prover` skill surface reuses it. **There must be no second proof
-renderer.**
+Purely presentational: the mounting surface owns both fetches (`web/src/lib/lean4-proof.ts`). This tip
+ships `Lean4ProofsPanel` as that surface. Lane F6's node inspector and lane F11's `lean4-prover`
+skill reuse the same renderer. **There must be no second proof renderer.**
 
 ## Known gap: a rejected proof loses its Mathlib pin
 
@@ -90,7 +90,8 @@ recorded in the clone's `INTEGRATION.md`.
 
 ## Reachability today
 
-The `lean4` node kind is present in `web/src/lib/dag-workflow-builder.ts` (`WORKFLOW_NODE_KINDS`,
-`createNode`, `nodeKindLabel`) but **nothing in the running app imports any of it** — the only consumer is
-its own unit test. There is no node palette and no node inspector in the app at base `f98da86`; both are
-lane F6's surfaces. Until F6 lands, this lane's renderer is reachable only from a test.
+This tip publishes the Lean routes from `server/src/index.ts` (`registerLean4Routes`) and mounts
+`Lean4ProofsPanel` as the one host for `Lean4ProofArtifact`. Dest `33a13ea` does not yet have those
+lines; `INTEGRATION.md` quotes them against dest's current register block (after
+`registerDagWorkflowRoutes`, before `registerScheduleRoutes`). F6 still owns the node palette /
+inspector mount. Do not copy F6 files into this clone.

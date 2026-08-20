@@ -9,3 +9,7 @@ export {
   Lean4ProofArtifact,
   type Lean4ProofArtifactProps,
 } from "./lean4-proof-artifact";
+export {
+  Lean4ProofsPanel,
+  type Lean4ProofsPanelProps,
+} from "./lean4-proofs-panel";
