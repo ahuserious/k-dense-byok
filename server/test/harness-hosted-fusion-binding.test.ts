@@ -23,13 +23,13 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  validateStoredWorkflowGraphDocument,
   validateWorkflowGraphDocument,
   type ModelRequest,
   type WorkflowGraphDocument,
   type WorkflowNode,
   type WorkflowValidationResult,
 } from "../src/workflows/index.ts";
+import { validateStoredWorkflowGraphDocument } from "../src/workflows/harness-stored-validation.ts";
 import type { WorkflowHarness } from "../src/agent/workflow-delegation-session.ts";
 
 function openRouterModel(model = "anthropic/claude-sonnet-4"): ModelRequest {
