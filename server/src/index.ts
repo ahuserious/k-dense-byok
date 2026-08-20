@@ -25,6 +25,7 @@ import { withActiveProject } from "./scope.ts";
 import { registerProjectRoutes } from "./api/projects.ts";
 import { registerSessionRoutes } from "./api/sessions.ts";
 import { registerContextEngineeringRoutes } from "./api/context-engineering.ts";
+import { registerDurabilityRoutes } from "./api/durability.ts";
 import { registerSandboxRoutes } from "./api/sandbox.ts";
 import { registerSkillRoutes } from "./api/skills.ts";
 import { registerSystemRoutes } from "./api/system.ts";
@@ -261,6 +262,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   });
   await registerSessionRoutes(app);
   await registerContextEngineeringRoutes(app, contextEngineering);
+  await registerDurabilityRoutes(app, contextEngineering);
   await registerSandboxRoutes(app);
   await registerSkillRoutes(app);
   await registerSystemRoutes(app);
