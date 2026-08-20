@@ -6,8 +6,9 @@
     24,
     "44-server"
   ],
-  "baseSha": "cc547ba",
-  "recordedAt": "2026-08-19",
+  "baseSha": "25d605860e73ec2d3ed268c93cbb17a61bae0497",
+  "recordedAt": "2026-08-20",
+  "priorLaneTip": "c34c357",
   "note": "There is exactly ONE durability watcher. Rows 23 and 44 are the same capability; lane F6 builds the pipeline-options UI on this API and lane F11 builds the workflow-supervisor skill on it.",
   "modules": {
     "watcher": "server/src/workflows/durability-watcher.ts",
