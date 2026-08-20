@@ -259,3 +259,47 @@ describe("why the guidance lives in SKILL.md and not only in the playbook", () =
     }
   });
 });
+
+/**
+ * F7 addition. Master-brief row 21 asks for a pipeline-builder skill whose
+ * content is substantive, and NT-1's finding was that the renamed skill carried
+ * none. That finding is now stale for rescue guidance — the block above proves
+ * it — but the skill still had no reference for the DAG dialect it exists to
+ * emit. These assertions pin the authoring corpus to the same canonical file the
+ * rescue helper reads, so a later rename or trim cannot quietly drop it.
+ */
+describe("the authoring corpus the canonical skill points at", () => {
+  const CORPUS_DIR = path.join(path.dirname(SKILL_PATH), "references", "recipes");
+  const CORPUS = [
+    "two-runtimes.md",
+    "typed-node-vocabulary.md",
+    "legacy-dialect-nodes.md",
+    "variables-and-outputs.md",
+    "good-practices.md",
+    "example-pipelines.md",
+  ];
+
+  it("is indexed from the canonical SKILL.md the helper resolves", () => {
+    const content = readCanonicalSkill();
+    for (const file of CORPUS) {
+      expect(content, `${file} must be indexed`).toContain(`references/recipes/${file}`);
+    }
+  });
+
+  it("exists on disk beside the skill and is not a set of stubs", () => {
+    expect(fs.readdirSync(CORPUS_DIR).sort()).toEqual([...CORPUS].sort());
+    for (const file of CORPUS) {
+      expect(
+        fs.statSync(path.join(CORPUS_DIR, file)).size,
+        `${file} must carry substance`,
+      ).toBeGreaterThan(3_000);
+    }
+  });
+
+  it("names the capability split that makes the rest of it usable", () => {
+    const twoRuntimes = fs.readFileSync(path.join(CORPUS_DIR, "two-runtimes.md"), "utf8");
+    expect(twoRuntimes).toContain("Typed runtime");
+    expect(twoRuntimes).toContain("Vendored pipeline engine");
+    expect(twoRuntimes).toContain("settings.skills.list");
+  });
+});

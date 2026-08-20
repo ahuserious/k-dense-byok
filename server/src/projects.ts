@@ -30,6 +30,7 @@ import { isSamePath } from "./path-containment.ts";
 import { isWithin } from "./sandbox-fs.ts";
 import { currentProjectId } from "./scope.ts";
 import { seedSandboxFiles } from "./sandbox-seed.ts";
+import { seedProjectPipelines } from "./workflows/seed-pipelines.ts";
 
 const INDEX_PATH = path.join(PROJECTS_ROOT, "index.json");
 const RESERVED_IDS = new Set(["new", "index", "archive", "..", "."]);
@@ -2189,6 +2190,7 @@ export function ensureProjectExists(projectId: string): ProjectPaths {
   fs.mkdirSync(paths.kadyDir, { recursive: true });
   // Covers projects that predate sandbox seeding; no-op once the files exist.
   seedSandboxFiles(paths);
+  seedProjectPipelines(projectId);
   // Project workspaces are execution repositories. This also upgrades the
   // default project and sandboxes created before Git initialization existed.
   ensureProjectRepository(paths.sandbox);

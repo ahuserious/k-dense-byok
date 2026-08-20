@@ -1,0 +1,199 @@
+# Seeded pipeline — imported from the DAG-Pipelines branch (source: data-scientist).
+#
+# Landed as a TYPED NodeSpec v1 document rather than in the legacy dialect,
+# because three of the upstream node fields have no NodeSpec v1 equivalent and
+# the legacy translator rejects all three: `loop`, `approval` and `idle_timeout`.
+# Adaptations, recorded in full in docs/adr/F7-seed-import.md:
+#
+#   - upstream `code` was a `loop` node (`until: COMPLETE`, `max_iterations: 10`).
+#     NodeSpec v1 has no loop node, so it is a bounded agent node whose own
+#     `limits.maxIterations` carries the same bound and whose prompt states the
+#     completion condition.
+#   - upstream `review` was an `approval` node with `capture_response: true` and
+#     an `on_reject` retry. NodeSpec v1 has NO HUMAN GATE. It is an agent node
+#     that performs an adversarial review, and the loss of the human pause is
+#     stated in this document's own description so nobody running it is misled.
+#   - upstream `interactive: true` therefore has no counterpart either.
+schemaVersion: "1.0"
+id: data-scientist
+name: Data Scientist
+description: |
+  An end-to-end data-science loop: plan the analysis, implement and run it,
+  review the results adversarially, reflect on that review, then summarize.
+  Upstream this workflow paused for a human to approve the results before the
+  write-up. This runtime has no human approval gate, so the review step is
+  performed by an adversarial reviewer node instead — read its output before you
+  trust the summary.
+entryNodeId: plan
+
+defaultModel:
+  requested:
+    source: fixed
+    provider: openrouter
+    model: anthropic/claude-opus-4.8
+    auth:
+      kind: api-key
+    reasoning: high
+  resolution:
+    mode: exact
+
+limits:
+  maxIterations: 24
+  maxModelCalls: 24
+  maxParallelism: 1
+  maxSubagents: 5
+  timeoutMs: 3600000
+  maxTokens: 4000000
+  maxCostUsd: 5
+  maxRetries: 0
+
+rescue:
+  enabled: false
+  maxAttempts: 0
+  triggers: []
+
+evidence:
+  enabled: false
+  minimumIndependentSources: 0
+  requireArtifactReferences: false
+  onUnsupportedOutput: fail
+
+artifacts:
+  - id: analysis-outputs
+    name: Analysis outputs
+    kind: directory
+    writerNodeId: code
+    path: analysis
+
+nodes:
+  - id: plan
+    name: Plan the analysis
+    kind: agent
+    terminal: false
+    position: { x: 80, y: 80 }
+    workspace:
+      isolation: read-only
+      writePaths: []
+    settings:
+      version: 1
+      skills:
+        mode: auto-manual
+        list:
+          - exploratory-data-analysis
+          - statistical-analysis
+    prompt: |
+      You are a senior data scientist. Read the run goal and produce a concrete
+      analysis plan: the questions to answer, the datasets and inputs involved,
+      the methods to apply, and the deliverables. Name the specific comparisons
+      or tests the analysis should run, and state every assumption explicitly.
+
+  - id: code
+    name: Implement and run the analysis
+    kind: agent
+    terminal: false
+    position: { x: 400, y: 80 }
+    workspace:
+      isolation: isolated-worktree
+      writePaths:
+        - analysis
+    limits:
+      maxIterations: 10
+      maxModelCalls: 10
+    settings:
+      version: 1
+      skills:
+        mode: auto-manual
+        list:
+          - exploratory-data-analysis
+          - polars
+          - matplotlib
+    prompt: |
+      Implement the analysis plan from the previous step. Write the code, run
+      it, and check the output. Work step by step through the plan and do not
+      stop at the first result that looks plausible — validate it.
+
+      Write every script, table and figure under `analysis/`. You have at most
+      ten passes; if the plan is not finished by then, say exactly which steps
+      remain and why, rather than claiming completion.
+
+  - id: review
+    name: Review the results
+    kind: agent
+    terminal: false
+    position: { x: 720, y: 80 }
+    workspace:
+      isolation: read-only
+      writePaths: []
+    settings:
+      version: 1
+      skills:
+        mode: auto-manual
+        list:
+          - scientific-critical-thinking
+    prompt: |
+      Review the analysis and its results adversarially. This step replaces a
+      human approval gate: nobody else is going to catch what you miss.
+
+      Check that the code does what the plan said, that the statistics are
+      applied to data that meets their assumptions, that the figures show what
+      the text claims, and that no result rests on a step that silently failed.
+      Report APPROVED or REJECTED, and when you reject, say precisely what must
+      be fixed.
+
+  - id: reflect
+    name: Reflect on the review
+    kind: agent
+    terminal: false
+    position: { x: 80, y: 320 }
+    workspace:
+      isolation: read-only
+      writePaths: []
+    settings:
+      version: 1
+      skills:
+        mode: auto-manual
+        list:
+          - scientific-critical-thinking
+          - statistical-analysis
+    prompt: |
+      Reflect on the analysis and the reviewer's verdict. Call out the key
+      assumptions, the limitations of the methods used, and any result that
+      warrants caution or further work. If the reviewer rejected the results,
+      lead with what is not yet trustworthy.
+
+  - id: summarize
+    name: Summarize the findings
+    kind: agent
+    terminal: true
+    position: { x: 400, y: 320 }
+    workspace:
+      isolation: read-only
+      writePaths: []
+    settings:
+      version: 1
+      skills:
+        mode: auto-manual
+        list:
+          - scientific-writing
+    prompt: |
+      Write the final report. Lead with the headline findings, then the
+      methodology, then the caveats from the reflection. Do not present a
+      finding the reviewer rejected as settled.
+
+edges:
+  - id: plan-to-code
+    from: plan
+    to: code
+    condition: always
+  - id: code-to-review
+    from: code
+    to: review
+    condition: always
+  - id: review-to-reflect
+    from: review
+    to: reflect
+    condition: always
+  - id: reflect-to-summarize
+    from: reflect
+    to: summarize
+    condition: always
