@@ -82,15 +82,50 @@ So the filesystem is interrogated before git is, and the name is pinned to its b
   tracked, and git was only asked about this one.
 - anything that exists and is not a regular file → refused.
 
-That closes the "it is a link right now" question. The "a link was planted between the
-check and the write" question is closed separately, at the only moment that matters: the
-file is opened with **`O_NOFOLLOW`**, so `open()` itself fails on a symlinked final
-component, the hard-link count is re-read with `fstat` on the descriptor actually held, and
-**both the mode and the bytes are applied to that descriptor, never to the path**. (The
+- a **symlink named as the target's parent** → refused: git resolves it, or refuses to
+  answer about it at all (`fatal: pathspec … is beyond a symbolic link`), and neither
+  answer is about the file the write would reach.
+
+That closes the "it is a link right now" question. The "something was planted between the
+check and the write" question is closed separately, on the descriptor, and it takes four
+conditions because each one alone has a documented escape:
+
+1. **`O_NOFOLLOW`** — `open()` itself fails on a symlinked *final* component. By definition
+   it constrains only the last component; condition 4 is what covers the path above it.
+2. **`fstat().nlink === 1`**, re-read on the descriptor actually held rather than on a name
+   that may since have been re-pointed.
+3. **`fstat().isFile()`, with `O_NONBLOCK`** — the non-regular-file refusal above is a
+   question about a *name*, so a FIFO planted inside the window reached the open. Without
+   `O_NONBLOCK` that open blocks forever on a FIFO with no reader, which in a script whose
+   contract is to fail loudly is a hang with no timeout and no message; with it the open
+   fails `ENXIO` and the type check refuses the device case too. A platform that exposes
+   neither required open flag is refused instead of silently running a weaker writer.
+4. **the parent directory's `(dev, ino)` is still the one git was asked about, and the
+   descriptor's `(dev, ino)` is still what the path names.** Replacing an *ancestor
+   directory* with a symlink inside the window redirects the whole open, and this was a
+   real escape: classify `repo/ok/secrets.env` (untracked and ignored, correctly allowed),
+   swap `repo/ok` for a symlink to `repo/real`, and the write landed in the tracked
+   `repo/real/secrets.env`. Comparing inodes rather than strings catches any ancestor swap,
+   because a swap that changes what the parent path *reaches* changes which inode the
+   parent path `lstat`s to. The second half — the descriptor's inode against the inode the
+   path names *now* — is what stops an attacker restoring the directory after the open so
+   that the parent check passes over a descriptor already pointing elsewhere.
+
+**Both the mode and the bytes are applied to that descriptor, never to the path.** (The
 earlier `chmod(path)` followed a symlink too, and silently rewrote a tracked file's mode.)
 `O_TRUNC` is deliberately not requested — truncating at open time would destroy the target
-before the hard-link question could be answered — so the truncation happens on the
-descriptor afterwards.
+before any of these questions could be answered — so the truncation happens on the
+descriptor, after all four have passed.
+
+**What condition 4 does not claim.** Node exposes no `openat(2)`, so this is an identity
+check after the fact, not an atomic directory-relative open. Two residuals follow, and both
+are stated rather than papered over: an ancestor swap that is *reverted* fast enough can
+still cause `O_CREAT` to leave a **zero-byte file** in the attacker's chosen directory
+before the refusal (no secret is written, the target is never truncated, and no existing
+file is modified); and the guarantee is "an ancestor swap is detected before any byte is
+written", not "an ancestor swap is impossible". The threat model this closes is a local
+adversary racing the process — strictly stronger than the checked-in symlink the first
+layer refuses statically.
 
 **Scope.** Without `--only`, `--write` emits every reported present name, which includes
 every secret-shaped variable in the ambient environment. `--only <NAME>` governs the written
@@ -167,6 +202,13 @@ itself be the leak). It matches any address outside a documented example/reserve
 | 1 | findings — at least one non-allowlisted hit |
 | 2 | usage or environment error, an allowlist entry without a reason, a git failure, or `--require-env-values` with no secret-shaped variable in the environment |
 
+**2 takes precedence over 1.** When `--require-env-values` is given, the environment holds
+no secret-shaped variable, *and* the regex half also found hits, the exit code is **2**.
+Both complaints are printed on stderr; the code reports the more actionable one, because
+findings produced by the regex half alone, over a diff that nothing searched for actual
+values, are not the reason that run should be looked at. This is a change: the code
+previously returned 1 in that case, so the documented exit 2 held only on a clean diff.
+
 It never exits 0 on an error. **Never pipe it into anything**: capture to a log and test `$?`.
 
 ### Adding an allowlist entry
@@ -211,6 +253,57 @@ There is no `--mode server`: no backend HTTP route performs a single completion 
 project sandbox and a live agent session, and booting one would prove less than product mode
 already proves.
 
+**`--mode direct` is a reachability probe, and it can legitimately fail.** It reads the
+answer out of `choices[0].message.content`, and today's cheapest free models are reasoning
+models that spend the entire 32-token budget on reasoning tokens and return
+`content: ""` with `finish_reason: "length"`. Direct mode therefore falls back to
+`choices[0].message.reasoning` and prints a `TEXT FIELD: reasoning` line when it does —
+reasoning text is still the model's own output arriving over the wire, which is all the
+non-empty-text assertion claims to check, but "the model replied" and "the model thought out
+loud and never replied" are not the same result and the output says which happened. A model
+that emits neither still fails, correctly. Raise `--max-tokens` if a real reply is wanted.
+
+### Where the two substitution assertions get their numbers
+
+This is the part that was wrong for two rounds, in the mode that is the gate.
+
+The `AssistantMessage` the runtime returns cannot answer either substitution question, and
+both of its fields look like it can:
+
+- `message.model` is assigned from the model this process **requested** — the provider
+  adapter sets `output.model = model.id` when it builds the message
+  (`@earendil-works/pi-ai/dist/api/openai-completions.js:110`) and never overwrites it from
+  the response. Reading it back and comparing it to the requested id compares a value with
+  itself, so a paid substitution on the wire compares equal.
+- `message.usage.cost` is **computed, not received**: `parseChunkUsage` builds an all-zero
+  cost object and hands it to `calculateCost(model, usage)` (same file, `:1128-1130`), which
+  multiplies token counts by the **local** catalogue's rates. Under this driver's
+  `modelsPath: null, allowModelNetwork: false` runtime the catalogue carries no rates, so a
+  genuinely paid model resolves to an all-zero cost table and reports `costUsd = 0`.
+
+The runtime's own `onResponse` hook carries only `{status, headers}`. What it does expose is
+`StreamOptions.fetch`, forwarded verbatim to the provider adapter by
+`ModelRuntime.prepareRequest`. So the driver passes a `fetch` that **clones the response and
+reads the provider's own SSE frames out of the clone**. This does not change which code path
+runs or what it sends — the same `setupModelRuntime → resolveModel →
+assertModelAuthentication → ModelRuntime.complete` chain executes, through the same adapter,
+with the same key injection and request payload. OpenRouter now includes detailed usage in
+the final SSE frame automatically; the old `usage: {include: true}` and
+`stream_options: {include_usage: true}` switches are deprecated and have no effect. The run
+prints `OBSERVED FROM: …` naming the source, frame count, and that the observer modified
+nothing. It also prints the runtime's own locally-computed cost beside the wire-observed one,
+labelled as such, so a divergence is visible.
+
+When the provider surfaces neither field, both are `null` and both assertions **fail**:
+
+```
+ASSERT the returned model id matches the requested one: FAIL — the runtime surfaced no
+provider model id, so a substitution cannot be ruled out
+```
+
+There is no `?? model.id` and no `?? 0` on either. A smoke test that says "I could not rule
+out a substitution" is worth more than one that prints PASS over a value that never arrived.
+
 ### Model resolution — never hardcoded
 
 The live catalogue is fetched and every **strictly free** model is ranked: every numeric
@@ -246,7 +339,7 @@ Exit 0. It never prints `PASS` without a key. `--require-key` turns that absence
   substitution compare equal, which is the one thing this row's careful free-model ranking
   exists to prevent. The tolerant comparison survives only for a request with no suffix,
   where there is no paid twin to confuse.
-- token usage was recorded
+- provider-reported token usage was recorded
 - **the call cost zero.** The row is "cheapest *free* model"; without this the cost was
   printed and read by nothing, so a substitution could print `RESULT: PASS` with a charge
   sitting visibly in the output. A provider that reports *no* cost figure fails this too —
@@ -332,17 +425,21 @@ environment` instead, and `--require-env-values` makes that exit 2.)
 
 ```
 $ node scripts/secrets-prefill.mjs -- node scripts/smoke-openrouter.mjs --require-key
-MODEL RESOLUTION: 19 strictly-free model(s) in the live catalogue; ranked cheapest-first, will try up to 3.
 MODE: product
   proves: this repository's own BYOK path — server/src/agent/models.ts setupModelRuntime() injecting the key, resolveModel(), assertModelAuthentication(), ModelRuntime.complete().
+MODEL RESOLUTION: 20 strictly-free model(s) in the live catalogue; ranked cheapest-first, will try up to 3.
+ATTEMPT: liquid/lfm-2.5-2.6b:free
+  candidate failed: 400: {"message":"Reasoning is mandatory for this endpoint and cannot be disabled.","code":400,"metadata":{"provider_name":null}}
 ATTEMPT: nvidia/nemotron-3.5-content-safety:free
 MODEL: nvidia/nemotron-3.5-content-safety:free
 RESOLVED REF: openrouter/nvidia/nemotron-3.5-content-safety:free
+OBSERVED FROM: provider SSE frames observed through StreamOptions.fetch (6 frame(s); request payload modification: nothing)
+RUNTIME-COMPUTED COST (from the local catalogue, NOT the wire, shown for contrast): 0
 STOP REASON: stop
 REPLY (model output, first 200 chars): "User Safety: safe"
 ASSERT the completion text is non-empty: PASS — 17 characters
 ASSERT the returned model id matches the requested one: PASS — requested=nvidia/nemotron-3.5-content-safety:free returned=nvidia/nemotron-3.5-content-safety:free
-ASSERT token usage was recorded: PASS — input=472 output=5 total=477
+ASSERT provider-reported token usage was recorded: PASS — input=472 output=5 total=477
 ASSERT the call cost zero: PASS — costUsd=0
 ELAPSED: N ms for the call, N ms total
 RESULT: PASS

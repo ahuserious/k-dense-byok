@@ -10,12 +10,17 @@ import {
   KEY_VARIABLE_NAME,
   MODE_CLAIMS,
   SKIP_MESSAGE,
+  completionTextFrom,
   evaluateAssertions,
   modelIdMatches,
   parseArguments,
   rankFreeModels,
   tsxBinaryPath,
 } from "./smoke-openrouter.mjs";
+// Importable under plain `node` because the driver loads `server/src/agent/models.ts`
+// lazily. `createProviderWireObserver` is a pure function over text: no runtime is
+// constructed, no network is touched, and importing this module starts nothing.
+import { createProviderWireObserver } from "./smoke-openrouter-runtime.mjs";
 
 const scriptPath = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -213,9 +218,127 @@ test("evaluateAssertions checks the response, not the request", () => {
     modelRequested: "vendor/model",
     modelReturned: "vendor/model",
     textLength: 4,
-    usage: { input: 0, output: 0, total: 0, costUsd: 0 },
+    usage: { input: null, output: null, total: null, costUsd: 0 },
   });
   assert.equal(noUsage.pass, false);
+  const usageAssertion = noUsage.assertions.find((assertion) =>
+    assertion.name.includes("token usage"),
+  );
+  assert.equal(usageAssertion.detail, "the provider reported no complete token-usage figure");
+});
+
+test("an absent returned model id FAILS rather than being filled in from the request", () => {
+  // This is the round-2 finding the round-3 review proved was never fixed in the mode that
+  // is the gate. The driver used to report `message.model?.id ?? model.id`, and the
+  // runtime's `message.model` never carries the provider's answer — so the assertion
+  // compared the requested id with itself and could not fail. Both the null and the
+  // detail sentence are asserted: a caller reading the output has to be able to tell
+  // "no substitution" apart from "no answer to check".
+  for (const missing of [null, undefined, ""]) {
+    const result = evaluateAssertions({
+      modelRequested: "vendor/model:free",
+      modelReturned: missing,
+      textLength: 4,
+      usage: { input: 10, output: 3, total: 13, costUsd: 0 },
+    });
+    assert.equal(result.pass, false, `a ${JSON.stringify(missing)} returned id must not pass`);
+    const idAssertion = result.assertions.find((assertion) =>
+      assertion.name.includes("returned model id"),
+    );
+    assert.equal(idAssertion.pass, false);
+    assert.equal(
+      idAssertion.detail,
+      "the runtime surfaced no provider model id, so a substitution cannot be ruled out",
+    );
+    // And it must not have leaked the requested id into the detail as evidence.
+    assert.ok(!idAssertion.detail.includes("vendor/model:free"));
+  }
+});
+
+test("completionTextFrom prefers content, falls back to reasoning, and names the field", () => {
+  // Direct mode read `choices[0].message.content` only, and today's cheapest free models
+  // are reasoning models that spend the whole token budget on reasoning and return an
+  // empty content with finish_reason=length — so the labelled-lesser mode failed its own
+  // non-empty-text assertion against every top-ranked free model.
+  assert.deepEqual(completionTextFrom({ content: "pong", reasoning: "thinking" }), {
+    text: "pong",
+    field: "content",
+  });
+  assert.deepEqual(completionTextFrom({ content: "", reasoning: "thinking" }), {
+    text: "thinking",
+    field: "reasoning",
+  });
+  // Neither field is still a failure: the assertion is about the model answering at all.
+  assert.deepEqual(completionTextFrom({ content: "", reasoning: "" }), {
+    text: "",
+    field: "content",
+  });
+  assert.deepEqual(completionTextFrom(undefined), { text: "", field: "content" });
+  // A non-string in either field is ignored rather than stringified into a false pass.
+  assert.deepEqual(completionTextFrom({ content: 42, reasoning: null }), {
+    text: "",
+    field: "content",
+  });
+});
+
+test("the wire observer reads the provider's own model id and usage out of SSE frames", async () => {
+  // The plumbing behind the assertion above. The frames below are the shape OpenRouter
+  // sends: the model id on every chunk, the cost only in the final usage frame, which is
+  // why the observer has to keep reading to the end rather than stopping at the first.
+  const observer = createProviderWireObserver();
+  let pending = "";
+  pending = observer.consumeSseText(
+    pending + 'data: {"model":"vendor/model:free","choices":[{"delta":{"content":"po"}}]}\n',
+  );
+  // A frame split across chunk boundaries must not be lost or double-counted.
+  pending = observer.consumeSseText(pending + 'data: {"model":"vendor/model:fr');
+  pending = observer.consumeSseText(
+    pending +
+      'ee","usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13,"cost":0.0}}\n',
+  );
+  observer.consumeSseText(`${pending}data: [DONE]\n`);
+
+  assert.equal(observer.observed.modelId, "vendor/model:free");
+  assert.deepEqual(observer.observed.usage, { input: 10, output: 3, total: 13, costUsd: 0 });
+  assert.equal(observer.observed.frameCount, 2, "[DONE] is not a frame");
+
+  // A provider that answers with no model id and no cost leaves both null, which is what
+  // makes the assertions fail closed instead of falling back.
+  const silent = createProviderWireObserver();
+  silent.consumeSseText('data: {"choices":[{"delta":{}}]}\ndata: not json\n\n');
+  assert.equal(silent.observed.modelId, null);
+  assert.deepEqual(silent.observed.usage, {
+    input: null,
+    output: null,
+    total: null,
+    costUsd: null,
+  });
+
+  // Types are checked, not coerced: a string cost and a null model id are not answers.
+  const malformed = createProviderWireObserver();
+  malformed.consumeSseText('data: {"model":null,"usage":{"cost":"0"}}\n');
+  assert.equal(malformed.observed.modelId, null);
+  assert.deepEqual(malformed.observed.usage, {
+    input: null,
+    output: null,
+    total: null,
+    costUsd: null,
+  });
+
+  // Exercise the actual fetch-clone path too, not only its parser. The response returned
+  // to the provider adapter remains readable while the observer drains its clone.
+  const wireBody =
+    'data: {"model":"vendor/model:free","choices":[{"delta":{"content":"pong"}}]}\n' +
+    'data: {"model":"vendor/model:free","usage":{"prompt_tokens":8,' +
+    '"completion_tokens":2,"total_tokens":10,"cost":0}}\n' +
+    "data: [DONE]\n";
+  const throughFetch = createProviderWireObserver(async () => new Response(wireBody));
+  const original = await throughFetch.fetchImplementation("https://example.invalid");
+  assert.equal(await original.text(), wireBody, "the provider adapter's response was altered");
+  const fetched = await throughFetch.waitForObservation();
+  assert.equal(fetched.error, null);
+  assert.equal(fetched.modelId, "vendor/model:free");
+  assert.deepEqual(fetched.usage, { input: 8, output: 2, total: 10, costUsd: 0 });
 });
 
 test("product mode's driver is the server's tsx, and it is present in this clone", () => {

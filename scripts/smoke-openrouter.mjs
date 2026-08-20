@@ -90,11 +90,16 @@ Exit codes:
   2  usage or environment error, including --require-key with the key absent
 
 Assertions (on the RESPONSE, not on the request):
-  · the completion text is non-empty
+  · the completion text is non-empty (direct mode falls back to the message's 'reasoning'
+    field when 'content' is empty, and says which field it read)
   · the model id the provider returned matches the one requested — EXACTLY when the
     requested id ends in :free, because vendor/model is the paid twin of vendor/model:free
-  · token usage was recorded
+  · provider-reported token usage was recorded
   · the call cost zero (a provider that reports no cost figure fails this)
+
+Both substitution assertions read the PROVIDER's own bytes, in both modes. When the
+provider surfaces no model id or no cost, they FAIL — there is no fallback to the requested
+id and no fallback to zero, because an assertion that cannot fail proves nothing.
 
 Under node --test only the pure parts run. The live call is guarded by KADY_SMOKE_LIVE=1.
 `;
@@ -237,6 +242,28 @@ function runProductMode({ modelId, prompt, maxTokens, timeoutMs, environment }) 
   return { ok: true, ...payload };
 }
 
+/**
+ * Which field of an OpenAI-compatible message carries the model's answer.
+ *
+ * `content` is the answer for an ordinary model. Today's cheapest free models are
+ * reasoning models: they spend the whole token budget on `reasoning` and return
+ * `content: ""` with `finish_reason: "length"`, which made direct mode fail its
+ * non-empty-text assertion against every top-ranked free model. Reasoning text is still
+ * the model's own output arriving over the wire, which is all this assertion claims to
+ * check, so it counts — and the run says which field it read, because "the model replied"
+ * and "the model thought out loud and never replied" are not the same result.
+ *
+ * Product mode does not need this: the runtime's `message.content` already carries the
+ * text parts the adapter assembled.
+ */
+export function completionTextFrom(message) {
+  const content = typeof message?.content === "string" ? message.content : "";
+  if (content.length > 0) return { text: content, field: "content" };
+  const reasoning = typeof message?.reasoning === "string" ? message.reasoning : "";
+  if (reasoning.length > 0) return { text: reasoning, field: "reasoning" };
+  return { text: "", field: "content" };
+}
+
 async function runDirectMode({ modelId, prompt, maxTokens, timeoutMs, baseUrl, key }) {
   const url = `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
   const controller = new AbortController();
@@ -252,9 +279,6 @@ async function runDirectMode({ modelId, prompt, maxTokens, timeoutMs, baseUrl, k
       body: JSON.stringify({
         model: modelId,
         max_tokens: maxTokens,
-        // Ask the provider for the cost figure rather than reporting a hardcoded 0: the
-        // cost assertion below is only worth anything if the number came from the wire.
-        usage: { include: true },
         messages: [
           { role: "system", content: "You are a reachability probe. Answer in one word." },
           { role: "user", content: prompt },
@@ -268,9 +292,10 @@ async function runDirectMode({ modelId, prompt, maxTokens, timeoutMs, baseUrl, k
       return { ok: false, message: `HTTP ${response.status}: ${body.slice(0, 300)}` };
     }
     const payload = await response.json();
-    const text = payload?.choices?.[0]?.message?.content ?? "";
+    const { text, field } = completionTextFrom(payload?.choices?.[0]?.message);
     return {
       ok: true,
+      textField: field,
       modelRequested: modelId,
       modelReturned: payload?.model ?? "",
       stopReason: payload?.choices?.[0]?.finish_reason ?? null,
@@ -278,9 +303,11 @@ async function runDirectMode({ modelId, prompt, maxTokens, timeoutMs, baseUrl, k
       textLength: text.length,
       textPrefix: text.slice(0, 200),
       usage: {
-        input: payload?.usage?.prompt_tokens ?? 0,
-        output: payload?.usage?.completion_tokens ?? 0,
-        total: payload?.usage?.total_tokens ?? 0,
+        // `null`, not 0, when the provider reported nothing. The smoke is evidence only
+        // when both usage and cost came from the response.
+        input: payload?.usage?.prompt_tokens ?? null,
+        output: payload?.usage?.completion_tokens ?? null,
+        total: payload?.usage?.total_tokens ?? null,
         // `null`, not 0, when the provider reported nothing: an unreported cost must fail
         // the cost assertion, not silently satisfy it.
         costUsd: payload?.usage?.cost ?? null,
@@ -317,6 +344,22 @@ export function modelIdMatches(requested, returned) {
 }
 
 export function evaluateAssertions(result) {
+  // A returned id that is absent is not a mismatch to be reported as `returned=undefined`
+  // and it is certainly not a match. Product mode used to fall back to the REQUESTED id
+  // here, which made this assertion compare a value against itself and therefore made it
+  // structurally incapable of failing — in the mode that is the lane's gate. It now
+  // reports the only honest thing: nothing came back to compare against.
+  const returnedIdMissing =
+    result.modelReturned === null ||
+    result.modelReturned === undefined ||
+    result.modelReturned === "";
+  const providerUsagePresent =
+    typeof result.usage?.input === "number" &&
+    Number.isFinite(result.usage.input) &&
+    typeof result.usage?.output === "number" &&
+    Number.isFinite(result.usage.output) &&
+    typeof result.usage?.total === "number" &&
+    Number.isFinite(result.usage.total);
   const assertions = [
     {
       name: "the completion text is non-empty",
@@ -325,15 +368,21 @@ export function evaluateAssertions(result) {
     },
     {
       name: "the returned model id matches the requested one",
-      pass: modelIdMatches(result.modelRequested, result.modelReturned),
-      detail: `requested=${result.modelRequested} returned=${result.modelReturned}`,
+      pass: !returnedIdMissing && modelIdMatches(result.modelRequested, result.modelReturned),
+      detail: returnedIdMissing
+        ? "the runtime surfaced no provider model id, so a substitution cannot be ruled out"
+        : `requested=${result.modelRequested} returned=${result.modelReturned}`,
     },
     {
-      name: "token usage was recorded",
-      pass: (result.usage?.output ?? 0) > 0 && (result.usage?.total ?? 0) > 0,
-      detail:
-        `input=${result.usage?.input ?? 0} output=${result.usage?.output ?? 0} ` +
-        `total=${result.usage?.total ?? 0}`,
+      name: "provider-reported token usage was recorded",
+      pass:
+        providerUsagePresent &&
+        result.usage.input >= 0 &&
+        result.usage.output > 0 &&
+        result.usage.total > 0,
+      detail: providerUsagePresent
+        ? `input=${result.usage.input} output=${result.usage.output} total=${result.usage.total}`
+        : "the provider reported no complete token-usage figure",
     },
     {
       // The row is "cheapest FREE model". Without this the cost was printed and read by
@@ -546,6 +595,28 @@ export async function run(argv, environment = process.env, streams = process) {
     writers.out(`MODEL: ${result.modelRequested}\n`);
     if (result.modelResolvedRef) {
       writers.out(`RESOLVED REF: ${result.modelResolvedRef}\n`);
+    }
+    if (result.observation) {
+      // Where the two substitution assertions got their numbers. Printed because the
+      // previous version of this script printed a `returned=` line that came from the
+      // request, and nothing in the output said so.
+      writers.out(
+        `OBSERVED FROM: ${result.observation.source} (${result.observation.frameCount} frame(s); ` +
+          `request payload modification: ${result.observation.requestModifiedWith})\n`,
+      );
+      if (result.observation.error) {
+        writers.out(`OBSERVER: ${result.observation.error}\n`);
+      }
+      writers.out(
+        `RUNTIME-COMPUTED COST (from the local catalogue, NOT the wire, shown for contrast): ` +
+          `${result.observation.runtimeComputedCostUsd}\n`,
+      );
+    }
+    if (result.textField && result.textField !== "content") {
+      writers.out(
+        `TEXT FIELD: ${result.textField} — the model returned no \`content\`; the reply below ` +
+          "is its reasoning output.\n",
+      );
     }
     writers.out(`STOP REASON: ${result.stopReason}\n`);
     if (result.errorMessage != null) {

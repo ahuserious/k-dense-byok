@@ -371,3 +371,47 @@ test("--require-env-values exits 2 when the value-derived half had nothing to se
 
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+test("--require-env-values outranks findings: exit 2, both complaints, on a dirty diff", () => {
+  // The documented exit-code table said 2 meant "--require-env-values with no secret-shaped
+  // variable in the environment", with no carve-out — but the code returned 1 for findings
+  // before it ever evaluated the flag, so the documented 2 held only on a clean diff. A CI
+  // job that both dropped its secret mapping and has an unrelated allowlist miss now
+  // reports the reason that is actually actionable: its strongest half never ran.
+  const { root, git, base } = makeRepository();
+  fs.writeFileSync(
+    path.join(root, "planted.txt"),
+    ["AKI", "AQQQQQQQQQQQQQQQQ"].join("") + "\\n" + ["sk-", "abcdefghijklmnopqrstuvwxyz0123456789ABCD"].join("") + "\\n",
+  );
+  git("add", ".");
+  git("commit", "--quiet", "-m", "planted");
+
+  const emptyEnvironment = { PATH: process.env.PATH ?? "" };
+  const both = runGate(["--base", base, "--repo", root, "--require-env-values"], {
+    env: emptyEnvironment,
+  });
+  assert.equal(both.status, 2, "the not-run state outranks the findings");
+  // Neither complaint is swallowed by the other: the hits are still named on stderr, the
+  // not-run sentence is still there, and the precedence itself is stated rather than left
+  // for a reader to infer from an exit code.
+  assert.match(both.stderr, /non-allowlisted hit\(s\) in added lines/);
+  assert.match(both.stderr, /--require-env-values was given/);
+  assert.match(both.stderr, /exiting 2 rather than 1/);
+  assert.match(both.stdout, /not run — 0 secret-shaped variables/);
+
+  // The same dirty diff WITHOUT the flag is still a plain findings failure, exit 1.
+  const findingsOnly = runGate(["--base", base, "--repo", root], { env: emptyEnvironment });
+  assert.equal(findingsOnly.status, 1);
+  assert.ok(!findingsOnly.stderr.includes("exiting 2 rather than 1"));
+
+  // And with a secret-shaped variable present the value half DID run, so the findings win.
+  const sentinel = `SENTINEL-${crypto.randomBytes(24).toString("hex")}`;
+  const halfRan = runGate(["--base", base, "--repo", root, "--require-env-values"], {
+    env: { PATH: process.env.PATH ?? "", FIXTURE_API_KEY: sentinel },
+  });
+  assert.equal(halfRan.status, 1, "with the half running, findings are the reason");
+  assert.ok(!halfRan.stderr.includes("did not run"));
+  assert.ok(!halfRan.stdout.includes(sentinel), "the sentinel reached stdout");
+
+  fs.rmSync(root, { recursive: true, force: true });
+});

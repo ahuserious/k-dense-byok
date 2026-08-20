@@ -13,6 +13,8 @@ import {
   parseEnvText,
   variableNameForFile,
   WriteRefusal,
+  classifyWriteTarget,
+  directoryIdentity,
   openGuardedWriteDescriptor,
 } from "./secrets-prefill.mjs";
 
@@ -314,21 +316,22 @@ test("the descriptor guard refuses a link on its own, without asking git at all"
   // answers "is it a link right now"; this is what stops a link planted after that
   // answer, so it has to refuse a link even when nothing checked beforehand.
   const fixture = makeFixtureDirectory();
+  const identity = directoryIdentity(fixture);
   const realFile = path.join(fixture, "real.txt");
   fs.writeFileSync(realFile, "untouched\n");
   const link = path.join(fixture, "link.txt");
   fs.symlinkSync(realFile, link);
 
   assert.throws(
-    () => openGuardedWriteDescriptor(link),
-    (error) => error instanceof WriteRefusal && /could not be opened without following a link/.test(error.message),
+    () => openGuardedWriteDescriptor(link, identity),
+    (error) => error instanceof WriteRefusal && /could not be opened as a plain unlinked file/.test(error.message),
   );
   assert.equal(fs.readFileSync(realFile, "utf-8"), "untouched\n");
 
   const hard = path.join(fixture, "hard.txt");
   fs.linkSync(realFile, hard);
   assert.throws(
-    () => openGuardedWriteDescriptor(hard),
+    () => openGuardedWriteDescriptor(hard, identity),
     (error) => error instanceof WriteRefusal && /2 hard links/.test(error.message),
   );
   assert.equal(fs.readFileSync(realFile, "utf-8"), "untouched\n");
@@ -336,11 +339,108 @@ test("the descriptor guard refuses a link on its own, without asking git at all"
   // And on a plain file it succeeds, returning a descriptor already 0600 and truncated.
   const plain = path.join(fixture, "plain.txt");
   fs.writeFileSync(plain, "a much longer previous body that must not survive\n", { mode: 0o644 });
-  const descriptor = openGuardedWriteDescriptor(plain);
+  const descriptor = openGuardedWriteDescriptor(plain, identity);
   fs.writeSync(descriptor, "new\n", 0, "utf8");
   fs.closeSync(descriptor);
   assert.equal(fs.readFileSync(plain, "utf-8"), "new\n");
   assert.equal(fs.statSync(plain).mode & 0o777, 0o600);
+
+  fs.rmSync(fixture, { recursive: true, force: true });
+});
+
+test("swapping the PARENT directory between the git check and the open is refused", () => {
+  // The round-2 review's escape, reproduced from its own description. O_NOFOLLOW
+  // constrains only the final component, so a parent replaced by a symlink after
+  // classifyWriteTarget said `allowed: true` redirected the whole open and wrote a
+  // sentinel into a TRACKED file. The swap is performed here synchronously between the
+  // two calls, which is exactly the window an adversary would have to win.
+  const fixture = makeFixtureDirectory();
+  const repository = path.join(fixture, "repo");
+  fs.mkdirSync(repository);
+  const git = (...args) =>
+    spawnSync("git", args, { cwd: repository, encoding: "utf-8", stdio: "pipe" });
+  git("init", "--quiet");
+  git("config", "user.email", "fixture@example.invalid");
+  git("config", "user.name", "Fixture");
+
+  // `real/` is tracked; `ok/` is a real directory that git ignores. Writing into ok/ is
+  // legitimate; writing into real/ must never happen.
+  fs.mkdirSync(path.join(repository, "real"));
+  const trackedPath = path.join(repository, "real", "secrets.env");
+  fs.writeFileSync(trackedPath, "PLACEHOLDER=\n");
+  fs.writeFileSync(path.join(repository, ".gitignore"), "ok/\n");
+  git("add", "-A");
+  git("commit", "--quiet", "-m", "fixture");
+
+  const decoyDirectory = path.join(repository, "ok");
+  fs.mkdirSync(decoyDirectory);
+  const target = path.join(decoyDirectory, "secrets.env");
+
+  const verdict = classifyWriteTarget(target, repository);
+  assert.equal(verdict.allowed, true, "the untracked-and-ignored path is legitimately allowed");
+  assert.ok(verdict.parentIdentity, "the verdict carries the parent's identity");
+
+  // The swap. `ok` is now a symlink to `real`, so `ok/secrets.env` reaches the TRACKED file.
+  fs.rmSync(decoyDirectory, { recursive: true, force: true });
+  fs.symlinkSync(path.join(repository, "real"), decoyDirectory);
+
+  assert.throws(
+    () => openGuardedWriteDescriptor(target, verdict.parentIdentity),
+    (error) => error instanceof WriteRefusal && /parent directory/.test(error.message),
+  );
+  // The effect, not the message: the tracked file's bytes, its mode, and git's own view.
+  assert.equal(fs.readFileSync(trackedPath, "utf-8"), "PLACEHOLDER=\n");
+  assert.equal(fs.statSync(trackedPath).mode & 0o777, 0o644);
+  assert.equal(git("status", "--short", "--", "real").stdout.trim(), "");
+
+  fs.rmSync(fixture, { recursive: true, force: true });
+});
+
+test("a FIFO planted after the check is refused rather than blocking the write forever", () => {
+  // classifyWriteTarget refuses a non-regular file, but that is a question about a NAME.
+  // A FIFO planted inside the window reached the open, and opening a FIFO for writing
+  // with no reader blocks indefinitely — a hang with no timeout and no message, in a
+  // script whose whole contract is to fail loudly. O_NONBLOCK makes that open fail ENXIO;
+  // the isFile() check covers the device case the same flag cannot.
+  const fixture = makeFixtureDirectory();
+  const identity = directoryIdentity(fixture);
+  const target = path.join(fixture, "planted.env");
+  const mkfifo = spawnSync("mkfifo", [target], { encoding: "utf-8" });
+  assert.equal(mkfifo.status, 0, `mkfifo failed: ${mkfifo.stderr}`);
+
+  const startedAt = Date.now();
+  assert.throws(
+    () => openGuardedWriteDescriptor(target, identity),
+    (error) => error instanceof WriteRefusal,
+  );
+  // The point of the assertion is that it RETURNED. A second is three orders of magnitude
+  // more than the syscall needs and still far below the "forever" this replaces.
+  assert.ok(Date.now() - startedAt < 1000, "the refusal must not block");
+  assert.ok(fs.lstatSync(target).isFIFO(), "the FIFO is left exactly as it was found");
+
+  fs.rmSync(fixture, { recursive: true, force: true });
+});
+
+test("the descriptor guard refuses when the caller supplies no parent identity at all", () => {
+  // The parameter is not defaultable: re-deriving the identity inside the guard would
+  // compare the parent against itself and silently re-open the hole above.
+  const fixture = makeFixtureDirectory();
+  const target = path.join(fixture, "plain.env");
+  fs.writeFileSync(target, "before\n");
+
+  assert.throws(
+    () => openGuardedWriteDescriptor(target),
+    (error) => error instanceof WriteRefusal && /no parent-directory identity/.test(error.message),
+  );
+  assert.equal(fs.readFileSync(target, "utf-8"), "before\n");
+
+  // And directoryIdentity refuses to launder a symlinked parent into the identity of what
+  // it points at, which is what makes the comparison above worth making.
+  const linked = path.join(fixture, "linked");
+  fs.symlinkSync(fixture, linked);
+  assert.equal(directoryIdentity(linked), null);
+  assert.equal(directoryIdentity(path.join(fixture, "absent")), null);
+  assert.equal(directoryIdentity(target), null, "a regular file is not a directory identity");
 
   fs.rmSync(fixture, { recursive: true, force: true });
 });

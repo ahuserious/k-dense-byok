@@ -18,10 +18,11 @@
  *   2. It never persists a value to a path git would keep. `--write` asks git twice —
  *      `ls-files --error-unmatch` (tracked?) and `check-ignore` (ignored?) — and refuses
  *      unless the target is untracked AND ignored. Both questions are about a NAME, so
- *      the name is pinned to its bytes first: a symlink, a hard-linked file and a
- *      non-regular file are each refused before git is consulted, and the write opens
- *      with O_NOFOLLOW and applies mode and bytes to the descriptor, so a link planted
- *      after the check cannot be followed either.
+ *      the name is pinned to its bytes first: a symlink, a hard-linked file, a non-regular
+ *      file and a symlinked PARENT are each refused before git is consulted, and the write
+ *      opens with O_NOFOLLOW|O_NONBLOCK, re-checks the descriptor's link count, file type,
+ *      parent-directory inode and own inode, and applies mode and bytes to the descriptor
+ *      — so neither a link nor an ancestor directory planted after the check is followed.
  *   3. A missing source is a skip with a named reason, never an error and never a silent
  *      zero; an unparseable source is an error naming the file and the LINE NUMBER, never
  *      the line's content.
@@ -507,11 +508,45 @@ function gitSays(args, cwd) {
  * never heard of would answer "untracked, unignored" for the wrong reason. A target that
  * is in no git repository at all is refused — an unanswerable question fails closed.
  */
+/**
+ * The (device, inode) pair a directory path names RIGHT NOW, or null if the path is not a
+ * directory. `lstat`, not `stat`: a symlink named as the parent must not be resolved into
+ * the identity of what it points at, or the caller's later comparison would be satisfied
+ * by exactly the swap it exists to detect.
+ */
+export function directoryIdentity(directoryPath) {
+  let stats;
+  try {
+    // Device and inode identifiers are platform-sized integers. BigInt avoids treating
+    // two distinct 64-bit identities as equal after Number precision loss.
+    stats = fs.lstatSync(directoryPath, { bigint: true });
+  } catch {
+    return null;
+  }
+  if (!stats.isDirectory()) return null;
+  return { dev: stats.dev, ino: stats.ino };
+}
+
 export function classifyWriteTarget(target, cwd = process.cwd()) {
   const resolved = path.resolve(cwd, target);
   const parent = path.dirname(resolved);
   if (!fs.existsSync(parent)) {
     throw new UsageError(`--write target directory does not exist: ${parent}`);
+  }
+  // Every git answer below is about the string `resolved`, so it is only worth anything
+  // while that string keeps naming the same directory. The identity is captured here and
+  // re-checked at open time; see `openGuardedWriteDescriptor`.
+  const parentIdentity = directoryIdentity(parent);
+  if (parentIdentity === null) {
+    return {
+      resolved,
+      parentIdentity: null,
+      allowed: false,
+      reason:
+        "the target's parent is not a directory (a symbolic link named as the parent is " +
+        "refused rather than resolved: git would answer about a path that reaches " +
+        "somewhere else)",
+    };
   }
   // `path.resolve` is LEXICAL: it does not resolve symlinks. Every git question below is
   // therefore a question about this NAME, not about the bytes the name reaches. An
@@ -532,6 +567,7 @@ export function classifyWriteTarget(target, cwd = process.cwd()) {
   if (targetStats?.isSymbolicLink()) {
     return {
       resolved,
+      parentIdentity,
       allowed: false,
       reason:
         "this path is a symbolic link; git would answer about the link while the write " +
@@ -541,6 +577,7 @@ export function classifyWriteTarget(target, cwd = process.cwd()) {
   if (targetStats && !targetStats.isFile()) {
     return {
       resolved,
+      parentIdentity,
       allowed: false,
       reason: "this path exists and is not a regular file",
     };
@@ -550,6 +587,7 @@ export function classifyWriteTarget(target, cwd = process.cwd()) {
     // see: the other name for these bytes can be tracked while this one is not.
     return {
       resolved,
+      parentIdentity,
       allowed: false,
       reason:
         `this path has ${targetStats.nlink} hard links; another name for the same bytes ` +
@@ -559,6 +597,7 @@ export function classifyWriteTarget(target, cwd = process.cwd()) {
   if (!gitSays(["rev-parse", "--is-inside-work-tree"], parent)) {
     return {
       resolved,
+      parentIdentity,
       allowed: false,
       reason:
         "path is not inside a git repository, so neither tracked-ness nor ignored-ness can be established",
@@ -568,6 +607,7 @@ export function classifyWriteTarget(target, cwd = process.cwd()) {
   if (tracked) {
     return {
       resolved,
+      parentIdentity,
       allowed: false,
       reason: "git tracks this path; writing a secret here would commit it",
     };
@@ -576,11 +616,12 @@ export function classifyWriteTarget(target, cwd = process.cwd()) {
   if (!ignored) {
     return {
       resolved,
+      parentIdentity,
       allowed: false,
       reason: "git does not ignore this path; an untracked-but-unignored file is one `git add .` from being committed",
     };
   }
-  return { resolved, allowed: true, reason: null };
+  return { resolved, parentIdentity, allowed: true, reason: null };
 }
 
 /** A refusal raised by the descriptor-level guard below, distinct from a usage error. */
@@ -593,38 +634,130 @@ class WriteRefusal extends Error {}
  * This is the TOCTOU half of the write guard, and it is a SEPARATE layer from the `lstat`
  * in `classifyWriteTarget` on purpose. That `lstat` answers "is this a link right now",
  * which on its own is a check-then-use race: the name can be re-pointed in the window
- * between the answer and the write. O_NOFOLLOW closes that window at the only moment that
- * matters — open() itself fails if the final path component is a symlink — so a link
- * planted inside the window is never followed. The hard-link question is then re-asked
- * with `fstat` on the descriptor actually held rather than on a name that may since have
- * been re-pointed.
+ * between the answer and the write.
+ *
+ * FOUR conditions, and it takes all four, because each one alone has a documented escape:
+ *
+ *   1. O_NOFOLLOW — open() itself fails if the FINAL path component is a symlink, so a
+ *      link planted inside the window is never followed. It covers the final component
+ *      and nothing above it, which is why 4 exists.
+ *   2. `fstat().nlink === 1` on the descriptor actually held, not on a name that may since
+ *      have been re-pointed. A hard link defeats the git questions with no link to see.
+ *   3. `fstat().isFile()` — `classifyWriteTarget` refuses a non-regular file, but that was
+ *      a question about the name, and a FIFO or a device planted in the window reached
+ *      this open. O_NONBLOCK is requested for the same reason: opening a FIFO for writing
+ *      with no reader BLOCKS FOREVER, and a script whose whole contract is to fail loudly
+ *      must not hang without a message. With O_NONBLOCK that open fails ENXIO instead.
+ *      (On a regular file O_NONBLOCK is a no-op.)
+ *   4. the PARENT still names the same directory inode it named when git was asked, and
+ *      the path still names the same file inode the descriptor holds. O_NOFOLLOW covers
+ *      only the last component by definition, so replacing an ancestor DIRECTORY with a
+ *      symlink inside the window redirected the whole open — a real, reproduced escape:
+ *      classify `repo/ok/secrets.env` (untracked, ignored, allowed), swap `repo/ok` for a
+ *      symlink to `repo/real`, and the write landed in the tracked `repo/real/secrets.env`.
+ *      Comparing (dev, ino) rather than the string catches ANY ancestor swap, because a
+ *      swap that changes what the parent path reaches necessarily changes which inode the
+ *      parent path lstats to. The second half — the descriptor's inode against the inode
+ *      the path lstats to now — is what stops an attacker restoring the directory after
+ *      the open so the parent check passes over a descriptor already pointing elsewhere.
+ *
+ * Node exposes no `openat(2)`, so 4 is an identity check rather than an atomic
+ * directory-relative open; its residual is stated in `docs/testing/secrets-and-smoke.md`.
  *
  * O_TRUNC is deliberately NOT requested: truncating at open time would destroy the file
- * before the hard-link question could be answered. The truncation happens after, on the
- * descriptor. So does the chmod — the previous `chmodSync(path)` followed a symlink and
- * silently rewrote a tracked file's mode through exactly this hole.
+ * before any of these questions could be answered. The truncation happens after all four,
+ * on the descriptor. So does the chmod — the previous `chmodSync(path)` followed a symlink
+ * and silently rewrote a tracked file's mode through exactly this hole.
  */
-export function openGuardedWriteDescriptor(resolved) {
+export function openGuardedWriteDescriptor(resolved, expectedParentIdentity) {
+  if (!expectedParentIdentity || typeof expectedParentIdentity.ino !== "bigint") {
+    // Not a defaultable argument: silently re-deriving the identity here would compare the
+    // parent against itself and re-open exactly the hole this parameter closes.
+    throw new WriteRefusal(
+      "the caller supplied no parent-directory identity to check against, so an ancestor " +
+        "swap between the git check and this open could not be ruled out",
+    );
+  }
+  const parent = path.dirname(resolved);
+  const parentBefore = directoryIdentity(parent);
+  if (
+    parentBefore === null ||
+    parentBefore.dev !== expectedParentIdentity.dev ||
+    parentBefore.ino !== expectedParentIdentity.ino
+  ) {
+    throw new WriteRefusal(
+      "the target's parent directory is no longer the directory git was asked about; an " +
+        "ancestor of this path was replaced after the check",
+    );
+  }
+
+  const noFollow = fs.constants.O_NOFOLLOW;
+  const nonBlock = fs.constants.O_NONBLOCK;
+  if (
+    !Number.isInteger(noFollow) ||
+    noFollow <= 0 ||
+    !Number.isInteger(nonBlock) ||
+    nonBlock <= 0
+  ) {
+    throw new WriteRefusal(
+      "this platform does not expose the no-follow and nonblocking open flags required " +
+        "for a fail-closed secret write",
+    );
+  }
+
   let descriptor;
   try {
     descriptor = fs.openSync(
       resolved,
-      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | noFollow | nonBlock,
       0o600,
     );
   } catch (error) {
     throw new WriteRefusal(
-      `the path could not be opened without following a link (${error.code})`,
+      `the path could not be opened as a plain unlinked file (${error.code})`,
     );
   }
-  const opened = fs.fstatSync(descriptor);
-  if (opened.nlink > 1) {
+
+  const refuse = (message) => {
     fs.closeSync(descriptor);
-    throw new WriteRefusal(
+    throw new WriteRefusal(message);
+  };
+  const opened = fs.fstatSync(descriptor, { bigint: true });
+  if (!opened.isFile()) {
+    refuse("the opened file is not a regular file; something was planted at this path");
+  }
+  if (opened.nlink > 1n) {
+    refuse(
       `the opened file has ${opened.nlink} hard links; another name for the same bytes ` +
         "may be tracked",
     );
   }
+  // Re-asked AFTER the open, against the descriptor being held. Everything before this
+  // point described a name; this is the first question about the object.
+  const parentAfter = directoryIdentity(parent);
+  if (
+    parentAfter === null ||
+    parentAfter.dev !== expectedParentIdentity.dev ||
+    parentAfter.ino !== expectedParentIdentity.ino
+  ) {
+    refuse(
+      "the target's parent directory changed identity while the file was being opened; " +
+        "the descriptor may not be the file git was asked about",
+    );
+  }
+  let named;
+  try {
+    named = fs.lstatSync(resolved, { bigint: true });
+  } catch (error) {
+    refuse(`the target path could no longer be inspected after opening it (${error.code})`);
+  }
+  if (named.dev !== opened.dev || named.ino !== opened.ino) {
+    refuse(
+      "the open descriptor is not the file this path names; the path was redirected " +
+        "between the check and the open",
+    );
+  }
+
   fs.fchmodSync(descriptor, 0o600);
   fs.ftruncateSync(descriptor, 0);
   return descriptor;
@@ -775,7 +908,7 @@ export async function run(argv, environment = process.env, streams = process) {
       .join("\n");
     let descriptor;
     try {
-      descriptor = openGuardedWriteDescriptor(verdict.resolved);
+      descriptor = openGuardedWriteDescriptor(verdict.resolved, verdict.parentIdentity);
     } catch (error) {
       writers.err(
         `secrets-prefill: refusing to write ${verdict.resolved}: ${error.message}\n`,

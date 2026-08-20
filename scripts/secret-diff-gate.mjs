@@ -202,6 +202,10 @@ Exit codes:
   1  findings (at least one non-allowlisted hit)
   2  usage or environment error, an allowlist entry without a reason, a git failure, or
      --require-env-values with no secret-shaped variable in the environment
+
+  2 TAKES PRECEDENCE OVER 1. When --require-env-values is given, the environment holds no
+  secret-shaped variable, and the regex half also found hits, the exit code is 2 — both
+  complaints are printed, and "the strongest half never ran" is the more actionable one.
 `;
 
 class UsageError extends Error {}
@@ -495,24 +499,38 @@ export function run(argv, streams = process, environment = process.env) {
     streams.stdout.write(
       `${formatReport({ rows, header, addedLineCount, fileCount: byFile.size })}\n`,
     );
+    // BOTH complaints are printed; only the exit code has to choose. Findings used to
+    // return 1 before `--require-env-values` was evaluated at all, so a job that had
+    // dropped its secret mapping AND had an unrelated allowlist miss exited 1 and the
+    // not-run state survived only as a line on stdout — the documented exit 2 held on a
+    // clean diff and nowhere else.
     if (failing > 0) {
       streams.stderr.write(
         `secret-diff-gate: ${failing} non-allowlisted hit(s) in added lines. ` +
           "Remove the value, or add an allowlist entry with a reason.\n",
       );
-      return 1;
     }
-    // Ordering: findings outrank a not-run complaint, because a hit is a real leak and
-    // this is a report about coverage. The report itself is already on stdout either way.
     const envRow = rows.find((row) => row.id === ENV_VALUE_PATTERN.id);
-    if (options.requireEnvValues && (envRow?.variableCount ?? 0) === 0) {
+    const valueHalfDidNotRun = (envRow?.variableCount ?? 0) === 0;
+    if (options.requireEnvValues && valueHalfDidNotRun) {
       streams.stderr.write(
         "secret-diff-gate: --require-env-values was given and the environment holds 0 " +
           "secret-shaped variables, so the value-derived half of the gate did not run. " +
           "A tool that did not run is not a verdict. Map the secrets into this job.\n",
       );
+      if (failing > 0) {
+        // Deliberate precedence, and it is the less obvious way round. A findings exit
+        // says "here is what I found"; this one says "the strongest half of me never
+        // ran", which is the more actionable failure — the reported hits are whatever the
+        // regexes happened to catch, over a diff nothing searched for actual values.
+        streams.stderr.write(
+          "secret-diff-gate: exiting 2 rather than 1 — the not-run state outranks the " +
+            `${failing} finding(s) above, which were found by the regex half alone.\n`,
+        );
+      }
       return 2;
     }
+    if (failing > 0) return 1;
     return 0;
   } catch (error) {
     streams.stderr.write(`secret-diff-gate: ${error.message}\n`);
