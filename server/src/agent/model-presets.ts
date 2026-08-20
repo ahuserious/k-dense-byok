@@ -72,19 +72,17 @@ export interface PresetBinding {
  *    every group, which told an Anthropic preset's owner "Carried" about a call
  *    Kady cannot build. The binding block must be derived from the same
  *    predicate the button is, never asserted alongside it.
- *  - `chat-session`: the model-preset extension applies system-prompt
- *    replacement through Pi's provider-independent `before_agent_start` hook.
- *    It applies hyperparameters through `before_provider_request` for the
- *    OpenAI-shaped API-key/local groups whose payload Kady can bind exactly.
- *    OAuth payloads remain dropped rather than guessed.
- *  - `workflow-node` / `hosted-fusion-supervised`: both transports do carry
- *    per-node provider-request controls, and both refuse to run without them —
- *    but those controls come from the node's own settings. No preset feeds
- *    them, so a preset's values would not be what arrives.
- *
- * Workflow-node verdicts remain group-independent until the typed workflow
- * model request carries a preset id. Chat is per-group because Pi gives Kady an
- * exact binding seam for some provider APIs and not others.
+ *  - `chat-session`: the extension in this module can bind the system prompt
+ *    and (for OpenAI-shaped API-key/local groups) hyperparameters. Dest does
+ *    not install that extension — `session-registry.ts` / `sessions.ts` are
+ *    outside F1 — so this tree reports dropped until the orchestrator wires it
+ *    and flips `CHAT_SESSION_PRESET_EXTENSION_INSTALLED` in the same commit.
+ *  - `workflow-node`: a node can name a preset durably as provider `preset`
+ *    and model `<preset-id>`. That resolves to the preset's provider and model.
+ *    Sampling and the system-prompt override still come from NodeSpec settings
+ *    because ModelRequest has no control fields.
+ *  - `hosted-fusion-supervised`: Hosted Fusion validation accepts only a fixed
+ *    OpenRouter ModelRequest. That shape has no durable preset id.
  */
 const SURFACE_BINDINGS: Record<
   Exclude<PresetBindingSurface, "direct" | "chat-session">,
@@ -94,15 +92,23 @@ const SURFACE_BINDINGS: Record<
     hyperparameters: "dropped",
     systemPromptOverride: "dropped",
     reason:
-      "Workflow nodes take their sampling parameters and prompt from the node's own settings, so a preset only sets the node's provider and model.",
+      "A workflow node can name a preset as provider \"preset\" and model \"<preset-id>\", which sets the node's provider and model. Sampling and the system-prompt override still come from the node's own settings, because ModelRequest has no preset-control fields.",
   },
   "hosted-fusion-supervised": {
     hyperparameters: "dropped",
     systemPromptOverride: "dropped",
     reason:
-      "Hosted Fusion nodes take their sampling parameters from the node's own settings, so a preset only sets the node's provider and model.",
+      "Hosted Fusion accepts only a fixed OpenRouter ModelRequest, which has no durable preset id, so a preset's hyperparameters and system-prompt override are not what the supervised transport sends.",
   },
 };
+
+/**
+ * The chat-session extension is written and tested here. It is not installed
+ * in this dest-rebased tree. Flip this in the same commit that adds
+ * `makeModelPresetExtension` to `session-registry.ts` and the
+ * `setSessionModelPreset` calls in `sessions.ts`.
+ */
+export const CHAT_SESSION_PRESET_EXTENSION_INSTALLED = false;
 
 const CHAT_HYPERPARAMETER_GROUPS = new Set<ProviderGroupId>([
   "cerebras",
@@ -111,7 +117,7 @@ const CHAT_HYPERPARAMETER_GROUPS = new Set<ProviderGroupId>([
   "local",
 ]);
 
-function bindingForChat(groupId: ProviderGroupId): PresetBinding {
+function bindingForInstalledChat(groupId: ProviderGroupId): PresetBinding {
   const group = providerGroup(groupId);
   if (!group?.dispatchableAsChatModel) {
     return {
@@ -132,6 +138,26 @@ function bindingForChat(groupId: ProviderGroupId): PresetBinding {
     reason:
       `${group.label} chat uses Pi's subscription transport, whose sampling payload is provider-specific. ` +
       "Kady replaces the system prompt, but leaves this preset's hyperparameters disabled rather than guessing fields the provider may discard.",
+  };
+}
+
+function bindingForChat(groupId: ProviderGroupId): PresetBinding {
+  const group = providerGroup(groupId);
+  if (!group?.dispatchableAsChatModel) {
+    return {
+      hyperparameters: "dropped",
+      systemPromptOverride: "dropped",
+      reason: `${group?.label ?? groupId} presets describe a compute job rather than a chat model.`,
+    };
+  }
+  if (CHAT_SESSION_PRESET_EXTENSION_INSTALLED) {
+    return bindingForInstalledChat(groupId);
+  }
+  return {
+    hyperparameters: "dropped",
+    systemPromptOverride: "dropped",
+    reason:
+      "Chat applies this preset's provider and model. Its hyperparameters and system-prompt override wait for the session builder to install Kady's model-preset extension.",
   };
 }
 
@@ -436,7 +462,12 @@ export function makeModelPresetExtension(
   return (pi) => {
     pi.on("before_agent_start", (event) => {
       const preset = activePreset();
-      if (!preset?.systemPromptOverride) return;
+      if (
+        !preset?.systemPromptOverride ||
+        preset.binding.systemPromptOverride !== "bound"
+      ) {
+        return;
+      }
       return { systemPrompt: preset.systemPromptOverride };
     });
     pi.on("before_provider_request", (event, context) => {

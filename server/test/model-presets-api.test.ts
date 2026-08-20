@@ -115,8 +115,9 @@ describe("row 3 — the preset section covers all eight provider groups", () => 
     expect(body.bindingsByGroup.anthropic.direct.hyperparameters).toBe("dropped");
     expect(body.bindingsByGroup.anthropic.direct.reason).toBeTruthy();
     expect(body.bindingsByGroup.local.direct.hyperparameters).toBe("dropped");
-    expect(body.bindingsByGroup.groq["chat-session"].hyperparameters).toBe("bound");
-    expect(body.bindingsByGroup.groq["chat-session"].systemPromptOverride).toBe("bound");
+    expect(body.bindingsByGroup.groq["chat-session"].hyperparameters).toBe("dropped");
+    expect(body.bindingsByGroup.groq["chat-session"].systemPromptOverride).toBe("dropped");
+    expect(body.bindingsByGroup.groq["chat-session"].reason).toMatch(/session builder/);
   });
 
   it("creates, updates, lists and deletes a preset, persisting it", async () => {
@@ -386,9 +387,9 @@ describe("resolve fails closed", () => {
     expect(resolved.hyperparameters.temperature).toBe(0.25);
     expect(resolved.systemPromptOverride).toBe("Be terse.");
     expect(resolved.surface).toBe("chat-session");
-    expect(resolved.binding.hyperparameters).toBe("bound");
-    expect(resolved.binding.systemPromptOverride).toBe("bound");
-    expect(resolved.binding.reason).toBeUndefined();
+    expect(resolved.binding.hyperparameters).toBe("dropped");
+    expect(resolved.binding.systemPromptOverride).toBe("dropped");
+    expect(resolved.binding.reason).toMatch(/session builder/);
     expect(resolved.bindingBySurface.direct.hyperparameters).toBe("bound");
     expect(response.body).not.toContain("test-only-groq-key");
   });
@@ -568,6 +569,11 @@ describe("THE RESOLUTION RULE — a selected preset resolves to its provider and
     try {
       expect(() => resolveModel(`${MODEL_PRESET_REF_PREFIX}${id}`, registry)).toThrow(
         /compute job, not a chat model/,
+      );
+      // The stored canonical ref must also refuse before the unknown-prefix
+      // OpenRouter compatibility path can reinterpret `modal/<hf-id>`.
+      expect(() => resolveModel("modal/meta-llama/Llama-3.3-70B-Instruct", registry)).toThrow(
+        /Modal compute job, not a chat model/,
       );
     } finally {
       if (previous === undefined) delete process.env.KADY_MODEL_PRESETS_FILE;

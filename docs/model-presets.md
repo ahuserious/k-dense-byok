@@ -131,6 +131,28 @@ see why it will not run.
 If you delete a preset that something was using, that something fails with a message naming the problem. It does not
 fall back to a default model.
 
+A Modal compute preset never becomes a chat model. Generic resolution refuses
+`preset/<id>` and the stored `modal/<hugging-face-id>` ref before the
+unknown-prefix OpenRouter compatibility path can reinterpret them.
+
+### What is bound today, and what is not
+
+`POST /model-presets/:id/resolve` returns a binding block per surface. Honour it:
+a `dropped` control must not look live.
+
+- **Test preset (`direct`)** — bound for Groq, Cerebras, and OpenRouter. OAuth,
+  Local, and Modal stay dropped with a reason.
+- **Chat and runs** — the preset's provider and model resolve. Hyperparameters
+  and the system-prompt override wait for the session builder to install Kady's
+  model-preset extension (`CHAT_SESSION_PRESET_EXTENSION_INSTALLED` in
+  `server/src/agent/model-presets.ts`). Dest does not have that wiring.
+- **Workflow nodes** — persist `{ provider: "preset", model: "<preset-id>" }` on
+  the existing ModelRequest. That resolves to the preset's provider and model.
+  Sampling and the system-prompt override still come from the node's own
+  settings because ModelRequest has no control fields.
+- **Hosted Fusion** — still dropped. Hosted Fusion accepts only a fixed
+  OpenRouter ModelRequest, which has no durable preset id.
+
 ---
 
 ## API

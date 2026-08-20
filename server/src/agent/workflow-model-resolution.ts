@@ -23,6 +23,11 @@ import {
   sessionProfileForId,
 } from "./session-registry.ts";
 import { isSubscriptionProvider } from "./provider-auth.ts";
+import { getModelPreset } from "./model-presets-store.ts";
+import { providerGroup } from "./providers/registry.ts";
+
+/** Durable ModelRequest spelling: `{ provider: "preset", model: "<preset-id>" }`. */
+export const WORKFLOW_PRESET_PROVIDER_ID = "preset";
 
 type FixedRequestedModel = Extract<RequestedModel, { source: "fixed" }>;
 
@@ -84,10 +89,63 @@ function expectedAuthKind(
 ): FixedRequestedModel["auth"]["kind"] | null {
   if (provider === "openrouter") return "api-key";
   if (provider === "nvidia") return "api-key";
+  if (provider === "groq" || provider === "cerebras") return "api-key";
   if (provider === "ollama") return "local";
   if (provider === "openai-compatible") return "custom";
   if (isSubscriptionProvider(provider)) return "oauth";
   return null;
+}
+
+function splitCanonicalModelRef(ref: string): { provider: string; model: string } {
+  const slash = ref.indexOf("/");
+  if (slash <= 0) {
+    throw resolutionError(
+      "WORKFLOW_MODEL_UNSUPPORTED_REQUEST",
+      `Preset ref ${ref} is missing a provider or model id.`,
+    );
+  }
+  return { provider: ref.slice(0, slash), model: ref.slice(slash + 1) };
+}
+
+/**
+ * Expand a durable `provider: "preset"` request into the stored preset's
+ * provider, model, and auth. ModelRequest has no extra field for a preset id
+ * (`additionalProperties: false`), so the existing provider/model pair is the
+ * only writable-set way to persist one.
+ */
+export function expandWorkflowPresetCandidate(
+  requested: FixedRequestedModel,
+): FixedRequestedModel {
+  if (requested.provider !== WORKFLOW_PRESET_PROVIDER_ID) return requested;
+  const preset = getModelPreset(requested.model);
+  if (!preset) {
+    throw resolutionError(
+      "WORKFLOW_MODEL_UNSUPPORTED_REQUEST",
+      `Model preset "${requested.model}" no longer exists. Pick another model.`,
+    );
+  }
+  const group = providerGroup(preset.providerId);
+  if (!group?.dispatchableAsChatModel) {
+    throw resolutionError(
+      "WORKFLOW_MODEL_UNSUPPORTED_REQUEST",
+      `Model preset "${preset.name}" describes a ${group?.label ?? preset.providerId} compute job, not a workflow chat model.`,
+    );
+  }
+  const identity = splitCanonicalModelRef(preset.ref);
+  const authKind = expectedAuthKind(identity.provider);
+  if (!authKind) {
+    throw resolutionError(
+      "WORKFLOW_MODEL_UNSUPPORTED_AUTH_CLAIM",
+      `Preset "${preset.name}" resolved to ${identity.provider}, which workflows cannot represent exactly.`,
+    );
+  }
+  return {
+    source: "fixed",
+    provider: identity.provider,
+    model: identity.model,
+    auth: { kind: authKind },
+    reasoning: requested.reasoning,
+  };
 }
 
 function validateFixedAuthClaim(requested: FixedRequestedModel): void {
@@ -95,6 +153,12 @@ function validateFixedAuthClaim(requested: FixedRequestedModel): void {
     throw resolutionError(
       "WORKFLOW_MODEL_UNSUPPORTED_AUTH_CLAIM",
       `Workflow provider ${requested.provider} is not a canonical lowercase Kady provider id.`,
+    );
+  }
+  if (requested.provider === "modal") {
+    throw resolutionError(
+      "WORKFLOW_MODEL_UNSUPPORTED_REQUEST",
+      "Modal presets describe a compute job, not a workflow chat model. Run them from Model presets instead.",
     );
   }
   if (requested.auth.profile !== undefined) {
@@ -137,6 +201,9 @@ function resolveFixedModelWithKady(requested: FixedRequestedModel): Model<Api> {
   }
   if (requested.provider === "openai-compatible") {
     return resolveModel(`openai-compatible/${requested.model}`, registry);
+  }
+  if (requested.provider === "groq" || requested.provider === "cerebras") {
+    return resolveModel(`${requested.provider}/${requested.model}`, registry);
   }
   if (isSubscriptionProvider(requested.provider)) {
     return resolveModel(`${requested.provider}/${requested.model}`, registry);
@@ -342,7 +409,7 @@ export async function resolveWorkflowModel(
     };
   }
 
-  const candidates: FixedRequestedModel[] = [request.requested];
+  const rawCandidates: FixedRequestedModel[] = [request.requested];
   if (request.resolution.mode === "explicit-fallback") {
     for (const alternative of request.resolution.alternatives) {
       if (alternative.source === "kady-current") {
@@ -351,9 +418,10 @@ export async function resolveWorkflowModel(
           "Kady Current cannot appear in an explicit workflow fallback list.",
         );
       }
-      candidates.push(alternative);
+      rawCandidates.push(alternative);
     }
   }
+  const candidates = rawCandidates.map(expandWorkflowPresetCandidate);
   // Ownership/profile claims are schema-level intent. Reject them before any
   // candidate is attempted so a fallback cannot conceal an invalid claim.
   for (const candidate of candidates) validateFixedAuthClaim(candidate);

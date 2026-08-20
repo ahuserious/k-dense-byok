@@ -31,15 +31,15 @@ export type HuggingFaceSearchResult =
 
 /**
  * The reason the chooser shows when Hugging Face is not configured. F12's
- * interface names this exact sentence; it is repeated here rather than imported
- * because their module is not in this tree.
+ * interface names this exact sentence; the adapter repeats it so the editor
+ * can render a disabled control without importing F12's server module.
  */
 export const HF_NOT_CONFIGURED_REASON = "Set HF_TOKEN to search Hugging Face models";
 
 /**
- * The reason the chooser shows in THIS clone, where F12's route is not
- * registered yet and a search 404s. Naming the cause honestly beats reporting
- * it as a Hugging Face outage.
+ * The reason the chooser shows when F12's search route is not registered
+ * (a 404). Naming the cause honestly beats reporting it as a Hugging Face
+ * outage. Dest registers that route; this remains a fail-closed fallback.
  */
 export const HF_ROUTE_ABSENT_REASON =
   "Hugging Face model search is not available in this build yet. Add it, or set the model id from a Modal job once the integration lands.";

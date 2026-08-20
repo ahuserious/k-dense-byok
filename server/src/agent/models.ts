@@ -533,6 +533,15 @@ export function resolveModel(
     }
     return resolveModel(preset.ref, registry, fusionConfig);
   }
+  // A Modal compute ref must not fall through to the unknown-prefix OpenRouter
+  // compatibility path. The stored Modal preset ref is `modal/<hf-id>`; treating
+  // that as an OpenRouter vendor would send the prompt and the OpenRouter key
+  // to OpenRouter for a job that was never a chat completion.
+  if (r === "modal" || r.startsWith("modal/")) {
+    throw new ModelResolutionError(
+      `Ref "${r}" names a Modal compute job, not a chat model. Run it from Model presets instead.`,
+    );
+  }
   // A "fusion/<id>" ref is the synthetic selector entry; resolve it to the real
   // openrouter/fusion Model, priced by the panel sum. The bare string ref can't
   // carry the panel prices, so the fusionConfig must be threaded in by the

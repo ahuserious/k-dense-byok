@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {
   buildPresetChatCompletionRequest,
@@ -12,11 +15,20 @@ import {
 import {
   applyPresetToPiProviderPayload,
   applyPresetToProviderPayload,
+  CHAT_SESSION_PRESET_EXTENSION_INSTALLED,
   makeModelPresetExtension,
   presetBindingBySurface,
   presetBindingForSurface,
   setSessionModelPreset,
 } from "../src/agent/model-presets.ts";
+import { createModelPreset } from "../src/agent/model-presets-store.ts";
+import {
+  WORKFLOW_PRESET_PROVIDER_ID,
+  expandWorkflowPresetCandidate,
+  resolveWorkflowModel,
+} from "../src/agent/workflow-model-resolution.ts";
+import type { ProjectPaths } from "../src/projects.ts";
+import type { ModelRequest, RequestedModel } from "../src/workflows/schema.ts";
 
 /**
  * Gate B for matrix rows 4 (hyperparameters) and 5 (system-prompt override).
@@ -248,7 +260,10 @@ describe("the chat-session extension binds one run and clears cleanly", () => {
       systemPromptOverride: "Use only verified evidence.",
       parameterSupport: providerGroup("openrouter")!.parameterSupport,
       surface: "chat-session",
-      binding: presetBindingForSurface("chat-session", "openrouter"),
+      // The dest-rebased tree reports chat-session dropped. This test is the
+      // extension itself: prove it applies controls when the stashed binding
+      // says they are bound.
+      binding: { hyperparameters: "bound", systemPromptOverride: "bound" },
       bindingBySurface: presetBindingBySurface("openrouter"),
     });
 
@@ -355,17 +370,18 @@ describe("the binding block tells the truth about each surface", () => {
     }
   });
 
-  it("reports chat bindings per group from the installed Pi extension", () => {
+  it("reports chat bindings as dropped until the session builder installs the extension", () => {
+    expect(CHAT_SESSION_PRESET_EXTENSION_INSTALLED).toBe(false);
     const openRouter = presetBindingForSurface("chat-session", "openrouter");
-    expect(openRouter).toEqual({
-      hyperparameters: "bound",
-      systemPromptOverride: "bound",
-    });
+    expect(openRouter.hyperparameters).toBe("dropped");
+    expect(openRouter.systemPromptOverride).toBe("dropped");
+    expect(openRouter.reason).toMatch(/session builder/);
+    expect(openRouter.reason).not.toMatch(/\/(Users|home|tmp|var)\//);
 
     const anthropic = presetBindingForSurface("chat-session", "anthropic");
     expect(anthropic.hyperparameters).toBe("dropped");
-    expect(anthropic.systemPromptOverride).toBe("bound");
-    expect(anthropic.reason).toMatch(/subscription transport/);
+    expect(anthropic.systemPromptOverride).toBe("dropped");
+    expect(anthropic.reason).toMatch(/session builder/);
 
     const modal = presetBindingForSurface("chat-session", "modal");
     expect(modal.hyperparameters).toBe("dropped");
@@ -386,6 +402,8 @@ describe("the binding block tells the truth about each surface", () => {
       expect(bindings[surface].reason).toBeTruthy();
       expect(bindings[surface].reason).not.toMatch(/\/(Users|home|tmp|var)\//);
     }
+    expect(bindings["workflow-node"].reason).toMatch(/provider "preset"/);
+    expect(bindings["hosted-fusion-supervised"].reason).toMatch(/no durable preset id/);
   });
 });
 
@@ -523,5 +541,146 @@ describe("a group Kady cannot build a request for makes NO outbound request", ()
     expect((init.headers as Record<string, string>).Authorization).toMatch(/^Bearer /);
     expect(JSON.parse(String(init.body)).temperature).toBe(0.15);
     expect(result.status).toBe(200);
+  });
+});
+
+describe("workflow nodes can name a preset id without looking live for dropped controls", () => {
+  let storeFile: string;
+  let previousStore: string | undefined;
+
+  beforeEach(() => {
+    storeFile = path.join(
+      fs.mkdtempSync(path.join(os.tmpdir(), "kady-f1-workflow-preset-")),
+      "model-presets.json",
+    );
+    previousStore = process.env.KADY_MODEL_PRESETS_FILE;
+    process.env.KADY_MODEL_PRESETS_FILE = storeFile;
+  });
+
+  afterEach(() => {
+    if (previousStore === undefined) delete process.env.KADY_MODEL_PRESETS_FILE;
+    else process.env.KADY_MODEL_PRESETS_FILE = previousStore;
+    fs.rmSync(path.dirname(storeFile), { recursive: true, force: true });
+  });
+
+  function paths(): ProjectPaths {
+    return { id: "workflow-preset" } as ProjectPaths;
+  }
+
+  function exact(requested: RequestedModel): ModelRequest {
+    return { requested, resolution: { mode: "exact" } };
+  }
+
+  it("expands provider preset + model <id> to the stored provider and model", () => {
+    const preset = createModelPreset({
+      name: "Fast summariser",
+      providerId: "groq",
+      modelId: "llama-3.3-70b-versatile",
+      hyperparameters: { temperature: 0.2 },
+      systemPromptOverride: "Be terse.",
+    });
+    const expanded = expandWorkflowPresetCandidate({
+      source: "fixed",
+      provider: WORKFLOW_PRESET_PROVIDER_ID,
+      model: preset.id,
+      auth: { kind: "api-key" },
+      reasoning: "high",
+    });
+    expect(expanded).toEqual({
+      source: "fixed",
+      provider: "groq",
+      model: "llama-3.3-70b-versatile",
+      auth: { kind: "api-key" },
+      reasoning: "high",
+    });
+  });
+
+  it("refuses a Modal preset on the workflow path before any model call", async () => {
+    const preset = createModelPreset({
+      name: "Weights",
+      providerId: "modal",
+      modelId: "meta-llama/Llama-3.3-70B-Instruct",
+      modal: {
+        huggingFaceModelId: "meta-llama/Llama-3.3-70B-Instruct",
+        gpuCount: 1,
+      },
+    });
+    const resolveFixedModel = vi.fn();
+    const authenticateModel = vi.fn();
+    await expect(
+      resolveWorkflowModel(
+        exact({
+          source: "fixed",
+          provider: WORKFLOW_PRESET_PROVIDER_ID,
+          model: preset.id,
+          auth: { kind: "api-key" },
+          reasoning: "off",
+        }),
+        { manifest: { projectId: "workflow-preset" }, paths: paths() },
+        { resolveFixedModel, authenticateModel },
+      ),
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_MODEL_UNSUPPORTED_REQUEST",
+      message: expect.stringMatching(/compute job/),
+    });
+    expect(resolveFixedModel).not.toHaveBeenCalled();
+    expect(authenticateModel).not.toHaveBeenCalled();
+  });
+
+  it("refuses a raw modal provider as a workflow chat model", async () => {
+    const resolveFixedModel = vi.fn();
+    await expect(
+      resolveWorkflowModel(
+        exact({
+          source: "fixed",
+          provider: "modal",
+          model: "meta-llama/Llama-3.3-70B-Instruct",
+          auth: { kind: "api-key" },
+          reasoning: "off",
+        }),
+        { manifest: { projectId: "workflow-preset" }, paths: paths() },
+        { resolveFixedModel },
+      ),
+    ).rejects.toMatchObject({
+      code: "WORKFLOW_MODEL_UNSUPPORTED_REQUEST",
+      message: expect.stringMatching(/compute job/),
+    });
+    expect(resolveFixedModel).not.toHaveBeenCalled();
+  });
+
+  it("resolves a Groq workflow node through the expanded preset id", async () => {
+    const preset = createModelPreset({
+      name: "Fast summariser",
+      providerId: "groq",
+      modelId: "llama-3.3-70b-versatile",
+    });
+    const resolveFixedModel = vi.fn((requested: { provider: string; model: string }) => ({
+      ...modelFor(requested.provider, requested.model, "https://api.groq.com/openai/v1"),
+      thinkingLevelMap: { off: "off", high: "high", xhigh: "xhigh", max: "max" },
+    }));
+    const resolved = await resolveWorkflowModel(
+      exact({
+        source: "fixed",
+        provider: WORKFLOW_PRESET_PROVIDER_ID,
+        model: preset.id,
+        auth: { kind: "api-key" },
+        reasoning: "high",
+      }),
+      { manifest: { projectId: "workflow-preset" }, paths: paths() },
+      {
+        resolveFixedModel,
+        authenticateModel: async () => {},
+      },
+    );
+    expect(resolveFixedModel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: "groq",
+        model: "llama-3.3-70b-versatile",
+        auth: { kind: "api-key" },
+      }),
+    );
+    expect(resolved.model.provider).toBe("groq");
+    expect(resolved.model.id).toBe("llama-3.3-70b-versatile");
+    expect(resolved.receipt.resolved.provider).toBe("groq");
   });
 });
