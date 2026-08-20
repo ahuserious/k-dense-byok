@@ -47,9 +47,7 @@ export function workflowNodeCoreModelCallCeiling(
     case "research-until-goal":
       return inputs.maxIterations;
     case "council":
-      return (node.members.length + 1) * node.rounds +
-        (node.fuser ? 1 : 0) +
-        (node.maxRecruits ?? 0) * node.rounds;
+      return (node.members.length + 1) * node.rounds;
     case "fusion":
       return node.fusion.mode === "openrouter-router"
         ? node.fusion.members.length + 2
@@ -57,9 +55,6 @@ export function workflowNodeCoreModelCallCeiling(
     case "best-of-n":
       return (node.candidateCount ?? node.candidateModels?.length ?? 2) + 1;
     case "evidence-gate":
-      if (node.evaluatorMode === "council" && node.council) {
-        return (node.council.members.length + 1) * (node.council.rounds ?? 1);
-      }
       return node.evaluator ||
           node.checks.some((check) => check !== "artifact-exists")
         ? 1
@@ -70,18 +65,6 @@ export function workflowNodeCoreModelCallCeiling(
       return 1;
     case "prompt-optimization":
       return promptOptimizationModelCallSlots(node).length;
-    case "elevate-to-dag":
-    case "reasoning-style":
-    case "workflow-ref":
-      return 0;
-    case "hypothesis":
-      return (node.hypothesisCount ?? 2) + 1;
-    case "formatted-output":
-      return 1;
-    default: {
-      const _exhaustive: never = node;
-      throw new Error(`Unhandled workflow node kind ${String((_exhaustive as WorkflowNode).kind)}.`);
-    }
   }
 }
 

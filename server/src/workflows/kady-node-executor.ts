@@ -30,10 +30,8 @@ import {
   openClaudeCodeRelay,
 } from "./claude-code-relay.ts";
 import type { WorkflowHarnessAdapterSelection } from "./harness-registry.ts";
-import {
-  workflowHarnessDispatchReachability,
-  type HarnessDispatchReachability,
-} from "./harness-dispatch-reachability.ts";
+import { f5WorkflowHarnessDispatchReachability } from "./kinds/core-model-call-ceiling.ts";
+import type { HarnessDispatchReachability } from "./harness-dispatch-reachability.ts";
 import {
   assertWorkflowNodeControlPackageSeeded,
   createS4HostedFusionSession,
@@ -111,6 +109,7 @@ import {
   councilRecruitmentObservation,
   effectiveCouncilRecruitmentBound,
   inboundReasoningStyleRefs,
+  selectCouncilHeads,
 } from "./council-roles.ts";
 import { elevatePromptToDag } from "./elevate-to-dag.ts";
 import {
@@ -118,7 +117,11 @@ import {
   validateFormattedOutput,
 } from "./formatted-output.ts";
 import { buildHypothesisPairs, hypothesisReportMarkdown } from "./hypothesis.ts";
-import { selectReasoningStylePersonas } from "./reasoning-style.ts";
+import {
+  infranodusMapQueryFromMcp,
+  selectReasoningStylePersonas,
+  type InfranodusMapQuery,
+} from "./reasoning-style.ts";
 
 export const KADY_WORKFLOW_READ_ONLY_AGENT =
   "dag-workflow-readonly-executor" as const;
@@ -560,6 +563,7 @@ export interface KadyNodeExecutorDependencies {
   assertChildRuntimeReady(paths: ProjectPaths): void;
   readCompactionAudit(sandboxRoot: string, childRunId: string): TrustedDagFusionCompactionAudit;
   now(): number;
+  queryInfranodusMap?: InfranodusMapQuery;
 }
 
 interface KadyPreResolvedDelegation {
@@ -948,7 +952,7 @@ function harnessDispatchReachability(
   context: WorkflowNodeExecutorContext,
   limits: EffectiveNodeLimits,
 ): HarnessDispatchReachability {
-  return workflowHarnessDispatchReachability(context.node, {
+  return f5WorkflowHarnessDispatchReachability(context.node, {
     maxIterations: limits.maxIterations,
     requiresEvidencePolicyEvaluation: requiresWorkflowEvidencePolicyEvaluation(
       context.graph,
@@ -2725,10 +2729,11 @@ export function createKadyWorkflowNodeExecutor(
       }
 
       if (node.kind === "council") {
-        const memberIds = new Set(node.members.map((member) => member.id));
+        const inboundPersonas = inboundReasoningStyleRefs(context.inbound);
+        const roster = selectCouncilHeads(node, inboundPersonas);
+        const memberIds = new Set(roster.members.map((member) => member.id));
         const minorityReports: MinorityReport[] = [];
         const roundDecisions: string[] = [];
-        const inboundPersonas = inboundReasoningStyleRefs(context.inbound);
         const recruitedMembers: Array<{
           memberId: string;
           role: string;
@@ -2744,7 +2749,7 @@ export function createKadyWorkflowNodeExecutor(
         let previousChair: CouncilChairResult | undefined;
         for (let round = 1; round <= node.rounds; round += 1) {
           const positions: Array<{ memberId: string; role: string; result: CouncilMemberResult }> = [];
-          for (const member of node.members) {
+          for (const member of roster.members) {
             const result = await delegate({
               slotId: `council-round-${round}-member-${member.id}`,
               task: boundedTask([
@@ -2875,6 +2880,11 @@ export function createKadyWorkflowNodeExecutor(
             memberPositions: latestPositions,
             roundDecisions,
             recruitment,
+            headSelection: {
+              mode: roster.mode,
+              source: roster.source,
+              personalityRefs: roster.personalityRefs,
+            },
           }),
         });
       }
@@ -3387,7 +3397,11 @@ export function createKadyWorkflowNodeExecutor(
 
       if (node.kind === "reasoning-style") {
         try {
-          const selection = selectReasoningStylePersonas(node);
+          const query = node.mode === "infranodus"
+            ? dependencies.queryInfranodusMap ??
+              await infranodusMapQueryFromMcp(context.projectId, paths)
+            : undefined;
+          const selection = await selectReasoningStylePersonas(node, process.env, query);
           return await applyCommonEvidencePolicy({
             output: checkedOutput(selection),
           });

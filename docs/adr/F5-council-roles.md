@@ -25,3 +25,12 @@ a pair every time. One kind with three roles is the smaller change.
 `maxSubagents`. Recruited heads use dynamic slots
 `council-round-{n}-member-recruited-{k}` and appear in
 `nodes[].recruitment = { recruited, maxRecruits, reason? }`.
+
+## Head selection
+
+`headSelection: "auto" | "manual"` is read by `selectCouncilHeads` before
+dispatch. `manual` keeps the authored `members[]` roles. `auto` replaces
+those roles with inbound reasoning-style refs, then mimeograph refs, then
+the four workflow-type scientist defaults. Omitted `headSelection` is
+manual unless inbound reasoning-style refs are present (row 35). The
+member ids and models stay authored so declared slots remain valid.

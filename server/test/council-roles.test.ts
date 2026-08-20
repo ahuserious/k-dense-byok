@@ -5,6 +5,7 @@ import {
   DEFAULT_COUNCIL_JUDGE_COUNT,
   councilRecruitmentObservation,
   effectiveCouncilRecruitmentBound,
+  selectCouncilHeads,
 } from "../src/workflows/council-roles.ts";
 import { mapWithBoundedConcurrency } from "../src/workflows/kinds/bounded-concurrency.ts";
 import { runStateNodeObservations } from "../src/workflows/kinds/run-state-observations.ts";
@@ -20,6 +21,53 @@ describe("council roles and rescue branches", () => {
     expect(DEFAULT_COUNCIL_HEAD_COUNT).toBe(4);
     expect(DEFAULT_COUNCIL_JUDGE_COUNT).toBe(1);
     expect(DEFAULT_COUNCIL_FUSER_COUNT).toBe(1);
+  });
+
+  it("binds headSelection to the running council roster", () => {
+    const model = {
+      requested: {
+        source: "fixed" as const,
+        provider: "openrouter",
+        model: "vendor/a",
+        auth: { kind: "api_key" as const },
+        reasoning: "off" as const,
+      },
+      resolution: { mode: "exact" as const },
+    };
+    const node = {
+      id: "council",
+      name: "Council",
+      kind: "council",
+      terminal: true,
+      workspace: { isolation: "read-only", writePaths: [] },
+      goal: "Decide.",
+      members: [
+        { id: "a", role: "Reviewer A", model },
+        { id: "b", role: "Reviewer B", model },
+      ],
+      chair: model,
+      rounds: 1,
+      preserveMinorityReports: false,
+    } as Extract<WorkflowNode, { kind: "council" }>;
+
+    const auto = selectCouncilHeads({ ...node, headSelection: "auto" });
+    expect(auto.mode).toBe("auto");
+    expect(auto.source).toBe("workflow-type");
+    expect(auto.members.map((member) => member.role)).toEqual(["genomics", "statistician"]);
+    expect(auto.members.map((member) => member.id)).toEqual(["a", "b"]);
+
+    const manual = selectCouncilHeads(
+      { ...node, headSelection: "manual" },
+      ["map-head-a", "map-head-b"],
+    );
+    expect(manual.mode).toBe("manual");
+    expect(manual.source).toBe("authored");
+    expect(manual.members.map((member) => member.role)).toEqual(["Reviewer A", "Reviewer B"]);
+
+    const inbound = selectCouncilHeads(node, ["map-head-a", "map-head-b"]);
+    expect(inbound.mode).toBe("auto");
+    expect(inbound.source).toBe("inbound-reasoning-style");
+    expect(inbound.members.map((member) => member.role)).toEqual(["map-head-a", "map-head-b"]);
   });
 
   it("caps recruitment at maxRecruits and maxSubagents", () => {

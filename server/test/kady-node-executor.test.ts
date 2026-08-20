@@ -431,6 +431,10 @@ function executorFor(
       sandboxRoot: string,
       childRunId: string,
     ) => TrustedDagFusionCompactionAudit;
+    queryInfranodusMap?: {
+      listTools(): Promise<string[]>;
+      callTool(name: string, args: Record<string, unknown>): Promise<unknown>;
+    };
   } = {},
 ): WorkflowNodeExecutor {
   const paths = projectPaths();
@@ -466,6 +470,9 @@ function executorFor(
       })),
       ...(options.runHostedFusion
         ? { runHostedFusion: options.runHostedFusion }
+        : {}),
+      ...(options.queryInfranodusMap
+        ? { queryInfranodusMap: options.queryInfranodusMap }
         : {}),
     },
   });
@@ -3312,5 +3319,163 @@ describe("production Kady DAG node executor", () => {
         { id: "candidate-2", status: "succeeded" },
       ],
     });
+  });
+
+  it("auto headSelection instantiates workflow-type personas on the running members", async () => {
+    const node: WorkflowNode = {
+      ...baseNode("council"),
+      kind: "council",
+      goal: "Decide whether the claim holds.",
+      headSelection: "auto",
+      members: [
+        { id: "a", role: "Reviewer A", model: openRouterModel("vendor/a") },
+        { id: "b", role: "Reviewer B", model: openRouterModel("vendor/b") },
+      ],
+      chair: openRouterModel("vendor/chair"),
+      rounds: 1,
+      preserveMinorityReports: false,
+    };
+    const document = graph(node);
+    const host = new FakeHost([
+      { position: "yes", rationale: "a", evidence: ["e1"], concerns: [] },
+      { position: "no", rationale: "b", evidence: ["e2"], concerns: [] },
+      { decision: "split", rationale: "agree to split", consensus: true, minorityReports: [] },
+    ]);
+
+    const result = await executorFor(host, document)(contextFor(document));
+    expect(host.calls[0]?.request.task).toContain("assigned role: genomics");
+    expect(host.calls[1]?.request.task).toContain("assigned role: statistician");
+    expect(result.output).toMatchObject({
+      kind: "council",
+      headSelection: {
+        mode: "auto",
+        source: "workflow-type",
+        personalityRefs: ["genomics", "statistician"],
+      },
+      memberPositions: [
+        { memberId: "a", role: "genomics" },
+        { memberId: "b", role: "statistician" },
+      ],
+    });
+  });
+
+  it("manual headSelection keeps the authored roster when reasoning-style inbound exists", async () => {
+    const node: WorkflowNode = {
+      ...baseNode("council"),
+      kind: "council",
+      goal: "Decide whether the claim holds.",
+      headSelection: "manual",
+      members: [
+        { id: "a", role: "Reviewer A", model: openRouterModel("vendor/a") },
+        { id: "b", role: "Reviewer B", model: openRouterModel("vendor/b") },
+      ],
+      chair: openRouterModel("vendor/chair"),
+      rounds: 1,
+      preserveMinorityReports: false,
+    };
+    const document = graph(node);
+    const host = new FakeHost([
+      { position: "yes", rationale: "a", evidence: ["e1"], concerns: [] },
+      { position: "no", rationale: "b", evidence: ["e2"], concerns: [] },
+      { decision: "split", rationale: "agree to split", consensus: true, minorityReports: [] },
+    ]);
+    const context = contextFor(document);
+    context.inbound = [{
+      edgeId: "to-council",
+      fromNodeId: "style",
+      condition: "always",
+      executionId: "dagx_style",
+      artifacts: [],
+      output: {
+        kind: "reasoning-style",
+        personalityRefs: ["map-head-a", "map-head-b"],
+      },
+    }];
+
+    const result = await executorFor(host, document)(context);
+    expect(host.calls[0]?.request.task).toContain("assigned role: Reviewer A");
+    expect(result.output).toMatchObject({
+      kind: "council",
+      headSelection: { mode: "manual", source: "authored" },
+      memberPositions: [
+        { memberId: "a", role: "Reviewer A" },
+        { memberId: "b", role: "Reviewer B" },
+      ],
+    });
+  });
+
+  it("inbound reasoning-style refs become the running council roster", async () => {
+    const node: WorkflowNode = {
+      ...baseNode("council"),
+      kind: "council",
+      goal: "Decide whether the claim holds.",
+      members: [
+        { id: "a", role: "Reviewer A", model: openRouterModel("vendor/a") },
+        { id: "b", role: "Reviewer B", model: openRouterModel("vendor/b") },
+      ],
+      chair: openRouterModel("vendor/chair"),
+      rounds: 1,
+      preserveMinorityReports: false,
+    };
+    const document = graph(node);
+    const host = new FakeHost([
+      { position: "yes", rationale: "a", evidence: ["e1"], concerns: [] },
+      { position: "no", rationale: "b", evidence: ["e2"], concerns: [] },
+      { decision: "split", rationale: "agree to split", consensus: true, minorityReports: [] },
+    ]);
+    const context = contextFor(document);
+    context.inbound = [{
+      edgeId: "to-council",
+      fromNodeId: "style",
+      condition: "always",
+      executionId: "dagx_style",
+      artifacts: [],
+      output: {
+        kind: "reasoning-style",
+        personalityRefs: ["map-head-a", "map-head-b"],
+      },
+    }];
+
+    const result = await executorFor(host, document)(context);
+    expect(host.calls[0]?.request.task).toContain("assigned role: map-head-a");
+    expect(host.calls[1]?.request.task).toContain("assigned role: map-head-b");
+    expect(result.output).toMatchObject({
+      kind: "council",
+      headSelection: {
+        mode: "auto",
+        source: "inbound-reasoning-style",
+        personalityRefs: ["map-head-a", "map-head-b"],
+      },
+    });
+  });
+
+  it("queries InfraNodus before labeling reasoning-style source infranodus", async () => {
+    const previous = process.env.INFRANODUS_API_KEY;
+    process.env.INFRANODUS_API_KEY = "present";
+    try {
+      const node: WorkflowNode = {
+        ...baseNode("reasoning-style"),
+        kind: "reasoning-style",
+        mode: "infranodus",
+        style: "cancer-genomics",
+      };
+      const document = graph(node);
+      const host = new FakeHost([]);
+      const result = await executorFor(host, document, {
+        queryInfranodusMap: {
+          listTools: async () => ["mcp__infranodus__generate_knowledge_graph"],
+          callTool: async () => ({ mainConcepts: ["map-head-a", "map-head-b"] }),
+        },
+      })(contextFor(document));
+      expect(result.output).toMatchObject({
+        kind: "reasoning-style",
+        mode: "infranodus",
+        source: "infranodus",
+        personalityRefs: ["map-head-a", "map-head-b"],
+      });
+    } finally {
+      if (previous === undefined) delete process.env.INFRANODUS_API_KEY;
+      else process.env.INFRANODUS_API_KEY = previous;
+    }
   });
 });

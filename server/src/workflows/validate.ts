@@ -8,7 +8,7 @@ import {
   workflowHarnessDefinition,
   type WorkflowHarnessId,
 } from "./harness-registry.ts";
-import { workflowHarnessDispatchReachability } from "./harness-dispatch-reachability.ts";
+import { f5WorkflowHarnessDispatchReachability } from "./kinds/core-model-call-ceiling.ts";
 import {
   MAX_WORKFLOW_DOCUMENT_BYTES,
   WorkflowGraphDocumentSchema,
@@ -1158,7 +1158,7 @@ function validateNode(
  * with `mode: "verify"` and an `evidence-gate` with no evaluator and only
  * `artifact-exists` checks accepting `harness: "grok-cli"` with zero issues and
  * then discarding it. **Both** conjuncts are closed now, and the predicate is
- * `workflowHarnessDispatchReachability` — the same function the executor's
+ * `f5WorkflowHarnessDispatchReachability` — the same function the executor's
  * `requiresPiSubagent` is computed from — so the two cannot drift.
  *
  * Reaching the decision anyway would select an adapter that then executes
@@ -1183,7 +1183,7 @@ function validateHarnessReachesDispatch(
     document.settings?.defaultHarness ??
     DEFAULT_NODE_SPEC_V1.harness;
   if (effective === "pi") return;
-  const reachability = workflowHarnessDispatchReachability(node, {
+  const reachability = f5WorkflowHarnessDispatchReachability(node, {
     maxIterations: Math.min(
       document.limits.maxIterations,
       node.limits?.maxIterations ?? document.limits.maxIterations,

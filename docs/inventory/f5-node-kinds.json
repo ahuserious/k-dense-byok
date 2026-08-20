@@ -17,5 +17,7 @@
     "councilJudge": 1,
     "councilFuser": 1
   },
-  "mimeographs": "settings.deliberation.mimeographs / personality store"
+  "mimeographs": "settings.deliberation.mimeographs / personality store",
+  "headSelection": "bound by selectCouncilHeads; auto/manual changes running member roles",
+  "infranodus": "queries F12 MCP map tools or fails closed; never labels local defaults as infranodus"
 }
