@@ -36,6 +36,7 @@ import { registerSpeechRoutes } from "./api/speech.ts";
 import { registerModalRoutes } from "./api/modal.ts";
 import { registerModelProviderRoutes } from "./api/model-providers.ts";
 import { registerDagWorkflowRoutes } from "./api/dag-workflows.ts";
+import { registerScheduleRoutes } from "./api/schedules.ts";
 import { registerPipelineRoutes } from "./api/pipelines.ts";
 import { registerConsoleRoutes } from "./api/console.ts";
 import { registerRaindropRoutes } from "./api/raindrop.ts";
@@ -275,6 +276,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await registerDagWorkflowRoutes(app, {
     controller: workflowController ?? undefined,
   });
+  await registerScheduleRoutes(app);
   await registerPromptOptimizationInterviewRoutes(app);
   await registerPipelineRoutes(app);
   await registerConsoleRoutes(app);

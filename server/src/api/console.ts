@@ -34,7 +34,6 @@ import {
   type RunRecord,
 } from "../agent/runs-index.ts";
 import { pauseLoop, resumeLoop, startLoop, stopLoop } from "../agent/goal-loop.ts";
-import { registerScheduleRoutes } from "./schedules.ts";
 
 // How many runs the unfiltered /console/runs feed returns. The store sorts
 // newest-first, so this is the most-recent N. Matches the spirit of ACP's
@@ -109,17 +108,6 @@ function toClientLoop(record: LoopRecord): Record<string, unknown> {
 // ---- Routes ----------------------------------------------------------------
 
 export async function registerConsoleRoutes(app: FastifyInstance): Promise<void> {
-  // --- schedules (lane F13, row 52) ---
-  // Registered HERE rather than in server/src/index.ts on purpose. The schedule
-  // ticker fires by dispatching an in-process request to the existing
-  // POST /dag-workflows/:workflowId/runs route, so it needs no reference to the
-  // workflow controller — and index.ts is not this lane's file to edit. The
-  // routes own their own timer lifecycle through a preClose hook, so closing
-  // the app stops the ticker. See INTEGRATION.md: if this ever moves to
-  // index.ts, this line must be REMOVED in the same change or Fastify throws
-  // FST_ERR_DUPLICATED_ROUTE.
-  await registerScheduleRoutes(app);
-
   // --- runs (history feed) ---
   // Every recorded run for the active project, newest first: loop iterations
   // plus the backfilled chat / subagent / workflow rows.
