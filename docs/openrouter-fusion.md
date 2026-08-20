@@ -1,19 +1,27 @@
 # OpenRouter Fusion
 
-> **Fork addition.** This fork adds **OpenRouter Fusion** presets to the model picker: instead of one model answering, a *panel* of models deliberates on your prompt in parallel and a *judge* model synthesizes a single answer. It's [OpenRouter's Fusion router](https://openrouter.ai/blog/announcements/fusion-beats-frontier/) wired into Kady's single-agent run loop, with combined pricing and benchmark scores shown right in the picker.
+> **Tombstone (2026-08-20, lane F3).** Earlier revisions of this page listed
+> GPT-5.5 fusion panels and numeric DRACO percents. Those predecessor-panel
+> scores are **not transferable**. Shipped built-ins are GPT-5.6 Sol Pro
+> refresh panels. Every shipped note is `DRACO: unmeasured`. No percent score
+> is carried. The live table is `web/src/lib/fusion-presets.ts`
+> (`DEFAULT_FUSION_CONFIGS`). This file is not F3-owned on dest; see
+> `s11/wave-f/requests/f3-handoff.md`.
+
+> **Fork addition.** This fork adds **OpenRouter Fusion** presets to the model picker: instead of one model answering, a *panel* of models deliberates on your prompt in parallel and a *judge* model synthesizes a single answer. It's [OpenRouter's Fusion router](https://openrouter.ai/blog/announcements/fusion-beats-frontier/) wired into Kady's single-agent run loop, with combined pricing shown in the picker. DRACO remains **unmeasured** for every shipped preset.
 
 ## What you get
 
-Open the model picker and you'll see an **Openrouter Fusion** section at the top. Each entry is a named *preset* — a panel of analysis models plus an Opus 4.8 judge — with its combined input/output price and (where OpenRouter published one) its **DRACO** benchmark score:
+Open the model picker and you'll see an **Openrouter Fusion** section at the top. Each entry is a named *preset* — a panel of analysis models plus an Opus 4.8 judge — with its combined input/output price. Predecessor DRACO percents are not shown.
 
 | Preset | Panel (analysis models) | DRACO |
 |---|---|---|
-| Fable 5 + GPT-5.5 | `claude-fable-5`, `gpt-5.5` | **69.0%** |
-| Opus 4.8 + GPT-5.5 + Gemini 3.1 Pro | `claude-opus-4.8`, `gpt-5.5`, `gemini-3.1-pro-preview` | **68.3%** |
-| Opus 4.8 + GPT-5.5 | `claude-opus-4.8`, `gpt-5.5` | **67.6%** |
-| Opus 4.8 + Opus 4.8 | `claude-opus-4.8` ×2 | **65.5%** |
-| Gemini 3.5 Flash + Kimi K2.6 + DeepSeek V4 Pro | `gemini-3.5-flash`, `kimi-k2.6`, `deepseek-v4-pro` | 64.7% (budget; score measured with the predecessor Gemini 3 Flash panel) |
-| Exaflop | `gpt-5.5-pro`, `gemini-3.1-pro-preview`, `claude-fable-5` | custom (not benchmarked) |
+| Fable 5 + GPT-5.6 Sol Pro | `claude-fable-5`, `gpt-5.6-sol-pro` | unmeasured |
+| Opus 4.8 + GPT-5.6 Sol Pro + Gemini 3.1 Pro | `claude-opus-4.8`, `gpt-5.6-sol-pro`, `gemini-3.1-pro-preview` | unmeasured |
+| Opus 4.8 + GPT-5.6 Sol Pro | `claude-opus-4.8`, `gpt-5.6-sol-pro` | unmeasured |
+| Opus 4.8 + Opus 4.8 | `claude-opus-4.8` ×2 | unmeasured |
+| Gemini 3.5 Flash + Kimi K2.6 + DeepSeek V4 Pro | `gemini-3.5-flash`, `kimi-k2.6`, `deepseek-v4-pro` | unmeasured |
+| Exaflop | `gpt-5.6-sol-pro`, `gemini-3.1-pro-preview`, `claude-fable-5` | unmeasured |
 
 All presets are judged by **Opus 4.8** at `xhigh` reasoning, temperature 1, `max_tool_calls` 16. Pick one and send a message — every message on a Fusion preset runs the panel and returns the synthesized answer.
 
@@ -27,9 +35,9 @@ A Fusion run threads from the picker to a real `openrouter/fusion` request and b
 
 ### 1. Presets (frontend)
 
-Presets are defined in `web/src/lib/fusion-presets.ts` as `DEFAULT_FUSION_CONFIGS` — each a `{ id, name, note, config }` where `config` is the serialized Fusion request body. `loadFusionConfigs()` reads the user's saved presets from `localStorage` (key `fusionConfigs`), falling back to the built-ins; a `FUSION_DEFAULTS_VERSION` bump re-seeds new/updated built-ins while preserving user-added presets.
+Presets are defined in `web/src/lib/fusion-presets.ts` as `DEFAULT_FUSION_CONFIGS` — each a `{ id, name, note, config }` where `config` is the serialized Fusion request body. Every shipped `note` matches `/DRACO: unmeasured/`. `loadFusionConfigs()` reads the user's saved presets from `localStorage` (key `fusionConfigs`), falling back to the built-ins; a `FUSION_DEFAULTS_VERSION` bump re-seeds new/updated built-ins while preserving user-added presets.
 
-`web/src/lib/use-models.ts` turns each preset into a synthetic picker entry with id `fusion/<presetId>`, provider `"Openrouter Fusion"`, the preset's DRACO `note`, and a **combined price = each panel model's catalogue price once, plus the judge's twice** (so a two-Opus panel correctly shows double Opus pricing, and the judge is counted for both the analysis call and the final answer).
+`web/src/lib/use-models.ts` turns each preset into a synthetic picker entry with id `fusion/<presetId>`, provider `"Openrouter Fusion"`, the preset's DRACO `note` (unmeasured), and a **combined price = each panel model's catalogue price once, plus the judge's twice** (so a two-Opus panel correctly shows double Opus pricing, and the judge is counted for both the analysis call and the final answer).
 
 ### 2. The run request (frontend → server)
 
@@ -83,6 +91,7 @@ The **Fusion** tab in Settings lists your presets and an **Add Fusion config +**
 - **Not deterministic** — multiple models + sampling; not exactly reproducible.
 - **Panel sources aren't surfaced** — the panel's web searches run server-side at OpenRouter and aren't shown in Kady.
 - **Cost is an estimate** (catalogue pricing, panel + 2× judge), not OpenRouter's exact post-hoc bill.
+- **DRACO is unmeasured** for every shipped built-in after the GPT-5.6 Sol Pro refresh. Do not restore numeric percents.
 
 ## Key files
 

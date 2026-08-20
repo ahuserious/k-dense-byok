@@ -1,0 +1,31 @@
+{
+  "lane": "F3",
+  "rows": [8, 9],
+  "purpose": "Refresh shipped Fusion built-ins to GPT-5.6 Sol Pro, label inherited DRACO results unmeasured, and prove a shipped config reaches the production router transform.",
+  "rebaseBase": "fdd022102e26aa5986a8300977cefd0cb46f0dc9",
+  "files": [
+    "docs/inventory/f3-fusion-presets.json",
+    "docs/openrouter-fusion.md",
+    "docs/model-selection.md",
+    "e2e/item-count-reporter.ts",
+    "e2e/wave-f/f3/fusion-refresh.spec.ts",
+    "web/src/lib/fusion-presets.ts",
+    "web/src/lib/fusion-presets.test.ts"
+  ],
+  "routerProof": {
+    "test": "web/src/lib/fusion-presets.test.ts",
+    "productionTransform": "server/src/agent/fusion-bridge.ts#buildFusionRequestBody",
+    "asserts": [
+      "outbound.model === openrouter/fusion",
+      "plugins[0].analysis_models contains openai/gpt-5.6-sol-pro",
+      "no live default contains openai/gpt-5.5 or openai/gpt-5.5-pro",
+      "every shipped note matches /DRACO: unmeasured/ and carries no percent score"
+    ]
+  },
+  "gate_status": {
+    "U": "Live Playwright exists (e2e/wave-f/f3/fusion-refresh.spec.ts, 2 items). Not re-run on this dest rebase. Not a review PASS.",
+    "B": "Unit proof sends a shipped DEFAULT_FUSION_CONFIGS body through production buildFusionRequestBody.",
+    "D": "Data-only change in fusion-presets.ts. No new visual tokens."
+  },
+  "unowned_leftover": "Amendment #4 on dest fdd0221 granted docs/model-selection.md and docs/openrouter-fusion.md. This tip tombstones GPT-5.5 fusion panels and numeric DRACO percents; every shipped note stays DRACO: unmeasured. Dest docs stay stale until this lane merges. token-ban.json was rejected (live C5). Do not globally ban GPT-5.5."
+}
