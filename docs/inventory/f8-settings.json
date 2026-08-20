@@ -152,5 +152,15 @@
     "server/src/index.ts — register the /subscription-usage route (orchestrator-only file).",
     "e2e/fixtures.ts — mock /subscription-usage (lane S11's file). Without it, an unmocked call from the app-shell header would fail EVERY Playwright spec via the automatic runtimeErrors fixture, not just this lane's.",
     "web/src/lib/subscription-usage-source.ts — flip PROJECT_ROLLUP_ROUTE_ENABLED to true once both of the above land. That constant is inside lane F8's writable set; it is listed here so the three changes are applied together."
-  ]
+  ],
+
+  "focusRestore": {
+    "rule": "§6.6 — an overlay restores focus to its trigger.",
+    "implementation": "SettingsDialog is a controlled Dialog without a DialogTrigger. DialogContent.onCloseAutoFocus preventDefaults and focuses document.querySelector('[aria-label=\"Open settings\"]').",
+    "triggerOwners": [
+      "web/src/components/project-view.tsx (header gear, aria-label Open settings)",
+      "web/src/app/page.tsx (same aria-label on the landing gear)"
+    ],
+    "unitTest": "settings-dialog.test.tsx restores focus to a live Open settings button after Escape."
+  }
 }

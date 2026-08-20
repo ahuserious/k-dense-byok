@@ -626,6 +626,14 @@ function PipelinesPanel() {
   );
 }
 
+const SETTINGS_TRIGGER_SELECTOR = '[aria-label="Open settings"]';
+
+function restoreSettingsTriggerFocus(event: Event) {
+  event.preventDefault();
+  const trigger = document.querySelector<HTMLElement>(SETTINGS_TRIGGER_SELECTOR);
+  trigger?.focus();
+}
+
 export function SettingsDialog({
   open,
   onOpenChange,
@@ -639,6 +647,7 @@ export function SettingsDialog({
         className={cn(
           "sm:max-w-2xl h-[min(560px,80dvh)] flex flex-col gap-0 p-0 overflow-hidden"
         )}
+        onCloseAutoFocus={restoreSettingsTriggerFocus}
       >
         <DialogHeader className="px-6 pt-6 pb-4 border-b">
           <DialogTitle>Settings</DialogTitle>
