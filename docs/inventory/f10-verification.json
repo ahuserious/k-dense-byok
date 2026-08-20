@@ -1,9 +1,9 @@
 {
-  "$comment": "Machine-readable inventory of the Wave-F verification surface. Facts only: what exists, where it lives, what it proves. Owned by lane F10 (docs/inventory/f10-verification.json). Every number here was measured in this clone at base sha b702a8b, not copied from a brief. Round 2: evidence paths gained a per-item testId segment and shot() refuses a reused name; Job A runs --project=chromium and asserts the full inventory in a separate --list step; the wave-F upload is gated on a scrub-and-scan.",
+  "$comment": "Machine-readable inventory of the Wave-F verification surface. Facts only: what exists, where it lives, what it proves. Owned by lane F10 (docs/inventory/f10-verification.json). Every number here was measured in this clone, not copied from a brief. Rescue after round 2: per-item deterministic paths are held by an atomic sibling lock across the complete fixture lifetime, PNG creation is O_EXCL, Job A and Wave-F execute disjoint projects, the Stably action inputs are structurally pinned, and a successful Wave-F upload reconciles every executed item to deterministic PNG + video + trace + end-of-test screenshot retention.",
   "schemaVersion": 1,
   "lane": "F10",
-  "measuredAt": "2026-08-19",
-  "measuredAtBaseSha": "2e4d8ee",
+  "measuredAt": "2026-08-20",
+  "measuredAtBaseSha": "6e459db",
   "tiers": [
     {
       "id": "mocked",
@@ -136,6 +136,8 @@
       "perItemDirectorySegment": "testInfo.testId",
       "perItemDirectorySegmentReason": "two items in one spec file that pass the same shot name must not share a path; <NN> resets per item, so without this they did",
       "nameUniquenessRule": "names must be unique within an item; evidence.shot() rejects a reused name rather than overwriting",
+      "concurrentInvocationRule": "a sibling <testId>.lock directory is claimed with atomic mkdir for the complete fixture lifetime; a second Playwright process running the same item fails before it can clear or write the deterministic directory",
+      "atomicFileCreation": "page.screenshot() returns bytes first, then the final PNG is created with flag wx (O_EXCL); no exists-check/write TOCTOU and no overwrite",
       "staleArtifactHandling": "each item's own directory is emptied at fixture setup; a directory this run did not touch keeps its old run.json and is visibly stale",
       "perItemManifest": ".stably/wave-f-evidence/<lane>/<spec-basename>/<testId>/run.json",
       "verifiedExample": ".stably/wave-f-evidence/harness/smoke/517cde852f561569966c-0747a5b3859c1926408e/01-registry-before-create.png",
@@ -163,6 +165,7 @@
       "script": "e2e/wave-f/evidence-scan.mjs",
       "reuses": "scanHostedEvidenceArtifacts / scrubAndVerifyText / assertHostedEvidenceLogWithinLimit from scripts/hosted-evidence-*.mjs",
       "gates": "the wave-F artifact upload runs only when this step's outcome is success",
+      "successfulSuiteRetentionGate": "the reporter's executed-item count is reconciled to run.json manifests, deterministic PNGs, video.webm, trace.zip and test-finished-N.png; any missing or empty class fails closed",
       "limit": "finds only representations of secrets present in the job's own environment"
     }
   },
@@ -353,6 +356,7 @@
       "workflow": ".github/workflows/stably-cloud.yml",
       "job": "stably-cloud",
       "action": "stablyai/stably-runner-action@v4",
+      "acceptedInputsVerifiedFrom": "the v4 action.yml contract, rechecked 2026-08-20",
       "acceptedInputs": [
         "api-key",
         "project-id",
@@ -370,7 +374,7 @@
         "note"
       ],
       "consumesRepositorySpecs": false,
-      "consumesRepositorySpecsReason": "no input accepts a path, glob, config file or Playwright project name; work is selected by Stably-platform ids only",
+      "consumesRepositorySpecsReason": "no input accepts a repository path, glob or config file; project-id/test-suite-id select Stably-platform work, not this checkout's e2e/*.spec.ts",
       "proves": "nothing about this repository's suite",
       "skipsWhenSecretsAbsent": true,
       "requiredSecretNames": [
@@ -390,14 +394,15 @@
       "proves": "remote execution of the unmocked Wave-F tier plus the Gate U evidence bundle",
       "artifact": "wave-f-evidence-<run_id>",
       "phaseBudgetCheck": "node e2e/check-job-timeout-budget.mjs --target wave-f, first step of the job",
-      "evidenceScanGate": "node e2e/wave-f/evidence-scan.mjs; the upload is gated on its outcome",
-      "uploadsScrubbedLogs": true
+      "evidenceScanGate": "node e2e/wave-f/evidence-scan.mjs; the upload is gated on its outcome and a successful suite must reconcile every retained artifact class",
+      "uploadsScrubbedLogs": true,
+      "ifNoFilesFound": "error"
     }
   ],
   "honestClaim": {
     "remoteExecution": true,
     "remoteExecutionEvidence": "GitHub-hosted runner, ubuntu-24.04, fingerprinted per run",
     "stablyCloudBrowsers": false,
-    "stablyCloudBrowsersReason": "the Stably runner action's contract consumes no repository spec files; no run has ever executed this suite on a Stably-hosted browser"
+    "stablyCloudBrowsersReason": "the Stably runner action's contract selects Stably-platform tests and accepts no repository spec path; no run has ever executed this checkout's suite on a Stably-hosted browser"
   }
 }

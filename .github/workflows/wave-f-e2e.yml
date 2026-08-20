@@ -285,9 +285,17 @@ jobs:
       # green here means "no secret this job knows about leaked". It cannot see a credential that
       # exists only in seeded data or in a lane's fixture. A lane whose spec drives a real credential
       # surface must put that secret in this job's `env:` so the scanner can look for it.
+      #
+      # On a successful suite this step also reconciles the reporter's executed-item count to the
+      # retained run.json manifests, deterministic PNGs, videos, traces and end-of-test screenshots.
+      # Missing visual evidence therefore fails this step and keeps the upload from presenting an
+      # incomplete bundle as row-38 proof. On a failed suite it still scans and uploads partial
+      # diagnostics, but does not pretend every item should have reached its screenshot call.
       - name: Scan Wave-F evidence artifacts
         id: evidence-scan
         if: always()
+        env:
+          WAVE_F_SUITE_OUTCOME: ${{ steps.suite.outcome }}
         run: node e2e/wave-f/evidence-scan.mjs
 
       - name: Upload Wave-F evidence
@@ -295,7 +303,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: wave-f-evidence-${{ github.run_id }}
-          if-no-files-found: warn
+          if-no-files-found: error
           include-hidden-files: true
           retention-days: 14
           # The scrubbed logs, not the raw ones: the raw files stay on the runner and die with it.

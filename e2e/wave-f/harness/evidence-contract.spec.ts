@@ -24,7 +24,12 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { WAVE_F_EVIDENCE_MANIFEST_NAME, expect, test } from "../fixtures";
+import {
+  WAVE_F_EVIDENCE_LOCK_SUFFIX,
+  WAVE_F_EVIDENCE_MANIFEST_NAME,
+  expect,
+  test,
+} from "../fixtures";
 
 /**
  * The first item's screenshot path, read by the second item. Safe only because this block is
@@ -57,6 +62,15 @@ test.describe.serial(
       ).toBe(testInfo.testId);
       expect(fs.statSync(written).size, "A screenshot with no bytes is not evidence.")
         .toBeGreaterThan(0);
+      const lockDirectory = `${evidence.directory}${WAVE_F_EVIDENCE_LOCK_SUFFIX}`;
+      expect(
+        fs.statSync(lockDirectory).isDirectory(),
+        "The deterministic item path must be exclusively held for the whole fixture lifetime.",
+      ).toBe(true);
+      expect(
+        () => fs.mkdirSync(lockDirectory),
+        "A second Playwright invocation must be unable to claim this item's path concurrently.",
+      ).toThrow(/EEXIST/);
     });
 
     test("the second item passing the SAME name writes a different file, not over the first", async ({
@@ -70,6 +84,16 @@ test.describe.serial(
         firstItemScreenshotPath,
         "This item reads the first item's path; the serial block guarantees that order.",
       ).toBeDefined();
+      expect(
+        fs.existsSync(
+          `${path.dirname(firstItemScreenshotPath!)}${WAVE_F_EVIDENCE_LOCK_SUFFIX}`,
+        ),
+        "The first item's lock must be released after fixture teardown so a later run can refresh it.",
+      ).toBe(false);
+      expect(
+        fs.existsSync(`${evidence.directory}${WAVE_F_EVIDENCE_LOCK_SUFFIX}`),
+        "This second item must hold its own lock while it writes.",
+      ).toBe(true);
 
       const written = await evidence.shot("shared-evidence-name");
 

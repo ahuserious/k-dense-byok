@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import { TARGETS, checkJobTimeoutBudget } from "./check-job-timeout-budget.mjs";
 import cloudGlobalSetup from "./global-setup.cloud.ts";
+import { assertWaveFEvidenceRetention } from "./wave-f/evidence-scan.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const playwrightCli = path.join(repositoryRoot, "node_modules/@playwright/test/cli.js");
@@ -124,6 +126,223 @@ test("the default collection holds every item exactly once across both projects"
   assert.match(
     result.output,
     /E2E inventory verified: 272 total = 234 executing-substantive \+ 38 thin; 3 fixme \+ 0 skip\./,
+  );
+  const inventory = /E2E inventory verified: (\d+) total = (\d+) executing-substantive/.exec(
+    result.output,
+  );
+  assert.ok(inventory, result.output);
+  assert.ok(
+    Number(inventory[2]) >= 200,
+    `The measured substantive floor must stay at or above 200.\n${result.output}`,
+  );
+});
+
+test("the hosted floor and Wave-F jobs execute disjoint Playwright projects", () => {
+  const floorWorkflow = fs.readFileSync(
+    path.join(repositoryRoot, ".github/workflows/stably-cloud.yml"),
+    "utf8",
+  );
+  const waveFWorkflow = fs.readFileSync(
+    path.join(repositoryRoot, ".github/workflows/wave-f-e2e.yml"),
+    "utf8",
+  );
+
+  const floorSuiteCommands = floorWorkflow
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("run: npx playwright test"));
+  assert.equal(floorSuiteCommands.length, 2, floorSuiteCommands.join("\n"));
+  assert.ok(
+    floorSuiteCommands.every((line) => line.includes("--project=chromium")),
+    `Every executable floor-suite command must select chromium only.\n${floorSuiteCommands.join("\n")}`,
+  );
+
+  const fullInventoryCommand = floorWorkflow
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line === "run: node node_modules/@playwright/test/cli.js test --list");
+  assert.ok(fullInventoryCommand, "The floor job lost its unfiltered full-inventory assertion.");
+  assert.ok(
+    !fullInventoryCommand.includes("--project"),
+    "The hosted full-inventory assertion must collect both projects without a project filter.",
+  );
+
+  const waveFSuiteCommands = waveFWorkflow
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("npx playwright test"));
+  assert.equal(waveFSuiteCommands.length, 2, waveFSuiteCommands.join("\n"));
+  assert.ok(
+    waveFSuiteCommands.every((line) => line.includes("--project=wave-f")),
+    `Every executable Wave-F command must select wave-f only.\n${waveFSuiteCommands.join("\n")}`,
+  );
+});
+
+test("the Stably v4 action uses valid inputs and labels platform tests honestly", () => {
+  const workflow = fs.readFileSync(
+    path.join(repositoryRoot, ".github/workflows/stably-cloud.yml"),
+    "utf8",
+  );
+  const actionMarker = "uses: stablyai/stably-runner-action@v4";
+  const actionStart = workflow.indexOf(actionMarker);
+  assert.notEqual(actionStart, -1, `Missing ${actionMarker}`);
+  const nextStep = workflow.indexOf("\n      - name:", actionStart);
+  const actionStep = workflow.slice(actionStart, nextStep === -1 ? undefined : nextStep);
+  const usedInputs = [...actionStep.matchAll(/^ {10}([a-z][a-z0-9-]*):/gm)]
+    .map((match) => match[1]);
+  const acceptedInputs = new Set([
+    "api-key",
+    "project-id",
+    "run-group-name",
+    "env-overrides",
+    "test-group-id",
+    "test-suite-id",
+    "domain-override",
+    "url-replacement",
+    "github-comment",
+    "github-token",
+    "async",
+    "environment",
+    "variable-overrides",
+    "note",
+  ]);
+  assert.ok(usedInputs.length > 0, actionStep);
+  assert.deepEqual(
+    usedInputs.filter((input) => !acceptedInputs.has(input)),
+    [],
+    `Unsupported stably-runner-action input(s): ${usedInputs.join(", ")}`,
+  );
+  assert.ok(usedInputs.includes("api-key"), actionStep);
+  assert.ok(usedInputs.includes("project-id"), actionStep);
+  assert.ok(!usedInputs.includes("test-suite-id"), "Use project-id OR test-suite-id, not both.");
+  assert.ok(!usedInputs.includes("playwright-project-name"), actionStep);
+
+  // Backticks are escaped in the double-quoted shell source so the rendered summary receives them
+  // literally rather than treating them as command substitutions.
+  const renderedSummarySource = workflow.replaceAll("\\`", "`");
+  assert.ok(
+    renderedSummarySource.includes(
+      "Nothing in its contract consumes this repository's `e2e/*.spec.ts`",
+    ),
+    "The summary must distinguish Stably-platform tests from repository specs.",
+  );
+  assert.ok(
+    renderedSummarySource.includes(
+      "A green Job B is NOT evidence that this suite ran in Stably Cloud",
+    ),
+    "The summary must not promote a platform-test run as repository-suite evidence.",
+  );
+  assert.ok(
+    renderedSummarySource.includes(
+      "Hosted execution of THIS suite is proven by Job A (GitHub-hosted ubuntu runner) and by " +
+        "the `wave-f-e2e.yml` workflow",
+    ),
+    "The summary must identify the jobs that actually execute repository specs.",
+  );
+});
+
+test("the Wave-F project and upload retain every required visual artifact", () => {
+  const configSource = fs.readFileSync(
+    path.join(repositoryRoot, "playwright.config.ts"),
+    "utf8",
+  );
+  const projectStart = configSource.indexOf('name: "wave-f"');
+  assert.notEqual(projectStart, -1, "playwright.config.ts must declare a wave-f project.");
+  const projectEnd = configSource.indexOf("\n    },", projectStart);
+  assert.notEqual(projectEnd, -1, "Could not delimit the wave-f project.");
+  const waveFProject = configSource.slice(projectStart, projectEnd);
+  assert.match(waveFProject, /trace:\s*"on"/);
+  assert.match(waveFProject, /video:\s*"on"/);
+  assert.match(waveFProject, /screenshot:\s*"on"/);
+
+  const workflow = fs.readFileSync(
+    path.join(repositoryRoot, ".github/workflows/wave-f-e2e.yml"),
+    "utf8",
+  );
+  assert.match(workflow, /WAVE_F_SUITE_OUTCOME: \$\{\{ steps\.suite\.outcome \}\}/);
+  assert.match(workflow, /if: always\(\) && steps\.evidence-scan\.outcome == 'success'/);
+  assert.match(workflow, /if-no-files-found: error/);
+  assert.match(workflow, /retention-days: 14/);
+  for (const artifactPath of [
+    ".stably/wave-f-evidence/**",
+    ".stably/test-results/**",
+    "wave-f-test.scrubbed.log",
+    "wave-f-preview-up.scrubbed.log",
+    "wave-f-runner-fingerprint.json",
+  ]) {
+    assert.ok(workflow.includes(artifactPath), `Wave-F upload is missing ${artifactPath}`);
+  }
+});
+
+function writeSyntheticWaveFEvidence({ omitSecondTrace = false } = {}) {
+  const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "wave-f-retention-"));
+  fs.writeFileSync(
+    path.join(workingDirectory, "wave-f-test.log"),
+    "E2E inventory observed for filtered run: 2 total = 2 executing-substantive + 0 thin; " +
+      "0 fixme + 0 skip.\n",
+  );
+  for (let index = 1; index <= 2; index += 1) {
+    const itemDirectory = path.join(
+      workingDirectory,
+      ".stably",
+      "wave-f-evidence",
+      "synthetic",
+      "spec",
+      `item-${String(index)}`,
+    );
+    fs.mkdirSync(itemDirectory, { recursive: true });
+    const shot = "01-retained.png";
+    fs.writeFileSync(path.join(itemDirectory, shot), `png-${String(index)}`);
+    fs.writeFileSync(
+      path.join(itemDirectory, "run.json"),
+      `${JSON.stringify({ ciRunId: "synthetic-run", shots: [shot] })}\n`,
+    );
+
+    const resultDirectory = path.join(
+      workingDirectory,
+      ".stably",
+      "test-results",
+      `item-${String(index)}-wave-f`,
+    );
+    fs.mkdirSync(resultDirectory, { recursive: true });
+    fs.writeFileSync(path.join(resultDirectory, "video.webm"), `video-${String(index)}`);
+    if (!(omitSecondTrace && index === 2)) {
+      fs.writeFileSync(path.join(resultDirectory, "trace.zip"), `trace-${String(index)}`);
+    }
+    fs.writeFileSync(
+      path.join(resultDirectory, "test-finished-1.png"),
+      `screenshot-${String(index)}`,
+    );
+  }
+  return workingDirectory;
+}
+
+test("successful Wave-F retention reconciliation counts all artifact classes", (t) => {
+  const workingDirectory = writeSyntheticWaveFEvidence();
+  t.after(() => fs.rmSync(workingDirectory, { recursive: true, force: true }));
+  const result = assertWaveFEvidenceRetention({
+    workingDirectory,
+    suiteOutcome: "success",
+    ciRunId: "synthetic-run",
+  });
+  assert.equal(result.enforced, true);
+  assert.equal(result.manifests, 2);
+  assert.equal(result.deterministicPngs, 2);
+  assert.equal(result.videos, 2);
+  assert.equal(result.traces, 2);
+  assert.equal(result.screenshots, 2);
+});
+
+test("successful Wave-F retention reconciliation fails closed on a missing trace", (t) => {
+  const workingDirectory = writeSyntheticWaveFEvidence({ omitSecondTrace: true });
+  t.after(() => fs.rmSync(workingDirectory, { recursive: true, force: true }));
+  assert.throws(
+    () => assertWaveFEvidenceRetention({
+      workingDirectory,
+      suiteOutcome: "success",
+      ciRunId: "synthetic-run",
+    }),
+    /retained 1 trace artifact\(s\); expected at least 2/,
   );
 });
 

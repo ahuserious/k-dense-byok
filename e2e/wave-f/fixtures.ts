@@ -76,6 +76,58 @@ function waveFSpecIdentity(testInfo: TestInfo): WaveFSpecIdentity {
 
 /** The per-item provenance file written next to that item's screenshots. */
 export const WAVE_F_EVIDENCE_MANIFEST_NAME = "run.json";
+/** A sibling directory held while one Playwright invocation owns an item's deterministic path. */
+export const WAVE_F_EVIDENCE_LOCK_SUFFIX = ".lock";
+
+function hasNodeErrorCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error &&
+    (error as { code?: unknown }).code === code;
+}
+
+function acquireEvidenceDirectoryLock(directory: string, testInfo: TestInfo): string {
+  const lockDirectory = `${directory}${WAVE_F_EVIDENCE_LOCK_SUFFIX}`;
+  fs.mkdirSync(path.dirname(directory), { recursive: true });
+  try {
+    // `mkdir` is the cross-platform atomic claim. The item id is unique only within one Playwright
+    // session; two Playwright CLI processes can execute the same item concurrently and therefore
+    // compute the same deterministic evidence directory. Without this claim, either process can
+    // `rmSync` the other process's screenshots or both can write the same PNG/run.json.
+    fs.mkdirSync(lockDirectory);
+  } catch (error) {
+    if (hasNodeErrorCode(error, "EEXIST")) {
+      throw new Error(
+        `Wave-F evidence directory ${directory} is already owned by another Playwright invocation ` +
+          `(lock: ${lockDirectory}). Refusing to clear or write it, because concurrent runs of the ` +
+          "same item would race. If no Playwright run is active, remove the stale lock directory " +
+          "and run the item again.",
+      );
+    }
+    throw error;
+  }
+
+  try {
+    fs.writeFileSync(
+      path.join(lockDirectory, "owner.json"),
+      `${JSON.stringify(
+        {
+          pid: process.pid,
+          testId: testInfo.testId,
+          project: testInfo.project.name,
+          retry: testInfo.retry,
+          acquiredAt: new Date().toISOString(),
+          ciRunId: process.env.GITHUB_RUN_ID ?? null,
+        },
+        null,
+        2,
+      )}\n`,
+      { flag: "wx" },
+    );
+  } catch (error) {
+    fs.rmSync(lockDirectory, { recursive: true, force: true });
+    throw error;
+  }
+  return lockDirectory;
+}
 
 export interface WaveFEvidence {
   /** The lane id this spec's evidence is filed under (its directory under `e2e/wave-f/`). */
@@ -120,88 +172,99 @@ export const test = liveTest.extend<{ evidence: WaveFEvidence }>({
       identity.specName,
       testInfo.testId,
     );
-    // Emptied, not merely created. `.stably/wave-f-evidence` is never cleaned between local runs,
-    // so without this a screenshot from an earlier run -- or from attempt 1 of a retried item --
-    // sits in the directory a lane is about to quote from, indistinguishable from what this run
-    // produced. After this line every file under this directory was written by this attempt, and
-    // the manifest below says which attempt that was.
-    fs.rmSync(directory, { recursive: true, force: true });
-    fs.mkdirSync(directory, { recursive: true });
-
+    const lockDirectory = acquireEvidenceDirectoryLock(directory, testInfo);
     let shotCount = 0;
     const writtenFileNameByName = new Map<string, string>();
-    await use({
-      lane: identity.lane,
-      directory,
-      async shot(name: string): Promise<string> {
-        if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) {
-          throw new Error(
-            `Evidence name ${JSON.stringify(name)} must be lower-case kebab-case so the on-disk ` +
-              "evidence tree stays sortable and quotable in a report.",
-          );
-        }
-        const alreadyWritten = writtenFileNameByName.get(name);
-        if (alreadyWritten !== undefined) {
-          throw new Error(
-            `Evidence name ${JSON.stringify(name)} was already used by this test item; it wrote ` +
-              `${alreadyWritten}. Screenshot names must be unique within an item -- pass a ` +
-              "different name (for example a suffix naming the step: " +
-              `${JSON.stringify(`${name}-after`)}) rather than reusing this one. Refusing to ` +
-              "overwrite, because a lane that quotes the first path would silently be shown the " +
-              "second screenshot.",
-          );
-        }
-        shotCount += 1;
-        const fileName = `${String(shotCount).padStart(2, "0")}-${name}.png`;
-        const absolutePath = path.join(directory, fileName);
-        // Belt and braces behind the name map: the map cannot see a file some other writer put
-        // here. Nothing should be able to -- the directory is keyed by this item's id and was
-        // emptied above -- so if this ever fires it is a real collision and not a naming slip.
-        if (fs.existsSync(absolutePath)) {
-          throw new Error(
-            `Evidence path ${absolutePath} already exists in this run. Two writers are sharing one ` +
-              "Wave-F evidence path, which means one screenshot is about to be lost.",
-          );
-        }
-        writtenFileNameByName.set(name, fileName);
-        await page.screenshot({ path: absolutePath, fullPage: true });
-        // Attached as well as written: the written copy is what a lane quotes by path in its
-        // evidence file and what the CI artifact step uploads, the attachment is what makes it
-        // visible in the HTML report and the trace viewer without anyone knowing the path.
-        await testInfo.attach(`${identity.lane}/${identity.specName}/${fileName}`, {
-          path: absolutePath,
-          contentType: "image/png",
-        });
-        return absolutePath;
-      },
-    });
+    try {
+      // Emptied, not merely created. `.stably/wave-f-evidence` is never cleaned between local runs,
+      // so without this a screenshot from an earlier run -- or from attempt 1 of a retried item --
+      // sits in the directory a lane is about to quote from, indistinguishable from what this run
+      // produced. The sibling lock above makes this clearing safe even when a second Playwright CLI
+      // process starts the same item in the same checkout.
+      fs.rmSync(directory, { recursive: true, force: true });
+      fs.mkdirSync(directory, { recursive: true });
 
-    // Written on the way out, so a failed item still leaves provenance for whatever it did shoot.
-    // This is the other half of the stale-artifact answer: a directory whose test was renamed or
-    // deleted keeps its old manifest and is visibly from another run, and a reader who pastes a
-    // path into a report can `cat run.json` beside it to see which item, attempt and run made it.
-    fs.writeFileSync(
-      path.join(directory, WAVE_F_EVIDENCE_MANIFEST_NAME),
-      `${JSON.stringify(
-        {
+      try {
+        await use({
           lane: identity.lane,
-          spec: path
-            .relative(identity.repositoryRoot, testInfo.file)
-            .split(path.sep)
-            .join("/"),
-          title: testInfo.titlePath.join(" › "),
-          testId: testInfo.testId,
-          project: testInfo.project.name,
-          retry: testInfo.retry,
-          workerIndex: testInfo.workerIndex,
-          writtenAt: new Date().toISOString(),
-          ciRunId: process.env.GITHUB_RUN_ID ?? null,
-          shots: [...writtenFileNameByName.values()],
-        },
-        null,
-        2,
-      )}\n`,
-    );
+          directory,
+          async shot(name: string): Promise<string> {
+            if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) {
+              throw new Error(
+                `Evidence name ${JSON.stringify(name)} must be lower-case kebab-case so the on-disk ` +
+                  "evidence tree stays sortable and quotable in a report.",
+              );
+            }
+            const alreadyWritten = writtenFileNameByName.get(name);
+            if (alreadyWritten !== undefined) {
+              throw new Error(
+                `Evidence name ${JSON.stringify(name)} was already used by this test item; it wrote ` +
+                  `${alreadyWritten}. Screenshot names must be unique within an item -- pass a ` +
+                  "different name (for example a suffix naming the step: " +
+                  `${JSON.stringify(`${name}-after`)}) rather than reusing this one. Refusing to ` +
+                  "overwrite, because a lane that quotes the first path would silently be shown the " +
+                  "second screenshot.",
+              );
+            }
+            shotCount += 1;
+            const fileName = `${String(shotCount).padStart(2, "0")}-${name}.png`;
+            const absolutePath = path.join(directory, fileName);
+            writtenFileNameByName.set(name, fileName);
+            const screenshot = await page.screenshot({ fullPage: true });
+            try {
+              // `existsSync` followed by `page.screenshot({path})` was a TOCTOU check: another writer
+              // could create/truncate the target between the check and the browser's write. Capture
+              // first, then claim the final path with O_EXCL (`wx`) so an overwrite is impossible.
+              fs.writeFileSync(absolutePath, screenshot, { flag: "wx" });
+            } catch (error) {
+              if (hasNodeErrorCode(error, "EEXIST")) {
+                throw new Error(
+                  `Evidence path ${absolutePath} already exists in this run. Refusing to overwrite ` +
+                    "it, because two writers sharing one Wave-F evidence name would lose a screenshot.",
+                );
+              }
+              throw error;
+            }
+            // Attached as well as written: the written copy is what a lane quotes by path in its
+            // evidence file and what the CI artifact step uploads, the attachment is what makes it
+            // visible in the HTML report and the trace viewer without anyone knowing the path.
+            await testInfo.attach(`${identity.lane}/${identity.specName}/${fileName}`, {
+              body: screenshot,
+              contentType: "image/png",
+            });
+            return absolutePath;
+          },
+        });
+      } finally {
+        // Written on the way out, so a failed item still leaves provenance for whatever it did shoot.
+        // A directory whose test was renamed or deleted keeps its old manifest and is visibly from
+        // another run; a reader can inspect this file without trusting a screenshot's filename.
+        fs.writeFileSync(
+          path.join(directory, WAVE_F_EVIDENCE_MANIFEST_NAME),
+          `${JSON.stringify(
+            {
+              lane: identity.lane,
+              spec: path
+                .relative(identity.repositoryRoot, testInfo.file)
+                .split(path.sep)
+                .join("/"),
+              title: testInfo.titlePath.join(" › "),
+              testId: testInfo.testId,
+              project: testInfo.project.name,
+              retry: testInfo.retry,
+              workerIndex: testInfo.workerIndex,
+              writtenAt: new Date().toISOString(),
+              ciRunId: process.env.GITHUB_RUN_ID ?? null,
+              shots: [...writtenFileNameByName.values()],
+            },
+            null,
+            2,
+          )}\n`,
+        );
+      }
+    } finally {
+      fs.rmSync(lockDirectory, { recursive: true, force: true });
+    }
   },
 });
 
