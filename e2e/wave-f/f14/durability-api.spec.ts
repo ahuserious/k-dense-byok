@@ -280,6 +280,9 @@ test("@live @live-alt round-trips a durability settings change through the serve
 test("@live @live-alt refuses to enable a signal it cannot observe, and says why", async ({
   liveWorkspace,
 }) => {
+  // Chromium logs the deliberate refusal as a console error, so the fixture's
+  // runtime-error guard needs it declared as an exact multiset — one 400 here.
+  liveWorkspace.expectRefusedResourceStatus(400);
   const refused = await backendJson<{ detail: string; code: string }>(liveWorkspace, {
     path: "/durability/settings",
     method: "PUT",
@@ -303,6 +306,11 @@ test("@live @live-alt refuses to enable a signal it cannot observe, and says why
 test("@live @live-alt refuses a malformed model reference and a malformed timeline cursor without leaking a path", async ({
   liveWorkspace,
 }) => {
+  // Three deliberate refusals below, each of which Chromium logs as a console
+  // error; the guard is an exact multiset, so all three must be declared.
+  for (let refusal = 0; refusal < 3; refusal += 1) {
+    liveWorkspace.expectRefusedResourceStatus(400);
+  }
   const badModel = await backendJson<{ detail: string }>(liveWorkspace, {
     path: "/durability/settings",
     method: "PUT",
