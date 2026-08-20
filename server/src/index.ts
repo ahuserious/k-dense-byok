@@ -37,6 +37,7 @@ import { registerModalRoutes } from "./api/modal.ts";
 import { registerModelProviderRoutes } from "./api/model-providers.ts";
 import { registerHarnessRoutes } from "./api/harness.ts";
 import { registerDagWorkflowRoutes } from "./api/dag-workflows.ts";
+import { registerElevateToDagRoutes } from "./api/elevate-to-dag.ts";
 import { registerScheduleRoutes } from "./api/schedules.ts";
 import { registerPipelineRoutes } from "./api/pipelines.ts";
 import { registerConsoleRoutes } from "./api/console.ts";
@@ -279,6 +280,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await registerDagWorkflowRoutes(app, {
     controller: workflowController ?? undefined,
   });
+  registerElevateToDagRoutes(app);
   await registerScheduleRoutes(app);
   await registerPromptOptimizationInterviewRoutes(app);
   await registerPipelineRoutes(app);

@@ -65,6 +65,20 @@ export function workflowNodeCoreModelCallCeiling(
       return 1;
     case "prompt-optimization":
       return promptOptimizationModelCallSlots(node).length;
+    case "elevate-to-dag":
+    case "reasoning-style":
+    case "workflow-ref":
+      return 0;
+    case "hypothesis":
+      return (node.hypothesisCount ?? 2) + 1;
+    case "formatted-output":
+      return 1;
+    default: {
+      const _exhaustive: never = node;
+      throw new Error(
+        `Unhandled workflow node kind ${String((_exhaustive as WorkflowNode).kind)}.`,
+      );
+    }
   }
 }
 
