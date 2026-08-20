@@ -41,6 +41,7 @@ import { registerScheduleRoutes } from "./api/schedules.ts";
 import { registerPipelineRoutes } from "./api/pipelines.ts";
 import { registerConsoleRoutes } from "./api/console.ts";
 import { registerRaindropRoutes } from "./api/raindrop.ts";
+import { registerSubscriptionUsageRoutes } from "./api/subscription-usage.ts";
 import { disposeAllWorkflowDelegationSessions } from "./agent/workflow-delegation-session.ts";
 import type { WorkflowRunController } from "./workflows/controller.ts";
 import {
@@ -283,6 +284,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await registerPipelineRoutes(app);
   await registerConsoleRoutes(app);
   await registerRaindropRoutes(app);
+  await registerSubscriptionUsageRoutes(app);
 
   // Production attaches to and drains any inherited detached owner before
   // buildApp runs. Budget reconciliation can therefore charge only reservations

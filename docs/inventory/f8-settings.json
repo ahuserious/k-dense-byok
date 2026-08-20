@@ -1,0 +1,167 @@
+{
+  "inventory": "f8-settings",
+  "lane": "F8",
+  "wave": "F",
+  "base": "51f0b7d",
+  "rows": [
+    {
+      "row": 14,
+      "title": "Subscription manager bar",
+      "surface": "app-shell header, mounted through the existing SessionCostPill slot (web/src/app/page.tsx:1017)",
+      "gateU": "PASS",
+      "gateB": "PARTIAL — usage is bound to the real cost ledger; quota is not readable on this machine and is rendered disabled with the provider's own reason",
+      "gateD": "PASS with three measured contrast failures inherited from the base token palette, fixed inside this lane's own components"
+    },
+    {
+      "row": 15,
+      "title": "Kady CLI selector",
+      "surface": "Settings > Kady CLI (tab value \"kady-cli\", Runtime group)",
+      "gateU": "PASS",
+      "gateB": "NOT DONE — no endpoint in this tree persists a default harness; GET /harnesses is absent and the published F2 interface has no default-selection mutation"
+    }
+  ],
+
+  "files": [
+    "web/src/components/settings-dialog.tsx",
+    "web/src/components/settings-dialog.test.tsx",
+    "web/src/components/session-cost-pill.tsx",
+    "web/src/components/session-cost-pill.test.tsx",
+    "web/src/components/subscription-bar.tsx",
+    "web/src/components/subscription-bar.test.tsx",
+    "web/src/components/settings/kady-cli-panel.tsx",
+    "web/src/components/settings/kady-cli-panel.test.tsx",
+    "web/src/components/settings/settings-nav-group.tsx",
+    "web/src/lib/subscription-usage.ts",
+    "web/src/lib/subscription-usage.test.ts",
+    "web/src/lib/subscription-usage-source.ts",
+    "web/src/lib/kady-cli.ts",
+    "web/src/lib/kady-cli.test.ts",
+    "server/src/agent/subscription-usage.ts",
+    "server/src/api/subscription-usage.ts",
+    "server/test/subscription-usage.test.ts",
+    "docs/inventory/f8-settings.json"
+  ],
+
+  "playwrightSpecs": {
+    "note": "Policy amendment #3 gives e2e/wave-f/f8/** to F8 without overlap. The reporter remains an exact-path handoff.",
+    "paths": [
+      "e2e/wave-f/f8/f8-settings-usage.spec.ts",
+      "e2e/wave-f/f8/f8-live.spec.ts"
+    ],
+    "itemDelta": {
+      "files": {
+        "f8-settings-usage.spec.ts": 9,
+        "f8-live.spec.ts": 3
+      },
+      "substantive": 12,
+      "thin": 0,
+      "fixme": 0,
+      "skip": 0,
+      "expectedSubstantiveBefore": 221,
+      "expectedSubstantiveAfter": 233
+    }
+  },
+
+  "settingsTabLayout": {
+    "decision": "Keep one vertical rail; introduce non-interactive group headings inside it.",
+    "groups": [
+      { "label": "Workspace", "tabs": ["model-providers", "api-keys", "connectors"] },
+      { "label": "Agents", "tabs": ["skills", "specialists", "fusion"] },
+      { "label": "Runtime", "tabs": ["pipelines", "kady-cli"] },
+      { "label": "Appearance", "tabs": ["appearance"] }
+    ],
+    "invariants": [
+      "All eight pre-existing tab `value` strings are unchanged; other code and tests reference them.",
+      "Each pre-existing trigger keeps its icon, label, classes and order within its group.",
+      "Headings are <div role=\"presentation\">: not focusable, not in the tab order, not registered with Radix's roving focus. Arrowing the rail still visits exactly the tabs.",
+      "defaultValue stays \"api-keys\"."
+    ],
+    "why": "The rail is vertical, w-44 and already `overflow-y-auto` (settings-dialog.tsx:652-712), so eight entries was never an overflow problem — it is a navigability one, and it gets worse with every lane that adds a tab. Grouping costs one 10px --muted-foreground label per group (four labels inside an already-scrolling container) and buys a structure that absorbs the next three additions without another layout decision. Per §6.4 the labels carry information — which subsystem a setting belongs to — so they are not chrome.",
+    "rejected": [
+      {
+        "option": "Add another flat TabsTrigger",
+        "why": "Defers the problem to whoever adds the tenth. The master brief pre-rejected it."
+      },
+      {
+        "option": "Horizontal top tabs with overflow",
+        "why": "Breaks all eight existing tabs' layout and the rail's border-r, and buys a surface with less room, not more."
+      },
+      {
+        "option": "A search or command palette over settings",
+        "why": "Discovery by search is worse than discovery by structure at eleven items, and it is new chrome that only pays off at a scale this dialog will not reach."
+      },
+      {
+        "option": "A second dialog for Runtime settings",
+        "why": "Splits one mental model across two overlays and doubles §6.6's focus-trap and focus-restore obligations for no gain."
+      },
+      {
+        "option": "Collapsible groups (Accordion inside the rail)",
+        "why": "The closest alternative, and still wrong here: it hides items behind a disclosure the user must operate before they can see what exists. §6.5 bans hover-driven expansion; a click-driven one is permitted but costs a keystroke per group on every visit. With eleven items there is nothing to collapse for — the rail already scrolls."
+      }
+    ],
+    "reservedMountPoints": [
+      {
+        "owner": "Team E lane F11",
+        "interface": "W/interfaces/F11-supervisor-settings.md",
+        "status": "does not exist as of 2026-08-19; `ls W/interfaces/` shows F1, F2, F7, F10, F12 (x3), F14 only",
+        "placement": "Runtime group, immediately below Kady CLI, value \"supervisor\". A mount, not a redesign."
+      },
+      {
+        "owner": "Team A lane F1",
+        "interface": "W/interfaces/F1-model-presets.md (DRAFT-0)",
+        "status": "exists; F1 mounts its Model presets section INSIDE Settings > Model providers, in its own file",
+        "placement": "No rail entry is required for any gate (W/requests/LEAD-TO-C-1.md). If the orchestrator wants one, it belongs in the Workspace group under Model providers. Lane F8 did not build against it."
+      }
+    ]
+  },
+
+  "costWidgetReconciliation": {
+    "decision": "The bar CONTAINS the pill.",
+    "detail": "web/src/components/session-cost-pill.tsx now re-exports SubscriptionBar under the name SessionCostPill with an identical prop shape, so the app shell's mount at web/src/app/page.tsx:1017 (not lane F8's file) needs no change and no second header trigger appears. Cost spent and subscription quota consumed are different quantities, so both are shown — as two sections of one overlay with one trigger, with the division of labour stated on screen.",
+    "overlayChange": "HoverCard -> Popover. A HoverCard's content is unreachable by keyboard and does not trap focus, close on Escape, or restore focus to its trigger; §6.6 requires all four."
+  },
+
+  "quotaPosition": {
+    "claim": "Provider quota is NOT readable on this machine, and no code path in this lane can produce a percentage for one.",
+    "evidence": "server/src/agent/provider-auth.ts:31-63 states it in its own billingNote fields: openai-codex, github-copilot and xai each say Kady cannot read remaining quota or overages; anthropic is billingMode metered_oauth, which has no ceiling to be a percentage of (server/src/cost/billing.ts:72-74).",
+    "orcaComparison": "Orca's usedPercent does not come from its usage scanners either — claude/codex/opencode-usage-types.ts carry no limit field. It comes from src/shared/rate-limit-types.ts, populated per provider from an OAuth credential store or a CLI credential file (UsageRateLimitSource = oauth | cli | web | live-session). That source is closed to this lane twice over: it is Orca's Electron main/IPC layer, which decision D4 does not port, and reading a credential store is forbidden to this agent.",
+    "rendering": "Each provider's quota meter renders disabled with the provider's own sentence visible. The only real percentage on the surface is the project spend cap, which has a real denominator (server/src/cost/ledger.ts:695-719)."
+  },
+
+  "orcaProvenance": {
+    "licence": "MIT, Copyright (c) 2026 Lovecast Inc. Verified in this session at /Users/DanBot/orca-custom/orca/LICENSE.",
+    "obligation": "The copyright notice and the permission notice travel with any copy or substantial portion. Every file in this lane carrying ported Orca logic reproduces both, plus a provenance comment naming the source file.",
+    "portedInto": "web/src/lib/subscription-usage.ts",
+    "portedSymbols": [
+      "normalizeUsagePercentageDisplay / DEFAULT_USAGE_PERCENTAGE_DISPLAY",
+      "normalizeStatusBarUsageMode / DEFAULT_STATUS_BAR_USAGE_MODE",
+      "clampUsedPercent",
+      "getDisplayedUsagePercentage (including the round-before-complement rule, Orca #7574)"
+    ],
+    "portedSources": [
+      "<orca>/src/shared/usage-percentage-display.ts",
+      "<orca>/src/shared/status-bar-usage-mode.ts"
+    ],
+    "reimplementedNotCopied": [
+      "The 60/80 severity thresholds, from <orca>/src/renderer/src/components/status-bar/usage-roster-formatting.ts (usageTextColorClass). Its text-red-500/text-yellow-500 palette classes were deliberately NOT ported: §6.1 wants semantic tokens and §6.6 forbids colour-only state."
+    ],
+    "notPorted": "Orca's runtime/IPC layer. Architectural, not a licence question — this app is a Fastify server plus a Next.js client, not an Electron main/renderer pair."
+  },
+
+  "integrationRequired": [
+    "server/src/index.ts — register the /subscription-usage route (orchestrator-only file).",
+    "e2e/fixtures.ts — mock /subscription-usage (lane S11's file). Without it, an unmocked call from the app-shell header would fail EVERY Playwright spec via the automatic runtimeErrors fixture, not just this lane's.",
+    "web/src/lib/subscription-usage-source.ts — flip PROJECT_ROLLUP_ROUTE_ENABLED to true once both of the above land. That constant is inside lane F8's writable set; it is listed here so the three changes are applied together."
+  ],
+
+  "focusRestore": {
+    "rule": "§6.6 — an overlay restores focus to its trigger.",
+    "implementation": "SettingsDialog is a controlled Dialog without a DialogTrigger. A layout-effect triggerRef records the opener (or querySelector('[aria-label=\"Open settings\"]') as last resort). DialogContent.onCloseAutoFocus preventDefaults and focuses that node.",
+    "triggerOwners": [
+      "web/src/components/project-view.tsx (header gear, aria-label Open settings)",
+      "web/src/app/page.tsx (same aria-label on the landing gear)"
+    ],
+    "unitTest": "settings-dialog.test.tsx restores focus to a live Open settings button after Escape.",
+    "liveTest": "e2e/wave-f/f8/f8-live.spec.ts: keyboard Enter on the gear, Escape, assert the gear is focused. Unmocked."
+  }
+}

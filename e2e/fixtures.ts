@@ -586,6 +586,9 @@ async function installApiMocks(page: Page, state: MockApiState) {
     }
     if (path === "/model-providers" && method === "GET") return routeJson(route, { providers: [] });
     if (path === "/model-providers/models" && method === "GET") return routeJson(route, { models: [] });
+    if (path === "/subscription-usage" && method === "GET") {
+      return routeJson(route, { version: 1, scope: "project", projectId: "e2e", sessionCount: 0, providers: [], totalTokens: 0, totalListPriceUsd: 0 });
+    }
     if (path === "/credentials" && method === "GET") return routeJson(route, { openrouter: { set: true } });
     if (path === "/ollama/models" && method === "GET") return routeJson(route, { available: false, models: [] });
     if (path === "/openai-compatible/models" && method === "GET") {

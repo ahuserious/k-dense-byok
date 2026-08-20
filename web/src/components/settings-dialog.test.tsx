@@ -38,6 +38,35 @@ describe("SettingsDialog", () => {
     expect(screen.getByRole("tab", { name: /specialists/i })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /connectors/i })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /pipelines/i })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Kady CLI" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /fusion/i })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /appearance/i })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /workspace/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /agents/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /^runtime$/i })).not.toBeInTheDocument();
+    expect(
+      [...document.querySelectorAll('[role="presentation"]')].map((node) => node.textContent),
+    ).toEqual(["Workspace", "Agents", "Runtime", "Appearance"]);
+  });
+
+  it("restores focus to the Open settings trigger when the overlay closes", async () => {
+    const user = userEvent.setup();
+    const trigger = document.createElement("button");
+    trigger.setAttribute("aria-label", "Open settings");
+    document.body.appendChild(trigger);
+    trigger.focus();
+
+    const onOpenChange = vi.fn();
+    const { rerender } = render(<SettingsDialog open onOpenChange={onOpenChange} />);
+    expect(document.querySelector('[role="dialog"]')).toBeTruthy();
+
+    await user.keyboard("{Escape}");
+    rerender(<SettingsDialog open={false} onOpenChange={onOpenChange} />);
+
+    await waitFor(() => {
+      expect(document.activeElement).toBe(trigger);
+    });
+    trigger.remove();
   });
 
   it("identifies the active, Kady-owned pipeline runtime as Pi (Kady)", async () => {

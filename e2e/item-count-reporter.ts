@@ -25,6 +25,9 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   ["wave-f/f9/f9-live.spec.ts", 2],
   // Wave F lane F2 (rows 7/16). Three live contract items; Gate U remains F8.
   ["wave-f/f2/harness-endpoint.spec.ts", 3],
+  // Lane F8 (rows 14-15): subscription bar + Settings ▸ Kady CLI + D-4 live pin.
+  ["wave-f/f8/f8-settings-usage.spec.ts", 9],
+  ["wave-f/f8/f8-live.spec.ts", 3],
   ["live-backend.spec.ts", 3],
   ["scientific-pipelines.spec.ts", 57],
   ["workspace.spec.ts", 46],
@@ -32,8 +35,8 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   ["wave-f/harness/evidence-contract.spec.ts", 3],
   ["wave-f/harness/smoke.spec.ts", 1],
 ]);
-// 255 after F9, plus F2's 3 live harness items.
-const EXPECTED_SUBSTANTIVE_ITEMS = 258;
+// 258 after F2, plus F8's 12 settings/live items.
+const EXPECTED_SUBSTANTIVE_ITEMS = 270;
 // 35 pre-existing thin items (labelled inventory smokes plus the 3 fixmes) + the 3 Wave-F
 // evidence-fixture contract items.
 const EXPECTED_THIN_ITEMS = 38;
