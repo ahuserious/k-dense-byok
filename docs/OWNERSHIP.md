@@ -205,3 +205,18 @@ S11's `e2e/**` already covered, so the first lane to inventory one of its specs 
 measured to be everything it holds (21 top-level files, no subdirectories) — so `e2e/wave-f/` belongs to Wave F alone:
 `e2e/wave-f/*` and `e2e/wave-f/harness/**` to F10, `e2e/wave-f/<lane>/**` to each lane. S11's handoffs
 (`e2e/item-count-reporter.ts` and the existing top-level files) are unchanged.
+
+**Amendment #4 (2026-08-20, lead).** Narrow dest grants from the filed F1/F3/F6/F7 handoff requests, with
+zero Wave F intersections:
+
+- S7→F1 `server/src/agent/session-registry.ts` — `makeModelPresetExtension` next to Fusion; flag flip in the same commit.
+- S8→F1 `server/src/api/sessions.ts` — `preset/<id>` binder (`0cbba78`); no second binder.
+- S5→F3 `docs/model-selection.md` — GPT-5.5 fusion-panel / numeric DRACO tombstone; Fusion paragraph only.
+- F3 glob `docs/openrouter-fusion.md` — same tombstone on the previously uninventoried Fusion doc.
+- F6 globs `server/test/wave-f/f6-*.test.ts`, `web/package.json`, `web/package-lock.json`, `docs/inventory/web-tabs.json`.
+- C5→F7 `server/src/projects.ts` — one `seedProjectPipelines` call next to `seedSandboxFiles` in `ensureProjectExists`.
+
+Rejected (see `s11/wave-f/requests/LEAD-HANDOFF-DECISIONS.md`): F4 `server/src/index.ts` (orchestrator-only
+route registration); F3 `config/token-ban.json` (optional; do not globally ban GPT-5.5); F7 taking
+`dag-workflows-panel.tsx` (F6 already holds it); F5 reachability (no grant requested); F14 `controller.ts`
+(already granted).

@@ -317,6 +317,7 @@
       "web/src/lib/fusion-presets.test.ts",
       "web/src/lib/fusion-presets*.ts",
       "docs/inventory/f3-fusion-presets.json",
+      "docs/openrouter-fusion.md",
       "e2e/wave-f/f3/**"
     ],
     "F2": [
@@ -387,7 +388,11 @@
       "server/vendor/pipeline-engine/packages/web/src/components/workflows/*.wave-f.test.ts",
       "docs/adr/F6-*.md",
       "docs/inventory/f6-builder.json",
-      "e2e/wave-f/f6/**"
+      "e2e/wave-f/f6/**",
+      "server/test/wave-f/f6-*.test.ts",
+      "web/package.json",
+      "web/package-lock.json",
+      "docs/inventory/web-tabs.json"
     ],
     "F7": [
       "server/seed/skills/scientific-pipelines/SKILL.md",
@@ -2132,6 +2137,34 @@
       "date": "2026-08-19",
       "path": "server/src/workflows/service.ts",
       "scope": "Wave F lane F5: the composition root that wires new node-kind executors and the elevate-to-dag engine into the runtime. Edits confined to the lane brief; the owner lane S5 is dormant and no Wave-F lane claims this path."
+    },
+    {
+      "from": "S7",
+      "to": "F1",
+      "date": "2026-08-20",
+      "path": "server/src/agent/session-registry.ts",
+      "scope": "Wave F lane F1: install makeModelPresetExtension next to the Fusion extension in the same commit as the CHAT_SESSION_PRESET_EXTENSION_INSTALLED flag flip. Do not invent a second binder. Owner S7 is dormant; no other Wave F lane claims this path."
+    },
+    {
+      "from": "S8",
+      "to": "F1",
+      "date": "2026-08-20",
+      "path": "server/src/api/sessions.ts",
+      "scope": "Wave F lane F1: resolve preset/<id>, setSessionModelPreset, and clear the preset on every terminal path (quote Team A 0cbba78). Do not invent a second binder. Owner S8 is dormant; no other Wave F lane claims this path."
+    },
+    {
+      "from": "S5",
+      "to": "F3",
+      "date": "2026-08-20",
+      "path": "docs/model-selection.md",
+      "scope": "Wave F lane F3: tombstone GPT-5.5 fusion-panel claims and numeric DRACO percents in the Fusion paragraph only; every shipped note stays DRACO: unmeasured. Do not globally ban GPT-5.5. Owner S5 is dormant; no other Wave F lane claims this path."
+    },
+    {
+      "from": "C5",
+      "to": "F7",
+      "date": "2026-08-20",
+      "path": "server/src/projects.ts",
+      "scope": "Wave F lane F7 (row 20): one import of seedProjectPipelines and one call next to seedSandboxFiles inside ensureProjectExists so new projects receive seeded pipelines. Nothing else in this file. Owner C5 is dormant; no other Wave F lane claims this path."
     }
   ]
 }
