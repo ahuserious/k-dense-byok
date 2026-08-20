@@ -3,6 +3,7 @@ import {
   PROVIDER_GROUPS,
   PROVIDER_GROUP_IDS,
   credentialVariablesPresent,
+  directDispatchSupport,
   providerGroup,
   providerGroupForRef,
   providerGroupModelRef,
@@ -172,5 +173,43 @@ describe("provider-group registry", () => {
     expect(providerGroup("groq")?.parameterSupport.seed).toBe(true);
     expect(providerGroup("anthropic")?.parameterSupport.seed).toBe(false);
     expect(providerGroup("anthropic")?.parameterSupport.reasoningEffort).toBe(true);
+  });
+
+  /**
+   * The predicate that gates the ▶ Test control, the `direct` binding row and
+   * `dispatchPresetCompletion`. Pinned per group so a later change to
+   * `kind` or to the group list cannot quietly re-enable a control over a call
+   * Kady cannot build — the round-1 defect this closes.
+   */
+  it("says exactly which groups Kady can build a preset call for", () => {
+    const supported = PROVIDER_GROUPS.filter(
+      (group) => directDispatchSupport(group).supported,
+    ).map((group) => group.id);
+    expect(supported).toEqual(["cerebras", "openrouter", "groq"]);
+
+    for (const groupId of ["openai", "anthropic", "xai", "local", "modal"] as const) {
+      const support = directDispatchSupport(providerGroup(groupId)!);
+      expect(support.supported).toBe(false);
+      // A refusal with no stated reason is a disabled control with no
+      // explanation, which §6.7 forbids.
+      expect(support.reason).toBeTruthy();
+      expect(support.reason).not.toMatch(/\/(Users|home|tmp|var)\//);
+    }
+  });
+
+  it("refuses an api-key group whose model speaks another API", () => {
+    const groq = providerGroup("groq")!;
+    expect(directDispatchSupport(groq, { api: "openai-completions" }).supported).toBe(true);
+    expect(directDispatchSupport(groq, { api: "anthropic-messages" }).supported).toBe(false);
+  });
+
+  it("never reports a group as configured-and-dispatchable that has no credential name", () => {
+    // The structural version of the same rule: a group Kady would send a
+    // bearer token for must name the variable that token comes from.
+    for (const group of PROVIDER_GROUPS) {
+      if (!directDispatchSupport(group).supported) continue;
+      expect(group.kind).toBe("api-key");
+      expect(group.credentialVariableNames.length).toBeGreaterThan(0);
+    }
   });
 });

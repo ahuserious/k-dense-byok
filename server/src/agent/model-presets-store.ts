@@ -111,8 +111,56 @@ export function modelPresetsFilePath(env: NodeJS.ProcessEnv = process.env): stri
   return path.join(os.homedir(), ".kady", "model-presets.json");
 }
 
+/**
+ * Parsed-store cache, keyed by resolved path.
+ *
+ * `resolveModel` gained a `preset/<id>` branch, and `resolveModel` runs on the
+ * request path for every `/run` and once per workflow node — so without this,
+ * selecting a preset in a workflow means one blocking `readFileSync` + JSON
+ * parse per node on the event loop. The cache is invalidated by size and mtime
+ * from a `statSync`, which is one cheap syscall instead of a read and a parse,
+ * and `writeFile` below refreshes the entry directly so a write from this
+ * process is visible immediately regardless of mtime granularity. An external
+ * edit within the same millisecond AND at the same byte length is the one case
+ * this would miss; the store is only written by this process.
+ */
+interface CachedPresetFile {
+  mtimeMs: number;
+  size: number;
+  contents: PresetFileV1;
+}
+
+const PARSED_STORE_CACHE = new Map<string, CachedPresetFile>();
+
+/** Exported for tests; production code never needs to call this. */
+export function clearModelPresetCache(): void {
+  PARSED_STORE_CACHE.clear();
+}
+
 function readFile(env: NodeJS.ProcessEnv): PresetFileV1 {
   const file = modelPresetsFilePath(env);
+  let stat: fs.Stats | null = null;
+  try {
+    stat = fs.statSync(file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    PARSED_STORE_CACHE.delete(file);
+    return { schemaVersion: 1, presets: [] };
+  }
+  const cached = PARSED_STORE_CACHE.get(file);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return cached.contents;
+  }
+  const contents = parseFile(file);
+  PARSED_STORE_CACHE.set(file, {
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
+    contents,
+  });
+  return contents;
+}
+
+function parseFile(file: string): PresetFileV1 {
   let raw: string;
   try {
     raw = fs.readFileSync(file, "utf8");
@@ -157,6 +205,19 @@ function writeFile(contents: PresetFileV1, env: NodeJS.ProcessEnv): void {
     encoding: "utf8",
     mode: 0o600,
   });
+  // Refresh rather than invalidate: the next read then costs one statSync and
+  // no parse, and a write is never followed by a stale read even if two writes
+  // land inside the same millisecond.
+  try {
+    const stat = fs.statSync(file);
+    PARSED_STORE_CACHE.set(file, {
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      contents,
+    });
+  } catch {
+    PARSED_STORE_CACHE.delete(file);
+  }
 }
 
 function mintPresetId(): string {
@@ -240,7 +301,7 @@ function validateHyperparameters(
 function validateModal(
   raw: unknown,
   providerId: ProviderGroupId,
-  maxGpuCountForInstance: (instanceId: string) => number | null,
+  modalInstance: (instanceId: string) => ModalInstanceFacts | null,
 ): ModelPresetModalSettings | undefined {
   if (providerId !== "modal") {
     if (raw !== undefined && raw !== null) {
@@ -271,16 +332,33 @@ function validateModal(
   }
   const instanceId = input.instanceId ? String(input.instanceId).trim() : undefined;
   if (instanceId) {
-    const maxGpuCount = maxGpuCountForInstance(instanceId);
-    if (maxGpuCount === null) {
+    const instance = modalInstance(instanceId);
+    if (!instance) {
       throw new ModelPresetError(400, `Unknown Modal instance "${instanceId}".`);
     }
-    if (gpuCount > maxGpuCount) {
+    // Mirrors `validateGpuCount` in the existing Modal catalogue, so a preset
+    // cannot store a pair the Modal job path would later reject. The wording is
+    // the user's next action, not the catalogue's error code.
+    if (instance.kind === "cpu" && gpuCount !== 1) {
       throw new ModelPresetError(
         400,
-        `The ${instanceId} instance accepts at most ${maxGpuCount} GPUs.`,
+        `The ${instanceId} instance has no GPUs, so its GPU count must be 1. Pick a GPU instance to raise it.`,
       );
     }
+    if (gpuCount > instance.maxGpuCount) {
+      throw new ModelPresetError(
+        400,
+        `The ${instanceId} instance accepts at most ${instance.maxGpuCount} GPUs.`,
+      );
+    }
+  } else if (gpuCount !== 1) {
+    // Modal defaults an instance-less request to "cpu", which then refuses any
+    // GPU count above 1. Refusing here means the preset can never hold a pair
+    // that only fails at submit time.
+    throw new ModelPresetError(
+      400,
+      "Pick a GPU instance before raising the GPU count; without one the job runs on a CPU instance, which allows only 1.",
+    );
   }
   return {
     huggingFaceModelId,
@@ -289,9 +367,19 @@ function validateModal(
   };
 }
 
+/** The two facts about a Modal instance a preset has to respect. */
+export interface ModalInstanceFacts {
+  kind: "cpu" | "gpu";
+  maxGpuCount: number;
+}
+
 export interface ModelPresetValidationDependencies {
-  /** Max GPUs for a Modal instance id, or null when the id is unknown. */
-  maxGpuCountForInstance(instanceId: string): number | null;
+  /**
+   * Kind and GPU ceiling for a Modal instance id, or null when the id is
+   * unknown. Injected so this module never imports the Modal catalogue — the
+   * catalogue is lane F12's file and stays the single source of both numbers.
+   */
+  modalInstance(instanceId: string): ModalInstanceFacts | null;
   env: NodeJS.ProcessEnv;
 }
 
@@ -345,13 +433,19 @@ export function validateModelPresetInput(
     modelId,
     hyperparameters: validateHyperparameters(input.hyperparameters, providerId),
     systemPromptOverride,
-    modal: validateModal(input.modal, providerId, dependencies.maxGpuCountForInstance),
+    modal: validateModal(input.modal, providerId, dependencies.modalInstance),
   };
 }
 
-/** Every stored preset, oldest first. */
+/**
+ * Every stored preset, oldest first.
+ *
+ * Copied rather than handed out by reference: `readFile` now returns the cached
+ * parse, and a caller that sorted or spliced the result in place would corrupt
+ * every later read.
+ */
 export function listModelPresets(env: NodeJS.ProcessEnv = process.env): ModelPreset[] {
-  return readFile(env).presets;
+  return [...readFile(env).presets];
 }
 
 export function getModelPreset(

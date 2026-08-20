@@ -27,10 +27,20 @@ const GROQ_GROUP = {
     seed: true,
   },
   dispatchableAsChatModel: true,
+  directDispatch: { supported: true },
   configured: true,
 };
 
-const MODAL_GROUP = { ...GROQ_GROUP, id: "modal", label: "Modal", dispatchableAsChatModel: false };
+const MODAL_GROUP = {
+  ...GROQ_GROUP,
+  id: "modal",
+  label: "Modal",
+  dispatchableAsChatModel: false,
+  directDispatch: {
+    supported: false,
+    reason: "Modal presets describe a compute job rather than a chat model.",
+  },
+};
 
 const PRESET = {
   id: "mp_groq",
@@ -89,13 +99,28 @@ beforeEach(() => {
       return json({
         presets: [PRESET, MODAL_PRESET],
         groups: [GROQ_GROUP, MODAL_GROUP],
-        bindings: {
-          direct: { hyperparameters: "bound", systemPromptOverride: "bound" },
-          "chat-session": { hyperparameters: "dropped", systemPromptOverride: "dropped" },
-          "workflow-node": { hyperparameters: "dropped", systemPromptOverride: "dropped" },
-          "hosted-fusion-supervised": {
-            hyperparameters: "dropped",
-            systemPromptOverride: "dropped",
+        bindingsByGroup: {
+          groq: {
+            direct: { hyperparameters: "bound", systemPromptOverride: "bound" },
+            "chat-session": { hyperparameters: "dropped", systemPromptOverride: "dropped" },
+            "workflow-node": { hyperparameters: "dropped", systemPromptOverride: "dropped" },
+            "hosted-fusion-supervised": {
+              hyperparameters: "dropped",
+              systemPromptOverride: "dropped",
+            },
+          },
+          modal: {
+            direct: {
+              hyperparameters: "dropped",
+              systemPromptOverride: "dropped",
+              reason: "Modal presets describe a compute job rather than a chat model.",
+            },
+            "chat-session": { hyperparameters: "dropped", systemPromptOverride: "dropped" },
+            "workflow-node": { hyperparameters: "dropped", systemPromptOverride: "dropped" },
+            "hosted-fusion-supervised": {
+              hyperparameters: "dropped",
+              systemPromptOverride: "dropped",
+            },
           },
         },
       });

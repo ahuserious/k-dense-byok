@@ -19,6 +19,7 @@ import {
   AlertCircleIcon,
   CheckCircle2Icon,
   LoaderCircleIcon,
+  CpuIcon,
   PencilIcon,
   PlayIcon,
   PlusIcon,
@@ -28,17 +29,21 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { PresetEditor } from "@/components/model-presets/preset-editor";
 import {
+  EMPTY_BINDING_TABLE,
   createModelPreset,
   deleteModelPreset,
   groupPresetsByProvider,
+  runPresetModalJob,
   testModelPreset,
   updateModelPreset,
   useModelPresets,
   type ModelPreset,
   type ModelPresetInput,
-  type PresetBinding,
   type PresetBindingSurface,
+  type PresetBindingTable,
+  type PresetModalJobResult,
   type PresetTestResult,
+  type ProviderGroupStatus,
 } from "@/lib/model-presets";
 
 /**
@@ -73,11 +78,12 @@ function parameterSummary(preset: ModelPreset): string {
 }
 
 export function ModelPresetsSection() {
-  const { presets, groups, bindings, loading, error, refresh } = useModelPresets();
+  const { presets, groups, bindingsByGroup, loading, error, refresh } = useModelPresets();
   const [editing, setEditing] = useState<{ preset: ModelPreset | null } | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<PresetTestResult | null>(null);
+  const [modalJob, setModalJob] = useState<PresetModalJobResult | null>(null);
   const addButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const grouped = useMemo(
@@ -138,11 +144,31 @@ export function ModelPresetsSection() {
     setBusyId(preset.id);
     setActionError(null);
     setTestResult(null);
+    setModalJob(null);
     try {
       setTestResult(await testModelPreset(preset.id));
     } catch (cause) {
       setActionError(
         cause instanceof Error ? cause.message : "The provider call did not complete.",
+      );
+    } finally {
+      setBusyId(null);
+    }
+  }, []);
+
+  // Row 6's action: run this preset's Hugging Face model on Modal at the GPU
+  // count the stepper set. It reaches the SAME Modal job path the Modal panel
+  // already uses; nothing here opens a second one.
+  const runOnModal = useCallback(async (preset: ModelPreset) => {
+    setBusyId(preset.id);
+    setActionError(null);
+    setTestResult(null);
+    setModalJob(null);
+    try {
+      setModalJob(await runPresetModalJob(preset.id));
+    } catch (cause) {
+      setActionError(
+        cause instanceof Error ? cause.message : "The Modal job could not be created.",
       );
     } finally {
       setBusyId(null);
@@ -235,6 +261,24 @@ export function ModelPresetsSection() {
         </div>
       ) : null}
 
+      {modalJob ? (
+        <div
+          role="status"
+          className="mt-3 rounded-md border bg-muted/40 p-3 text-[11px] leading-relaxed"
+        >
+          <div className="flex items-center gap-1.5 font-medium">
+            <CheckCircle2Icon className="size-3.5" aria-hidden />
+            <span>Modal job {modalJob.jobId} is {modalJob.state}</span>
+          </div>
+          <p className="mt-1 text-muted-foreground">
+            Running <code>{modalJob.huggingFaceModelId ?? "the preset's model"}</code> on{" "}
+            <code>{modalJob.request.instance ?? "the default instance"}</code> with{" "}
+            <span className="tabular-nums">{modalJob.request.gpuCount ?? 1}</span> GPU
+            {(modalJob.request.gpuCount ?? 1) === 1 ? "" : "s"}.
+          </p>
+        </div>
+      ) : null}
+
       {loading && presets.length === 0 ? (
         <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
           <LoaderCircleIcon className="size-4 animate-spin" aria-hidden />
@@ -258,6 +302,10 @@ export function ModelPresetsSection() {
                   {group.notConfiguredReason}
                 </p>
               ) : null}
+              <GroupDispatchLine
+                group={group}
+                binding={bindingsByGroup[group.id] ?? EMPTY_BINDING_TABLE}
+              />
               {groupPresets.length === 0 ? (
                 <p className="px-3 py-2 text-[11px] text-muted-foreground">
                   No presets yet.
@@ -266,14 +314,21 @@ export function ModelPresetsSection() {
                 <ul className="divide-y">
                   {groupPresets.map((preset) => {
                     const status = configuredById.get(preset.providerId);
+                    // The ▶ Test control's enabled state is the server's own
+                    // `directDispatch` predicate AND the group being configured
+                    // — never a second rule computed here. Round 1 asked
+                    // `configured && dispatchableAsChatModel`, which is true for
+                    // the OAuth groups the dispatch path cannot build a request
+                    // for, so the button was live exactly when it could not work.
                     const testable =
                       Boolean(status?.configured) &&
-                      Boolean(status?.dispatchableAsChatModel);
+                      Boolean(status?.directDispatch?.supported);
                     const testReason = !status?.configured
                       ? status?.notConfiguredReason
-                      : !status?.dispatchableAsChatModel
-                        ? `${status?.label} presets describe a compute job rather than a chat model, so there is no completion to send.`
-                        : undefined;
+                      : status?.directDispatch?.supported
+                        ? undefined
+                        : status?.directDispatch?.reason;
+                    const isModalPreset = preset.providerId === "modal";
                     return (
                       <li
                         key={preset.id}
@@ -285,23 +340,50 @@ export function ModelPresetsSection() {
                             {preset.ref} · {parameterSummary(preset)}
                           </p>
                         </div>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="ghost"
-                          className={`h-7 shrink-0 px-2 ${FOCUS_RING_CLASS}`}
-                          disabled={!testable || busyId === preset.id}
-                          title={testReason}
-                          aria-label={`Test preset ${preset.name}`}
-                          onClick={() => void test(preset)}
-                        >
-                          {busyId === preset.id ? (
-                            <LoaderCircleIcon className="size-3.5 animate-spin" aria-hidden />
-                          ) : (
-                            <PlayIcon className="size-3.5" aria-hidden />
-                          )}
-                          Test
-                        </Button>
+                        {isModalPreset ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className={`h-7 shrink-0 px-2 ${FOCUS_RING_CLASS}`}
+                            disabled={!status?.configured || busyId === preset.id}
+                            aria-label={`Run preset ${preset.name} on Modal`}
+                            aria-describedby={
+                              status?.configured ? undefined : `group-reason-${group.id}`
+                            }
+                            onClick={() => void runOnModal(preset)}
+                          >
+                            {busyId === preset.id ? (
+                              <LoaderCircleIcon className="size-3.5 animate-spin" aria-hidden />
+                            ) : (
+                              <CpuIcon className="size-3.5" aria-hidden />
+                            )}
+                            Run on Modal
+                          </Button>
+                        ) : (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className={`h-7 shrink-0 px-2 ${FOCUS_RING_CLASS}`}
+                            disabled={!testable || busyId === preset.id}
+                            aria-label={`Test preset ${preset.name}`}
+                            // The reason a disabled control is disabled is
+                            // VISIBLE in the group header line above, not only
+                            // in a title attribute a keyboard user never sees.
+                            aria-describedby={
+                              testReason ? `group-reason-${group.id}` : undefined
+                            }
+                            onClick={() => void test(preset)}
+                          >
+                            {busyId === preset.id ? (
+                              <LoaderCircleIcon className="size-3.5 animate-spin" aria-hidden />
+                            ) : (
+                              <PlayIcon className="size-3.5" aria-hidden />
+                            )}
+                            Test
+                          </Button>
+                        )}
                         <Button
                           type="button"
                           size="sm"
@@ -339,8 +421,49 @@ export function ModelPresetsSection() {
         </div>
       )}
 
-      <PresetBindingNotice bindings={bindings} />
+      <PresetBindingNotice bindingsByGroup={bindingsByGroup} groups={groups} />
     </section>
+  );
+}
+
+/**
+ * The `direct` row, stated per provider group inside that group's own card.
+ *
+ * It lives here rather than in the table below because it is the one verdict
+ * that is NOT the same for all eight groups: Kady builds its preset call as an
+ * OpenAI-shaped chat completion with an API-key credential, so it carries a
+ * Groq or Cerebras or OpenRouter preset's parameters and cannot carry an
+ * Anthropic, OpenAI, xAI, Local or Modal one. Round 1 stated a single global
+ * "Carried", which told an Anthropic preset's owner something untrue.
+ *
+ * The reason rendered here is the SAME string the disabled ▶ Test button points
+ * at with `aria-describedby`, so the explanation is visible on screen and
+ * announced to a screen reader rather than hidden in a `title` attribute.
+ */
+function GroupDispatchLine({
+  group,
+  binding,
+}: {
+  group: ProviderGroupStatus;
+  binding: PresetBindingTable;
+}) {
+  const carried =
+    binding.direct.hyperparameters === "bound" &&
+    binding.direct.systemPromptOverride === "bound";
+  return (
+    <p
+      id={`group-reason-${group.id}`}
+      className="px-3 pt-2 text-[11px] leading-relaxed text-muted-foreground"
+    >
+      <span className="font-medium text-foreground">
+        {carried ? "Test preset carries these parameters." : "Test preset unavailable."}
+      </span>
+      {carried
+        ? " The hyperparameters and the system-prompt override are sent on the call Kady builds for this group."
+        : binding.direct.reason
+          ? ` ${binding.direct.reason}`
+          : ""}
+    </p>
   );
 }
 
@@ -352,18 +475,30 @@ export function ModelPresetsSection() {
  * without a UI change — and, more to the point, a surface that stops carrying
  * them cannot keep claiming it does. Bound and dropped are distinguished by the
  * word, not by colour or opacity alone (§6.6).
+ *
+ * The three rows here are the ones whose verdict is the same for every group.
+ * `direct` is deliberately not one of them; it is per group, in
+ * `GroupDispatchLine`, and this table names where to look rather than
+ * flattening eight different answers into one.
  */
 function PresetBindingNotice({
-  bindings,
+  bindingsByGroup,
+  groups,
 }: {
-  bindings: Record<PresetBindingSurface, PresetBinding>;
+  bindingsByGroup: Record<string, PresetBindingTable>;
+  groups: ProviderGroupStatus[];
 }) {
-  const rows: Array<{ surface: PresetBindingSurface; label: string }> = [
-    { surface: "direct", label: "Test preset" },
+  const rows: Array<{ surface: Exclude<PresetBindingSurface, "direct">; label: string }> = [
     { surface: "chat-session", label: "Chat and runs" },
     { surface: "workflow-node", label: "Workflow nodes" },
     { surface: "hosted-fusion-supervised", label: "Hosted Fusion nodes" },
   ];
+  const anyGroupId = groups[0]?.id;
+  const table =
+    (anyGroupId ? bindingsByGroup[anyGroupId] : undefined) ?? EMPTY_BINDING_TABLE;
+  const carrying = groups
+    .filter((group) => bindingsByGroup[group.id]?.direct.hyperparameters === "bound")
+    .map((group) => group.label);
   return (
     <div className="mt-4 rounded-lg border p-3">
       <h4 className="text-xs font-semibold">Where these parameters apply</h4>
@@ -372,8 +507,19 @@ function PresetBindingNotice({
         carries the hyperparameters and the system-prompt override.
       </p>
       <dl className="mt-2 space-y-1.5 text-[11px] leading-relaxed">
+        <div className="flex gap-2">
+          <dt className="w-36 shrink-0 font-medium">Test preset</dt>
+          <dd className="text-muted-foreground">
+            <span className="font-medium text-foreground">
+              {carrying.length > 0 ? `Carried on ${carrying.join(", ")}` : "Not carried"}
+            </span>
+            {carrying.length === groups.length && groups.length > 0
+              ? ""
+              : " — every other group says why on its own row above."}
+          </dd>
+        </div>
         {rows.map(({ surface, label }) => {
-          const binding = bindings[surface];
+          const binding = table[surface];
           const carried =
             binding.hyperparameters === "bound" &&
             binding.systemPromptOverride === "bound";

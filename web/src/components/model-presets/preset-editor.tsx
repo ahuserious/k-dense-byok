@@ -23,19 +23,25 @@
  *     updates here without a UI change.
  */
 
-import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { AlertCircleIcon, MinusIcon, PlusIcon } from "lucide-react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { AlertCircleIcon, MinusIcon, PlusIcon, SearchIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
   REASONING_EFFORTS,
+  fetchModalInstances,
   unsupportedParameterReasons,
+  type ModalInstanceOption,
   type ModelPreset,
   type ModelPresetInput,
   type ProviderGroupStatus,
   type ReasoningEffort,
 } from "@/lib/model-presets";
+import {
+  searchHuggingFaceModels,
+  type HuggingFaceModelSummary,
+} from "@/lib/model-presets-huggingface";
 
 /**
  * The shadcn primitives draw their focus ring as `ring-ring/50`. Measured on
@@ -68,7 +74,16 @@ interface PresetFormState {
   systemPromptOverride: string;
   huggingFaceModelId: string;
   gpuCount: string;
+  instanceId: string;
 }
+
+/** What the Hugging Face chooser knows. Every branch is a designed state. */
+type HuggingFaceChooserState =
+  | { kind: "idle" }
+  | { kind: "searching" }
+  | { kind: "results"; models: HuggingFaceModelSummary[] }
+  | { kind: "unconfigured"; envVar: string; detail: string }
+  | { kind: "unavailable"; detail: string };
 
 function formStateFor(preset: ModelPreset | null, fallbackProviderId: string): PresetFormState {
   return {
@@ -83,6 +98,7 @@ function formStateFor(preset: ModelPreset | null, fallbackProviderId: string): P
     systemPromptOverride: preset?.systemPromptOverride ?? "",
     huggingFaceModelId: preset?.modal?.huggingFaceModelId ?? "",
     gpuCount: preset?.modal?.gpuCount?.toString() ?? "1",
+    instanceId: preset?.modal?.instanceId ?? "",
   };
 }
 
@@ -108,6 +124,9 @@ export function PresetEditor({ preset, groups, onSave, onCancel }: PresetEditorP
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [instances, setInstances] = useState<ModalInstanceOption[] | null>(null);
+  const [huggingFaceQuery, setHuggingFaceQuery] = useState("");
+  const [huggingFace, setHuggingFace] = useState<HuggingFaceChooserState>({ kind: "idle" });
 
   // Opening the editor moves focus to its first field so a keyboard user is not
   // left behind on the trigger with new content below them.
@@ -134,12 +153,96 @@ export function PresetEditor({ preset, groups, onSave, onCancel }: PresetEditorP
   );
   const isModal = form.providerId === "modal";
 
+  /**
+   * The Modal instance catalogue, from the already-registered
+   * `GET /modal/instances`. The stepper's ceiling and its CPU rule come from
+   * here rather than from constants in this file — F12's interface is explicit
+   * that `maxGpuCount` is per instance (a10g is 4, not 8) and that a CPU
+   * instance renders the stepper disabled at 1.
+   *
+   * Fetched only when the Modal group is selected: nothing else in this editor
+   * needs it, and an unconditional fetch would make every preset edit hit the
+   * Modal route for no reason.
+   */
+  useEffect(() => {
+    if (!isModal || instances !== null) return;
+    let cancelled = false;
+    void fetchModalInstances().then((catalogue) => {
+      if (!cancelled) setInstances(catalogue.instances);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isModal, instances]);
+
+  const selectedInstance = useMemo(
+    () => (instances ?? []).find((candidate) => candidate.id === form.instanceId) ?? null,
+    [instances, form.instanceId],
+  );
+  // No instance chosen means Modal's own default, which is the "cpu" instance —
+  // and a CPU instance allows exactly one GPU. So the stepper is disabled at 1
+  // until a GPU instance is picked, rather than live and then rejected at save.
+  const gpuStepperMax = selectedInstance
+    ? selectedInstance.maxGpuCount
+    : 1;
+  const gpuStepperDisabledReason = !selectedInstance
+    ? "Pick a Modal instance to choose a GPU count. Without one the job runs on a CPU instance, which allows only 1."
+    : selectedInstance.kind === "cpu"
+      ? `The ${selectedInstance.id} instance has no GPUs, so its GPU count is fixed at 1.`
+      : null;
+
+  const runHuggingFaceSearch = useCallback(async () => {
+    const query = huggingFaceQuery.trim();
+    if (!query) return;
+    setHuggingFace({ kind: "searching" });
+    const result = await searchHuggingFaceModels(query, 20);
+    if (result.ok) {
+      setHuggingFace({ kind: "results", models: result.models });
+      return;
+    }
+    setHuggingFace(
+      result.kind === "unconfigured"
+        ? { kind: "unconfigured", envVar: result.envVar, detail: result.detail }
+        : { kind: "unavailable", detail: result.detail },
+    );
+  }, [huggingFaceQuery]);
+
+  /**
+   * Probe once when the Modal group is selected, so the chooser can render
+   * DISABLED with the honest reason before the user types anything — rather
+   * than accepting a query and only then admitting it cannot search. The probe
+   * is a real search for a common term; a 503 or a 404 answers the question.
+   */
+  useEffect(() => {
+    if (!isModal || huggingFace.kind !== "idle") return;
+    let cancelled = false;
+    void searchHuggingFaceModels("llama", 1).then((result) => {
+      if (cancelled || result.ok) return;
+      setHuggingFace(
+        result.kind === "unconfigured"
+          ? { kind: "unconfigured", envVar: result.envVar, detail: result.detail }
+          : { kind: "unavailable", detail: result.detail },
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isModal, huggingFace.kind]);
+
+  const huggingFaceDisabledReason =
+    huggingFace.kind === "unconfigured"
+      ? `Set ${huggingFace.envVar} to search Hugging Face models`
+      : huggingFace.kind === "unavailable"
+        ? huggingFace.detail
+        : null;
+
   const set = <K extends keyof PresetFormState>(key: K, value: PresetFormState[K]) =>
     setForm((current) => ({ ...current, [key]: value }));
 
   const adjustGpuCount = (delta: number) => {
     const current = Number(form.gpuCount) || 1;
-    set("gpuCount", String(Math.max(1, current + delta)));
+    const next = Math.min(gpuStepperMax, Math.max(1, current + delta));
+    set("gpuCount", String(next));
   };
 
   const submit = async (event: React.FormEvent) => {
@@ -160,24 +263,30 @@ export function PresetEditor({ preset, groups, onSave, onCancel }: PresetEditorP
       const hasHyperparameters = Object.values(hyperparameters).some(
         (value) => value !== undefined,
       );
+      // All three optional fields are ALWAYS sent, with an explicit `null` when
+      // they are empty. The PATCH route reads an absent key as "leave it as it
+      // is": omitting them made an emptied system-prompt override silently come
+      // back on the next save, and made a Modal preset impossible to re-target
+      // at a chat provider (the merge re-attached the old `modal` block and the
+      // server then refused it with an error naming nothing the user could act
+      // on). `null` means clear, and the server treats it that way.
       await onSave({
         name: form.name.trim(),
         providerId: form.providerId as ModelPresetInput["providerId"],
         // A Modal preset's "model" is the Hugging Face id, so the two stay in
         // lockstep rather than asking the user to type it twice.
         modelId: isModal ? form.huggingFaceModelId.trim() : form.modelId.trim(),
-        ...(hasHyperparameters ? { hyperparameters } : {}),
-        ...(form.systemPromptOverride.trim()
-          ? { systemPromptOverride: form.systemPromptOverride }
-          : {}),
-        ...(isModal
+        hyperparameters: hasHyperparameters ? hyperparameters : null,
+        systemPromptOverride: form.systemPromptOverride.trim()
+          ? form.systemPromptOverride
+          : null,
+        modal: isModal
           ? {
-              modal: {
-                huggingFaceModelId: form.huggingFaceModelId.trim(),
-                gpuCount: Math.max(1, Math.floor(Number(form.gpuCount) || 1)),
-              },
+              huggingFaceModelId: form.huggingFaceModelId.trim(),
+              gpuCount: Math.max(1, Math.floor(Number(form.gpuCount) || 1)),
+              ...(form.instanceId ? { instanceId: form.instanceId } : {}),
             }
-          : {}),
+          : null,
       });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not save the preset.");
@@ -263,70 +372,173 @@ export function PresetEditor({ preset, groups, onSave, onCancel }: PresetEditorP
       </div>
 
       {isModal ? (
-        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <div className="mt-3 space-y-3">
           <div>
-            <label className={LABEL_CLASS} htmlFor={`${fieldId}-hf`}>
+            <label className={LABEL_CLASS} htmlFor={`${fieldId}-hf-search`}>
               Hugging Face model
             </label>
-            <Input
-              id={`${fieldId}-hf`}
-              className={FIELD_CLASS}
-              value={form.huggingFaceModelId}
-              required
-              placeholder="meta-llama/Llama-3.3-70B-Instruct"
-              // Mirrors the server's org/name check. The hyphens are escaped
-              // deliberately: browsers compile `pattern` with the `v` flag, in
-              // which a trailing literal `-` inside a character class is a
-              // syntax error — the attribute is then discarded entirely and
-              // the page logs a console error, which is how the live Gate U
-              // run caught the first two attempts at this line.
-              pattern="[A-Za-z0-9][A-Za-z0-9._\-]{0,95}/[A-Za-z0-9][A-Za-z0-9._\-]{0,95}"
-              onChange={(event) => set("huggingFaceModelId", event.target.value)}
-              aria-describedby={`${fieldId}-hf-hint`}
-            />
-            <p id={`${fieldId}-hf-hint`} className={HINT_CLASS}>
-              Checked for the <code>org/name</code> shape only. Kady does not contact
-              Hugging Face to confirm the model exists.
-            </p>
-          </div>
-          <div>
-            <label className={LABEL_CLASS} htmlFor={`${fieldId}-gpu`}>
-              GPU count
-            </label>
+            {/*
+              A search-backed chooser over GET /integrations/huggingface/models,
+              per lane F12's FINAL interface — deliberately NOT a free-text
+              field. When Hugging Face is not configured (503 NOT_CONFIGURED) or
+              the route is absent, the control renders DISABLED with the reason
+              rather than falling back to free text, which is the
+              accepted-then-discarded pattern this wave exists to stop (§6.7).
+            */}
             <div className="flex items-center gap-1">
-              <Button
-                type="button"
-                size="icon"
-                variant="outline"
-                className={`size-8 shrink-0 ${FOCUS_RING_CLASS}`}
-                aria-label="Decrease GPU count"
-                onClick={() => adjustGpuCount(-1)}
-              >
-                <MinusIcon className="size-3.5" aria-hidden />
-              </Button>
               <Input
-                id={`${fieldId}-gpu`}
-                type="number"
-                min="1"
-                step="1"
-                className={`${FIELD_CLASS} text-center tabular-nums`}
-                value={form.gpuCount}
-                onChange={(event) => set("gpuCount", event.target.value)}
+                id={`${fieldId}-hf-search`}
+                className={FIELD_CLASS}
+                value={huggingFaceQuery}
+                disabled={Boolean(huggingFaceDisabledReason)}
+                placeholder={
+                  huggingFaceDisabledReason ? "search unavailable" : "Search Hugging Face…"
+                }
+                aria-describedby={`${fieldId}-hf-state`}
+                onChange={(event) => setHuggingFaceQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return;
+                  // The editor is a form; Enter in a search box must search,
+                  // not submit a preset that has no model chosen yet.
+                  event.preventDefault();
+                  void runHuggingFaceSearch();
+                }}
               />
               <Button
                 type="button"
-                size="icon"
+                size="sm"
                 variant="outline"
-                className={`size-8 shrink-0 ${FOCUS_RING_CLASS}`}
-                aria-label="Increase GPU count"
-                onClick={() => adjustGpuCount(1)}
+                className={`h-8 shrink-0 ${FOCUS_RING_CLASS}`}
+                disabled={Boolean(huggingFaceDisabledReason) || !huggingFaceQuery.trim()}
+                onClick={() => void runHuggingFaceSearch()}
               >
-                <PlusIcon className="size-3.5" aria-hidden />
+                <SearchIcon className="size-3.5" aria-hidden />
+                Search
               </Button>
             </div>
-            <p className={HINT_CLASS}>
-              Handed to the Modal job as its GPU count. Whole numbers of 1 or more.
+            <p id={`${fieldId}-hf-state`} className={HINT_CLASS}>
+              {huggingFaceDisabledReason ??
+                (huggingFace.kind === "searching"
+                  ? "Searching Hugging Face…"
+                  : huggingFace.kind === "results"
+                    ? `${huggingFace.models.length} model${huggingFace.models.length === 1 ? "" : "s"} found. Pick one below.`
+                    : "Search the Hugging Face hub and pick the model this preset loads.")}
             </p>
+            {huggingFace.kind === "results" && huggingFace.models.length > 0 ? (
+              <select
+                id={`${fieldId}-hf`}
+                className={`mt-1 ${SELECT_CLASS}`}
+                aria-label="Hugging Face model"
+                value={form.huggingFaceModelId}
+                onChange={(event) => set("huggingFaceModelId", event.target.value)}
+              >
+                <option value="">Select a model…</option>
+                {huggingFace.models.map((candidate) => (
+                  <option key={candidate.id} value={candidate.id}>
+                    {candidate.id}
+                    {candidate.pipelineTag ? ` · ${candidate.pipelineTag}` : ""}
+                    {candidate.gated ? " · gated" : ""}
+                  </option>
+                ))}
+              </select>
+            ) : null}
+            <p className={HINT_CLASS}>
+              Selected:{" "}
+              <code data-testid="hf-selected-model">
+                {form.huggingFaceModelId || "none yet"}
+              </code>
+            </p>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label className={LABEL_CLASS} htmlFor={`${fieldId}-instance`}>
+                Modal instance
+              </label>
+              <select
+                id={`${fieldId}-instance`}
+                className={SELECT_CLASS}
+                value={form.instanceId}
+                disabled={instances !== null && instances.length === 0}
+                aria-describedby={`${fieldId}-instance-hint`}
+                onChange={(event) => {
+                  const nextId = event.target.value;
+                  const next = (instances ?? []).find(
+                    (candidate) => candidate.id === nextId,
+                  );
+                  // Clamp in the same action that changes the ceiling, so the
+                  // form can never hold a pair the server would reject.
+                  const ceiling = next ? next.maxGpuCount : 1;
+                  setForm((current) => ({
+                    ...current,
+                    instanceId: nextId,
+                    gpuCount: String(
+                      Math.min(ceiling, Math.max(1, Number(current.gpuCount) || 1)),
+                    ),
+                  }));
+                }}
+              >
+                <option value="">Modal default (CPU)</option>
+                {(instances ?? []).map((candidate) => (
+                  <option key={candidate.id} value={candidate.id}>
+                    {candidate.label}
+                    {candidate.kind === "gpu" ? ` · up to ${candidate.maxGpuCount} GPUs` : ""}
+                  </option>
+                ))}
+              </select>
+              <p id={`${fieldId}-instance-hint`} className={HINT_CLASS}>
+                {instances === null
+                  ? "Reading the Modal instance catalogue…"
+                  : instances.length === 0
+                    ? "Kady could not read the Modal instance catalogue, so only the default CPU instance is available."
+                    : "From Kady's Modal catalogue. Each instance sets its own GPU ceiling."}
+              </p>
+            </div>
+            <div>
+              <label className={LABEL_CLASS} htmlFor={`${fieldId}-gpu`}>
+                GPU count
+              </label>
+              <div className="flex items-center gap-1">
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="outline"
+                  className={`size-8 shrink-0 ${FOCUS_RING_CLASS}`}
+                  aria-label="Decrease GPU count"
+                  disabled={Boolean(gpuStepperDisabledReason)}
+                  onClick={() => adjustGpuCount(-1)}
+                >
+                  <MinusIcon className="size-3.5" aria-hidden />
+                </Button>
+                <Input
+                  id={`${fieldId}-gpu`}
+                  type="number"
+                  min="1"
+                  max={String(gpuStepperMax)}
+                  step="1"
+                  className={`${FIELD_CLASS} text-center tabular-nums`}
+                  value={form.gpuCount}
+                  disabled={Boolean(gpuStepperDisabledReason)}
+                  aria-describedby={`${fieldId}-gpu-hint`}
+                  onChange={(event) => set("gpuCount", event.target.value)}
+                />
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="outline"
+                  className={`size-8 shrink-0 ${FOCUS_RING_CLASS}`}
+                  aria-label="Increase GPU count"
+                  disabled={Boolean(gpuStepperDisabledReason)}
+                  onClick={() => adjustGpuCount(1)}
+                >
+                  <PlusIcon className="size-3.5" aria-hidden />
+                </Button>
+              </div>
+              <p id={`${fieldId}-gpu-hint`} className={HINT_CLASS}>
+                {gpuStepperDisabledReason ??
+                  `Sent to the Modal job as gpuCount. Up to ${gpuStepperMax} on this instance.`}
+              </p>
+            </div>
           </div>
         </div>
       ) : (

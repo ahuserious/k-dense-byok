@@ -28,9 +28,35 @@ const GROUPS = [
       seed: true,
     },
     dispatchableAsChatModel: true,
+    directDispatch: { supported: true },
     configured: false,
     notConfiguredReason:
       "Cerebras is not configured. Set CEREBRAS_API_KEY in your environment file and restart Kady.",
+  },
+  {
+    // The group the round-1 defect was about: connected, a chat model, and a
+    // call Kady cannot build. `directDispatch.supported` is false and carries
+    // the reason the UI shows.
+    id: "anthropic",
+    label: "Anthropic",
+    kind: "oauth-subscription",
+    projectsFrom: "subscription-providers",
+    runtimeProviderIds: ["anthropic"],
+    credentialVariableNames: [],
+    parameterSupport: {
+      temperature: true,
+      topP: true,
+      maxTokens: true,
+      reasoningEffort: true,
+      seed: false,
+    },
+    dispatchableAsChatModel: true,
+    directDispatch: {
+      supported: false,
+      reason:
+        "Kady sends a preset's parameters as an OpenAI-shaped chat completion authenticated with an API key. Anthropic is connected with a subscription login instead, so Kady cannot send that call and this preset's hyperparameters and system-prompt override are not carried on it.",
+    },
+    configured: true,
   },
   {
     id: "groq",
@@ -47,6 +73,7 @@ const GROUPS = [
       seed: true,
     },
     dispatchableAsChatModel: true,
+    directDispatch: { supported: true },
     configured: true,
   },
   {
@@ -64,12 +91,16 @@ const GROUPS = [
       seed: false,
     },
     dispatchableAsChatModel: false,
+    directDispatch: {
+      supported: false,
+      reason:
+        "Modal presets describe a compute job rather than a chat model, so there is no completion to send. Use Run on Modal instead.",
+    },
     configured: true,
   },
 ];
 
-const BINDINGS = {
-  direct: { hyperparameters: "bound", systemPromptOverride: "bound" },
+const SHARED_DROPPED = {
   "chat-session": {
     hyperparameters: "dropped",
     systemPromptOverride: "dropped",
@@ -87,6 +118,40 @@ const BINDINGS = {
   },
 };
 
+/**
+ * `direct` is per GROUP, because it is not one fact: Kady builds the preset
+ * call for an API-key OpenAI-completions group and cannot build it for an OAuth,
+ * Local or Modal one. Round 1 served a single global "bound" here.
+ */
+const BINDINGS_BY_GROUP = {
+  cerebras: {
+    direct: { hyperparameters: "bound", systemPromptOverride: "bound" },
+    ...SHARED_DROPPED,
+  },
+  groq: {
+    direct: { hyperparameters: "bound", systemPromptOverride: "bound" },
+    ...SHARED_DROPPED,
+  },
+  anthropic: {
+    direct: {
+      hyperparameters: "dropped",
+      systemPromptOverride: "dropped",
+      reason:
+        "Kady sends a preset's parameters as an OpenAI-shaped chat completion authenticated with an API key. Anthropic is connected with a subscription login instead, so Kady cannot send that call and this preset's hyperparameters and system-prompt override are not carried on it.",
+    },
+    ...SHARED_DROPPED,
+  },
+  modal: {
+    direct: {
+      hyperparameters: "dropped",
+      systemPromptOverride: "dropped",
+      reason:
+        "Modal presets describe a compute job rather than a chat model, so there is no completion to send. Use Run on Modal instead.",
+    },
+    ...SHARED_DROPPED,
+  },
+};
+
 const GROQ_PRESET = {
   id: "mp_groq",
   name: "Fast summariser",
@@ -95,6 +160,17 @@ const GROQ_PRESET = {
   ref: "groq/llama-3.3-70b-versatile",
   hyperparameters: { temperature: 0.2, maxTokens: 400 },
   systemPromptOverride: "Be terse.",
+  createdAt: "2026-08-18T00:00:00.000Z",
+  updatedAt: "2026-08-18T00:00:00.000Z",
+};
+
+const ANTHROPIC_PRESET = {
+  id: "mp_anthropic",
+  name: "Careful Opus",
+  providerId: "anthropic",
+  modelId: "claude-opus-4-8",
+  ref: "anthropic/claude-opus-4-8",
+  hyperparameters: { temperature: 0.2 },
   createdAt: "2026-08-18T00:00:00.000Z",
   updatedAt: "2026-08-18T00:00:00.000Z",
 };
@@ -115,7 +191,11 @@ beforeEach(() => {
   fetchMock.mockImplementation(async (input) => {
     const url = String(input);
     if (url.endsWith("/model-presets")) {
-      return json({ presets: [GROQ_PRESET, MODAL_PRESET], groups: GROUPS, bindings: BINDINGS });
+      return json({
+        presets: [GROQ_PRESET, ANTHROPIC_PRESET, MODAL_PRESET],
+        groups: GROUPS,
+        bindingsByGroup: BINDINGS_BY_GROUP,
+      });
     }
     return json({});
   });
@@ -137,7 +217,7 @@ describe("Model presets section", () => {
     expect(screen.getByText("Llama on GPUs")).toBeVisible();
 
     // Every group appears, configured or not — never hidden.
-    for (const label of ["Cerebras", "Groq", "Modal"]) {
+    for (const label of ["Cerebras", "Groq", "Anthropic", "Modal"]) {
       expect(screen.getByRole("heading", { name: label })).toBeVisible();
     }
     // An unconfigured group states why and names the variable to set.
@@ -162,20 +242,92 @@ describe("Model presets section", () => {
     const notice = (await screen.findByText("Where these parameters apply")).closest(
       "div",
     ) as HTMLElement;
-    expect(within(notice).getByText("Carried")).toBeVisible();
+    // `direct` is summarised by the groups that DO carry it, not asserted once
+    // for all eight — Anthropic and Modal do not, and each says so on its own
+    // row above.
+    expect(within(notice).getByText(/Carried on Cerebras, Groq/)).toBeVisible();
     expect(within(notice).getAllByText("Not carried")).toHaveLength(3);
     expect(
       within(notice).getByText(/Workflow nodes take their sampling parameters/),
     ).toBeVisible();
   });
 
-  it("disables Test for a Modal preset, which is a compute job not a completion", async () => {
+  it("states per GROUP whether the Test call carries the parameters", async () => {
+    // The round-1 defect at its surface: an Anthropic preset's owner was told
+    // "Carried" about a call Kady cannot build.
     render(<ModelPresetsSection />);
-    await screen.findByText("Llama on GPUs");
-    expect(screen.getByRole("button", { name: "Test preset Llama on GPUs" })).toBeDisabled();
+    await screen.findByText("Fast summariser");
+
+    expect(screen.getAllByText(/Test preset carries these parameters\./)).toHaveLength(2);
+    expect(screen.getAllByText(/Test preset unavailable\./)).toHaveLength(2);
+    expect(
+      screen.getByText(/Anthropic is connected with a subscription login instead/),
+    ).toBeVisible();
+  });
+
+  it("disables Test for a group Kady cannot build the call for, with a visible reason", async () => {
+    render(<ModelPresetsSection />);
+    await screen.findByText("Careful Opus");
+
+    // Connected, a chat model, and still not testable — round 1 rendered this
+    // control live on `configured && dispatchableAsChatModel`.
+    const anthropicTest = screen.getByRole("button", { name: "Test preset Careful Opus" });
+    expect(anthropicTest).toBeDisabled();
+    // The reason is on screen and announced, not hidden in a title attribute.
+    expect(anthropicTest).toHaveAttribute("aria-describedby", "group-reason-anthropic");
+    expect(document.getElementById("group-reason-anthropic")).toHaveTextContent(
+      /subscription login instead/,
+    );
+
     expect(
       screen.getByRole("button", { name: "Test preset Fast summariser" }),
     ).toBeEnabled();
+  });
+
+  it("offers Run on Modal for a Modal preset instead of a Test it cannot send", async () => {
+    render(<ModelPresetsSection />);
+    await screen.findByText("Llama on GPUs");
+    // A Modal preset is a compute job. It gets the action it can actually
+    // perform, not a disabled copy of a chat action.
+    expect(screen.queryByRole("button", { name: "Test preset Llama on GPUs" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Run preset Llama on GPUs on Modal" }),
+    ).toBeEnabled();
+  });
+
+  it("runs a Modal preset and reports the model and GPU count that were submitted", async () => {
+    const user = userEvent.setup();
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/modal-job") && (init as RequestInit | undefined)?.method === "POST") {
+        return json({
+          presetId: "mp_modal",
+          jobId: "job_7",
+          state: "queued",
+          request: { instance: "h100", gpuCount: 4, command: "python -c ..." },
+          huggingFaceModelId: "meta-llama/Llama-3.3-70B-Instruct",
+        });
+      }
+      if (url.endsWith("/model-presets")) {
+        return json({
+          presets: [GROQ_PRESET, ANTHROPIC_PRESET, MODAL_PRESET],
+          groups: GROUPS,
+          bindingsByGroup: BINDINGS_BY_GROUP,
+        });
+      }
+      return json({});
+    });
+    render(<ModelPresetsSection />);
+    await screen.findByText("Llama on GPUs");
+
+    await user.click(
+      screen.getByRole("button", { name: "Run preset Llama on GPUs on Modal" }),
+    );
+
+    const status = await screen.findByRole("status");
+    expect(status).toHaveTextContent("job_7");
+    expect(status).toHaveTextContent("meta-llama/Llama-3.3-70B-Instruct");
+    expect(status).toHaveTextContent("4 GPUs");
   });
 
   it("creates a preset through the editor and reloads the list", async () => {
@@ -233,7 +385,7 @@ describe("Model presets section", () => {
         );
       }
       if (url.endsWith("/model-presets")) {
-        return json({ presets: [GROQ_PRESET], groups: GROUPS, bindings: BINDINGS });
+        return json({ presets: [GROQ_PRESET], groups: GROUPS, bindingsByGroup: BINDINGS_BY_GROUP });
       }
       return json({});
     });

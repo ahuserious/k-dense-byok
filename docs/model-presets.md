@@ -71,14 +71,26 @@ Every surface uses the preset's **provider and model**. Not every surface curren
 
 | Surface | Provider + model | Hyperparameters & system-prompt override |
 |---|---|---|
-| **Test preset** (the ▶ button in Settings) | carried | **carried** |
+| **Test preset** (the ▶ button in Settings) | carried | **carried on Cerebras, Groq and OpenRouter only** — see below |
 | **Chat and runs** | carried | not carried yet |
 | **Workflow nodes** | carried | not carried — nodes use their own settings |
 | **Hosted Fusion nodes** | carried | not carried — nodes use their own settings |
 
-The section shows this table live, from the server, so it cannot drift out of date. The same information comes back on
-every `resolve` call as a `binding` block, so any part of Kady that offers you a preset can enforce the same rule
-without re-deriving it.
+**Test preset is not available for every provider group, and the section says so per group.** Kady builds that call
+itself, as an OpenAI-shaped chat completion authenticated with an API key from an environment variable. So it can send
+it for **Cerebras, Groq and OpenRouter**, and it cannot send it for:
+
+- **OpenAI, Anthropic and xAI** — connected with a subscription login rather than an API key, and two of the three do
+  not use the OpenAI chat-completions wire format at all.
+- **Local** — configured with a base URL (`OLLAMA_BASE_URL` / `OPENAI_COMPATIBLE_BASE_URL`) rather than a credential.
+- **Modal** — a compute job rather than a chat model. Use **Run on Modal** instead.
+
+For those five, the ▶ Test button is **disabled with that reason visible on the group's row**, and the binding table
+reports the parameters as not carried there. The preset's provider and model still apply wherever you select it.
+
+The section shows all of this live, from the server, so it cannot drift out of date. The same information comes back on
+every `resolve` call as a `binding` block, and on `GET /model-presets` as `bindingsByGroup`, so any part of Kady that
+offers you a preset can enforce the same rule without re-deriving it.
 
 Use **Test preset** to see exactly what Kady sends: the result names the address, the model id and the sampling values
 that went on the wire.
@@ -89,14 +101,21 @@ that went on the wire.
 
 A Modal preset describes a **Hugging Face model to load onto a number of GPUs**, rather than a chat endpoint:
 
-- **Hugging Face model** — checked for the `org/name` shape only. Kady does **not** contact Hugging Face to confirm the
-  model exists; that check will arrive with the Hugging Face integration.
-- **GPU count** — a whole number of 1 or more, handed to the Modal job as its GPU count. If you pin a Modal instance,
-  the count is bounded by that instance's maximum from Kady's existing Modal catalogue (an A10 accepts at most 4).
+- **Hugging Face model** — **chosen from a search of the Hugging Face hub**, not typed. The editor searches through
+  Kady's Hugging Face integration; when that integration is not configured the chooser is **disabled** and tells you to
+  set `HF_TOKEN`, and when the integration is not present in your build it says that instead. There is deliberately no
+  free-text fallback: a model id Kady could not check is a value that looks saved and is not. The stored id is
+  re-checked for the `org/name` shape on the server.
+- **Modal instance** — from Kady's existing Modal catalogue, served by the Modal API the Modal panel already uses.
+- **GPU count** — a whole number, sent to the Modal job as its `gpuCount`. Its ceiling is the **selected instance's**
+  maximum (an A10 accepts at most 4, an H100 at most 8). A **CPU instance has no GPUs**, so with one selected — or with
+  no instance selected, which means Modal's CPU default — the stepper is **disabled at 1** with that reason.
 
-Modal presets do not appear in the chat model picker and cannot be sent as a completion — the ▶ Test button is disabled
-with that reason. Modal credentials come from the same single path everything else Modal uses (`MODAL_TOKEN_ID` and
-`MODAL_TOKEN_SECRET`); there is no second credential path for presets. See `docs/modal-compute.md`.
+Modal presets do not appear in the chat model picker and cannot be sent as a completion. Instead of ▶ Test they carry
+**Run on Modal**, which creates a Modal job that loads the preset's Hugging Face model at the preset's GPU count, on the
+**same** Modal job path the Modal panel uses. Modal credentials come from the same single path everything else Modal
+uses (`MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`); there is no second credential path for presets. See
+`docs/modal-compute.md`.
 
 ---
 
@@ -117,13 +136,18 @@ Base path `/model-presets` on the Kady backend (no `/api` prefix).
 
 | Method | Path | Body | Returns |
 |---|---|---|---|
-| `GET` | `/model-presets` | — | `{ presets, groups, bindings }` |
-| `GET` | `/model-presets/bindings` | — | `{ surfaces, groups }` |
+| `GET` | `/model-presets` | — | `{ presets, groups, bindingsByGroup }` |
+| `GET` | `/model-presets/bindings` | — | `{ bindingsByGroup, groups }` |
 | `POST` | `/model-presets` | preset input | the created preset (201) |
 | `PATCH` | `/model-presets/:id` | partial preset input | the updated preset |
+
+On `PATCH`, an **absent** key means "leave this as it is" and an explicit **`null`** means "clear it". Send
+`{"systemPromptOverride": null}` to remove an override, `{"hyperparameters": null}` to remove all of them, and
+`{"modal": null}` when moving a preset off the Modal group.
 | `DELETE` | `/model-presets/:id` | — | `{ ok: true }` |
 | `POST` | `/model-presets/:id/resolve` | `{ surface? }` | the resolved preset + `binding` + `bindingBySurface` |
 | `POST` | `/model-presets/:id/test` | `{ prompt? }` | the outbound request, the status, and the reply |
+| `POST` | `/model-presets/:id/modal-job` | `{ command? }` | the created Modal job's id, state and request (202) |
 
 `surface` is one of `direct`, `chat-session`, `workflow-node`, `hosted-fusion-supervised`; it defaults to `direct`.
 
@@ -135,7 +159,8 @@ message naming the variable to set. Neither contacts a provider.
 1. Persist the preset **id** only — never a copy of its contents.
 2. At dispatch time, `POST /model-presets/:id/resolve` and use `ref`, `hyperparameters` and `systemPromptOverride`.
 3. Honour `binding`: render disabled-with-reason anything reported `dropped`, and never send a dropped value as though
-   it had landed.
+   it had landed. `binding` is per **provider group** as well as per surface — do not cache one group's verdict and
+   apply it to another.
 4. On 404 or an unconfigured provider, fail closed with the returned message.
 
 Presets are stored in `model-presets.json` under Kady's own home directory — outside every project sandbox, because a

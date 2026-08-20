@@ -36,6 +36,7 @@ const GROQ_GROUP = {
     seed: true,
   },
   dispatchableAsChatModel: true,
+  directDispatch: { supported: true },
   configured: true,
 };
 
@@ -60,13 +61,15 @@ beforeEach(() => {
           },
         ],
         groups: [{ ...GROQ_GROUP, configured: groqConfigured }],
-        bindings: {
-          direct: { hyperparameters: "bound", systemPromptOverride: "bound" },
-          "chat-session": { hyperparameters: "dropped", systemPromptOverride: "dropped" },
-          "workflow-node": { hyperparameters: "dropped", systemPromptOverride: "dropped" },
-          "hosted-fusion-supervised": {
-            hyperparameters: "dropped",
-            systemPromptOverride: "dropped",
+        bindingsByGroup: {
+          groq: {
+            direct: { hyperparameters: "bound", systemPromptOverride: "bound" },
+            "chat-session": { hyperparameters: "dropped", systemPromptOverride: "dropped" },
+            "workflow-node": { hyperparameters: "dropped", systemPromptOverride: "dropped" },
+            "hosted-fusion-supervised": {
+              hyperparameters: "dropped",
+              systemPromptOverride: "dropped",
+            },
           },
         },
       });

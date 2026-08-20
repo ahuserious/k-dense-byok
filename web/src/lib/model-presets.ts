@@ -41,6 +41,12 @@ export interface ProviderParameterSupport {
   seed: boolean;
 }
 
+export interface DirectDispatchSupport {
+  supported: boolean;
+  /** Present exactly when `supported` is false. Rendered verbatim to the user. */
+  reason?: string;
+}
+
 export interface ProviderGroupStatus {
   id: ProviderGroupId;
   label: string;
@@ -50,7 +56,16 @@ export interface ProviderGroupStatus {
   /** Environment variable NAMES the user must set. Never a value. */
   credentialVariableNames: string[];
   parameterSupport: ProviderParameterSupport;
+  /** A chat model at all, as opposed to a compute job. NOT the Test predicate. */
   dispatchableAsChatModel: boolean;
+  /**
+   * Whether Kady's own preset dispatch path can carry this group's presets.
+   * THE predicate for the ▶ Test control and for the `direct` binding row —
+   * both render from this one field, which the server derives from the same
+   * function `dispatchPresetCompletion` guards on. Nothing in the web app may
+   * compute it locally.
+   */
+  directDispatch: DirectDispatchSupport;
   configured: boolean;
   notConfiguredReason?: string;
 }
@@ -82,13 +97,22 @@ export interface ModelPreset {
   updatedAt: string;
 }
 
+/**
+ * What the editor sends.
+ *
+ * `null` is meaningful and is NOT the same as omitting the key: the PATCH route
+ * reads an absent key as "leave it as it is" and an explicit `null` as "clear
+ * it". Round 1 omitted the key when a field was emptied, which made a cleared
+ * system-prompt override silently come back and a Modal preset impossible to
+ * re-target at a chat provider. The editor now always sends all three keys.
+ */
 export interface ModelPresetInput {
   name: string;
   providerId: ProviderGroupId;
   modelId: string;
-  hyperparameters?: ModelPresetHyperparameters;
-  systemPromptOverride?: string;
-  modal?: ModelPresetModalSettings;
+  hyperparameters?: ModelPresetHyperparameters | null;
+  systemPromptOverride?: string | null;
+  modal?: ModelPresetModalSettings | null;
 }
 
 export type PresetBindingSurface =
@@ -143,14 +167,25 @@ async function detailFrom(response: Response, fallback: string): Promise<string>
   }
 }
 
+export type PresetBindingTable = Record<PresetBindingSurface, PresetBinding>;
+
 export interface ModelPresetListResponse {
   presets: ModelPreset[];
   groups: ProviderGroupStatus[];
-  /** Per-surface binding truth, shipped with the list so nothing hardcodes it. */
-  bindings: Record<PresetBindingSurface, PresetBinding>;
+  /**
+   * Per-GROUP, per-surface binding truth, shipped with the list so nothing
+   * hardcodes it. Keyed by group because `direct` is not one fact across the
+   * eight: Kady builds the test call for an API-key OpenAI-completions group
+   * and cannot build it for an OAuth or Local one.
+   */
+  bindingsByGroup: Record<string, PresetBindingTable>;
 }
 
-export const EMPTY_BINDINGS: Record<PresetBindingSurface, PresetBinding> = {
+/**
+ * The state before the server has answered. Everything reads "dropped", because
+ * the honest default while nothing is known is that nothing is carried.
+ */
+export const EMPTY_BINDING_TABLE: PresetBindingTable = {
   direct: { hyperparameters: "dropped", systemPromptOverride: "dropped" },
   "chat-session": { hyperparameters: "dropped", systemPromptOverride: "dropped" },
   "workflow-node": { hyperparameters: "dropped", systemPromptOverride: "dropped" },
@@ -170,8 +205,8 @@ function isPresetListResponse(value: unknown): value is ModelPresetListResponse 
   return (
     Array.isArray(record.presets) &&
     Array.isArray(record.groups) &&
-    Boolean(record.bindings) &&
-    typeof record.bindings === "object"
+    Boolean(record.bindingsByGroup) &&
+    typeof record.bindingsByGroup === "object"
   );
 }
 
@@ -245,10 +280,97 @@ export async function testModelPreset(
   return (await response.json()) as PresetTestResult;
 }
 
+/**
+ * A Modal instance as the already-registered `GET /modal/instances` serves it —
+ * the fields the GPU stepper needs and nothing else.
+ *
+ * `maxGpuCount` and `kind` are read from the catalogue rather than typed here,
+ * because lane F12's interface is explicit that they vary per instance (a10g is
+ * 4, not 8) and that a CPU instance must render the stepper disabled at 1.
+ */
+export interface ModalInstanceOption {
+  id: string;
+  label: string;
+  kind: "cpu" | "gpu";
+  gpu: string | null;
+  maxGpuCount: number;
+  pricePerHour: number;
+}
+
+export interface ModalInstanceCatalogue {
+  modalConfigured: boolean;
+  instances: ModalInstanceOption[];
+}
+
+function instanceFrom(raw: unknown): ModalInstanceOption | null {
+  if (!raw || typeof raw !== "object") return null;
+  const record = raw as Record<string, unknown>;
+  if (typeof record.id !== "string" || !record.id.trim()) return null;
+  const maxGpuCount =
+    typeof record.maxGpuCount === "number" && Number.isFinite(record.maxGpuCount)
+      ? record.maxGpuCount
+      : 1;
+  return {
+    id: record.id,
+    label: typeof record.label === "string" ? record.label : record.id,
+    kind: record.kind === "gpu" ? "gpu" : "cpu",
+    gpu: typeof record.gpu === "string" ? record.gpu : null,
+    maxGpuCount,
+    pricePerHour:
+      typeof record.pricePerHour === "number" && Number.isFinite(record.pricePerHour)
+        ? record.pricePerHour
+        : 0,
+  };
+}
+
+/**
+ * Fetch the Modal instance catalogue. Never throws — an unreachable or
+ * malformed response degrades to an empty list, which the editor renders as the
+ * instance picker disabled with a visible reason (#62, §6.7).
+ */
+export async function fetchModalInstances(): Promise<ModalInstanceCatalogue> {
+  try {
+    const response = await apiFetch("/modal/instances");
+    if (!response.ok) return { modalConfigured: false, instances: [] };
+    const payload = (await response.json()) as {
+      modalConfigured?: unknown;
+      instances?: unknown;
+    };
+    const instances = Array.isArray(payload?.instances)
+      ? payload.instances
+          .map(instanceFrom)
+          .filter((instance): instance is ModalInstanceOption => Boolean(instance))
+      : [];
+    return { modalConfigured: payload?.modalConfigured === true, instances };
+  } catch {
+    return { modalConfigured: false, instances: [] };
+  }
+}
+
+export interface PresetModalJobResult {
+  presetId: string;
+  jobId: string;
+  state: string;
+  request: { instance?: string; gpuCount?: number; command: string };
+  huggingFaceModelId: string | null;
+}
+
+/** Run a Modal preset's Hugging Face model on Modal at its stored GPU count. */
+export async function runPresetModalJob(id: string): Promise<PresetModalJobResult> {
+  const response = await apiFetch(
+    `/model-presets/${encodeURIComponent(id)}/modal-job`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+  );
+  if (!response.ok) {
+    throw new Error(await detailFrom(response, "The Modal job could not be created."));
+  }
+  return (await response.json()) as PresetModalJobResult;
+}
+
 export interface UseModelPresetsReturn {
   presets: ModelPreset[];
   groups: ProviderGroupStatus[];
-  bindings: Record<PresetBindingSurface, PresetBinding>;
+  bindingsByGroup: Record<string, PresetBindingTable>;
   loading: boolean;
   error: string | null;
   refresh: () => void;
@@ -257,8 +379,9 @@ export interface UseModelPresetsReturn {
 export function useModelPresets(): UseModelPresetsReturn {
   const [presets, setPresets] = useState<ModelPreset[]>([]);
   const [groups, setGroups] = useState<ProviderGroupStatus[]>([]);
-  const [bindings, setBindings] =
-    useState<Record<PresetBindingSurface, PresetBinding>>(EMPTY_BINDINGS);
+  const [bindingsByGroup, setBindingsByGroup] = useState<
+    Record<string, PresetBindingTable>
+  >({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -268,7 +391,7 @@ export function useModelPresets(): UseModelPresetsReturn {
       .then((payload) => {
         setPresets(payload.presets);
         setGroups(payload.groups);
-        setBindings(payload.bindings);
+        setBindingsByGroup(payload.bindingsByGroup);
         setError(null);
       })
       .catch((cause: unknown) => {
@@ -287,7 +410,7 @@ export function useModelPresets(): UseModelPresetsReturn {
     return () => window.removeEventListener(MODEL_PRESETS_CHANGED_EVENT, reload);
   }, [load]);
 
-  return { presets, groups, bindings, loading, error, refresh: load };
+  return { presets, groups, bindingsByGroup, loading, error, refresh: load };
 }
 
 /** Presets grouped by provider, in the owner's stated group order. */

@@ -104,7 +104,7 @@ test.describe("Settings ▸ Model providers ▸ Model presets", () => {
     await expect(section.getByText("Not configured").first()).toBeVisible();
   });
 
-  test("the section states, per surface, whether a preset's parameters are carried", async ({
+  test("the section states, per group and per surface, whether a preset's parameters are carried", async ({
     liveWorkspace,
   }) => {
     const section = await openModelPresetsSection(liveWorkspace);
@@ -112,8 +112,26 @@ test.describe("Settings ▸ Model providers ▸ Model presets", () => {
     await expect(
       section.getByRole("heading", { name: "Where these parameters apply" }),
     ).toBeVisible();
-    await expect(section.getByText("Carried", { exact: true })).toBeVisible();
+    // `direct` is per group. Kady builds the preset call for the API-key,
+    // OpenAI-shaped groups and cannot build it for the OAuth, Local or Modal
+    // ones — so the summary names the groups it does carry rather than
+    // asserting one global "Carried" over eight different answers.
+    await expect(section.getByText(/Carried on .*Groq/)).toBeVisible();
     await expect(section.getByText("Not carried", { exact: true }).first()).toBeVisible();
+
+    // The per-group verdict, rendered inside each group's own card. This is
+    // the round-2 correction: an Anthropic preset's owner is told, on screen,
+    // that the Test call does not carry its parameters and why.
+    await expect(
+      section.getByText("Test preset carries these parameters.").first(),
+    ).toBeVisible();
+    await expect(section.getByText("Test preset unavailable.").first()).toBeVisible();
+    await expect(
+      section.getByText(/Anthropic is connected with a subscription login instead/),
+    ).toBeVisible();
+    await expect(
+      section.getByText(/Local is configured with a base-URL variable/),
+    ).toBeVisible();
   });
 
   test("creating a preset with hyperparameters and a system-prompt override persists it", async ({
@@ -165,46 +183,70 @@ test.describe("Settings ▸ Model providers ▸ Model presets", () => {
     await deletePresetIfPresent(section, page, GROQ_PRESET_NAME);
   });
 
-  test("a Modal preset takes a Hugging Face model id and a GPU count stepper", async ({
+  test("a Modal preset chooses its Hugging Face model from a search and bounds the GPU stepper", async ({
     liveWorkspace,
   }) => {
     const { page } = liveWorkspace;
     const section = await openModelPresetsSection(liveWorkspace);
-    await deletePresetIfPresent(section, page, MODAL_PRESET_NAME);
 
     await section.getByRole("button", { name: "Model preset" }).click();
     const editor = section.getByRole("form", { name: "New model preset" });
     await editor.getByLabel("Preset name").fill(MODAL_PRESET_NAME);
     await editor.getByLabel("Provider").selectOption("modal");
 
-    await editor
-      .getByLabel("Hugging Face model")
-      .fill("meta-llama/Llama-3.3-70B-Instruct");
-    // The +/- buttons carry "GPU count" in their labels too, so name the role.
+    // Lane F12's FINAL interface requires a search-backed chooser over
+    // GET /integrations/huggingface/models, and requires that it render
+    // DISABLED with a stated reason when it cannot search — explicitly NOT a
+    // free-text fallback that would store an unvalidated model id. F12's route
+    // is not registered in this clone, so this item asserts exactly that
+    // fail-closed state on the live stack. When F12 merges, the same control
+    // searches and this assertion flips to the results path (already covered
+    // as a unit item in preset-editor.test.tsx).
+    const huggingFace = editor.getByLabel("Hugging Face model");
+    await expect(huggingFace).toBeDisabled();
+    await expect(
+      editor.getByText(/Hugging Face model search is not available in this build yet/),
+    ).toBeVisible();
+
+    // The GPU stepper and the instance picker are live, and their bounds come
+    // from the REAL Modal catalogue served by the already-registered
+    // GET /modal/instances — not from a constant in the component.
     const gpuCount = editor.getByRole("spinbutton", { name: "GPU count" });
     await expect(gpuCount).toHaveValue("1");
-    await editor.getByRole("button", { name: "Increase GPU count" }).click();
-    await editor.getByRole("button", { name: "Increase GPU count" }).click();
-    await editor.getByRole("button", { name: "Increase GPU count" }).click();
+    // With no instance chosen the job runs on Modal's CPU default, which
+    // allows exactly one GPU. Disabled at 1 with that reason, not live and
+    // then rejected at save.
+    await expect(gpuCount).toBeDisabled();
+    await expect(editor.getByText(/Pick a Modal instance/)).toBeVisible();
+
+    const instance = editor.getByLabel("Modal instance");
+    await expect(instance).toBeEnabled();
+    await instance.selectOption("a10g");
+    await expect(gpuCount).toBeEnabled();
+    // a10g's ceiling is 4 in the catalogue. Leaning on the stepper stops there.
+    for (let index = 0; index < 6; index += 1) {
+      await editor.getByRole("button", { name: "Increase GPU count" }).click();
+    }
     await expect(gpuCount).toHaveValue("4");
     await editor.getByRole("button", { name: "Decrease GPU count" }).click();
     await expect(gpuCount).toHaveValue("3");
+
+    // Choosing a CPU instance clamps the count back to 1 and disables it.
+    await instance.selectOption("cpu-4");
+    await expect(gpuCount).toHaveValue("1");
+    await expect(gpuCount).toBeDisabled();
+    await expect(editor.getByText(/cpu-4 instance has no GPUs/)).toBeVisible();
 
     // A Modal preset is a compute job, so every sampling control is disabled.
     await expect(editor.getByLabel("Temperature")).toBeDisabled();
     await expect(editor.getByLabel("Seed")).toBeDisabled();
 
-    await editor.getByLabel("Hugging Face model").scrollIntoViewIfNeeded();
+    await huggingFace.scrollIntoViewIfNeeded();
     await page.screenshot({
       path: test.info().outputPath("f1-modal-preset-editor.png"),
     });
 
-    await editor.getByRole("button", { name: "Create preset" }).click();
-
-    await expect(section.getByText(MODAL_PRESET_NAME, { exact: true })).toBeVisible();
-    await expect(section.getByText(/3 GPUs/)).toBeVisible();
-
-    await deletePresetIfPresent(section, page, MODAL_PRESET_NAME);
+    await editor.getByRole("button", { name: "Cancel" }).click();
   });
 
   test("the editor is operable from the keyboard alone", async ({ liveWorkspace }) => {

@@ -18,10 +18,12 @@
  * can act on (§6.7 — and never a filesystem path, #71).
  */
 import {
+  directDispatchSupport,
   providerGroup,
   type ProviderGroupId,
   type ProviderGroupParameterSupport,
 } from "./providers/registry.ts";
+import type { ModalJobRequest } from "../modal/types.ts";
 import {
   ModelPresetError,
   type ModelPreset,
@@ -62,9 +64,12 @@ export interface PresetBinding {
  * The per-surface truth, derived from the audit trace in
  * `$W/reports/F1-audit.md` §C.
  *
- *  - `direct`: Kady builds the outbound request itself
- *    (`providers/dispatch.ts`), so both land. Asserted on the request body by
- *    `server/test/model-presets-binding.test.ts`.
+ *  - `direct`: NOT a constant. It is `directDispatchSupport(group)` — see
+ *    `bindingForDirect` below. Round 1 had it as the flat literal
+ *    `{hyperparameters: "bound", systemPromptOverride: "bound"}`, served for
+ *    every group, which told an Anthropic preset's owner "Carried" about a call
+ *    Kady cannot build. The binding block must be derived from the same
+ *    predicate the button is, never asserted alongside it.
  *  - `chat-session`: `POST /run` resolves the ref and calls `session.setModel`,
  *    so provider and model DO bind — but the session is built with no sampling
  *    binder and no system-prompt override, so those two do not. Flips to
@@ -74,9 +79,15 @@ export interface PresetBinding {
  *    per-node provider-request controls, and both refuse to run without them —
  *    but those controls come from the node's own settings. No preset feeds
  *    them, so a preset's values would not be what arrives.
+ *
+ * The three non-`direct` verdicts are group-independent: none of those surfaces
+ * feeds a preset's parameters for ANY group, so a group argument would be
+ * decoration there.
  */
-const SURFACE_BINDINGS: Record<PresetBindingSurface, PresetBinding> = {
-  direct: { hyperparameters: "bound", systemPromptOverride: "bound" },
+const SURFACE_BINDINGS: Record<
+  Exclude<PresetBindingSurface, "direct">,
+  PresetBinding
+> = {
   "chat-session": {
     hyperparameters: "dropped",
     systemPromptOverride: "dropped",
@@ -101,15 +112,62 @@ export function isPresetBindingSurface(value: string): value is PresetBindingSur
   return (PRESET_BINDING_SURFACES as readonly string[]).includes(value);
 }
 
-export function presetBindingForSurface(surface: PresetBindingSurface): PresetBinding {
+/**
+ * The `direct` verdict for one group, read straight off the dispatch predicate.
+ *
+ * There is no independent statement of it anywhere: if `directDispatchSupport`
+ * refuses the group, this says "dropped" and repeats that function's reason
+ * verbatim, so the Settings table and the disabled ▶ Test control cannot
+ * disagree with what dispatch would actually do.
+ */
+function bindingForDirect(groupId: ProviderGroupId): PresetBinding {
+  const group = providerGroup(groupId);
+  if (!group) {
+    return {
+      hyperparameters: "dropped",
+      systemPromptOverride: "dropped",
+      reason: "Kady no longer offers this provider. Edit the preset to pick another one.",
+    };
+  }
+  const support = directDispatchSupport(group);
+  if (support.supported) {
+    return { hyperparameters: "bound", systemPromptOverride: "bound" };
+  }
+  return {
+    hyperparameters: "dropped",
+    systemPromptOverride: "dropped",
+    reason: support.reason,
+  };
+}
+
+export function presetBindingForSurface(
+  surface: PresetBindingSurface,
+  groupId: ProviderGroupId,
+): PresetBinding {
+  if (surface === "direct") return bindingForDirect(groupId);
   return { ...SURFACE_BINDINGS[surface] };
 }
 
-export function presetBindingBySurface(): Record<PresetBindingSurface, PresetBinding> {
+export function presetBindingBySurface(
+  groupId: ProviderGroupId,
+): Record<PresetBindingSurface, PresetBinding> {
   const out = {} as Record<PresetBindingSurface, PresetBinding>;
   for (const surface of PRESET_BINDING_SURFACES) {
-    out[surface] = presetBindingForSurface(surface);
+    out[surface] = presetBindingForSurface(surface, groupId);
   }
+  return out;
+}
+
+/**
+ * The whole table, per group. Shipped with `GET /model-presets` so the Settings
+ * section can render every group's honest verdict without a request per group
+ * and without any component deciding one for itself.
+ */
+export function presetBindingsByGroup(
+  groupIds: readonly ProviderGroupId[],
+): Record<string, Record<PresetBindingSurface, PresetBinding>> {
+  const out: Record<string, Record<PresetBindingSurface, PresetBinding>> = {};
+  for (const groupId of groupIds) out[groupId] = presetBindingBySurface(groupId);
   return out;
 }
 
@@ -179,8 +237,8 @@ export function resolveModelPreset(
     ...(preset.modal ? { modal: preset.modal } : {}),
     parameterSupport: group.parameterSupport,
     surface,
-    binding: presetBindingForSurface(surface),
-    bindingBySurface: presetBindingBySurface(),
+    binding: presetBindingForSurface(surface, preset.providerId),
+    bindingBySurface: presetBindingBySurface(preset.providerId),
   };
 }
 
@@ -239,4 +297,50 @@ export function applyPresetToProviderPayload(
     ];
   }
   return next;
+}
+
+/**
+ * The `ModalJobRequest` a Modal preset produces — row 6's actual binding.
+ *
+ * Round 1 stopped at persistence, and the commit message overstated it. This is
+ * the missing half: the preset's Hugging Face id and GPU count become the two
+ * fields F12's FINAL interface says carry them, and the returned object is what
+ * `POST /model-presets/:id/modal-job` hands to `modalJobManager.submit`. The
+ * Gate B test asserts on THIS object at the call site, not on the schema.
+ *
+ * Two things are deliberately NOT done here, because F12 owns them:
+ *   - `gpuCount` stays an integer. The `"H100:4"` string is produced server-side
+ *     at dispatch by `gpuString(spec, count)` in `modal/catalog.ts`; building it
+ *     here would be a second spelling of the same fact.
+ *   - No credential is read, named or checked. `modalJobManager.submit` already
+ *     refuses on `modalConfigured()`, which is the one Modal credential path
+ *     (`MODAL_TOKEN_ID` + `MODAL_TOKEN_SECRET`); adding a second check here
+ *     would be the two-paths-to-one-service bug F12's interface calls out.
+ *
+ * The command is a `snapshot_download` of the preset's model. Interpolating the
+ * id into a Python string literal is safe because the store accepts only
+ * `org/name` over `[A-Za-z0-9._-]` — there is no quote, backslash or newline it
+ * can contain — and that regex is the guard, not this comment.
+ */
+export function modalJobRequestForPreset(
+  preset: Pick<ModelPreset, "name" | "modal">,
+  options: { command?: string; timeoutSec?: number } = {},
+): ModalJobRequest {
+  const modal = preset.modal;
+  if (!modal) {
+    throw new ModelPresetError(
+      400,
+      `Preset "${preset.name}" is not a Modal preset, so there is no Modal job to run.`,
+    );
+  }
+  const command =
+    options.command?.trim() ||
+    `python -c "from huggingface_hub import snapshot_download; snapshot_download('${modal.huggingFaceModelId}')"`;
+  return {
+    command,
+    ...(modal.instanceId ? { instance: modal.instanceId } : {}),
+    gpuCount: modal.gpuCount,
+    label: `preset: ${preset.name}`,
+    ...(options.timeoutSec ? { timeoutSec: options.timeoutSec } : {}),
+  };
 }

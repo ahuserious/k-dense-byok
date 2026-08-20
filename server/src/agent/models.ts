@@ -503,6 +503,15 @@ export function resolveModel(
   // Fails closed. A preset id that no longer exists throws instead of silently
   // falling back to the default model — a user who deleted a preset must not
   // discover it by being billed for a different one.
+  //
+  // NOTE FOR THE NEXT READER: this branch — and ONLY this branch — makes
+  // resolveModel do file I/O. `presetForSelectorRef` reads the preset store
+  // from disk. `resolveModel` was otherwise a pure catalogue lookup and is
+  // called on every /run and once per workflow node, so the store keeps a
+  // parsed cache invalidated by size + mtime (see `model-presets-store.ts`):
+  // the steady-state cost of a preset-backed ref is one `statSync`, not a read
+  // and a JSON parse. Do not move work into this branch on the assumption that
+  // resolveModel is still free.
   if (r.startsWith(MODEL_PRESET_REF_PREFIX)) {
     const preset = presetForSelectorRef(r);
     if (!preset) {

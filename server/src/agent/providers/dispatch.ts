@@ -14,10 +14,18 @@
  *   3. The credential is read from `process.env[name]` and placed in the
  *      Authorization header. It is never logged, never echoed into an error
  *      message, and never returned. Errors name the variable, not its value.
+ *
+ * A corollary the first round got wrong: this file builds ONE wire shape (an
+ * OpenAI `chat/completions` body with an `Authorization: Bearer` credential),
+ * so it may only ever be reached by a group and a model that actually speak
+ * it. That decision is not made here — it is `directDispatchSupport` in
+ * `registry.ts`, the same function the ▶ Test control's enabled state and the
+ * `direct` row of the binding-honesty block derive from.
  */
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {
   credentialVariablesPresent,
+  directDispatchSupport,
   providerGroup,
   type ProviderGroupDefinition,
   type ProviderGroupId,
@@ -154,15 +162,26 @@ export async function dispatchPresetCompletion(
       `Unknown provider group ${input.groupId}.`,
     );
   }
-  if (!group.dispatchableAsChatModel) {
+  // The one predicate, applied with the resolved model in hand so the wire
+  // shape is checked too. Round 1 asked only `dispatchableAsChatModel`, which
+  // is true for the three OAuth groups — so an Anthropic preset built an
+  // OpenAI-shaped body for https://api.anthropic.com/chat/completions with no
+  // credential at all. This refuses before a request exists. The UI disables
+  // the control from the same function.
+  const support = directDispatchSupport(group, input.model);
+  if (!support.supported) {
     throw new PresetDispatchError(
       "PROVIDER_NOT_DISPATCHABLE",
-      `${group.label} presets describe a compute job, not a chat model, so they cannot be sent as a completion.`,
+      support.reason ?? `${group.label} presets cannot be sent as a completion.`,
     );
   }
   // The guard that makes "unconfigured reaches nothing" true rather than
   // aspirational. Nothing below this line runs for an unconfigured provider.
-  if (group.kind === "api-key" && !credentialVariablesPresent(group, dependencies.env)) {
+  // `directDispatchSupport` has already established `kind === "api-key"`, so
+  // this is unconditional rather than conditional on the kind — the round-1
+  // `group.kind === "api-key" &&` prefix was the clause that let credential-less
+  // groups through.
+  if (!credentialVariablesPresent(group, dependencies.env)) {
     throw new PresetDispatchError(
       "PROVIDER_NOT_CONFIGURED",
       group.notConfiguredReason,
@@ -176,13 +195,25 @@ export async function dispatchPresetCompletion(
     prompt: input.prompt,
   });
 
+  // `credentialVariablesPresent` returned true for an `api-key` group, so a
+  // non-empty name exists here. It is asserted rather than assumed: a request
+  // must never leave without the credential it was supposed to carry, and the
+  // round-1 code silently sent one when the name lookup came back empty —
+  // which for the Local group put the value of OLLAMA_BASE_URL, a base URL and
+  // not a credential, into an `Authorization: Bearer` header.
   const credentialName = group.credentialVariableNames.find((name) =>
     dependencies.env[name]?.trim(),
   );
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (credentialName) {
-    headers[request.authHeaderName] = `Bearer ${dependencies.env[credentialName]}`;
+  if (!credentialName) {
+    throw new PresetDispatchError(
+      "PROVIDER_NOT_CONFIGURED",
+      group.notConfiguredReason,
+    );
   }
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    [request.authHeaderName]: `Bearer ${dependencies.env[credentialName]}`,
+  };
 
   const response = await dependencies.fetch(request.url, {
     method: request.method,

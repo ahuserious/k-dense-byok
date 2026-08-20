@@ -96,7 +96,14 @@ export interface ProviderGroupDefinition {
   parameterSupport: ProviderGroupParameterSupport;
   /** Shown when the group is not configured. Names the user's next action. */
   notConfiguredReason: string;
-  /** True when a preset in this group can be selected as a chat model. */
+  /**
+   * True when a preset in this group names a chat model at all, as opposed to a
+   * compute job (`modal`). This is NOT the same question as "can Kady send this
+   * preset's parameters on its own dispatch path" — an Anthropic preset is a
+   * chat model Kady cannot build a request for. That second question has one
+   * answer and it is `directDispatchSupport()` below; nothing user-facing may
+   * derive it from this flag.
+   */
   dispatchableAsChatModel: boolean;
 }
 
@@ -289,6 +296,75 @@ export function credentialVariablesPresent(
   return definition.credentialMode === "all" ? names.every(present) : names.some(present);
 }
 
+/**
+ * The wire shape `providers/dispatch.ts` builds. Pi labels every catalogue model
+ * with the API it speaks (`Model.api`); only this one is an OpenAI
+ * `POST {baseUrl}/chat/completions` with a `messages` array and `max_tokens`.
+ */
+export const PRESET_DISPATCH_API = "openai-completions";
+
+export interface DirectDispatchSupport {
+  supported: boolean;
+  /** Present exactly when `supported` is false. User-facing; names no path. */
+  reason?: string;
+}
+
+/**
+ * THE predicate. The ▶ Test control's enabled state, the `direct` entry of the
+ * binding-honesty block, and `dispatchPresetCompletion`'s own guard are all
+ * this one function — so the button cannot be live over a value the dispatch
+ * path would not carry, which is the round-1 defect this replaces.
+ *
+ * Kady's preset dispatch path builds exactly one thing: an OpenAI-shaped chat
+ * completion, sent to `Model.baseUrl` with an API-key credential in an
+ * `Authorization: Bearer` header. So a group can carry a preset's parameters on
+ * that path only when BOTH hold:
+ *
+ *   1. the group authenticates with an API-key environment variable
+ *      (`kind === "api-key"`) — an OAuth subscription has no bearer token to
+ *      send here and a local base-URL variable is not a credential at all; and
+ *   2. the model the ref resolved to actually speaks `openai-completions`.
+ *      `anthropic` is `anthropic-messages` at `/v1/messages` with `x-api-key`;
+ *      the `openai` group resolves to `openai-codex-responses`. Neither is what
+ *      this path builds.
+ *
+ * Rule 2 needs a resolved model, which the browser does not have. Callers
+ * without one get the group-level answer (rule 1 plus the chat-model check),
+ * which is never MORE permissive than the full check — so a control enabled by
+ * the group-level answer can still be refused at dispatch, and never the
+ * reverse.
+ */
+export function directDispatchSupport(
+  group: ProviderGroupDefinition,
+  model?: { api?: string },
+): DirectDispatchSupport {
+  if (!group.dispatchableAsChatModel) {
+    return {
+      supported: false,
+      reason: `${group.label} presets describe a compute job rather than a chat model, so there is no completion to send. Use Run on Modal instead.`,
+    };
+  }
+  if (group.kind === "oauth-subscription") {
+    return {
+      supported: false,
+      reason: `Kady sends a preset's parameters as an OpenAI-shaped chat completion authenticated with an API key. ${group.label} is connected with a subscription login instead, so Kady cannot send that call and this preset's hyperparameters and system-prompt override are not carried on it. The preset's provider and model still apply wherever you select it.`,
+    };
+  }
+  if (group.kind !== "api-key") {
+    return {
+      supported: false,
+      reason: `${group.label} is configured with a base-URL variable rather than an API-key credential, so Kady does not send it a preset test call. The preset's provider and model still apply wherever you select it.`,
+    };
+  }
+  if (model && model.api !== PRESET_DISPATCH_API) {
+    return {
+      supported: false,
+      reason: `This ${group.label} model speaks the ${String(model.api)} API, and Kady's preset call builds an ${PRESET_DISPATCH_API} request. Pick a model that uses the OpenAI chat-completions API.`,
+    };
+  }
+  return { supported: true };
+}
+
 export interface ProviderGroupStatus {
   id: ProviderGroupId;
   label: string;
@@ -299,6 +375,12 @@ export interface ProviderGroupStatus {
   credentialVariableNames: readonly string[];
   parameterSupport: ProviderGroupParameterSupport;
   dispatchableAsChatModel: boolean;
+  /**
+   * Whether Kady's own preset dispatch path can carry this group's presets, and
+   * why not when it cannot. Served to the browser so the ▶ Test control and the
+   * `direct` binding row render from the same predicate the server enforces.
+   */
+  directDispatch: DirectDispatchSupport;
   configured: boolean;
   notConfiguredReason?: string;
 }
@@ -343,6 +425,7 @@ export async function resolveProviderGroups(
       credentialVariableNames: definition.credentialVariableNames,
       parameterSupport: definition.parameterSupport,
       dispatchableAsChatModel: definition.dispatchableAsChatModel,
+      directDispatch: directDispatchSupport(definition),
       configured,
       ...(configured ? {} : { notConfiguredReason: definition.notConfiguredReason }),
     });

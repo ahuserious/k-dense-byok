@@ -12,6 +12,9 @@
  */
 import type { FastifyInstance } from "fastify";
 import { resolveInstance } from "../modal/catalog.ts";
+import { modalJobManager } from "../modal/manager.ts";
+import { currentProjectId } from "../scope.ts";
+import { ModalJobError, type ModalJob, type ModalJobRequest } from "../modal/types.ts";
 import { modalConfigured } from "../config.ts";
 import { getModelRegistry, getModelRuntime } from "../agent/session-registry.ts";
 import { resolveModel } from "../agent/models.ts";
@@ -28,12 +31,15 @@ import {
 } from "../agent/model-presets-store.ts";
 import {
   isPresetBindingSurface,
-  presetBindingBySurface,
+  modalJobRequestForPreset,
+  presetBindingsByGroup,
   resolveModelPreset,
   type PresetBindingSurface,
 } from "../agent/model-presets.ts";
 import {
   PROVIDER_GROUPS,
+  PROVIDER_GROUP_IDS,
+  directDispatchSupport,
   providerGroup,
   resolveProviderGroups,
   type ProviderGroupStatus,
@@ -49,6 +55,17 @@ export interface RegisterModelPresetRoutesOptions {
   fetch?: typeof globalThis.fetch;
   env?: NodeJS.ProcessEnv;
   resolveModelForRef?: typeof resolveModel;
+  /**
+   * Injected in tests so the Gate B assertion can read the exact
+   * `ModalJobRequest` this module hands to the Modal job path without creating
+   * a real sandbox. Production uses `modalJobManager.submit`, which is the one
+   * existing Modal entry point — no second submission path is added here.
+   */
+  submitModalJob?: (
+    projectId: string,
+    request: ModalJobRequest,
+    owner: { sessionId: string; submittedBy: "api" },
+  ) => ModalJob;
 }
 
 const MAX_TEST_PROMPT_LENGTH = 2_000;
@@ -62,6 +79,10 @@ function errorReply(
     reply.code(error.status);
     return { detail: error.message };
   }
+  if (error instanceof ModalJobError) {
+    reply.code(error.statusCode);
+    return { detail: error.message };
+  }
   if (error instanceof PresetDispatchError) {
     reply.code(error.code === "PROVIDER_NOT_CONFIGURED" ? 409 : 502);
     return { detail: error.message };
@@ -72,9 +93,13 @@ function errorReply(
   };
 }
 
-/** Max GPUs for a Modal instance id, read from the existing Modal catalogue. */
-function maxGpuCountForInstance(instanceId: string): number | null {
-  return resolveInstance(instanceId)?.maxGpuCount ?? null;
+/**
+ * Kind and GPU ceiling for a Modal instance id, read from the existing Modal
+ * catalogue. `server/src/modal/catalog.ts` stays the single source of both.
+ */
+function modalInstance(instanceId: string): { kind: "cpu" | "gpu"; maxGpuCount: number } | null {
+  const spec = resolveInstance(instanceId);
+  return spec ? { kind: spec.kind, maxGpuCount: spec.maxGpuCount } : null;
 }
 
 export async function registerModelPresetRoutes(
@@ -142,10 +167,13 @@ export async function registerModelPresetRoutes(
       return {
         presets: listModelPresets(env),
         groups: await groupStatuses(),
-        // Shipped with the list so the Settings section can state, per dispatch
-        // surface, where a preset's parameters actually land — without a second
-        // request and without any surface hardcoding the answer.
-        bindings: presetBindingBySurface(),
+        // Shipped with the list so the Settings section can state, per provider
+        // group and per dispatch surface, where a preset's parameters actually
+        // land — without a request per group and without any surface deciding
+        // the answer for itself. It is keyed by group because `direct` is not
+        // one fact: Kady can build the call for an API-key OpenAI-completions
+        // group and cannot build it for an OAuth or Local one.
+        bindingsByGroup: presetBindingsByGroup(PROVIDER_GROUP_IDS),
       };
     } catch (error) {
       return errorReply(reply, error);
@@ -153,21 +181,22 @@ export async function registerModelPresetRoutes(
   });
 
   // The binding table on its own, so a consumer that has not yet chosen a
-  // preset can still render the honest per-surface state.
+  // preset can still render the honest per-group, per-surface state.
   app.get("/model-presets/bindings", async () => ({
-    surfaces: presetBindingBySurface(),
+    bindingsByGroup: presetBindingsByGroup(PROVIDER_GROUP_IDS),
     // Echoed so a client never has to hardcode the group list to render it.
     groups: PROVIDER_GROUPS.map((group) => ({
       id: group.id,
       label: group.label,
       parameterSupport: group.parameterSupport,
+      directDispatch: directDispatchSupport(group),
     })),
   }));
 
   app.post<{ Body: unknown }>("/model-presets", async (req, reply) => {
     try {
       const input = validateModelPresetInput(req.body, {
-        maxGpuCountForInstance,
+        modalInstance,
         env,
       });
       reply.code(201);
@@ -184,7 +213,18 @@ export async function registerModelPresetRoutes(
         const existing = requirePreset(req.params.id);
         const body = (req.body ?? {}) as Record<string, unknown>;
         // PATCH over the stored preset so a partial body cannot silently blank
-        // a field the user never touched.
+        // a field the user never touched — with one rule that has to be stated
+        // because getting it wrong made a cleared field un-clearable in round 1:
+        //
+        //   ABSENT  (key not in the body) means "leave it as it is".
+        //   null    means "clear it".
+        //
+        // The editor therefore sends an explicit `null` for an emptied override,
+        // an emptied hyperparameter set, and for `modal` when the user moves a
+        // preset off the Modal group. Without the second rule, deleting the
+        // whole override text silently restored the old one, and re-targeting a
+        // Modal preset at Groq failed with "modal settings are only valid on a
+        // Modal preset" — an error naming nothing the user could act on.
         const merged = {
           name: body.name ?? existing.name,
           providerId: body.providerId ?? existing.providerId,
@@ -199,8 +239,18 @@ export async function registerModelPresetRoutes(
               : body.systemPromptOverride,
           modal: body.modal === undefined ? existing.modal : body.modal,
         };
+        // A provider change always clears `modal` unless the body said
+        // otherwise: carrying a previous group's Modal settings into a chat
+        // provider can only produce a rejection the user cannot act on.
+        if (
+          body.modal === undefined &&
+          merged.providerId !== existing.providerId &&
+          merged.providerId !== "modal"
+        ) {
+          merged.modal = undefined;
+        }
         const input = validateModelPresetInput(merged, {
-          maxGpuCountForInstance,
+          modalInstance,
           env,
         });
         return updateModelPreset(req.params.id, input, env);
@@ -249,11 +299,18 @@ export async function registerModelPresetRoutes(
         const preset = requirePreset(req.params.id);
         const resolved = await resolveFor(preset, "direct");
         const group = providerGroup(preset.providerId);
-        if (!group?.dispatchableAsChatModel) {
+        if (!group) {
           throw new ModelPresetError(
             400,
-            `${group?.label ?? preset.providerId} presets describe a compute job rather than a chat model, so there is no completion to send.`,
+            `Preset "${preset.name}" names a provider Kady no longer offers. Edit the preset to pick another provider.`,
           );
+        }
+        // The same predicate the ▶ Test control and the `direct` binding row
+        // use, so a request that reaches here despite a disabled button is
+        // refused with the identical wording rather than a second one.
+        const support = directDispatchSupport(group);
+        if (!support.supported) {
+          throw new ModelPresetError(400, support.reason ?? `${group.label} presets cannot be tested.`);
         }
         const prompt = String(req.body?.prompt ?? DEFAULT_TEST_PROMPT).slice(
           0,
@@ -284,6 +341,71 @@ export async function registerModelPresetRoutes(
       }
     },
   );
+
+  /**
+   * Row 6's binding: run this Modal preset's Hugging Face model on Modal, with
+   * the GPU count the stepper set.
+   *
+   * The request object is built by `modalJobRequestForPreset` and handed to the
+   * EXISTING Modal job path — `modalJobManager.submit`, the same entry point
+   * `POST /modal/jobs` uses. No Modal file is edited, no second submission path
+   * is written, and no second credential check is added: `submit` already
+   * refuses on `modalConfigured()` (MODAL_TOKEN_ID + MODAL_TOKEN_SECRET), which
+   * is the one Modal credential path.
+   */
+  app.post<{ Params: { id: string }; Body: { command?: string } | null }>(
+    "/model-presets/:id/modal-job",
+    async (req, reply) => {
+      try {
+        const preset = requirePreset(req.params.id);
+        if (preset.providerId !== "modal") {
+          throw new ModelPresetError(
+            400,
+            `Preset "${preset.name}" is not a Modal preset, so there is no Modal job to run.`,
+          );
+        }
+        if (!modalConfigured()) {
+          throw new ModelPresetError(
+            409,
+            providerGroup("modal")?.notConfiguredReason ?? "Modal is not configured.",
+          );
+        }
+        const request = modalJobRequestForPreset(preset, {
+          ...(req.body?.command ? { command: String(req.body.command) } : {}),
+        });
+        const submit = options.submitModalJob ?? submitToModalJobManager;
+        const job = submit(currentProjectId(), request, {
+          sessionId: `model-preset-${preset.id}`,
+          submittedBy: "api",
+        });
+        reply.code(202);
+        return {
+          presetId: preset.id,
+          jobId: job.id,
+          state: job.state,
+          // Echoed so the caller — and the Gate B assertion — can see the two
+          // values row 6 is about on the request that was actually submitted.
+          request: {
+            instance: job.request.instance,
+            gpuCount: job.request.gpuCount,
+            command: job.request.command,
+          },
+          huggingFaceModelId: preset.modal?.huggingFaceModelId ?? null,
+        };
+      } catch (error) {
+        return errorReply(reply, error);
+      }
+    },
+  );
+}
+
+/** The existing Modal entry point, named once so the route reads as reuse. */
+function submitToModalJobManager(
+  projectId: string,
+  request: ModalJobRequest,
+  owner: { sessionId: string; submittedBy: "api" },
+): ModalJob {
+  return modalJobManager.submit(projectId, request, owner);
 }
 
 export { MODEL_PRESET_REF_PREFIX };

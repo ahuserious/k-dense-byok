@@ -631,6 +631,35 @@ export interface ClientNvidiaModel
  * NVIDIA-managed API credits that Kady cannot meter — so its picker entries
  * carry billingMode "subscription", matching `billingForProvider("nvidia")`.
  */
+export function nvidiaModelForClient(model: Model<Api>): ClientNvidiaModel {
+  return {
+    id: `nvidia/${model.id}`,
+    label: model.name,
+    provider: "NVIDIA",
+    sourceId: "nvidia",
+    sourceLabel: "NVIDIA NIM",
+    tier: tierFor(model),
+    context_length: model.contextWindow,
+    pricing: {
+      prompt: model.cost.input,
+      completion: model.cost.output,
+    },
+    modality: model.input.includes("image") ? "text+image->text" : "text->text",
+    description: "NVIDIA NIM (build.nvidia.com) via NVIDIA API credits",
+    reasoning: model.reasoning,
+    billingMode: "subscription",
+    available: true,
+  };
+}
+
+/**
+ * Picker entries for an API-key provider that bills per token in USD — Groq and
+ * Cerebras today. `billingMode` is "payg" so the entry agrees with what
+ * `billingForProvider` decides for them and the project spend cap meters the
+ * usage. Contrast `ClientNvidiaModel` directly above, which is "subscription"
+ * for the reason its own comment gives; a reader copying one of these two must
+ * copy the right one.
+ */
 export interface ClientApiKeyModel
   extends Omit<ClientProviderModel, "sourceId" | "billingMode"> {
   sourceId: string;
@@ -679,27 +708,6 @@ export function apiKeyModelForClient(
     description: presentation.description,
     reasoning: model.reasoning,
     billingMode: "payg",
-    available: true,
-  };
-}
-
-export function nvidiaModelForClient(model: Model<Api>): ClientNvidiaModel {
-  return {
-    id: `nvidia/${model.id}`,
-    label: model.name,
-    provider: "NVIDIA",
-    sourceId: "nvidia",
-    sourceLabel: "NVIDIA NIM",
-    tier: tierFor(model),
-    context_length: model.contextWindow,
-    pricing: {
-      prompt: model.cost.input,
-      completion: model.cost.output,
-    },
-    modality: model.input.includes("image") ? "text+image->text" : "text->text",
-    description: "NVIDIA NIM (build.nvidia.com) via NVIDIA API credits",
-    reasoning: model.reasoning,
-    billingMode: "subscription",
     available: true,
   };
 }

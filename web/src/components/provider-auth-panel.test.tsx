@@ -35,11 +35,15 @@ const GROUPS = [
     seed: true,
   },
   dispatchableAsChatModel: id !== "modal",
+  directDispatch:
+    id === "modal"
+      ? { supported: false, reason: "Modal presets describe a compute job rather than a chat model." }
+      : { supported: true },
   configured: false,
   notConfiguredReason: `${id} is not configured. Set ${id.toUpperCase()}_API_KEY.`,
 }));
 
-const BINDINGS = {
+const BINDING_TABLE = {
   direct: { hyperparameters: "bound", systemPromptOverride: "bound" },
   "chat-session": {
     hyperparameters: "dropped",
@@ -63,7 +67,7 @@ beforeEach(() => {
   fetchMock.mockImplementation(async (input) => {
     const url = String(input);
     if (url.endsWith("/model-presets")) {
-      return json({ presets: [], groups: GROUPS, bindings: BINDINGS });
+      return json({ presets: [], groups: GROUPS, bindingsByGroup: Object.fromEntries(GROUPS.map((group) => [group.id, BINDING_TABLE])) });
     }
     if (url.endsWith("/model-providers")) {
       return json({

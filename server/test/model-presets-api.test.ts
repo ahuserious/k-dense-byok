@@ -88,7 +88,10 @@ describe("row 3 — the preset section covers all eight provider groups", () => 
     const body = response.json() as {
       presets: unknown[];
       groups: Array<{ id: string; configured: boolean; notConfiguredReason?: string }>;
-      bindings: Record<string, { hyperparameters: string; reason?: string }>;
+      bindingsByGroup: Record<
+        string,
+        Record<string, { hyperparameters: string; reason?: string }>
+      >;
     };
     expect(body.presets).toEqual([]);
     expect(body.groups.map((group) => group.id)).toEqual([
@@ -106,9 +109,14 @@ describe("row 3 — the preset section covers all eight provider groups", () => 
       expect(group.configured).toBe(false);
       expect(group.notConfiguredReason).toBeTruthy();
     }
-    expect(body.bindings.direct.hyperparameters).toBe("bound");
-    expect(body.bindings["chat-session"].hyperparameters).toBe("dropped");
-    expect(body.bindings["chat-session"].reason).toBeTruthy();
+    // `direct` is per group and is derived from the dispatch predicate, not
+    // asserted: Kady builds the call for Groq and cannot build it for Anthropic.
+    expect(body.bindingsByGroup.groq.direct.hyperparameters).toBe("bound");
+    expect(body.bindingsByGroup.anthropic.direct.hyperparameters).toBe("dropped");
+    expect(body.bindingsByGroup.anthropic.direct.reason).toBeTruthy();
+    expect(body.bindingsByGroup.local.direct.hyperparameters).toBe("dropped");
+    expect(body.bindingsByGroup.groq["chat-session"].hyperparameters).toBe("dropped");
+    expect(body.bindingsByGroup.groq["chat-session"].reason).toBeTruthy();
   });
 
   it("creates, updates, lists and deletes a preset, persisting it", async () => {
@@ -470,7 +478,7 @@ describe("the test route puts the preset's values on the wire", () => {
         name: "m",
         providerId: "modal",
         modelId: "org/name",
-        modal: { huggingFaceModelId: "org/name", gpuCount: 2 },
+        modal: { huggingFaceModelId: "org/name", gpuCount: 2, instanceId: "h100" },
       },
     });
     const { id } = created.json() as { id: string };
@@ -548,6 +556,284 @@ describe("THE RESOLUTION RULE — a selected preset resolves to its provider and
     } finally {
       if (previous === undefined) delete process.env.KADY_MODEL_PRESETS_FILE;
       else process.env.KADY_MODEL_PRESETS_FILE = previous;
+    }
+  });
+});
+
+/**
+ * The round-2 medium: a cleared field must actually clear.
+ *
+ * The PATCH route merges over the stored preset so a partial body cannot blank
+ * a field the user never touched. The rule that makes clearing possible without
+ * losing that property is that ABSENT and `null` mean different things — absent
+ * is "leave it", `null` is "clear it". Round 1 had only the first half, and the
+ * editor omitted a key whenever its field was empty, so an emptied
+ * system-prompt override silently came back on the next save.
+ */
+describe("PATCH clears a field when the body says null, and preserves it when absent", () => {
+  async function createOverridePreset(app: Awaited<ReturnType<typeof buildApp>>) {
+    const created = await app.inject({
+      method: "POST",
+      url: "/model-presets",
+      payload: {
+        name: "Fast summariser",
+        providerId: "groq",
+        modelId: "llama-3.3-70b-versatile",
+        hyperparameters: { temperature: 0.3, maxTokens: 512 },
+        systemPromptOverride: "You are terse.",
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    return (created.json() as { id: string }).id;
+  }
+
+  it("clears a previously-set system-prompt override", async () => {
+    const app = await buildApp();
+    const id = await createOverridePreset(app);
+
+    const patched = await app.inject({
+      method: "PATCH",
+      url: `/model-presets/${id}`,
+      payload: { systemPromptOverride: null },
+    });
+
+    expect(patched.statusCode).toBe(200);
+    expect(patched.json()).not.toHaveProperty("systemPromptOverride");
+    // The effect, read back off disk rather than off the response.
+    expect(getModelPreset(id, env)?.systemPromptOverride).toBeUndefined();
+    // And the untouched fields are still there — clearing one is not clearing all.
+    expect(getModelPreset(id, env)?.hyperparameters).toEqual({
+      temperature: 0.3,
+      maxTokens: 512,
+    });
+  });
+
+  it("clears the hyperparameters", async () => {
+    const app = await buildApp();
+    const id = await createOverridePreset(app);
+
+    const patched = await app.inject({
+      method: "PATCH",
+      url: `/model-presets/${id}`,
+      payload: { hyperparameters: null },
+    });
+
+    expect(patched.statusCode).toBe(200);
+    expect(getModelPreset(id, env)?.hyperparameters).toBeUndefined();
+    expect(getModelPreset(id, env)?.systemPromptOverride).toBe("You are terse.");
+  });
+
+  it("still preserves a field the body does not mention", async () => {
+    const app = await buildApp();
+    const id = await createOverridePreset(app);
+
+    const patched = await app.inject({
+      method: "PATCH",
+      url: `/model-presets/${id}`,
+      payload: { name: "Renamed" },
+    });
+
+    expect(patched.statusCode).toBe(200);
+    expect(getModelPreset(id, env)?.name).toBe("Renamed");
+    expect(getModelPreset(id, env)?.systemPromptOverride).toBe("You are terse.");
+  });
+
+  it("moves a Modal preset onto a chat provider", async () => {
+    // Round 1's failure: the editor stopped sending `modal`, the merge
+    // re-attached the stored block, and `validateModal` rejected the save with
+    // "modal settings are only valid on a Modal preset." — an error naming
+    // nothing the user could act on.
+    const app = await buildApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/model-presets",
+      payload: {
+        name: "Weights",
+        providerId: "modal",
+        modelId: "meta-llama/Llama-3.3-70B-Instruct",
+        modal: {
+          huggingFaceModelId: "meta-llama/Llama-3.3-70B-Instruct",
+          gpuCount: 4,
+          instanceId: "h100",
+        },
+      },
+    });
+    const { id } = created.json() as { id: string };
+
+    const patched = await app.inject({
+      method: "PATCH",
+      url: `/model-presets/${id}`,
+      payload: {
+        providerId: "groq",
+        modelId: "llama-3.3-70b-versatile",
+        modal: null,
+      },
+    });
+
+    expect(patched.statusCode).toBe(200);
+    const stored = getModelPreset(id, env);
+    expect(stored?.providerId).toBe("groq");
+    expect(stored?.modal).toBeUndefined();
+    expect(stored?.ref).toBe("groq/llama-3.3-70b-versatile");
+  });
+
+  it("drops the Modal block on a provider change even when the body omits it", async () => {
+    // Defence in depth for the same defect: an older client that still omits
+    // `modal` must not be told its preset is invalid for a reason it cannot act
+    // on. A provider change clears the block.
+    const app = await buildApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/model-presets",
+      payload: {
+        name: "Weights",
+        providerId: "modal",
+        modelId: "org/name",
+        modal: { huggingFaceModelId: "org/name", gpuCount: 1 },
+      },
+    });
+    const { id } = created.json() as { id: string };
+
+    const patched = await app.inject({
+      method: "PATCH",
+      url: `/model-presets/${id}`,
+      payload: { providerId: "groq", modelId: "llama-3.3-70b-versatile" },
+    });
+
+    expect(patched.statusCode).toBe(200);
+    expect(getModelPreset(id, env)?.modal).toBeUndefined();
+  });
+});
+
+/**
+ * ROW 6 GATE B — the ModalJobRequest that reaches the Modal job path.
+ *
+ * The assertion is on the request OBJECT handed to `modalJobManager.submit`'s
+ * signature — the same entry point `POST /modal/jobs` uses — not on the preset
+ * schema accepting the two fields. `submitModalJob` is injected only so the
+ * assertion can read that object without creating a real Modal sandbox; the
+ * production default is `modalJobManager.submit` itself.
+ */
+describe("row 6 — a Modal preset's HF model and GPU count reach the Modal job request", () => {
+  it("hands the Modal job path the preset's huggingFaceModelId and gpuCount", async () => {
+    vi.stubEnv("MODAL_TOKEN_ID", "test-only-modal-id");
+    vi.stubEnv("MODAL_TOKEN_SECRET", "test-only-modal-secret");
+    const submitted: Array<{ projectId: string; request: Record<string, unknown> }> = [];
+    const app = await buildApp({
+      submitModalJob: (projectId, request) => {
+        submitted.push({ projectId, request: request as unknown as Record<string, unknown> });
+        return {
+          id: "job_1",
+          state: "queued",
+          request: { ...request, instance: request.instance ?? "cpu", gpuCount: request.gpuCount ?? 1 },
+        } as never;
+      },
+    });
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/model-presets",
+      payload: {
+        name: "Llama on H100s",
+        providerId: "modal",
+        modelId: "meta-llama/Llama-3.3-70B-Instruct",
+        modal: {
+          huggingFaceModelId: "meta-llama/Llama-3.3-70B-Instruct",
+          gpuCount: 4,
+          instanceId: "h100",
+        },
+      },
+    });
+    const { id } = created.json() as { id: string };
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/model-presets/${id}/modal-job`,
+    });
+
+    expect(response.statusCode).toBe(202);
+    expect(submitted).toHaveLength(1);
+    const request = submitted[0].request;
+    // The GPU count is the integer F12's interface specifies, NOT an "H100:4"
+    // string — that form is produced server-side at dispatch by gpuString().
+    expect(request.gpuCount).toBe(4);
+    expect(request.instance).toBe("h100");
+    // The Hugging Face model id is what the job actually loads.
+    expect(String(request.command)).toContain("meta-llama/Llama-3.3-70B-Instruct");
+    expect(response.json()).toMatchObject({
+      jobId: "job_1",
+      huggingFaceModelId: "meta-llama/Llama-3.3-70B-Instruct",
+      request: { gpuCount: 4, instance: "h100" },
+    });
+  });
+
+  it("makes no Modal call at all when Modal is not configured", async () => {
+    vi.stubEnv("MODAL_TOKEN_ID", "");
+    vi.stubEnv("MODAL_TOKEN_SECRET", "");
+    const submit = vi.fn();
+    const app = await buildApp({ submitModalJob: submit as never });
+    const created = await app.inject({
+      method: "POST",
+      url: "/model-presets",
+      payload: {
+        name: "Weights",
+        providerId: "modal",
+        modelId: "org/name",
+        modal: { huggingFaceModelId: "org/name", gpuCount: 1 },
+      },
+    });
+    const { id } = created.json() as { id: string };
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/model-presets/${id}/modal-job`,
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect((response.json() as { detail: string }).detail).toContain("MODAL_TOKEN_ID");
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("refuses a non-Modal preset without touching the Modal job path", async () => {
+    vi.stubEnv("MODAL_TOKEN_ID", "test-only-modal-id");
+    vi.stubEnv("MODAL_TOKEN_SECRET", "test-only-modal-secret");
+    const submit = vi.fn();
+    const app = await buildApp({ submitModalJob: submit as never });
+    const created = await app.inject({
+      method: "POST",
+      url: "/model-presets",
+      payload: { name: "g", providerId: "groq", modelId: "llama-3.3-70b-versatile" },
+    });
+    const { id } = created.json() as { id: string };
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/model-presets/${id}/modal-job`,
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("refuses to store a GPU count above the chosen instance's ceiling, and a CPU instance above 1", async () => {
+    const app = await buildApp();
+    // a10g's maxGpuCount is 4 and cpu-4's kind is "cpu" — both read from the
+    // existing catalogue in server/src/modal/catalog.ts, never re-typed here.
+    for (const [instanceId, gpuCount] of [
+      ["a10g", 5],
+      ["cpu-4", 2],
+    ] as const) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/model-presets",
+        payload: {
+          name: "too many",
+          providerId: "modal",
+          modelId: "org/name",
+          modal: { huggingFaceModelId: "org/name", gpuCount, instanceId },
+        },
+      });
+      expect(response.statusCode).toBe(400);
     }
   });
 });

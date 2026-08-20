@@ -4,7 +4,11 @@ import {
   buildPresetChatCompletionRequest,
   dispatchPresetCompletion,
 } from "../src/agent/providers/dispatch.ts";
-import { providerGroup } from "../src/agent/providers/registry.ts";
+import {
+  PROVIDER_GROUPS,
+  directDispatchSupport,
+  providerGroup,
+} from "../src/agent/providers/registry.ts";
 import {
   applyPresetToProviderPayload,
   presetBindingBySurface,
@@ -217,15 +221,45 @@ describe("the Pi payload binder replaces rather than appends", () => {
 });
 
 describe("the binding block tells the truth about each surface", () => {
-  it("reports the surface Kady builds the request for as bound", () => {
-    const binding = presetBindingForSurface("direct");
-    expect(binding.hyperparameters).toBe("bound");
-    expect(binding.systemPromptOverride).toBe("bound");
-    expect(binding.reason).toBeUndefined();
+  it("reports direct as bound ONLY for the groups Kady can build the call for", () => {
+    // The three API-key, OpenAI-shaped groups. Kady builds this request itself,
+    // and `model-presets-binding` above asserts the values are on the wire.
+    for (const groupId of ["groq", "cerebras", "openrouter"] as const) {
+      const binding = presetBindingForSurface("direct", groupId);
+      expect(binding.hyperparameters).toBe("bound");
+      expect(binding.systemPromptOverride).toBe("bound");
+      expect(binding.reason).toBeUndefined();
+    }
+  });
+
+  it("reports direct as DROPPED, with a reason, for every group it cannot", () => {
+    // Round 1 served `{hyperparameters: "bound"}` here for all eight groups.
+    // These five have no path: the three OAuth groups have no API key to send
+    // and (for openai/anthropic) do not speak openai-completions at all, Local
+    // names a base URL rather than a credential, and Modal is a compute job.
+    for (const groupId of ["openai", "anthropic", "xai", "local", "modal"] as const) {
+      const binding = presetBindingForSurface("direct", groupId);
+      expect(binding.hyperparameters).toBe("dropped");
+      expect(binding.systemPromptOverride).toBe("dropped");
+      expect(binding.reason).toBeTruthy();
+      expect(binding.reason).not.toMatch(/\/(Users|home|tmp|var)\//);
+    }
+  });
+
+  it("makes the direct verdict identical to what dispatch would do", () => {
+    // The anti-drift assertion: the honesty block and the guard are the same
+    // function, so a group can never be advertised as carrying values that
+    // `dispatchPresetCompletion` would refuse.
+    for (const group of PROVIDER_GROUPS) {
+      const support = directDispatchSupport(group);
+      const binding = presetBindingForSurface("direct", group.id);
+      expect(binding.hyperparameters).toBe(support.supported ? "bound" : "dropped");
+      if (!support.supported) expect(binding.reason).toBe(support.reason);
+    }
   });
 
   it("reports every other surface as dropped, each with a reason", () => {
-    const bindings = presetBindingBySurface();
+    const bindings = presetBindingBySurface("groq");
     for (const surface of [
       "chat-session",
       "workflow-node",
@@ -238,5 +272,142 @@ describe("the binding block tells the truth about each surface", () => {
       expect(bindings[surface].reason).toBeTruthy();
       expect(bindings[surface].reason).not.toMatch(/\/(Users|home|tmp|var)\//);
     }
+  });
+});
+
+/**
+ * The round-2 high, closed and pinned.
+ *
+ * Round 1's guard was `if (group.kind === "api-key" && !credentialVariablesPresent(...))`,
+ * so it never fired for the three OAuth groups, whose `credentialVariableNames`
+ * are empty. The header block then attached no `Authorization` at all and
+ * `buildPresetChatCompletionRequest` unconditionally targeted
+ * `${baseUrl}/chat/completions` with an OpenAI body. For an Anthropic preset
+ * that meant an unauthenticated POST to `https://api.anthropic.com/chat/completions`.
+ *
+ * Every assertion below is on the EFFECT: whether `fetch` was called at all.
+ */
+describe("a group Kady cannot build a request for makes NO outbound request", () => {
+  const CASES = [
+    { groupId: "anthropic", api: "anthropic-messages", baseUrl: "https://api.anthropic.com" },
+    {
+      groupId: "openai",
+      api: "openai-codex-responses",
+      baseUrl: "https://chatgpt.com/backend-api",
+    },
+    { groupId: "xai", api: "openai-completions", baseUrl: "https://api.x.ai/v1" },
+    { groupId: "local", api: "openai-completions", baseUrl: "http://127.0.0.1:11434/v1" },
+    { groupId: "modal", api: "openai-completions", baseUrl: "https://example.invalid/v1" },
+  ] as const;
+
+  for (const testCase of CASES) {
+    it(`refuses a ${testCase.groupId} preset before fetch, naming why`, async () => {
+      const fetchSpy = vi.fn(async () => new Response("{}", { status: 200 }));
+      // A fully populated environment, including the Local group's base-URL
+      // variables and Modal's token pair — so the refusal cannot be mistaken
+      // for "the credential happened to be missing".
+      const env = {
+        OLLAMA_BASE_URL: "http://127.0.0.1:11434",
+        OPENAI_COMPATIBLE_BASE_URL: "http://127.0.0.1:1234/v1",
+        MODAL_TOKEN_ID: "present",
+        MODAL_TOKEN_SECRET: "present",
+        ANTHROPIC_API_KEY: "present",
+        OPENAI_API_KEY: "present",
+        XAI_API_KEY: "present",
+      };
+
+      await expect(
+        dispatchPresetCompletion(
+          {
+            model: {
+              ...modelFor(testCase.groupId, "some-model", testCase.baseUrl),
+              api: testCase.api,
+            },
+            preset: { hyperparameters: { temperature: 0.2 } },
+            groupId: testCase.groupId,
+            prompt: "hi",
+          },
+          { fetch: fetchSpy as unknown as typeof globalThis.fetch, env },
+        ),
+      ).rejects.toThrow(/not|cannot|compute job|base-URL|API key/i);
+
+      // The whole point. Not "it returned an empty result" — nothing was sent.
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+  }
+
+  it("never puts a base-URL variable in an Authorization header", async () => {
+    // The Local group's `credentialVariableNames` are OLLAMA_BASE_URL and
+    // OPENAI_COMPATIBLE_BASE_URL — addresses, not credentials. Round 1 sent
+    // `Authorization: Bearer <that base URL>`.
+    const fetchSpy = vi.fn(async () => new Response("{}", { status: 200 }));
+    await expect(
+      dispatchPresetCompletion(
+        {
+          model: modelFor("ollama", "llama3", "http://127.0.0.1:11434/v1"),
+          preset: {},
+          groupId: "local",
+          prompt: "hi",
+        },
+        {
+          fetch: fetchSpy as unknown as typeof globalThis.fetch,
+          env: { OLLAMA_BASE_URL: "http://127.0.0.1:11434" },
+        },
+      ),
+    ).rejects.toThrow(/base-URL variable rather than an API-key credential/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("refuses an API-key group whose model speaks another API, before fetch", async () => {
+    // Rule 2 of the predicate, on its own: Groq is dispatchable and configured,
+    // but a model that is not `openai-completions` is not what this path builds.
+    const fetchSpy = vi.fn(async () => new Response("{}", { status: 200 }));
+    await expect(
+      dispatchPresetCompletion(
+        {
+          model: {
+            ...modelFor("groq", "some-anthropic-shaped", "https://api.groq.com/openai/v1"),
+            api: "anthropic-messages",
+          },
+          preset: {},
+          groupId: "groq",
+          prompt: "hi",
+        },
+        {
+          fetch: fetchSpy as unknown as typeof globalThis.fetch,
+          env: { GROQ_API_KEY: "present" },
+        },
+      ),
+    ).rejects.toThrow(/openai-completions/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("still sends, with the credential, for a configured API-key group", async () => {
+    // The control case: the predicate is not simply "refuse everything".
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+    const result = await dispatchPresetCompletion(
+      {
+        model: modelFor("groq", "llama-3.3-70b-versatile", "https://api.groq.com/openai/v1"),
+        preset: { hyperparameters: { temperature: 0.15 } },
+        groupId: "groq",
+        prompt: "hi",
+      },
+      {
+        fetch: fetchSpy as unknown as typeof globalThis.fetch,
+        env: { GROQ_API_KEY: "gsk-not-a-real-key" },
+      },
+    );
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://api.groq.com/openai/v1/chat/completions");
+    expect((init.headers as Record<string, string>).Authorization).toMatch(/^Bearer /);
+    expect(JSON.parse(String(init.body)).temperature).toBe(0.15);
+    expect(result.status).toBe(200);
   });
 });
