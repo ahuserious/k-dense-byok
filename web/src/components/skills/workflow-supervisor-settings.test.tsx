@@ -14,6 +14,39 @@ function mockProject() {
   } as unknown as ReturnType<typeof useProjects.useProjects>);
 }
 
+function destCapabilities(
+  overrides: Partial<skillCurator.SkillCuratorCapabilities> = {},
+): skillCurator.SkillCuratorCapabilities {
+  return {
+    promptElevation: {
+      available: false,
+      interfaceDocument: "wave-f/interfaces/F5-elevate-to-dag.md",
+      endpoint: "/elevate-to-dag",
+      engine: "server/src/workflows/elevate-to-dag.ts",
+      reason: "POST /elevate-to-dag is unpublished on this dest index.",
+    },
+    harness: {
+      available: true,
+      endpoint: "/harnesses",
+      reason: null,
+    },
+    runStateCritiques: {
+      readsLiveRunState: true,
+      persistedToRunState: false,
+      reason: "RunState v1 is frozen.",
+    },
+    durability: {
+      available: false,
+      settingsEndpoint: "/durability/settings",
+      signalsEndpoint: "/durability/signals",
+      ownsStore: false,
+      reason: "Durability settings endpoint not available on this build.",
+    },
+    modelPresets: { available: false, endpoint: "/model-presets" },
+    ...overrides,
+  };
+}
+
 const settings: skillCurator.DurabilitySettingsV1 = {
   version: 1,
   enabled: false,
@@ -36,26 +69,9 @@ const settings: skillCurator.DurabilitySettingsV1 = {
 describe("WorkflowSupervisorSettings", () => {
   it("is honestly disabled when F14's shared endpoint is absent", async () => {
     mockProject();
-    vi.spyOn(skillCurator, "getSkillCuratorCapabilities").mockResolvedValue({
-      promptElevation: {
-        available: false,
-        interfaceDocument: "wave-f/interfaces/F5-elevate-to-dag.md",
-        endpoint: null,
-        reason: "F5 unavailable.",
-      },
-      runStateCritiques: {
-        readsLiveRunState: true,
-        persistedToRunState: false,
-        reason: "RunState v1 is frozen.",
-      },
-      durability: {
-        available: false,
-        settingsEndpoint: "/durability/settings",
-        signalsEndpoint: "/durability/signals",
-        ownsStore: false,
-      },
-      modelPresets: { available: false, endpoint: "/model-presets" },
-    });
+    vi.spyOn(skillCurator, "getSkillCuratorCapabilities").mockResolvedValue(
+      destCapabilities(),
+    );
     vi.spyOn(skillCurator, "getDurabilityAdapterState").mockResolvedValue({
       available: false,
       settings: null,
@@ -86,26 +102,18 @@ describe("WorkflowSupervisorSettings", () => {
 
   it("writes preset ids and settings only through F14's PUT adapter", async () => {
     mockProject();
-    vi.spyOn(skillCurator, "getSkillCuratorCapabilities").mockResolvedValue({
-      promptElevation: {
-        available: false,
-        interfaceDocument: "wave-f/interfaces/F5-elevate-to-dag.md",
-        endpoint: null,
-        reason: "F5 unavailable.",
-      },
-      runStateCritiques: {
-        readsLiveRunState: true,
-        persistedToRunState: false,
-        reason: "RunState v1 is frozen.",
-      },
-      durability: {
-        available: true,
-        settingsEndpoint: "/durability/settings",
-        signalsEndpoint: "/durability/signals",
-        ownsStore: false,
-      },
-      modelPresets: { available: true, endpoint: "/model-presets" },
-    });
+    vi.spyOn(skillCurator, "getSkillCuratorCapabilities").mockResolvedValue(
+      destCapabilities({
+        durability: {
+          available: true,
+          settingsEndpoint: "/durability/settings",
+          signalsEndpoint: "/durability/signals",
+          ownsStore: false,
+          reason: null,
+        },
+        modelPresets: { available: true, endpoint: "/model-presets" },
+      }),
+    );
     const state = {
       available: true,
       settings,

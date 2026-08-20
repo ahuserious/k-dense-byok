@@ -15,7 +15,10 @@ import {
   SkillCuratorError,
 } from "../src/agent/skill-curator.ts";
 import { evaluateAutoresearchRun } from "../src/agent/skill-curator-autoresearch.ts";
-import { promptElevationAdapterStatus } from "../src/agent/skill-curator-prompt-elevation.ts";
+import {
+  destHarnessAdapterStatus,
+  promptElevationAdapterStatus,
+} from "../src/agent/skill-curator-prompt-elevation.ts";
 import { seedProjectSkills } from "../src/agent/skills.ts";
 import {
   resolveS4NodeExecutionBindings,
@@ -408,13 +411,32 @@ describe("Autoresearch² live RunState adapter", () => {
 });
 
 describe("prompt elevation adapter", () => {
-  it("is narrowly and honestly disabled while F5 is absent", () => {
-    expect(promptElevationAdapterStatus()).toEqual({
+  it("reuses F5's dest-index route and refuses a third elevator", () => {
+    const unpublished = {
+      hasRoute: () => false,
+    };
+    expect(promptElevationAdapterStatus(unpublished)).toEqual({
       available: false,
       interfaceDocument: "wave-f/interfaces/F5-elevate-to-dag.md",
-      endpoint: null,
-      reason: expect.stringMatching(/single elevation API has not landed/i),
+      endpoint: "/elevate-to-dag",
+      engine: "server/src/workflows/elevate-to-dag.ts",
+      reason: expect.stringMatching(/unpublished on this dest index/i),
     });
+    expect(
+      promptElevationAdapterStatus({
+        hasRoute: ({ method, url }) => method === "POST" && url === "/elevate-to-dag",
+      }).available,
+    ).toBe(true);
+    expect(destHarnessAdapterStatus(unpublished)).toEqual({
+      available: false,
+      endpoint: "/harnesses",
+      reason: expect.stringMatching(/unpublished on this dest index/i),
+    });
+    expect(
+      destHarnessAdapterStatus({
+        hasRoute: ({ method, url }) => method === "GET" && url === "/harnesses",
+      }).available,
+    ).toBe(true);
     expect(F11_SKILL_NAMES).toContain("prompt-elevation-to-dag");
   });
 });

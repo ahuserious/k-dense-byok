@@ -1,7 +1,7 @@
 # ADR F11 — substantive workflow skills and existing-store curation
 
 Status: accepted for the F11 lane  
-Base: `51f0b7d2d292093c71603504cbe159371930fffd`
+Base: `3aa056453e65571a923d2a9eb85400acb0abfa4c`
 
 ## Context
 
@@ -74,14 +74,15 @@ Document-first Team B follow-up:
 
 ### Prompt elevation remains one engine
 
-F5's interface is absent on the integration base. The
-`skill-curator-prompt-elevation.ts` adapter is intentionally disabled. The
-skill checks that capability and refuses to generate a substitute graph.
+F5 owns `server/src/workflows/elevate-to-dag.ts`. Dest `3aa0564` has F9's chat
+entry and F2's `/harnesses` registration, but it does not register
+`POST /elevate-to-dag`. The adapter probes dest index with `app.hasRoute` and
+stays disabled when that route is unpublished. The skill checks that
+capability and refuses to generate a substitute graph.
 
-Narrow F5 follow-up: change only the adapter to expose and call the endpoint
-published by `F5-elevate-to-dag.md`, then add one effect test proving the skill,
-chat affordance, and node resolve to the same endpoint. No elevation algorithm
-belongs in F11.
+F11 does not copy F5's engine, does not call F9's panel helper, and does not
+add a live Elevate control. When dest publishes F5's route, the same adapter
+reports the one endpoint; no elevation algorithm belongs in F11.
 
 ### Workflow supervision is a second view, never a second watcher
 

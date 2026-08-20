@@ -376,26 +376,49 @@ export function SkillCuratorPanel({
         </>
       )}
 
-      {capabilities?.promptElevation && !capabilities.promptElevation.available && (
+      {capabilities?.promptElevation && (
         <div className="space-y-1 rounded-md border p-2">
           <div className="flex items-center gap-2">
             <h4 className="text-xs font-medium">Prompt elevation entry point</h4>
             <Badge variant="outline" className="text-[9px]">
-              unavailable
+              {capabilities.promptElevation.available ? "published" : "unpublished"}
             </Badge>
           </div>
           <p id="prompt-elevation-disabled-reason" className="text-[11px] text-muted-foreground">
-            {capabilities.promptElevation.reason}
+            {capabilities.promptElevation.available
+              ? `F5 owns ${capabilities.promptElevation.engine}. Call ${capabilities.promptElevation.endpoint}; F11 does not host a second elevator.`
+              : capabilities.promptElevation.reason}
           </p>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled
-            aria-describedby="prompt-elevation-disabled-reason"
+          {!capabilities.promptElevation.available && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled
+              aria-describedby="prompt-elevation-disabled-reason"
+            >
+              Elevate prompt to DAG
+            </Button>
+          )}
+        </div>
+      )}
+
+      {capabilities?.harness && (
+        <div className="space-y-1 rounded-md border p-2">
+          <div className="flex items-center gap-2">
+            <h4 className="text-xs font-medium">Harness routes</h4>
+            <Badge variant="outline" className="text-[9px]">
+              {capabilities.harness.available ? "published" : "unpublished"}
+            </Badge>
+          </div>
+          <p
+            id="harness-dest-index-reason"
+            className="text-[11px] text-muted-foreground"
           >
-            Elevate prompt to DAG
-          </Button>
+            {capabilities.harness.available
+              ? `F2 published ${capabilities.harness.endpoint} on this dest index. F11 does not own that surface.`
+              : capabilities.harness.reason}
+          </p>
         </div>
       )}
     </section>

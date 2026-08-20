@@ -17,7 +17,10 @@ import {
   evaluateAutoresearchRun,
   type AutoresearchMonitorMode,
 } from "../agent/skill-curator-autoresearch.ts";
-import { promptElevationAdapterStatus } from "../agent/skill-curator-prompt-elevation.ts";
+import {
+  destHarnessAdapterStatus,
+  promptElevationAdapterStatus,
+} from "../agent/skill-curator-prompt-elevation.ts";
 import { SkillOperationFailure } from "../agent/skills-install.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -168,7 +171,8 @@ function parseCurationBody(body: unknown): SkillCurationInput {
 
 export async function registerSkillCuratorRoutes(app: FastifyInstance): Promise<void> {
   app.get("/skills/curator/capabilities", async () => ({
-    promptElevation: promptElevationAdapterStatus(),
+    promptElevation: promptElevationAdapterStatus(app),
+    harness: destHarnessAdapterStatus(app),
     runStateCritiques: {
       readsLiveRunState: true,
       persistedToRunState: false,
@@ -180,6 +184,9 @@ export async function registerSkillCuratorRoutes(app: FastifyInstance): Promise<
       settingsEndpoint: "/durability/settings",
       signalsEndpoint: "/durability/signals",
       ownsStore: false,
+      reason: app.hasRoute({ method: "GET", url: "/durability/settings" })
+        ? null
+        : "Durability settings endpoint not available on this build.",
     },
     modelPresets: {
       available: app.hasRoute({ method: "GET", url: "/model-presets" }),

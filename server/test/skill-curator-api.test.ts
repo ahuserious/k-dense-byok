@@ -158,15 +158,28 @@ describe("F11 skill curator API", () => {
     });
   });
 
-  it("publishes disabled F5 and frozen-RunState capability status", async () => {
+  it("reads dest index honestly: F2 harness published, F5 elevate and F14 durability unpublished", async () => {
+    const harness = await request("GET", "/harnesses");
+    const elevate = await request("POST", "/elevate-to-dag", {});
+    const durability = await request("GET", "/durability/settings");
+    expect([200, 503]).toContain(harness.statusCode);
+    expect(elevate.statusCode).toBe(404);
+    expect(durability.statusCode).toBe(404);
+
     const response = await request("GET", "/skills/curator/capabilities");
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({
       promptElevation: {
         available: false,
         interfaceDocument: "wave-f/interfaces/F5-elevate-to-dag.md",
-        endpoint: null,
-        reason: expect.stringMatching(/single elevation API has not landed/i),
+        endpoint: "/elevate-to-dag",
+        engine: "server/src/workflows/elevate-to-dag.ts",
+        reason: expect.stringMatching(/unpublished on this dest index/i),
+      },
+      harness: {
+        available: true,
+        endpoint: "/harnesses",
+        reason: null,
       },
       runStateCritiques: {
         readsLiveRunState: true,
@@ -178,6 +191,7 @@ describe("F11 skill curator API", () => {
         settingsEndpoint: "/durability/settings",
         signalsEndpoint: "/durability/signals",
         ownsStore: false,
+        reason: "Durability settings endpoint not available on this build.",
       },
       modelPresets: {
         available: false,

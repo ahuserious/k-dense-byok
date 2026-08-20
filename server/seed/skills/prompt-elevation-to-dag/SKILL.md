@@ -3,7 +3,7 @@ name: prompt-elevation-to-dag
 description: >-
   Enter Kady's single prompt-to-durable-DAG elevation flow. Use when the user
   asks to elevate a chat prompt or conversation into a saved scientific DAG;
-  fail closed when F5's shared elevation API is unavailable instead of
+  fail closed when dest has not published F5's POST /elevate-to-dag instead of
   constructing a competing graph-conversion algorithm.
 argument-hint: "[prompt or conversation goal]"
 ---
@@ -28,7 +28,8 @@ Inspect `promptElevation`:
 {
   "available": false,
   "interfaceDocument": "wave-f/interfaces/F5-elevate-to-dag.md",
-  "endpoint": null,
+  "endpoint": "/elevate-to-dag",
+  "engine": "server/src/workflows/elevate-to-dag.ts",
   "reason": "..."
 }
 ```
@@ -40,12 +41,17 @@ If `available` is false:
 3. Offer to preserve the source prompt while the shared engine is unavailable.
 4. Stop. Do not fall back to hand-authored conversion under this skill name.
 
-This fail-closed state is expected on builds where F5 has not landed.
+This fail-closed state is expected when dest's `server/src/index.ts` has not
+registered F5's route. F5 owns `elevate-to-dag.ts`. F9's chat affordance is
+another entry into that same engine. This skill must not become a third
+elevator.
 
 ## Procedure when the shared engine is available
 
-Only use the endpoint and request/response shape published by
-`F5-elevate-to-dag.md`.
+Only call F5's published `POST /elevate-to-dag` and the request/response shape
+in `F5-elevate-to-dag.md`. Import or invoke `elevatePromptToDag` from
+`server/src/workflows/elevate-to-dag.ts` if running in-process. Never copy
+that file.
 
 1. Collect the exact source:
    - one user prompt, or
@@ -82,9 +88,9 @@ Capability response: `available: false`.
 
 Answer:
 
-> Prompt elevation is unavailable on this build because the shared F5
-> elevation API has not landed. I did not generate or save a substitute graph.
-> I can preserve the selected prompt and requirements for the shared flow.
+> Prompt elevation is unpublished on this dest index. F5 owns
+> elevate-to-dag.ts. I did not generate or save a substitute graph. I can
+> preserve the selected prompt and requirements for the shared flow.
 
 Do not then emit a graph under another heading; that would silently defeat the
 guard.

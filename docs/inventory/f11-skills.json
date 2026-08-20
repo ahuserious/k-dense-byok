@@ -1,6 +1,6 @@
 {
   "lane": "F11",
-  "base": "51f0b7d2d292093c71603504cbe159371930fffd",
+  "base": "3aa056453e65571a923d2a9eb85400acb0abfa4c",
   "rows": [
     41,
     42,
@@ -38,7 +38,7 @@
         "capability adapter test",
         "disabled-with-reason UI test"
       ],
-      "knownGap": "F5 interface is absent; the adapter is intentionally disabled."
+      "knownGap": "Dest index has not registered POST /elevate-to-dag. F5 owns elevate-to-dag.ts; F11 stays disabled."
     },
     {
       "name": "workflow-supervisor",
@@ -48,7 +48,7 @@
         "preset-id-only UI binding test",
         "absent-endpoint disabled-state test"
       ],
-      "knownGap": "F14 and F1 are absent from the integration base."
+      "knownGap": "Dest index has not registered GET/PUT /durability/settings. Supervisor settings stay disabled-with-reason."
     },
     {
       "name": "lean4-prover",

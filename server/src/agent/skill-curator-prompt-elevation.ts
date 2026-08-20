@@ -1,28 +1,73 @@
 /**
  * F11 is only an entry point into F5's prompt-elevation engine.
  *
- * Keep this adapter deliberately tiny: the current integration does not contain
- * F5's interface or endpoint, so the only truthful behavior is disabled. Once
- * F5 lands, the follow-up changes this file to call that single API; no skill,
- * route, or UI needs to grow an elevation algorithm of its own.
+ * F5 owns `server/src/workflows/elevate-to-dag.ts`. F9's chat affordance is
+ * another entry point into that same engine. This adapter never implements
+ * elevation; it reports whether dest published F5's HTTP route. A missing
+ * dest-index registration stays disabled so Chat, the node kind, and this
+ * skill cannot grow three elevators.
  */
-
-export interface PromptElevationAdapterStatus {
-  available: boolean;
-  interfaceDocument: string;
-  endpoint: string | null;
-  reason: string | null;
-}
 
 export const F5_PROMPT_ELEVATION_INTERFACE =
   "wave-f/interfaces/F5-elevate-to-dag.md";
 
-export function promptElevationAdapterStatus(): PromptElevationAdapterStatus {
+export const F5_ELEVATE_TO_DAG_ENDPOINT = "/elevate-to-dag";
+
+export const F5_ELEVATE_TO_DAG_ENGINE =
+  "server/src/workflows/elevate-to-dag.ts";
+
+export const F2_HARNESS_LIST_ENDPOINT = "/harnesses";
+
+export interface DestRouteProbe {
+  hasRoute(route: { method: string; url: string }): boolean;
+}
+
+export interface PromptElevationAdapterStatus {
+  available: boolean;
+  interfaceDocument: string;
+  endpoint: string;
+  engine: string;
+  reason: string | null;
+}
+
+export interface DestHarnessAdapterStatus {
+  available: boolean;
+  endpoint: string;
+  reason: string | null;
+}
+
+export function destIndexPublishes(
+  app: DestRouteProbe,
+  method: string,
+  url: string,
+): boolean {
+  return app.hasRoute({ method, url });
+}
+
+export function promptElevationAdapterStatus(
+  app: DestRouteProbe,
+): PromptElevationAdapterStatus {
+  const published = destIndexPublishes(app, "POST", F5_ELEVATE_TO_DAG_ENDPOINT);
   return {
-    available: false,
+    available: published,
     interfaceDocument: F5_PROMPT_ELEVATION_INTERFACE,
-    endpoint: null,
-    reason:
-      "Prompt elevation is unavailable on this build because F5's single elevation API has not landed. The skill will not create a parallel elevator.",
+    endpoint: F5_ELEVATE_TO_DAG_ENDPOINT,
+    engine: F5_ELEVATE_TO_DAG_ENGINE,
+    reason: published
+      ? null
+      : "POST /elevate-to-dag is unpublished on this dest index. F5 owns elevate-to-dag.ts; F11 will not create a parallel elevator.",
+  };
+}
+
+export function destHarnessAdapterStatus(
+  app: DestRouteProbe,
+): DestHarnessAdapterStatus {
+  const published = destIndexPublishes(app, "GET", F2_HARNESS_LIST_ENDPOINT);
+  return {
+    available: published,
+    endpoint: F2_HARNESS_LIST_ENDPOINT,
+    reason: published
+      ? null
+      : "GET /harnesses is unpublished on this dest index.",
   };
 }

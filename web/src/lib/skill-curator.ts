@@ -10,7 +10,13 @@ export interface SkillCuratorCapabilities {
   promptElevation: {
     available: boolean;
     interfaceDocument: string;
-    endpoint: string | null;
+    endpoint: string;
+    engine: string;
+    reason: string | null;
+  };
+  harness: {
+    available: boolean;
+    endpoint: string;
     reason: string | null;
   };
   runStateCritiques: {
@@ -23,6 +29,7 @@ export interface SkillCuratorCapabilities {
     settingsEndpoint: string;
     signalsEndpoint: string;
     ownsStore: boolean;
+    reason: string | null;
   };
   modelPresets: {
     available: boolean;
@@ -213,6 +220,11 @@ export async function getSkillCuratorCapabilities(
     !isRecord(body.promptElevation) ||
     typeof body.promptElevation.available !== "boolean" ||
     typeof body.promptElevation.interfaceDocument !== "string" ||
+    typeof body.promptElevation.endpoint !== "string" ||
+    typeof body.promptElevation.engine !== "string" ||
+    !isRecord(body.harness) ||
+    typeof body.harness.available !== "boolean" ||
+    typeof body.harness.endpoint !== "string" ||
     !isRecord(body.runStateCritiques) ||
     typeof body.runStateCritiques.readsLiveRunState !== "boolean" ||
     typeof body.runStateCritiques.persistedToRunState !== "boolean" ||

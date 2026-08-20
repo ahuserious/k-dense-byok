@@ -15,6 +15,42 @@ function mockProject() {
   } as unknown as ReturnType<typeof useProjects.useProjects>);
 }
 
+function destCapabilities(
+  overrides: Partial<skillCurator.SkillCuratorCapabilities> = {},
+): skillCurator.SkillCuratorCapabilities {
+  return {
+    promptElevation: {
+      available: false,
+      interfaceDocument: "wave-f/interfaces/F5-elevate-to-dag.md",
+      endpoint: "/elevate-to-dag",
+      engine: "server/src/workflows/elevate-to-dag.ts",
+      reason: "POST /elevate-to-dag is unpublished on this dest index. F5 owns elevate-to-dag.ts; F11 will not create a parallel elevator.",
+    },
+    harness: {
+      available: true,
+      endpoint: "/harnesses",
+      reason: null,
+    },
+    runStateCritiques: {
+      readsLiveRunState: true,
+      persistedToRunState: false,
+      reason: "RunState v1 is frozen.",
+    },
+    durability: {
+      available: false,
+      settingsEndpoint: "/durability/settings",
+      signalsEndpoint: "/durability/signals",
+      ownsStore: false,
+      reason: "Durability settings endpoint not available on this build.",
+    },
+    modelPresets: {
+      available: false,
+      endpoint: "/model-presets",
+    },
+    ...overrides,
+  };
+}
+
 describe("SkillCuratorPanel", () => {
   it("writes selected loaded skills into the saved node through the curator API", async () => {
     mockProject();
@@ -32,29 +68,9 @@ describe("SkillCuratorPanel", () => {
         edgeCount: 0,
       },
     ]);
-    vi.spyOn(skillCurator, "getSkillCuratorCapabilities").mockResolvedValue({
-      promptElevation: {
-        available: false,
-        interfaceDocument: "wave-f/interfaces/F5-elevate-to-dag.md",
-        endpoint: null,
-        reason: "F5 shared elevation is not available.",
-      },
-      runStateCritiques: {
-        readsLiveRunState: true,
-        persistedToRunState: false,
-        reason: "RunState v1 is frozen.",
-      },
-      durability: {
-        available: false,
-        settingsEndpoint: "/durability/settings",
-        signalsEndpoint: "/durability/signals",
-        ownsStore: false,
-      },
-      modelPresets: {
-        available: false,
-        endpoint: "/model-presets",
-      },
-    });
+    vi.spyOn(skillCurator, "getSkillCuratorCapabilities").mockResolvedValue(
+      destCapabilities(),
+    );
     const getSnapshot = vi.spyOn(skillCurator, "getSkillCuratorSnapshot")
       .mockResolvedValue({
         definition: {
@@ -125,38 +141,20 @@ describe("SkillCuratorPanel", () => {
     ).toBeVisible();
   });
 
-  it("renders the absent F5 adapter disabled with its reason", async () => {
+  it("renders dest-index unpublished elevate as disabled and F2 harness as published", async () => {
     mockProject();
     vi.spyOn(dagWorkflows, "listDagWorkflowDefinitions").mockResolvedValue([]);
-    vi.spyOn(skillCurator, "getSkillCuratorCapabilities").mockResolvedValue({
-      promptElevation: {
-        available: false,
-        interfaceDocument: "wave-f/interfaces/F5-elevate-to-dag.md",
-        endpoint: null,
-        reason: "F5 shared elevation is not available.",
-      },
-      runStateCritiques: {
-        readsLiveRunState: true,
-        persistedToRunState: false,
-        reason: "RunState v1 is frozen.",
-      },
-      durability: {
-        available: false,
-        settingsEndpoint: "/durability/settings",
-        signalsEndpoint: "/durability/signals",
-        ownsStore: false,
-      },
-      modelPresets: {
-        available: false,
-        endpoint: "/model-presets",
-      },
-    });
+    vi.spyOn(skillCurator, "getSkillCuratorCapabilities").mockResolvedValue(
+      destCapabilities(),
+    );
 
     render(<SkillCuratorPanel />);
 
     const button = await screen.findByRole("button", { name: "Elevate prompt to DAG" });
     expect(button).toBeDisabled();
-    expect(screen.getByText("F5 shared elevation is not available.")).toBeVisible();
+    expect(screen.getByText(/unpublished on this dest index/i)).toBeVisible();
     expect(button).toHaveAttribute("aria-describedby", "prompt-elevation-disabled-reason");
+    expect(screen.getByText("Harness routes")).toBeVisible();
+    expect(screen.getByText(/F2 published \/harnesses/i)).toBeVisible();
   });
 });

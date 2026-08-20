@@ -13,9 +13,9 @@ load enabled skills; live sessions keep the resources they started with.
 - `autoresearch-squared` — reads live RunState and durable events for one run.
   Interactive mode asks the user; autonomous mode requires a 1–20 evaluation
   bound. Monitoring and run cancellation are separate controls.
-- `prompt-elevation-to-dag` — entry point into F5's single prompt-elevation
-  engine. It is visibly unavailable until that interface lands and never
-  generates a parallel substitute.
+- `prompt-elevation-to-dag` — entry point into F5's single `elevate-to-dag.ts`
+  engine. Dest-index unpublished `POST /elevate-to-dag` stays visibly
+  disabled. The skill never generates a parallel substitute.
 - `workflow-supervisor` — configures F14's shared durability watcher through its
   API, using F1 preset ids. It owns no watcher, store, escalation path, or
   defaults.
@@ -98,8 +98,8 @@ the curator. A project specialist is not silently copied into that library.
 - Workflow revision conflict: reload; no unconditional overwrite is offered.
 - Personality library unavailable: specialist creation remains available, but
   manual council-head selection is disabled.
-- F5/F14/F1/F4 interface absent: affected controls are disabled or the skill
-  reports the specific missing integration. No duplicate implementation is
-  started.
+- Dest index unpublished (`POST /elevate-to-dag`, `GET /durability/settings`):
+  affected controls are disabled with that reason. F2 `/harnesses` is reported
+  published when dest registered it. No duplicate implementation is started.
 - InfraNodus unconfigured/disabled: no MCP tool is advertised and the skill
   reaches nothing.
