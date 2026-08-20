@@ -40,7 +40,7 @@ import { validateWorkflowGraphDocument } from "./validate.ts";
 import {
   expandWorkflowRefs,
   WorkflowRefExpansionError,
-} from "./workflow-ref-expand.ts";
+} from "./kinds/workflow-ref-expand.ts";
 
 export const WORKFLOW_DEFINITION_STORAGE_VERSION = 1 as const;
 export const MAX_WORKFLOW_DEFINITIONS_PER_PROJECT = 256;

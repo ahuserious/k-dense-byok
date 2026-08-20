@@ -9,7 +9,7 @@ import {
   elevatePromptToDag,
   elevateWorkflowId,
 } from "../src/workflows/elevate-to-dag.ts";
-import { expandWorkflowRefs } from "../src/workflows/workflow-ref-expand.ts";
+import { expandWorkflowRefs } from "../src/workflows/kinds/workflow-ref-expand.ts";
 import {
   WorkflowStore,
   validateWorkflowGraphDocument,

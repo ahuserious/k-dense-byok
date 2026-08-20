@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { WorkflowEdge, WorkflowGraphDocument, WorkflowNode } from "./schema.ts";
+import type { WorkflowEdge, WorkflowGraphDocument, WorkflowNode } from "../schema.ts";
 
 export interface ReferencedWorkflowDefinition {
   id: string;
