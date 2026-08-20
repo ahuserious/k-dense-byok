@@ -46,6 +46,7 @@ import {
 
 import { stitchWorkflows } from "../../../web/src/lib/stitch-workflows.ts";
 import { applyFusionBoost, FUSION_BOOST_NODE_IDS } from "../../../web/src/lib/fusion-boost.ts";
+import { projectBestOfNRuns } from "../../../web/src/lib/best-of-n-branches.ts";
 
 const PROJECT_ID = "f6-stitch-fusion-test";
 
@@ -118,6 +119,28 @@ function twoNodeWorkflow(id: string): WorkflowGraphDocument {
   } as WorkflowGraphDocument;
 }
 
+function bestOfNWorkflow(): WorkflowGraphDocument {
+  const base = twoNodeWorkflow("f6-best-of-n");
+  return {
+    ...base,
+    entryNodeId: "pick",
+    nodes: [
+      {
+        id: "pick",
+        name: "Pick the best",
+        kind: "best-of-n",
+        terminal: true,
+        workspace: { isolation: "read-only", writePaths: [] },
+        goal: "Choose the strongest candidate.",
+        candidateCount: 4,
+        model: exactModel(),
+        evaluator: exactModel(),
+      },
+    ],
+    edges: [],
+  } as WorkflowGraphDocument;
+}
+
 /**
  * Save `document`, run it to completion, and return the ids of the nodes that
  * actually executed, in the order the runner started them.
@@ -170,6 +193,26 @@ async function runAndCollect(document: WorkflowGraphDocument, requestId: string)
         },
         fallbackUsed: false,
       });
+    } else if (node.kind === "best-of-n") {
+      const count = node.candidateCount ?? node.candidateModels?.length ?? 2;
+      for (let index = 1; index <= count; index += 1) {
+        context.recordModelResolution(`candidate-${String(index)}`, modelReceipt());
+      }
+      context.recordModelResolution("candidate-evaluator", modelReceipt());
+      return {
+        output: {
+          kind: "best-of-n",
+          candidateCount: count,
+          winner: 2,
+          scores: [
+            { candidate: 1, score: 0.4 },
+            { candidate: 2, score: 0.9 },
+            { candidate: 3, score: 0.6 },
+            { candidate: 4, score: 0.5 },
+          ],
+          rationale: "Candidate 2 retained the strongest evidence trail.",
+        },
+      };
     } else {
       context.recordModelResolution("agent", modelReceipt());
     }
@@ -189,6 +232,7 @@ async function runAndCollect(document: WorkflowGraphDocument, requestId: string)
     startedOrder: events.filter((e) => e.type === "node_started").map((e) => e.nodeId),
     succeededOrder: events.filter((e) => e.type === "node_succeeded").map((e) => e.nodeId),
     events,
+    record: store.readRun(PROJECT_ID, manifest.id)!,
   };
 }
 
@@ -361,5 +405,33 @@ describe("F6 row 25 — fusion boost changes which nodes the executor dispatches
     const run = await runAndCollect(document, "f6-row25-absent-stages");
     expect(run.status).toBe("succeeded");
     expect(run.startedOrder).toEqual(["subject-head", "subject-tail"]);
+  });
+});
+
+describe("F6 row 33 — real best-of-n receipts drive the projection", () => {
+  it("projects the executor's four resolved slots, winner, scores and rationale", async () => {
+    const run = await runAndCollect(bestOfNWorkflow(), "f6-row33-projection");
+    expect(run.status).toBe("succeeded");
+    expect(run.startedOrder).toEqual(["pick"]);
+
+    const [projection] = projectBestOfNRuns(
+      run.record as Parameters<typeof projectBestOfNRuns>[0],
+      run.events as Parameters<typeof projectBestOfNRuns>[1],
+    );
+    expect(projection?.branches.map(({ state }) => state)).toEqual([
+      "resolved",
+      "resolved",
+      "resolved",
+      "resolved",
+    ]);
+    expect(projection?.winnerIndex).toBe(2);
+    expect(projection?.branches.map(({ winner }) => winner)).toEqual([
+      false,
+      true,
+      false,
+      false,
+    ]);
+    expect(projection?.branches[1]?.score).toBe(0.9);
+    expect(projection?.rationale).toMatch(/strongest evidence trail/);
   });
 });

@@ -37,6 +37,7 @@ import type {
   WorkflowGraphNode,
   WorkflowModelRequest,
 } from "@/lib/dag-workflows";
+import { workflowHandoverConditions } from "./stitch-workflows";
 
 export type FusionBoostStageId =
   | "planning"
@@ -277,18 +278,21 @@ export function applyFusionBoost(
     // Every current terminal hands over to the verification panel, and the
     // panel becomes the sole terminal. Same demotion rule as the stitch: a
     // terminal node may not have outgoing edges (validate.ts:1812), and once
-    // demoted it needs an unconditional route (:1650/:1657).
+    // demoted it needs a condition family valid for that node. Evidence-routed
+    // terminals reject `always`, so reuse the stitch's shared rule.
     const terminals = nodes.filter((node) => node.terminal);
     if (terminals.length > 0) {
       for (const [index, terminal] of terminals.entries()) {
         const position = nodes.findIndex((node) => node.id === terminal.id);
         nodes[position] = { ...terminal, terminal: false } as WorkflowGraphNode;
-        edges.push({
-          id: `fusion-boost-verify-edge-${String(index + 1)}`,
-          from: terminal.id,
-          to: id,
-          condition: "always",
-        });
+        for (const condition of workflowHandoverConditions(base, terminal)) {
+          edges.push({
+            id: `fusion-boost-verify-edge-${String(index + 1)}-${condition}`,
+            from: terminal.id,
+            to: id,
+            condition,
+          });
+        }
       }
       nodes.push(
         fusionNode(

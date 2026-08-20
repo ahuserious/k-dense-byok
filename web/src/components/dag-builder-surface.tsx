@@ -141,7 +141,9 @@ import {
   issueLocation,
 } from "@/components/builder/issue-text";
 import { SourcePicker } from "@/components/builder/source-picker";
+import { DurabilityOptions } from "@/components/pipeline/durability-options";
 import { FusionBoostOptions } from "@/components/pipeline/fusion-boost-options";
+import { Lean4NodeOptions } from "@/components/pipeline/lean4-node-options";
 import { SavedWorkflowPalette } from "@/components/pipeline/saved-workflow-palette";
 import { HelperAgentChat } from "@/components/helper-agent-chat";
 import { PipelineBuilderPanel } from "@/components/pipeline-builder-panel";
@@ -319,6 +321,17 @@ export function DagBuilderSurface({
   // mounts the workspace after its own client-side hydration gate, so this
   // subtree is never in the server HTML and cannot mismatch.
   const [assistantOpen, setAssistantOpen] = useState(readAssistantOpen);
+  const {
+    models: authoringModels,
+    isModelAvailable: isAuthoringModelAvailable,
+  } = useModels();
+  const lean4ModelOptions = useMemo(
+    () =>
+      authoringModels.filter(
+        (model) => !model.isFusion && isAuthoringModelAvailable(model),
+      ),
+    [authoringModels, isAuthoringModelAvailable],
+  );
   const toggleAssistant = useCallback(() => {
     // Persisted HERE rather than inside the `setAssistantOpen` updater: updater
     // functions must be pure, and React may invoke one twice (StrictMode) or
@@ -337,11 +350,13 @@ export function DagBuilderSurface({
   // strip: the toolbar already carries eight controls, and §6.4 bans chrome
   // that does not carry information. Closed by default, labelled, in tab order.
   const [composeOpen, setComposeOpen] = useState(false);
+  const [durabilityOpen, setDurabilityOpen] = useState(false);
   const [composeBusyId, setComposeBusyId] = useState<string | null>(null);
   /** The full summaries, kept beside the picker's projection of them. */
   const [savedSummaries, setSavedSummaries] = useState<DagWorkflowDefinitionSummary[]>([]);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [loaded, setLoaded] = useState<LoadedWorkflow | null>(null);
+  const [fusionBoost, setFusionBoost] = useState<FusionBoostConfig>(FUSION_BOOST_DEFAULT);
   const [dirty, setDirty] = useState(false);
   const [issues, setIssues] = useState<BuilderIssue[]>([]);
   const [conflict, setConflict] = useState<ConflictState | null>(null);
@@ -359,6 +374,14 @@ export function DagBuilderSurface({
   useEffect(() => {
     loadedRef.current = loaded;
   }, [loaded]);
+
+  const loadedIdentity = loaded
+    ? `${loaded.sourceKey}:${String(loaded.revision ?? "draft")}`
+    : null;
+  useEffect(() => {
+    const current = loadedRef.current;
+    setFusionBoost(current ? readFusionBoost(current.document) : FUSION_BOOST_DEFAULT);
+  }, [loadedIdentity]);
 
   const libraryEntries = useMemo(
     () =>
@@ -619,20 +642,12 @@ export function DagBuilderSurface({
     [projectId, publishDocument],
   );
 
-  /**
-   * Row 25. The checkbox state is DERIVED from the loaded document rather than
-   * held beside it, so a saved-and-reloaded workflow shows the boost it
-   * actually carries. A control that remembered its own value while the
-   * document dropped it is the pattern this wave exists to stop (#54, #55).
-   */
-  const fusionBoost: FusionBoostConfig = loaded
-    ? readFusionBoost(loaded.document)
-    : FUSION_BOOST_DEFAULT;
-
   const changeFusionBoost = useCallback(
     (next: FusionBoostConfig) => {
       const current = loadedRef.current;
       if (!current) return;
+      setFusionBoost(next);
+
       const { document, appliedStages } = applyFusionBoost(current.document, next, {
         // Supplied by the host rather than invented inside the policy — see
         // fusion-boost.ts. Every document this builder creates already carries a
@@ -644,8 +659,21 @@ export function DagBuilderSurface({
       setStatus(
         appliedStages.length > 0
           ? `Fusion boost on at: ${appliedStages.join(", ")}. Save to keep it.`
-          : "Fusion boost off. Save to keep it.",
+          : next.enabled
+            ? "Fusion boost is on with no selected stage. The previous boost was removed; save to keep it."
+            : "Fusion boost off. Save to keep it.",
       );
+    },
+    [publishDocument],
+  );
+
+  const changeLean4Document = useCallback(
+    (document: WorkflowGraphDocument, nextStatus: string) => {
+      const current = loadedRef.current;
+      if (!current) return;
+      publishDocument({ ...current, document });
+      setDirty(true);
+      setStatus(nextStatus);
     },
     [publishDocument],
   );
@@ -1053,6 +1081,27 @@ export function DagBuilderSurface({
               disabledReason={
                 loaded === null ? "Load a workflow first." : undefined
               }
+            />
+            <button
+              type="button"
+              data-testid="durability-toggle"
+              aria-expanded={durabilityOpen}
+              onClick={() => setDurabilityOpen((open) => !open)}
+              className="flex items-center justify-between rounded-md border px-2.5 py-2 text-left text-[11px] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground"
+            >
+              <span>
+                <span className="block font-medium">Durability</span>
+                <span className="block text-[10px] text-muted-foreground">
+                  Watcher models, signals, escalation, lateral pass, and bounded stop.
+                </span>
+              </span>
+              <span aria-hidden>{durabilityOpen ? "−" : "+"}</span>
+            </button>
+            {durabilityOpen && <DurabilityOptions />}
+            <Lean4NodeOptions
+              document={loaded?.document ?? null}
+              models={lean4ModelOptions}
+              onChange={changeLean4Document}
             />
           </div>
         )}

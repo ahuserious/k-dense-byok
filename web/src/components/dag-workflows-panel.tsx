@@ -23,6 +23,7 @@ import {
   type VersionedDagWorkflowDefinition,
 } from "@/lib/dag-workflows";
 import { BestOfNBranchView } from "@/components/pipeline/best-of-n-branch-view";
+import { DurabilityTimeline } from "@/components/pipeline/durability-timeline";
 import {
   createDefaultWorkflowGraph,
   isWorkflowIdentifier,
@@ -710,6 +711,7 @@ function DefinitionDetails({
       {watchedRunId ? (
         <BestOfNBranchView projectId={projectId} runId={watchedRunId} />
       ) : null}
+      {watchedRunId ? <DurabilityTimeline runId={watchedRunId} /> : null}
       {graph.description ? (
         <p className="border-b px-4 py-3 text-xs text-muted-foreground">{graph.description}</p>
       ) : null}

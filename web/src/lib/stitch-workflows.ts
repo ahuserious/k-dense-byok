@@ -150,6 +150,25 @@ function usesEvidenceRoutes(
 }
 
 /**
+ * Route conditions accepted when a formerly terminal node hands work to a new
+ * phase or policy node. Kept public so every graph-rewriting policy uses the
+ * same validation rule instead of rediscovering it.
+ */
+export function workflowHandoverConditions(
+  sourceDocument: WorkflowGraphDocument,
+  sourceNode: WorkflowGraphNode,
+): WorkflowGraphEdge["condition"][] {
+  if (!usesEvidenceRoutes(sourceDocument, sourceNode)) return ["always"];
+
+  const conditions: WorkflowGraphEdge["condition"][] = ["evidence-supported"];
+  const onUnsupportedOutput = sourceNode.kind === "evidence-gate"
+    ? sourceNode.onUnsupportedOutput
+    : effectiveEvidencePolicy(sourceDocument, sourceNode).onUnsupportedOutput;
+  if (onUnsupportedOutput === "route") conditions.push("evidence-unsupported");
+  return conditions;
+}
+
+/**
  * Namespace one identifier into the composed document.
  *
  * Truncates rather than overflowing: `IdentifierSchema` caps at 64 characters,
@@ -204,32 +223,12 @@ function bridgeEdgesFrom(
 ): WorkflowGraphEdge[] {
   const makeId = (hint: string) => namespacedId("", hint, edgeIds);
 
-  if (!usesEvidenceRoutes(sourceDocument, sourceNode)) {
-    return [{ id: makeId(`stitch-${fromId}-to-${toId}`), from: fromId, to: toId, condition: "always" }];
-  }
-
-  const edges: WorkflowGraphEdge[] = [
-    {
-      id: makeId(`stitch-ok-${fromId}-to-${toId}`),
-      from: fromId,
-      to: toId,
-      condition: "evidence-supported",
-    },
-  ];
-  const onUnsupportedOutput = sourceNode.kind === "evidence-gate"
-    ? sourceNode.onUnsupportedOutput
-    : effectiveEvidencePolicy(sourceDocument, sourceNode).onUnsupportedOutput;
-  // :1745 rejects an unsupported edge when the policy does NOT route, so this
-  // edge is conditional on the policy rather than always emitted.
-  if (onUnsupportedOutput === "route") {
-    edges.push({
-      id: makeId(`stitch-no-${fromId}-to-${toId}`),
-      from: fromId,
-      to: toId,
-      condition: "evidence-unsupported",
-    });
-  }
-  return edges;
+  return workflowHandoverConditions(sourceDocument, sourceNode).map((condition) => ({
+    id: makeId(`stitch-${condition}-${fromId}-to-${toId}`),
+    from: fromId,
+    to: toId,
+    condition,
+  }));
 }
 
 export interface StitchOptions {

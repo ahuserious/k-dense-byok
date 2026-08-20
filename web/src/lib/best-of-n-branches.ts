@@ -105,6 +105,7 @@ export function candidateCountForNode(node: unknown): number {
 
 /** The slot map for the execution of `nodeId`, or `{}` if none is legible. */
 function slotsForNode(record: WorkflowRunRecord, nodeId: string): Record<string, unknown> {
+  if (!isRecord(record.state)) return {};
   const executions = record.state.executions;
   if (!isRecord(executions)) return {};
   for (const execution of Object.values(executions)) {

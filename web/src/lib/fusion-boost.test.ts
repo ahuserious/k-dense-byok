@@ -99,6 +99,41 @@ describe("applyFusionBoost", () => {
     expect(document.nodes.filter((node) => node.terminal)).toHaveLength(1);
   });
 
+  it("uses evidence routes when an evidence-gate terminal hands off to verification", () => {
+    const base = twoNodeDocument();
+    const tail = base.nodes.find((node) => node.id === "tail")!;
+    const evidenceTerminal = {
+      ...tail,
+      kind: "evidence-gate",
+      checks: ["claim-support"],
+      artifactIds: [],
+      evaluator: base.defaultModel,
+      onUnsupportedOutput: "route",
+    } as WorkflowGraphNode;
+    const { document } = applyFusionBoost(
+      {
+        ...base,
+        nodes: base.nodes.map((node) => (node.id === "tail" ? evidenceTerminal : node)),
+      },
+      { enabled: true, stages: { "verification-gate": true } },
+    );
+
+    expect(
+      document.edges
+        .filter((edge) => edge.from === "tail" && edge.to === FUSION_BOOST_NODE_IDS["verification-gate"])
+        .map((edge) => edge.condition)
+        .sort(),
+    ).toEqual(["evidence-supported", "evidence-unsupported"]);
+    expect(
+      document.edges.some(
+        (edge) =>
+          edge.from === "tail" &&
+          edge.to === FUSION_BOOST_NODE_IDS["verification-gate"] &&
+          edge.condition === "always",
+      ),
+    ).toBe(false);
+  });
+
   it("uses the existing `fusion` kind and adds no new node kind", () => {
     const { document } = applyFusionBoost(twoNodeDocument(), {
       enabled: true,

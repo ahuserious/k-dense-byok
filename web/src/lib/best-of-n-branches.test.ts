@@ -165,6 +165,36 @@ describe("projectBestOfNRuns", () => {
 
     const nullish = { manifest: null, state: null };
     expect(projectBestOfNRuns(nullish as unknown as WorkflowRunRecord)).toEqual([]);
+
+    const validGraphWithoutState = {
+      manifest: {
+        graph: {
+          nodes: [{ id: "pick", kind: "best-of-n", candidateCount: 3 }],
+        },
+      },
+      state: null,
+    };
+    expect(() =>
+      projectBestOfNRuns(validGraphWithoutState as unknown as WorkflowRunRecord),
+    ).not.toThrow();
+    expect(
+      projectBestOfNRuns(validGraphWithoutState as unknown as WorkflowRunRecord)[0]?.branches.map(
+        ({ state }) => state,
+      ),
+    ).toEqual(["not-started", "not-started", "not-started"]);
+
+    const validGraphWithNumericState = {
+      ...validGraphWithoutState,
+      state: 7,
+    };
+    expect(() =>
+      projectBestOfNRuns(validGraphWithNumericState as unknown as WorkflowRunRecord),
+    ).not.toThrow();
+    expect(
+      projectBestOfNRuns(validGraphWithNumericState as unknown as WorkflowRunRecord)[0]?.branches.map(
+        ({ state }) => state,
+      ),
+    ).toEqual(["not-started", "not-started", "not-started"]);
   });
 
   it("survives an execution whose modelCallSlots is not an object", () => {

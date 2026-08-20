@@ -1,13 +1,16 @@
 {
   "lane": "F6",
   "wave": "F",
-  "round": 1,
-  "purpose": "Pipeline builder composition: saved workflows as palette items (row 19), stitch as pipeline phases (row 22), fusion boost as policy over existing kinds (row 25), best-of-n candidate branches (row 33), and the #43 panel decision.",
+  "round": 2,
+  "purpose": "Pipeline builder composition: saved workflows as palette items (row 19), stitch as pipeline phases (row 22), fusion boost as policy over existing kinds (row 25), best-of-n candidate branches (row 33), durability UI against F14's contract (rows 23-24), and the #43 panel decision.",
   "files": [
     "docs/inventory/f6-builder.json",
     "docs/adr/F6-pipelines-panel.md",
     "docs/adr/F6-stitch-model.md",
     "docs/adr/F6-best-of-n-visualisation.md",
+    "docs/adr/F6-durability-ui.md",
+    "docs/adr/F6-lean4-interface.md",
+    "docs/adr/F6-workflow-ref-follow-up.md",
     "server/test/wave-f/f6-stitch-fusion.test.ts",
     "web/src/lib/stitch-workflows.ts",
     "web/src/lib/stitch-workflows.test.ts",
@@ -15,15 +18,23 @@
     "web/src/lib/fusion-boost.test.ts",
     "web/src/lib/best-of-n-branches.ts",
     "web/src/lib/best-of-n-branches.test.ts",
+    "web/src/lib/durability.ts",
+    "web/src/lib/durability.test.ts",
     "web/src/components/pipeline/saved-workflow-palette.tsx",
     "web/src/components/pipeline/fusion-boost-options.tsx",
     "web/src/components/pipeline/best-of-n-branch-view.tsx",
+    "web/src/components/pipeline/durability-options.tsx",
+    "web/src/components/pipeline/durability-timeline.tsx",
+    "web/src/components/pipeline/lean4-node-options.tsx",
     "web/src/components/dag-builder-surface.tsx",
     "web/src/components/dag-workflows-panel.tsx",
+    "web/package.json",
+    "web/package-lock.json",
     "e2e/item-count-reporter.ts"
   ],
   "notInFilesArray": {
-    "e2e/wave-f/f6/compose.spec.ts": "Authored, pinned and run by F6, and owned by F6 through its e2e/wave-f/f6/** glob. Kept out of the files array because lane S11 still holds e2e/** , so an inventoried path there resolves to two owners and ownership-check.mjs:284 fails. Escalated as W/requests/c-1.md; this changes no ownership."
+    "e2e/wave-f/f6/compose.spec.ts": "Authored, pinned and run by F6, and owned by F6 through its e2e/wave-f/f6/** glob. Kept out of the files array because lane S11 still holds e2e/**, so an inventoried path there resolves to two owners and ownership-check.mjs:284 fails. Escalated as W/requests/c-1.md; this changes no ownership.",
+    "e2e/wave-f/f6/live-builder.spec.ts": "Same S11 glob collision. Unmocked Gate U items for fusion-boost insertion and the React Flow sequence."
   },
   "deleted": [
     "web/src/components/pipelines-panel.tsx"
@@ -35,26 +46,28 @@
       "gateB": "not-done",
       "gateBReason": "No workflow-reference node kind exists in the typed union; every object in server/src/workflows/schema.ts is additionalProperties:false; and a run's graph is a snapshot (store.ts:2427 `graph: structuredClone(definition.graph)`) with no expansion pass. The 'as reference' control is rendered disabled with that reason.",
       "request": "W/requests/c-f6-4.md",
-      "followUp": "Lead: row 19's workflow-ref kind goes to Team B / lane F5 (LEAD-TO-B-1). F6 binds it in a follow-up round after F5 lands; poll W/interfaces/F5-palette-mapping.md."
+      "followUp": "docs/adr/F6-workflow-ref-follow-up.md. Lead: row 19's workflow-ref kind goes to Team B / lane F5. F6 binds it after F5 lands; poll W/interfaces/F5-palette-mapping.md."
     },
     "22": {
       "title": "Stitch multiple workflows as pipeline phases",
       "gateU": "pass",
       "gateB": "pass",
       "mechanism": "Flatten with meta.compositeOf provenance; ordering carried by real edges from phase N's terminals to phase N+1's entry node.",
-      "evidence": "server/test/wave-f/f6-stitch-fusion.test.ts (7/7, runs SUCCEED) plus a live run on preview :18301."
+      "evidence": "server/test/wave-f/f6-stitch-fusion.test.ts (phase order on the event log) plus a live run on preview :18301."
     },
     "23": {
       "title": "Workflow durability with a watcher model picker",
-      "gateU": "not-done",
+      "gateU": "pass-honest-unavailable",
       "gateB": "not-done",
-      "blockedOn": "W/interfaces/F14-durability.md does not exist; and WorkflowSettingsV1Schema (schema.ts:258-266) has no field to persist a durability configuration."
+      "blockedOn": "F14's /durability/* routes are unpublished on this tree. F14's own store answers settings; no NodeSpec field is required. Gate U is the 404 surface with a visible reason and retry, not a live-looking picker.",
+      "evidence": "web/src/components/pipeline/durability-options.tsx; e2e/wave-f/f6/live-builder.spec.ts asserts the 404 copy."
     },
     "24": {
       "title": "Durability lateral pass to a larger model",
-      "gateU": "not-done",
+      "gateU": "pass-honest-unavailable",
       "gateB": "not-done",
-      "blockedOn": "W/interfaces/F14-durability.md does not exist; the run-timeline event name and payload for a fired lateral pass are server-owned and unspecified."
+      "blockedOn": "Same unpublished F14 routes. Timeline 404 renders nothing rather than an empty history. Lateral-pass events are F14 journal names; F6 does not invent a second watcher.",
+      "evidence": "web/src/components/pipeline/durability-timeline.tsx; compose.spec.ts mocked contract item only."
     },
     "25": {
       "title": "Fusion boost at named stages",
@@ -68,41 +81,29 @@
         "elevation-to-dag": "Requires the elevate-to-DAG node kind, landing in lane F5.",
         "hypothesis": "Requires the hypothesis node kind, landing in lane F5."
       },
-      "evidence": "server/test/wave-f/f6-stitch-fusion.test.ts: boost ON executed kinds ['fusion','agent','agent','fusion']; boost OFF executed ['subject-head','subject-tail']. Plus a live run on preview :18301."
+      "hostState": "enabled is held in dag-builder-surface and seeded from readFusionBoost(loaded.document). Per-stage checks still derive from the document after apply.",
+      "evidence": "server/test/wave-f/f6-stitch-fusion.test.ts: boost ON executed kinds ['fusion','agent','agent','fusion']; boost OFF executed ['subject-head','subject-tail']. compose.spec.ts turns the toggle on and checks Planning."
     },
     "33": {
       "title": "Best of n, visually depicted",
       "gateU": "pass-with-divergence",
       "gateB": "pass",
       "divergences": [
-        "Not React Flow: @xyflow/react is a dependency of the vendored engine package only, and web/package.json is not this lane's file.",
-        "Not parallel: kady-node-executor.ts:2862 runs candidates in a sequential for loop with await inside, so the view shows them resolving one at a time and says so."
+        "Not parallel: kady-node-executor.ts:2862 runs candidates in a sequential for loop with await inside, so the view shows them resolving one at a time and says so.",
+        "React Flow is a sequence, not a concurrent fan-out. The UI prints that notice."
       ],
-      "dataSource": "state.executions[*].modelCallSlots['candidate-N'] for branch state; node_succeeded data.output for the winner and scores.",
-      "requests": [
-        "W/requests/c-f6-3.md",
-        "W/requests/c-f6-5.md"
-      ],
-      "followUp": "Lead APPROVED option A of c-f6-3: @xyflow/react goes into web/package.json and row 33's viz moves onto React Flow in a follow-up round. Round 1 shipped the tokenised-DOM version, which the response explicitly permits provided the evidence file says which shipped \u2014 it does."
+      "dataSource": "state.executions[*].modelCallSlots['candidate-N'] for branch state; node_succeeded data.output {kind,winner,scores,rationale} for the winner. Winner is 1-based as the executor writes.",
+      "evidence": "server/test/wave-f/f6-stitch-fusion.test.ts row 33 projects winner 2, scores, and rationale from a real-shaped executor output; web/src/lib/best-of-n-branches.test.ts covers #62 state:null and state:7."
     }
   },
   "e2e": {
-    "file": "e2e/wave-f/f6/compose.spec.ts",
-    "substantiveItems": 9,
-    "reporterKey": "compose.spec.ts",
-    "expectedSubstantiveItemsBefore": 218,
-    "expectedSubstantiveItemsAfter": 227
-  },
-  "pendingPolicyAmendment": {
-    "note": "server/test/wave-f/f6-*.test.ts and web/src/components/dag-builder-surface.test.tsx were granted mid-round by the lead (W/requests/c-f6-2.response.md, c-f6-1.response.md) but the amendment has not merged into this clone yet. F6 used only the server-test glob; the dag-builder-surface.test.tsx handoff turned out not to be needed.",
-    "granted": [
-      "server/test/wave-f/f6-*.test.ts",
-      "web/src/components/dag-builder-surface.test.tsx",
-      "web/package.json",
-      "web/package-lock.json"
-    ],
-    "usedByF6ThisRound": [
-      "server/test/wave-f/f6-stitch-fusion.test.ts"
-    ]
+    "mockedFile": "e2e/wave-f/f6/compose.spec.ts",
+    "liveFile": "e2e/wave-f/f6/live-builder.spec.ts",
+    "substantiveItems": 16,
+    "reporterKeys": {
+      "compose.spec.ts": 14,
+      "live-builder.spec.ts": 2
+    },
+    "expectedSubstantiveItemsAfter": 237
   }
 }

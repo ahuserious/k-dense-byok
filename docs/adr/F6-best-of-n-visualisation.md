@@ -1,8 +1,8 @@
-# ADR F6 — best-of-n is drawn from real slot state, sequentially, and not in React Flow (row 33)
+# ADR F6 — best-of-n uses React Flow without inventing concurrency (row 33)
 
-- **Status:** accepted, with two declared divergences from the row as written.
-- **Lane:** F6, Wave F round 1. **Row:** 33.
-- **Date:** 2026-08-19.
+- **Status:** accepted; React Flow is delivered, while sequential execution remains explicit.
+- **Lane:** F6, Wave F rescue round. **Row:** 33.
+- **Date:** 2026-08-20.
 
 ## What row 33 asks for
 
@@ -10,35 +10,24 @@
 > The graph view **renders the n-way split as n parallel branches, live**. The existing `best-of-n`
 > executes; the visualisation reflects real candidate state, **not a static fan-out drawing**.
 
-Three claims. The third is met in full. The first two are not, for measured reasons, and this ADR
-records the harsher framing rather than softening it.
+The dashboard and live-state claims are met. The word “parallel” is not: the executor is sequential,
+and the visualisation must not claim otherwise.
 
-## Divergence 1 — it is not React Flow
+## React Flow lives on the typed-runtime side
 
-```
-$ grep -n "xyflow\|reactflow" web/package.json          # (no output)
-$ grep -n "xyflow" server/vendor/pipeline-engine/packages/web/package.json
-20:    "@xyflow/react": "^12.10.1",
-```
-
-**React Flow exists only inside the vendored engine package.** `web/package.json` is not lane F6's
-file, so the dependency cannot be added here.
-
-The one React Flow surface that does exist — `WorkflowDagViewer.tsx`, which F6 *does* own — renders
+Round 1 found that the existing React Flow surface — `WorkflowDagViewer.tsx` — renders
 the **vendored engine's** runs: its props are `dagNodes: readonly DagNode[]` and
 `liveStatus: readonly DagNodeState[]` (`WorkflowDagViewer.tsx:41-48`), fed from the vendored REST+SSE
 in `WorkflowExecution.tsx`. That runtime has no `modelCallSlots` and no `best-of-n` kind; those are
-**typed Kady runtime** concepts. Feeding it typed run state would need a new host→canvas bridge
-message, and the bridge vocabulary is a closed seven-entry list (`HostBridge.ts:47-53`) in a file
-that is also not F6's.
+**typed Kady runtime** concepts.
 
-So the branch view is built in Kady's own web app (`web/src/components/pipeline/`) with tokenised
-DOM. Requested in `W/requests/c-f6-3.md`: either `@xyflow/react` in `web/package.json`, or a
-`builder.setRunCandidates` bridge message. Either would let a later round move this projection onto
-React Flow without redesigning it — the projection (`web/src/lib/best-of-n-branches.ts`) is
-deliberately separate from the rendering for exactly that reason.
+The lead approved the smaller and correct boundary: `@xyflow/react` is now a direct `web/`
+dependency at the same `^12.10.1` range as the vendored package. The typed run view renders its own
+React Flow graph in `web/src/components/pipeline/best-of-n-branch-view.tsx`; no host-bridge message
+and no vendored-run model were repurposed. The projection remains separate in
+`web/src/lib/best-of-n-branches.ts`.
 
-## Divergence 2 — the branches are not parallel, and the UI says so
+## Runtime divergence — the branches are not parallel, and the UI says so
 
 `server/src/workflows/kady-node-executor.ts:2862-2872`:
 
@@ -52,9 +41,10 @@ deliberately separate from the rendering for exactly that reason.
 
 `await` **inside** the loop. Candidate *k+1* is not even declared until candidate *k* has resolved.
 
-**Drawing a fan-out that implies concurrency would be a lie about the runtime**, so the view does not.
-The n branches are real — n candidates genuinely exist for `candidateCount: n` — but they light up
-one at a time in index order, and `SEQUENTIAL_CANDIDATES_NOTICE` is rendered on screen:
+**Drawing a fan-out that implies concurrency would be a lie about the runtime**, so React Flow lays
+the candidates out as a left-to-right sequence with edges labelled “then”. The n candidate nodes are
+real — n candidates genuinely exist for `candidateCount: n` — and they light up one at a time in
+index order. `SEQUENTIAL_CANDIDATES_NOTICE` is rendered on screen:
 *"Candidates run one at a time, in order — the executor resolves each before starting the next."*
 
 An unreached candidate reports `not-started`, deliberately **not** `pending`: "pending" reads as
@@ -90,16 +80,17 @@ An absent verdict renders as "No candidate has been chosen yet", never as "candi
 ## Resilience and accessibility
 
 `WorkflowRunState.executions` is `Record<string, unknown>` on the client (`dag-workflows.ts:365`) —
-deliberately opaque. Per **#62**, every read is guarded and a malformed-but-200 body yields an empty
-projection instead of throwing in render phase; two unit tests pin that.
+deliberately opaque. Per **#62**, every read is guarded and a malformed-but-200 body never throws in
+render phase. A valid graph with missing run state renders its candidates as `not started`; a
+malformed graph renders no projection.
 
-Per **§6.6**, no state is carried by colour alone: each branch prints its state as a word, the winner
-is labelled "★ winner" in text, and the branch marker is a border weight rather than a hue.
+Per **§6.6**, no state is carried by colour alone: each candidate prints its state as a word, the
+winner is labelled "★ winner" in text, and every React Flow node has an accessible label.
 
 ## Evidence
 
-Proven on the lane's preview: a `candidateCount: 4` run declared
-`candidate-1`, `candidate-2`, `candidate-3`, `candidate-4` and `candidate-evaluator` as real slots on
-the run's execution. Transcript in `W/reports/f6-evidence.md`, with the honest note that the
-candidates then failed on `WORKFLOW_MODEL_NO_AUTHENTICATED_CANDIDATE` because the preview has no
-provider credentials, which this lane must not supply.
+The server effect test runs a four-candidate node to success with an injected executor, records all
+five real slots, persists the `node_succeeded` output, and asserts that the exact projection used by
+the UI marks candidate 2 as winner with its score and rationale. The unmocked browser item then
+launches a real run and verifies that the run's `modelCallSlots` render inside an actual
+`.react-flow` canvas with the sequential notice.

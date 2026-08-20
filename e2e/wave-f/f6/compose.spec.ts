@@ -53,6 +53,97 @@ async function routeJson(route: Route, body: unknown, status = 200) {
   });
 }
 
+const DURABILITY_SIGNAL_IDS = [
+  "compaction",
+  "context-rot",
+  "hallucination",
+  "paused-no-progress",
+  "failed-script-run",
+  "failed-skill-fire",
+] as const;
+
+function durabilitySettings() {
+  return {
+    version: 1,
+    enabled: false,
+    watcherModel: { kind: "unset", reason: "Pick a priced watcher model." },
+    rescueModel: { kind: "unset", reason: "Pick a rescue model." },
+    rescueEffort: "xhigh",
+    minRescueContextWindow: 1_000_000,
+    stallMs: 300_000,
+    stopPolicy: { allowStop: true, maxStopsPerRun: 1 },
+    signals: Object.fromEntries(
+      DURABILITY_SIGNAL_IDS.map((id) => [
+        id,
+        { enabled: id === "compaction", action: "observe", threshold: 1 },
+      ]),
+    ),
+  };
+}
+
+function durabilityResolution(resolved = false) {
+  const state = resolved
+    ? { status: "resolved", pricing: "priced", ref: "openrouter/openai/gpt-5.4-pro" }
+    : { status: "unset", pricing: "unknown", reason: "Pick a model." };
+  return { watcher: state, rescue: state };
+}
+
+async function installDurabilitySettingsApi(page: Page) {
+  let saved: unknown = null;
+  await page.route(BACKEND, async (route, request) => {
+    const path = backendPath(request);
+    const method = request.method();
+    if (path === "/durability/settings" && method === "GET") {
+      return routeJson(route, {
+        settings: durabilitySettings(),
+        resolution: durabilityResolution(),
+      });
+    }
+    if (path === "/durability/settings" && method === "PUT") {
+      saved = request.postDataJSON();
+      return routeJson(route, {
+        settings: saved,
+        resolution: durabilityResolution(true),
+      });
+    }
+    if (path === "/durability/signals" && method === "GET") {
+      return routeJson(route, {
+        signals: DURABILITY_SIGNAL_IDS.map((id) => {
+          const observability =
+            id === "failed-skill-fire"
+              ? "none"
+              : id === "paused-no-progress" || id === "failed-script-run"
+                ? "partial"
+                : "full";
+          return {
+            id,
+            label: id.replaceAll("-", " "),
+            observable: observability !== "none",
+            observability,
+            ...(observability === "full"
+              ? {}
+              : {
+                  unobservableReason:
+                    id === "failed-skill-fire"
+                      ? "This build cannot observe skill failures."
+                      : "Only part of this signal is observable in this build.",
+                }),
+            observationSource: "durable run events",
+            firesWhen: `A real ${id} event is observed.`,
+            supportedActions:
+              id === "failed-skill-fire"
+                ? []
+                : ["observe", "restart", "escalate", "lateral-pass", "stop"],
+            thresholdLabel: "Events required",
+          };
+        }),
+      });
+    }
+    return route.fallback();
+  });
+  return { saved: () => saved };
+}
+
 test.describe("F6 · builder compose surface", () => {
   test("row 19: the Compose disclosure lists saved workflows as addable palette items", async ({
     workspacePage,
@@ -187,6 +278,132 @@ test.describe("F6 · builder compose surface", () => {
     );
     await expect(workspacePage.getByTestId("fusion-boost-stage-planning")).toBeDisabled();
   });
+
+  test("row 25: turning fusion boost on enables Planning and inserts its real fusion node", async ({
+    workspacePage,
+  }) => {
+    await selectWorkspaceTab(workspacePage, "Builder");
+    await workspacePage
+      .getByRole("listbox", { name: "Workflow sources" })
+      .getByRole("option")
+      .filter({ hasText: "E2E Workflow" })
+      .first()
+      .click();
+    await workspacePage.getByTestId("compose-toggle").click();
+
+    const frame = workspacePage.frameLocator('iframe[title="DAG Builder"]');
+    const beforeNodes = await frame.locator(".react-flow__node").count();
+    const enabled = workspacePage.getByTestId("fusion-boost-enabled");
+    await expect(enabled).toBeEnabled();
+    await enabled.check();
+    await expect(enabled).toBeChecked();
+
+    const planning = workspacePage.getByTestId("fusion-boost-stage-planning");
+    await expect(planning).toBeEnabled();
+    await planning.check();
+    await expect(planning).toBeChecked();
+    await expect(workspacePage.getByTestId("builder-host-status")).toContainText(
+      "Fusion boost on at: planning",
+    );
+
+    await expect(frame.locator(".react-flow__node")).toHaveCount(beforeNodes + 1);
+  });
+
+  test("row 23: durability exposes both model pickers and all six honest signal states", async ({
+    workspacePage,
+  }) => {
+    await installDurabilitySettingsApi(workspacePage);
+    await selectWorkspaceTab(workspacePage, "Builder");
+    await workspacePage.getByTestId("compose-toggle").click();
+    await workspacePage.getByTestId("durability-toggle").click();
+
+    const durability = workspacePage.getByRole("region", { name: "Durability" });
+    await expect(durability).toBeVisible();
+    await expect(workspacePage.getByLabel("Watcher model", { exact: true })).toBeVisible();
+    await expect(workspacePage.getByLabel("Rescue model", { exact: true })).toBeVisible();
+    await expect(durability.getByRole("list", { name: "Durability signals" }).getByRole("listitem"))
+      .toHaveCount(6);
+
+    await expect(workspacePage.getByTestId("durability-signal-paused-no-progress"))
+      .toBeEnabled();
+    await expect(workspacePage.getByTestId("durability-signal-reason-paused-no-progress"))
+      .toContainText("Only part");
+    await expect(workspacePage.getByTestId("durability-signal-failed-skill-fire"))
+      .toBeDisabled();
+    await expect(workspacePage.getByTestId("durability-signal-reason-failed-skill-fire"))
+      .toContainText("cannot observe skill failures");
+    await expect(workspacePage.getByTestId("durability-enabled")).toBeDisabled();
+    await expect(durability).toContainText("Pick a priced watcher model");
+  });
+
+  test("row 23: chosen watcher and rescue models make durability savable", async ({
+    workspacePage,
+  }) => {
+    const api = await installDurabilitySettingsApi(workspacePage);
+    await selectWorkspaceTab(workspacePage, "Builder");
+    await workspacePage.getByTestId("compose-toggle").click();
+    await workspacePage.getByTestId("durability-toggle").click();
+
+    const modelRef = "openrouter/openai/gpt-5.4-pro";
+    await expect(
+      workspacePage
+        .getByLabel("Watcher model", { exact: true })
+        .locator(`option[value="${modelRef}"]`),
+    )
+      .toHaveCount(1, { timeout: 15_000 });
+    await workspacePage.getByLabel("Watcher model", { exact: true }).selectOption(modelRef);
+    await workspacePage.getByLabel("Rescue model", { exact: true }).selectOption(modelRef);
+
+    const enabled = workspacePage.getByTestId("durability-enabled");
+    await expect(enabled).toBeEnabled();
+    await enabled.check();
+    const durability = workspacePage.getByRole("region", { name: "Durability" });
+    await durability.getByRole("button", { name: "Save durability" }).click();
+    await expect(durability.getByRole("status")).toContainText(
+      "Durability settings saved",
+    );
+
+    expect(api.saved()).toMatchObject({
+      enabled: true,
+      watcherModel: { kind: "direct", ref: modelRef, effort: "high" },
+      rescueModel: { kind: "direct", ref: modelRef, effort: "xhigh" },
+    });
+  });
+
+  test("F4 interface: Lean 4 palette and inspector use the existing typed node", async ({
+    workspacePage,
+  }) => {
+    await selectWorkspaceTab(workspacePage, "Builder");
+    await workspacePage
+      .getByRole("listbox", { name: "Workflow sources" })
+      .getByRole("option")
+      .filter({ hasText: "E2E Workflow" })
+      .first()
+      .click();
+    await workspacePage.getByTestId("compose-toggle").click();
+    const frame = workspacePage.frameLocator('iframe[title="DAG Builder"]');
+    const beforeNodes = await frame.locator(".react-flow__node").count();
+    await workspacePage.getByRole("button", { name: "Add Lean 4 node" }).click();
+    await expect(workspacePage.getByTestId("builder-host-status")).toContainText(
+      "Added Lean 4 node",
+    );
+
+    const leanEditor = workspacePage.getByRole("group", { name: "Lean 4" });
+    const mode = leanEditor.locator("select").nth(0);
+    const solver = leanEditor.locator("select").nth(1);
+    await expect(mode).toHaveValue("verify");
+    await expect(solver).toBeDisabled();
+    await expect(leanEditor).toContainText(
+      "Lean verify mode is deterministic and has no model slot",
+    );
+    await mode.selectOption("solve");
+    await expect(solver).toBeEnabled();
+    await expect(
+      leanEditor.getByText("Complete reviewed Lean source", { exact: true }),
+    ).toHaveCount(0);
+    await expect(leanEditor.getByText("Exact proposition", { exact: true })).toBeVisible();
+    await expect(frame.locator(".react-flow__node")).toHaveCount(beforeNodes + 1);
+  });
 });
 
 test.describe("F6 · best-of-n branches", () => {
@@ -250,9 +467,99 @@ test.describe("F6 · best-of-n branches", () => {
         return routeJson(route, { events: [], lastSeq: 0, hasMore: false, diagnostics: [] });
       }
 
+      if (path === `/durability/runs/${runId}/timeline` && method === "GET") {
+        return routeJson(route, { runId, events: [], lastSeq: 0, hasMore: false });
+      }
+
+      if (path === "/durability/state" && method === "GET") {
+        return routeJson(route, {
+          enabled: false,
+          resolution: durabilityResolution(),
+          watchedRuns: [],
+          stopPolicy: { allowStop: true, maxStopsPerRun: 1 },
+          stopAvailability: [],
+        });
+      }
+
       return route.fallback();
     });
     return runId;
+  }
+
+  async function installDurabilityTimeline(page: Page, runId: string) {
+    await page.route(BACKEND, async (route, request) => {
+      const path = backendPath(request);
+      const method = request.method();
+      if (path === `/durability/runs/${runId}/timeline` && method === "GET") {
+        return routeJson(route, {
+          runId,
+          lastSeq: 4,
+          hasMore: false,
+          events: [
+            {
+              seq: 1,
+              ts: 1,
+              name: "durability.watch.started",
+              runId,
+              runLastSeq: 1,
+              detail: "The watcher began observing this run.",
+            },
+            {
+              seq: 2,
+              ts: 2,
+              name: "durability.action.dispatched",
+              runId,
+              runLastSeq: 5,
+              action: "lateral-pass",
+              model: "openrouter/openai/gpt-5.4-pro",
+              effort: "xhigh",
+              detail: "A larger model received the bounded run context.",
+            },
+            {
+              seq: 3,
+              ts: 3,
+              name: "durability.escalation.started",
+              runId,
+              runLastSeq: 6,
+              model: "openrouter/openai/gpt-5.4-pro",
+              effort: "xhigh",
+              detail: "A rescue attempt started.",
+            },
+            {
+              seq: 4,
+              ts: 4,
+              name: "durability.escalation.deferred",
+              runId,
+              runLastSeq: 7,
+              proposalId: "proposal-f6",
+              detail: "A rescue proposal is waiting for approval; the run was left unchanged.",
+              ok: false,
+            },
+          ],
+        });
+      }
+      if (path === "/durability/state" && method === "GET") {
+        return routeJson(route, {
+          enabled: true,
+          resolution: durabilityResolution(true),
+          watchedRuns: [{
+            runId,
+            status: "running",
+            lastSeq: 7,
+            lastObservedAt: 4,
+            firedSignals: ["context-rot"],
+            stops: 1,
+          }],
+          stopPolicy: { allowStop: true, maxStopsPerRun: 1 },
+          stopAvailability: [{
+            runId,
+            canStop: false,
+            reason: "The one allowed watcher stop has already been used.",
+          }],
+        });
+      }
+      return route.fallback();
+    });
   }
 
   test("row 33: launching a run renders one branch per candidate, from real slot state", async ({
@@ -274,6 +581,10 @@ test.describe("F6 · best-of-n branches", () => {
       await expect(workspacePage.getByTestId(`best-of-n-branch-${String(index)}`)).toBeVisible();
     }
     await expect(branches).toContainText("4 candidates");
+    await expect(branches).toContainText("React Flow sequence");
+    await expect(
+      workspacePage.getByTestId("best-of-n-react-flow-pick").locator(".react-flow"),
+    ).toBeVisible();
   });
 
   test("row 33: each branch shows ITS OWN slot's state, not one shared status", async ({
@@ -322,8 +633,31 @@ test.describe("F6 · best-of-n branches", () => {
     // The executor is a sequential `for` loop with `await` inside, so the view
     // must not imply concurrency.
     await expect(branches).toContainText("one at a time");
+    await expect(branches).toContainText("not concurrent fan-out");
     // No evaluator verdict has arrived, so no candidate is marked the winner.
     await expect(branches).toContainText("No candidate has been chosen yet");
     await expect(branches).not.toContainText("★ winner");
+  });
+
+  test("row 24: the durability timeline distinguishes lateral pass, started, and deferred", async ({
+    workspacePage,
+  }) => {
+    const runId = await installBestOfNRun(workspacePage);
+    await installDurabilityTimeline(workspacePage, runId);
+    const { details } = await createTypedWorkflowFromTemplate(
+      workspacePage,
+      "ml-model-selection-review",
+    );
+    await details.getByRole("button", { name: "Run typed workflow" }).click();
+
+    const timeline = workspacePage.getByTestId("durability-timeline");
+    await expect(timeline).toBeVisible({ timeout: 20_000 });
+    await expect(timeline).toContainText("Lateral pass dispatched");
+    await expect(timeline).toContainText("Rescue escalation started");
+    await expect(timeline).toContainText("Rescue proposal waiting for approval");
+    await expect(timeline).toContainText("Proposal proposal-f6 is unapplied");
+    await expect(timeline).not.toContainText("replacement run continued");
+    await expect(timeline.getByRole("button", { name: "Stop watched run" })).toBeDisabled();
+    await expect(timeline).toContainText("one allowed watcher stop has already been used");
   });
 });

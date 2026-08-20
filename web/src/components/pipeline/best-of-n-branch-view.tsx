@@ -1,33 +1,17 @@
-// danbot-byok — web/src/components/pipeline/best-of-n-branch-view.tsx
-//
-// Row 33: render a real `best-of-n` run as n branches, each carrying its OWN
-// candidate's live state.
-//
-// TWO THINGS THIS DELIBERATELY DOES NOT DO, both stated in the evidence file:
-//
-// 1. It is NOT React Flow. Row 33 asks for the split to be depicted "in the
-//    React Flow dashboard". `@xyflow/react` is a dependency of the VENDORED
-//    engine package only — `grep -n xyflow web/package.json` returns nothing —
-//    and `web/package.json` is not this lane's file. The one React Flow surface
-//    that exists (`WorkflowDagViewer.tsx`) renders the vendored engine's own
-//    runs, whose model has no `modelCallSlots`, and the host->canvas bridge
-//    vocabulary is a closed seven-message list in `HostBridge.ts`, which is
-//    also not this lane's file. Requested in W/requests/c-f6-3.md.
-// 2. It does NOT imply concurrency. The executor runs candidates in a
-//    sequential `for` loop with `await` inside (kady-node-executor.ts:2862).
-//    So the branches light up one at a time and the view SAYS so, rather than
-//    drawing a fan-out that promises something the runtime does not do.
-//
-// #62: the run body is validated before it is rendered. `state.executions` is
-// `Record<string, unknown>` on the wire, and a malformed-but-200 response
-// yields an empty projection rather than throwing in render phase.
-//
-// §6.6: state is never carried by colour alone — every branch prints its state
-// as a word, and the winner is named in text, not just tinted.
-
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  Handle,
+  MarkerType,
+  Position,
+  ReactFlow,
+  type Edge,
+  type Node,
+  type NodeProps,
+  type NodeTypes,
+} from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
 
 import {
   SEQUENTIAL_CANDIDATES_NOTICE,
@@ -42,6 +26,7 @@ import {
 } from "@/lib/dag-workflows";
 
 const POLL_INTERVAL_MS = 2_000;
+const TERMINAL_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
 
 const BRANCH_STATE_LABEL: Record<BestOfNBranchState, string> = {
   "not-started": "not started",
@@ -49,16 +34,140 @@ const BRANCH_STATE_LABEL: Record<BestOfNBranchState, string> = {
   resolved: "resolved",
 };
 
-/**
- * Deliberately a border weight and a word, not a hue. A dimmed or tinted row
- * is an invisible row for anyone who cannot pick the tint out, and §6.6 bans
- * expressing state through opacity.
- */
 const BRANCH_STATE_BORDER: Record<BestOfNBranchState, string> = {
-  "not-started": "border-l-2 border-l-border",
-  "in-flight": "border-l-2 border-l-foreground",
-  resolved: "border-l-2 border-l-primary",
+  "not-started": "border-border",
+  "in-flight": "border-foreground",
+  resolved: "border-primary",
 };
+
+interface SequenceNodeData extends Record<string, unknown> {
+  kind: "start" | "candidate" | "evaluator";
+  title: string;
+  subtitle: string;
+  state: BestOfNBranchState;
+  candidateIndex?: number;
+  winner?: boolean;
+  score?: number;
+}
+
+type SequenceNode = Node<SequenceNodeData, "sequenceStep">;
+
+function SequenceStepNode({ data }: NodeProps<SequenceNode>) {
+  return (
+    <div
+      data-testid={
+        data.kind === "candidate"
+          ? `best-of-n-branch-${String(data.candidateIndex)}`
+          : undefined
+      }
+      data-branch-state={data.kind === "candidate" ? data.state : undefined}
+      className={`min-w-36 rounded-md border-2 bg-background px-2.5 py-2 text-foreground shadow-sm ${BRANCH_STATE_BORDER[data.state]}`}
+    >
+      {data.kind !== "start" && (
+        <Handle
+          type="target"
+          position={Position.Left}
+          isConnectable={false}
+          className="border-background bg-foreground"
+        />
+      )}
+      <p className="font-mono text-[11px] font-medium">{data.title}</p>
+      <p className="mt-0.5 text-[10px] text-muted-foreground">{data.subtitle}</p>
+      {typeof data.score === "number" && (
+        <p className="mt-0.5 text-[10px] text-muted-foreground">score {data.score}</p>
+      )}
+      {data.winner && (
+        <p className="mt-1 rounded border px-1 text-[10px] font-medium">★ winner</p>
+      )}
+      {data.kind !== "evaluator" && (
+        <Handle
+          type="source"
+          position={Position.Right}
+          isConnectable={false}
+          className="border-background bg-foreground"
+        />
+      )}
+    </div>
+  );
+}
+
+const NODE_TYPES: NodeTypes = { sequenceStep: SequenceStepNode };
+
+function sequenceGraph(projection: BestOfNProjection): {
+  nodes: SequenceNode[];
+  edges: Edge[];
+} {
+  const spacing = 190;
+  const nodes: SequenceNode[] = [
+    {
+      id: `${projection.nodeId}-start`,
+      type: "sequenceStep",
+      position: { x: 0, y: 20 },
+      draggable: false,
+      selectable: true,
+      ariaLabel: `${projection.nodeName} starts a sequential best-of-n evaluation`,
+      data: {
+        kind: "start",
+        title: projection.nodeName,
+        subtitle: "sequential start",
+        state: "resolved",
+      },
+    },
+    ...projection.branches.map((branch, index): SequenceNode => ({
+      id: `${projection.nodeId}-${branch.slotId}`,
+      type: "sequenceStep",
+      position: { x: spacing * (index + 1), y: 20 },
+      draggable: false,
+      selectable: true,
+      ariaLabel: `Candidate ${String(branch.index)}, ${BRANCH_STATE_LABEL[branch.state]}${branch.winner ? ", winner" : ""}`,
+      data: {
+        kind: "candidate",
+        title: `Candidate ${String(branch.index)}`,
+        subtitle: `${branch.slotId} · ${BRANCH_STATE_LABEL[branch.state]}`,
+        state: branch.state,
+        candidateIndex: branch.index,
+        winner: branch.winner,
+        score: branch.score,
+      },
+    })),
+    {
+      id: `${projection.nodeId}-evaluator`,
+      type: "sequenceStep",
+      position: { x: spacing * (projection.branches.length + 1), y: 20 },
+      draggable: false,
+      selectable: true,
+      ariaLabel: `Evaluator, ${BRANCH_STATE_LABEL[projection.evaluator.state]}`,
+      data: {
+        kind: "evaluator",
+        title: "Evaluator",
+        subtitle: `${projection.evaluator.slotId} · ${BRANCH_STATE_LABEL[projection.evaluator.state]}`,
+        state: projection.evaluator.state,
+      },
+    },
+  ];
+
+  const edges = nodes.slice(1).map((node, index): Edge => {
+    const source = nodes[index]!;
+    return {
+      id: `${source.id}-then-${node.id}`,
+      source: source.id,
+      target: node.id,
+      label: "then",
+      type: "smoothstep",
+      focusable: true,
+      selectable: false,
+      ariaLabel: `${source.data.title} finishes before ${node.data.title} starts`,
+      markerEnd: { type: MarkerType.ArrowClosed },
+      style: { strokeWidth: 2 },
+      labelStyle: { fontSize: 10 },
+    };
+  });
+  return { nodes, edges };
+}
+
+function isTerminalStatus(value: unknown): boolean {
+  return typeof value === "string" && TERMINAL_RUN_STATUSES.has(value);
+}
 
 export function BestOfNBranchView({
   projectId,
@@ -72,7 +181,7 @@ export function BestOfNBranchView({
   const [loaded, setLoaded] = useState(false);
   const stopped = useRef(false);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (): Promise<boolean> => {
     try {
       const record = await readDagWorkflowRun(projectId, runId);
       let events: WorkflowRunEvent[] = [];
@@ -80,19 +189,15 @@ export function BestOfNBranchView({
         const page = await pageDagWorkflowRunEvents(projectId, runId, { limit: 500 });
         events = page.events;
       } catch {
-        // The winner rides on the event log; the BRANCHES do not need it. A
-        // failed event page therefore degrades to "no verdict yet" rather than
-        // blanking the branches the run-state call already answered for.
         events = [];
       }
-      setProjections(projectBestOfNRuns(record, events));
+      const next = projectBestOfNRuns(record, events);
+      setProjections(next);
       setError(null);
-    } catch (caught: unknown) {
-      setError(
-        caught instanceof Error
-          ? `Could not read this run: ${caught.message}`
-          : "Could not read this run.",
-      );
+      return next.length > 0 && !isTerminalStatus(record.state?.status);
+    } catch {
+      setError("Could not read candidate state from this run.");
+      return false;
     } finally {
       setLoaded(true);
     }
@@ -100,13 +205,20 @@ export function BestOfNBranchView({
 
   useEffect(() => {
     stopped.current = false;
-    void refresh();
-    const timer = setInterval(() => {
-      if (!stopped.current) void refresh();
-    }, POLL_INTERVAL_MS);
+    setLoaded(false);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const poll = async () => {
+      const continuePolling = await refresh();
+      if (continuePolling && !stopped.current) {
+        timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
+      }
+    };
+    void poll();
+
     return () => {
       stopped.current = true;
-      clearInterval(timer);
+      if (timer) clearTimeout(timer);
     };
   }, [refresh]);
 
@@ -124,11 +236,7 @@ export function BestOfNBranchView({
     );
   }
 
-  if (projections.length === 0) {
-    // An honest empty state: this run simply has no best-of-n node, which is
-    // not an error and must not read like one.
-    return null;
-  }
+  if (projections.length === 0) return null;
 
   return (
     <section
@@ -136,56 +244,50 @@ export function BestOfNBranchView({
       data-testid="best-of-n-branches"
       className="border-t px-4 py-2"
     >
-      {projections.map((projection) => (
-        <div key={projection.nodeId} className="mb-2 last:mb-0">
-          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-            <h4 className="font-mono text-[11px] font-medium">{projection.nodeName}</h4>
-            <span className="text-[11px] text-muted-foreground">
-              {projection.candidateCount} candidate
-              {projection.candidateCount === 1 ? "" : "s"}
-            </span>
-            <span className="text-[11px] text-muted-foreground">
-              · evaluator {BRANCH_STATE_LABEL[projection.evaluator.state]}
-            </span>
-          </div>
-
-          <p className="mt-0.5 text-[10px] text-muted-foreground">
-            {SEQUENTIAL_CANDIDATES_NOTICE}
-          </p>
-
-          <ul className="mt-1.5 flex flex-col gap-1">
-            {projection.branches.map((branch) => (
-              <li
-                key={branch.slotId}
-                data-testid={`best-of-n-branch-${String(branch.index)}`}
-                data-branch-state={branch.state}
-                className={`flex flex-wrap items-baseline gap-x-2 rounded-sm bg-muted/30 py-1 pl-2 pr-2 text-[11px] ${BRANCH_STATE_BORDER[branch.state]}`}
-              >
-                <span className="font-mono font-medium">Candidate {branch.index}</span>
-                <span className="font-mono text-muted-foreground">{branch.slotId}</span>
-                <span className="text-muted-foreground">{BRANCH_STATE_LABEL[branch.state]}</span>
-                {branch.score !== undefined && (
-                  <span className="text-muted-foreground">score {branch.score}</span>
-                )}
-                {branch.winner && (
-                  // Named in words, not encoded in a colour (§6.6).
-                  <span className="ml-auto rounded border px-1 font-medium">★ winner</span>
-                )}
-              </li>
-            ))}
-          </ul>
-
-          {projection.winnerIndex === undefined ? (
-            <p className="mt-1 text-[10px] text-muted-foreground">
-              No candidate has been chosen yet.
+      {projections.map((projection) => {
+        const graph = sequenceGraph(projection);
+        return (
+          <div key={projection.nodeId} className="mb-3 last:mb-0">
+            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+              <h4 className="font-mono text-[11px] font-medium">{projection.nodeName}</h4>
+              <span className="text-[11px] text-muted-foreground">
+                {projection.candidateCount} candidates · React Flow sequence
+              </span>
+            </div>
+            <p className="mt-0.5 text-[10px] text-muted-foreground">
+              {SEQUENTIAL_CANDIDATES_NOTICE} The arrows mean “then”, not concurrent fan-out.
             </p>
-          ) : (
-            projection.rationale !== undefined && (
-              <p className="mt-1 text-[10px] text-muted-foreground">{projection.rationale}</p>
-            )
-          )}
-        </div>
-      ))}
+            <div
+              className="mt-1.5 h-44 overflow-hidden rounded-md border bg-muted/20"
+              data-testid={`best-of-n-react-flow-${projection.nodeId}`}
+            >
+              <ReactFlow
+                nodes={graph.nodes}
+                edges={graph.edges}
+                nodeTypes={NODE_TYPES}
+                fitView
+                fitViewOptions={{ padding: 0.18, minZoom: 0.45, maxZoom: 1 }}
+                minZoom={0.4}
+                maxZoom={1.5}
+                nodesDraggable={false}
+                nodesConnectable={false}
+                elementsSelectable
+                zoomOnDoubleClick={false}
+                aria-label={`${projection.nodeName} sequential candidate graph`}
+              />
+            </div>
+            {projection.winnerIndex === undefined ? (
+              <p className="mt-1 text-[10px] text-muted-foreground">
+                No candidate has been chosen yet.
+              </p>
+            ) : (
+              projection.rationale && (
+                <p className="mt-1 text-[10px] text-muted-foreground">{projection.rationale}</p>
+              )
+            )}
+          </div>
+        );
+      })}
     </section>
   );
 }
