@@ -19,6 +19,10 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   // Lane F13 (row 52): schedules in the Console. Seven substantive items, all
   // driving the real user path; none thin, fixme or skipped.
   ["wave-f/f13/f13-schedules.spec.ts", 7],
+  // Wave F lane F9 (rows 17-18). Measured with `npx playwright test --list`,
+  // not projected: 11 substantive items, 0 thin, 0 fixme, 0 skip.
+  ["wave-f/f9/f9-chat-elevation.spec.ts", 9],
+  ["wave-f/f9/f9-live.spec.ts", 2],
   ["live-backend.spec.ts", 3],
   ["scientific-pipelines.spec.ts", 57],
   ["workspace.spec.ts", 46],
@@ -26,8 +30,8 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   ["wave-f/harness/evidence-contract.spec.ts", 3],
   ["wave-f/harness/smoke.spec.ts", 1],
 ]);
-// 237 after F10+F12, plus F13's 7 schedule items.
-const EXPECTED_SUBSTANTIVE_ITEMS = 244;
+// 244 after F10+F12+F13, plus F9's 11 chat items.
+const EXPECTED_SUBSTANTIVE_ITEMS = 255;
 // 35 pre-existing thin items (labelled inventory smokes plus the 3 fixmes) + the 3 Wave-F
 // evidence-fixture contract items.
 const EXPECTED_THIN_ITEMS = 38;
