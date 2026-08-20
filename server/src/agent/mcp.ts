@@ -31,6 +31,7 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { TSchema } from "typebox";
 import type { ProjectPaths } from "../projects.ts";
 import type { ToggleResult } from "./capability-state.ts";
+import { stripInfranodusApiKeyFromServers } from "../integrations/infranodus.ts";
 
 export interface StdioServerConfig {
   command: string;
@@ -189,6 +190,8 @@ export async function getMcpTools(
   projectId: string,
   paths: ProjectPaths,
 ): Promise<ToolDefinition[]> {
+  // Drop a leftover InfraNodus key from disk before we cache or dial.
+  readMcpConfig(paths);
   const configText = readConfigText(paths);
   const cached = stateByProject.get(projectId);
   if (cached && cached.configText === configText) return cached.tools;
@@ -216,12 +219,18 @@ export async function disposeMcpClients(projectId: string): Promise<void> {
 
 /** Parsed mcp.json servers for a project ({} when missing/malformed). */
 export function readMcpConfig(paths: ProjectPaths): Record<string, McpServerConfig> {
-  return parseConfig(readConfigText(paths));
+  const servers = parseConfig(readConfigText(paths));
+  persistStrippedInfranodusSecret(paths, servers);
+  return servers;
 }
 
 /**
  * Persist the full server map to the project's mcp.json (atomic write). The
  * next session build sees a changed configText and reconnects clients.
+ *
+ * InfraNodus' API key is never written: the MCP child inherits process env.
+ * A leftover `env.INFRANODUS_API_KEY` from an older Connect is stripped here
+ * so the sandbox file does not keep the secret.
  */
 export function writeMcpConfig(
   paths: ProjectPaths,
@@ -230,8 +239,21 @@ export function writeMcpConfig(
   writeServers(mcpConfigPath(paths), servers);
 }
 
+function persistStrippedInfranodusSecret(
+  paths: ProjectPaths,
+  servers: Record<string, McpServerConfig>,
+  store: "enabled" | "disabled" = "enabled",
+): void {
+  if (!stripInfranodusApiKeyFromServers(servers)) return;
+  writeServers(
+    store === "disabled" ? mcpDisabledPath(paths) : mcpConfigPath(paths),
+    servers,
+  );
+}
+
 /** Atomic write with a unique temp name (a shared one races other writers). */
 function writeServers(file: string, servers: Record<string, McpServerConfig>): void {
+  stripInfranodusApiKeyFromServers(servers);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
   try {
@@ -250,7 +272,9 @@ function mcpDisabledPath(paths: ProjectPaths): string {
 /** Parsed disabled-server map for a project ({} when missing/malformed). */
 export function readMcpDisabled(paths: ProjectPaths): Record<string, McpServerConfig> {
   try {
-    return parseConfig(fs.readFileSync(mcpDisabledPath(paths), "utf-8"));
+    const servers = parseConfig(fs.readFileSync(mcpDisabledPath(paths), "utf-8"));
+    persistStrippedInfranodusSecret(paths, servers, "disabled");
+    return servers;
   } catch {
     return {};
   }
@@ -303,7 +327,7 @@ function moveServer(
   return { ok: true };
 }
 
-/** Move an enabled server into the disabled store (keeps its config + token). */
+/** Move an enabled server into the disabled store (keeps command/args/url). */
 export function disableMcpServer(paths: ProjectPaths, name: string): ToggleResult {
   return moveServer(paths, name, "enabled");
 }

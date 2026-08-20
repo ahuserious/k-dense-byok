@@ -181,6 +181,4 @@ export const OPENAI_COMPATIBLE_BASE_URL: string | undefined =
   process.env.OPENAI_COMPATIBLE_BASE_URL?.trim() || undefined;
 
 /** Whether Modal-style remote compute is configured (kept for /config parity). */
-export function modalConfigured(): boolean {
-  return Boolean(process.env.MODAL_TOKEN_ID && process.env.MODAL_TOKEN_SECRET);
-}
+export { modalConfigured } from "./modal/credentials.ts";
