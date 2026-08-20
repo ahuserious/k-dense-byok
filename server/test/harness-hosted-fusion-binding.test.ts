@@ -23,6 +23,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  validateStoredWorkflowGraphDocument,
   validateWorkflowGraphDocument,
   type ModelRequest,
   type WorkflowGraphDocument,
@@ -265,12 +266,16 @@ describe("harness on a node that makes no model calls at all", () => {
   );
 
   it("refuses an inherited defaultHarness on a lean4 verify node", () => {
-    const result = validateWorkflowGraphDocument(
-      singleNodeGraph(lean4Node("verify"), "grok-cli"),
-    );
+    const graph = singleNodeGraph(lean4Node("verify"), "grok-cli");
+    const result = validateWorkflowGraphDocument(graph);
     expect(result.ok).toBe(false);
     expect(issues(result).map((issue) => issue.code))
       .toContain("unreachable-inherited-harness");
+
+    const stored = validateStoredWorkflowGraphDocument(graph);
+    expect(stored.ok).toBe(true);
+    if (!stored.ok) return;
+    expect(stored.document.settings?.defaultHarness).toBe("grok-cli");
   });
 
   it("leaves a lean4 solve node alone — it does reach the decision", () => {

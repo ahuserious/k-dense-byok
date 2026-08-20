@@ -165,7 +165,7 @@ the opposite.
 | `model` | **bound after validation** — `request.model` is `provider/id`; only `anthropic/<id>` translates, and the provider prefix is stripped. Anything else is **refused** |
 | `hyperparameters.temperature` / `top_p` / `sampling` | **refused** — the CLI has no sampling flags |
 | `subagents.permitted` (i.e. `autonomy: "loose"`) | **refused** — the CLI's nearest equivalent is `Task`, whose children are *not* bound by this node's allowlist, so granting it would grant strictly more than the node declared |
-| `skills.configured` (a node that names skills) | **refused** — the relay cannot inject them |
+| effective skills (`skills.configured`, `skills.delegated`, or `request.skill`, including auto discovery and the required `byom-dag-fusion` skill) | **refused** — the relay cannot inject them, so none may be silently dropped |
 | `toolBudget` | **not bound** — the CLI counts turns, not tool calls. Published as an `unboundControls` entry on `GET /harnesses`; F8/F1 render the control disabled with that reason |
 | `billingMode` | **not bound** — see the billing boundary below |
 | `supervisedBudget` | **not bound** — see the supervised-transport note above |
@@ -183,8 +183,8 @@ billing identity the same one. A billing-mode control must not be rendered as if
   silently would be defect #54 one harness over — and for the tool policy it would also be a
   security-relevant drop.
 - The receipt records the relay path: `resolved.agent` is `claude-code-relay` and
-  `resolved.launchContractDigest` is a sha256 over the binary path, the argv, the system prompt **and
-  stdin** — every byte handed to the operating system, and still no filesystem path in the receipt (#71).
+  `resolved.launchContractDigest` is a sha256 over the binary path, working directory, argv, system
+  prompt and stdin — the complete launch contract, with no filesystem path exposed in the receipt (#71).
 - The trusted pre/post-compaction audit is a `pi-subagents` artifact and is not demanded of a relay
   adapter, which runs one non-compacting invocation. The decision is made from the local dispatch
   selection, never from anything the child said.

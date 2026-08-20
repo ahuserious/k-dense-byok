@@ -64,6 +64,19 @@ describe("claude code relay ↔ vendored resolver parity", () => {
     expect(source).toContain(
       "return join(homedir(), '.local', 'bin', CLAUDE_BINARY_NAME);",
     );
+    const helperStart = source.indexOf(
+      "export function claudeNativeInstallerPath(): string",
+    );
+    const helperEnd = source.indexOf("\n}", helperStart);
+    const helperBody = source
+      .slice(helperStart, helperEnd + 2)
+      .replace(/\/\*[\s\S]*?\*\//g, " ")
+      .replace(/\/\/[^\n]*/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    expect(helperBody).toBe(
+      "export function claudeNativeInstallerPath(): string { return join(homedir(), '.local', 'bin', CLAUDE_BINARY_NAME); }",
+    );
     expect(source).toContain("const nativeInstallerPath = claudeNativeInstallerPath();");
     expect(claudeNativeInstallerPath().endsWith(
       path.join(".local", "bin", CLAUDE_BINARY_NAME),

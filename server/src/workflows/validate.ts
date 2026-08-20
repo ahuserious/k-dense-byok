@@ -49,6 +49,11 @@ export type WorkflowValidationResult =
   | { ok: true; document: WorkflowGraphDocument }
   | { ok: false; issues: WorkflowValidationIssue[] };
 
+const STORED_GRAPH_COMPATIBILITY_ISSUE_CODES = new Set([
+  "unreachable-node-harness",
+  "unreachable-inherited-harness",
+]);
+
 export const DEFAULT_WORKFLOW_RESCUE_POLICY: RescuePolicy = {
   enabled: true,
   maxAttempts: 2,
@@ -128,6 +133,30 @@ export function normalizeWorkflowGraphDocument(
 export function validateWorkflowGraphDocument(
   value: unknown,
 ): WorkflowValidationResult {
+  return validateWorkflowGraphDocumentAllowingIssueCodes(value, new Set());
+}
+
+/**
+ * Validate bytes that were accepted and persisted by an earlier release.
+ *
+ * Harness reachability is an authoring rule: new saves must refuse a harness
+ * that the executor cannot dispatch. It is not a corruption rule. Ignoring
+ * only these two diagnostics on a read keeps older definitions and immutable
+ * run snapshots readable without weakening the strict authoring validator.
+ */
+export function validateStoredWorkflowGraphDocument(
+  value: unknown,
+): WorkflowValidationResult {
+  return validateWorkflowGraphDocumentAllowingIssueCodes(
+    value,
+    STORED_GRAPH_COMPATIBILITY_ISSUE_CODES,
+  );
+}
+
+function validateWorkflowGraphDocumentAllowingIssueCodes(
+  value: unknown,
+  nonBlockingIssueCodes: ReadonlySet<string>,
+): WorkflowValidationResult {
   let serializedDocument: string | undefined;
   try {
     serializedDocument = JSON.stringify(value);
@@ -167,7 +196,10 @@ export function validateWorkflowGraphDocument(
 
   const document = value as WorkflowGraphDocument;
   const semanticIssues = validateWorkflowGraphSemantics(document);
-  if (semanticIssues.length > 0) return { ok: false, issues: semanticIssues };
+  const blockingIssues = semanticIssues.filter(
+    (issue) => !nonBlockingIssueCodes.has(issue.code),
+  );
+  if (blockingIssues.length > 0) return { ok: false, issues: blockingIssues };
 
   return { ok: true, document: normalizeWorkflowGraphDocument(document) };
 }

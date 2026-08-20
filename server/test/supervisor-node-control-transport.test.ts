@@ -588,7 +588,12 @@ function harnessGraph(options: HarnessGraphOptions): WorkflowGraphDocument {
     terminal: true,
     workspace: { isolation: "read-only", writePaths: [] },
     prompt: "Answer from the supplied evidence only.",
-    ...(options.harness ? { settings: { harness: options.harness } } : {}),
+    settings: {
+      ...(options.harness ? { harness: options.harness } : {}),
+      // This suite isolates harness dispatch. Auto skills are deliberately not
+      // selected: the Claude relay must refuse request.skill rather than drop it.
+      skills: { mode: "manual", list: [] },
+    },
   } as WorkflowNode;
   return {
     ...(options.defaultHarness

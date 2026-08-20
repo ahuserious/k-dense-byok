@@ -237,9 +237,9 @@ export interface ClaudeCodeRelayInvocation {
   /** Controls that reached the relay and that the CLI cannot express (see above). */
   readonly unboundControls: readonly string[];
   /**
-   * sha256 over binary path + argv + system prompt + stdin — every byte the
-   * relay handed the operating system, and therefore a complete proof of the
-   * launch that still carries no filesystem path into the receipt (#71).
+   * sha256 over binary path + cwd + argv + system prompt + stdin — the launch
+   * contract handed to the operating system, while carrying no filesystem path
+   * into the receipt (#71).
    */
   readonly launchContractDigest: string;
   readonly requestId: string;
@@ -323,7 +323,7 @@ interface DecodedNodeControl {
   toolPolicy?: { allowedTools?: unknown };
   subagents?: { mode?: unknown; permitted?: unknown };
   autonomy?: unknown;
-  skills?: { mode?: unknown; configured?: unknown };
+  skills?: { mode?: unknown; configured?: unknown; delegated?: unknown };
   billingMode?: unknown;
 }
 
@@ -543,8 +543,16 @@ export interface ClaudeCodeBindingRefusal {
 }
 
 export interface ClaudeCodeBindingRefusalInput {
-  readonly request: Pick<OwnedDelegationRequest, "model">;
+  readonly request: Pick<OwnedDelegationRequest, "model" | "skill">;
   readonly nodeControl: DecodedNodeControl | undefined;
+}
+
+function requestsDelegatedSkills(
+  skill: OwnedDelegationRequest["skill"],
+): boolean {
+  if (skill === true) return true;
+  if (typeof skill === "string") return skill.trim().length > 0;
+  return Array.isArray(skill) && skill.length > 0;
 }
 
 /**
@@ -572,6 +580,19 @@ export function claudeCodeBindingRefusals(
   if (!model.ok) refusals.push({ control: "model", detail: model.detail });
 
   const nodeControl = input.nodeControl;
+  if (!nodeControl) {
+    refusals.push({
+      control: "nodeControl",
+      detail:
+        "the trusted node-control envelope is missing or invalid, so the relay cannot prove which tool policy and bindings the node declared",
+    });
+  } else if (!Array.isArray(nodeControl.toolPolicy?.allowedTools)) {
+    refusals.push({
+      control: "autonomy/toolPolicy",
+      detail:
+        "the trusted node-control envelope does not contain a valid tool grant, so launching would fall back to the CLI's broader defaults",
+    });
+  }
   if (nodeControl) {
     const allowedTools = Array.isArray(nodeControl.toolPolicy?.allowedTools)
       ? (nodeControl.toolPolicy.allowedTools as unknown[]).filter(
@@ -598,11 +619,18 @@ export function claudeCodeBindingRefusals(
     const configuredSkills = Array.isArray(nodeControl.skills?.configured)
       ? (nodeControl.skills.configured as unknown[])
       : [];
-    if (configuredSkills.length > 0) {
+    const delegatedSkills = Array.isArray(nodeControl.skills?.delegated)
+      ? (nodeControl.skills.delegated as unknown[])
+      : [];
+    if (
+      configuredSkills.length > 0 ||
+      delegatedSkills.length > 0 ||
+      requestsDelegatedSkills(input.request.skill)
+    ) {
       refusals.push({
         control: "skills",
         detail:
-          "the relay has no way to inject the node's named skills into the Claude Code CLI",
+          "the relay has no way to inject the node's effective delegated skill set into the Claude Code CLI",
       });
     }
   }
@@ -638,7 +666,7 @@ function structuredOutputInstruction(schema: unknown): string {
 export interface BuildClaudeCodeInvocationInput {
   request: Pick<
     OwnedDelegationRequest,
-    "requestId" | "task" | "model" | "result" | "turnBudget"
+    "requestId" | "task" | "cwd" | "model" | "result" | "skill" | "turnBudget"
   >;
   binaryPath: string;
   binarySource: ClaudeCodeBinarySource;
@@ -706,7 +734,13 @@ export function buildClaudeCodeInvocation(
   const launchContractDigest = crypto
     .createHash("sha256")
     .update(
-      JSON.stringify([input.binaryPath, argv, input.systemPrompt ?? null, stdin]),
+      JSON.stringify([
+        input.binaryPath,
+        input.request.cwd,
+        argv,
+        input.systemPrompt ?? null,
+        stdin,
+      ]),
       "utf8",
     )
     .digest("hex");

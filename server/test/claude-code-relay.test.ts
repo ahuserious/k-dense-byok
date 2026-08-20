@@ -91,7 +91,7 @@ function relayRequest(overrides: Partial<OwnedDelegationRequest> = {}) {
     ownerRunId: "wrun_0123456789abcdef",
     nodeId: "dagx_1:agent",
     agent: "dag-workflow-readonly-executor",
-    task: "Summarise the supplied evidence.",
+    task: controlledTask("Summarise the supplied evidence."),
     context: "fresh",
     cwd: "/tmp",
     model: "anthropic/claude-opus-4-1",
@@ -236,6 +236,12 @@ describe("claude code relay invocation", () => {
       "claude-opus-4-1",
       "--system-prompt",
       "You are Kady's relayed reviewer.",
+      "--allowedTools",
+      "Read,Grep,Glob",
+      "--disallowedTools",
+      expect.any(String),
+      "--permission-mode",
+      "default",
       "--max-turns",
       "4",
     ]);
@@ -252,6 +258,24 @@ describe("claude code relay invocation", () => {
       systemPrompt: undefined,
     });
     expect(invocation.argv).not.toContain("--system-prompt");
+  });
+
+  it.each([
+    ["a missing envelope", "Do the work."],
+    ["a malformed envelope", "KADY_NODE_CONTROL_V1:!!!not-base64!!!\nDo the work."],
+    [
+      "an envelope without a tool policy",
+      controlledTask("Do the work.", { toolPolicy: undefined }),
+    ],
+  ])("refuses %s instead of launching with CLI defaults", (_label, task) => {
+    expect(() =>
+      buildClaudeCodeInvocation({
+        request: relayRequest({ task }),
+        binaryPath: "/opt/claude/claude",
+        binarySource: "path",
+        systemPrompt: undefined,
+      })
+    ).toThrow(/node-control envelope|tool grant/);
   });
 
   it("turns the node's tool policy into real CLI flags, not a comment", () => {
@@ -343,6 +367,58 @@ describe("claude code relay invocation", () => {
     ).toThrow(/skills/);
   });
 
+  it("refuses delegated auto skills even when the configured list is empty", () => {
+    expect(() =>
+      buildClaudeCodeInvocation({
+        request: relayRequest({
+          task: controlledTask("Do the work.", {
+            skills: {
+              mode: "auto",
+              configured: [],
+              delegated: ["kady-evidence"],
+            },
+          }),
+          skill: false,
+        }),
+        binaryPath: "/opt/claude/claude",
+        binarySource: "path",
+        systemPrompt: undefined,
+      })
+    ).toThrow(/effective delegated skill set/);
+  });
+
+  it("refuses the required byom skill carried on request.skill", () => {
+    expect(() =>
+      buildClaudeCodeInvocation({
+        request: relayRequest({
+          task: controlledTask("Solve the Lean theorem.", {
+            skills: { mode: "auto", configured: [], delegated: [] },
+          }),
+          skill: "byom-dag-fusion",
+        }),
+        binaryPath: "/opt/claude/claude",
+        binarySource: "path",
+        systemPrompt: undefined,
+      })
+    ).toThrow(/effective delegated skill set/);
+  });
+
+  it("refuses automatic skill discovery carried as request.skill=true", () => {
+    expect(() =>
+      buildClaudeCodeInvocation({
+        request: relayRequest({
+          task: controlledTask("Do the work.", {
+            skills: { mode: "auto", configured: [], delegated: [] },
+          }),
+          skill: true,
+        }),
+        binaryPath: "/opt/claude/claude",
+        binarySource: "path",
+        systemPrompt: undefined,
+      })
+    ).toThrow(/effective delegated skill set/);
+  });
+
   it("refuses a model reference the CLI cannot run, instead of relaying the slug", () => {
     // `modelReference` produces `${provider}/${id}` (`agent/models.ts:387-391`).
     expect(claudeCodeModelArgument("anthropic/claude-sonnet-4-5"))
@@ -408,6 +484,19 @@ describe("claude code relay invocation", () => {
       systemPrompt: undefined,
     });
     expect(other.launchContractDigest).not.toBe(invocation.launchContractDigest);
+
+    const otherWorkingDirectory = buildClaudeCodeInvocation({
+      request: relayRequest({
+        cwd: "/tmp/other-workspace",
+        task: controlledTask("Judge the evidence."),
+        result: { kind: "structured", schema },
+      } as never),
+      binaryPath: "/opt/claude/claude",
+      binarySource: "path",
+      systemPrompt: undefined,
+    });
+    expect(otherWorkingDirectory.launchContractDigest)
+      .not.toBe(invocation.launchContractDigest);
   });
 
   it("publishes the controls it cannot bind rather than dropping them quietly", () => {
