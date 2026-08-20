@@ -1,0 +1,29 @@
+{
+  "lane": "F3",
+  "rows": [8, 9],
+  "purpose": "Refresh shipped Fusion built-ins to GPT-5.6 Sol Pro, label inherited DRACO results unmeasured, and prove a shipped config reaches the production router transform.",
+  "rebaseBase": "25d605860e73ec2d3ed268c93cbb17a61bae0497",
+  "files": [
+    "docs/inventory/f3-fusion-presets.json",
+    "e2e/item-count-reporter.ts",
+    "e2e/wave-f/f3/fusion-refresh.spec.ts",
+    "web/src/lib/fusion-presets.ts",
+    "web/src/lib/fusion-presets.test.ts"
+  ],
+  "routerProof": {
+    "test": "web/src/lib/fusion-presets.test.ts",
+    "productionTransform": "server/src/agent/fusion-bridge.ts#buildFusionRequestBody",
+    "asserts": [
+      "outbound.model === openrouter/fusion",
+      "plugins[0].analysis_models contains openai/gpt-5.6-sol-pro",
+      "no live default contains openai/gpt-5.5 or openai/gpt-5.5-pro",
+      "every shipped note matches /DRACO: unmeasured/ and carries no percent score"
+    ]
+  },
+  "gate_status": {
+    "U": "Live Playwright exists (e2e/wave-f/f3/fusion-refresh.spec.ts, 2 items). Not re-run on this dest rebase. Not a review PASS.",
+    "B": "Unit proof sends a shipped DEFAULT_FUSION_CONFIGS body through production buildFusionRequestBody.",
+    "D": "Data-only change in fusion-presets.ts. No new visual tokens."
+  },
+  "unowned_leftover": "docs/openrouter-fusion.md still advertises GPT-5.5 panels with numeric DRACO percents. F3 does not own that file."
+}
