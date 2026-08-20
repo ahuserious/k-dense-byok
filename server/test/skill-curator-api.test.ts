@@ -158,13 +158,15 @@ describe("F11 skill curator API", () => {
     });
   });
 
-  it("reads dest index honestly: F2 harness, F5 elevate, and F14 durability published", async () => {
+  it("reads dest index honestly: F2 harness, F5 elevate, F14 durability, and F1 presets published", async () => {
     const harness = await request("GET", "/harnesses");
     const elevate = await request("POST", "/elevate-to-dag", {});
     const durability = await request("GET", "/durability/settings");
+    const presets = await request("GET", "/model-presets");
     expect([200, 503]).toContain(harness.statusCode);
     expect(elevate.statusCode).not.toBe(404);
     expect(durability.statusCode).toBe(200);
+    expect(presets.statusCode).not.toBe(404);
 
     const response = await request("GET", "/skills/curator/capabilities");
     expect(response.statusCode).toBe(200);
@@ -194,7 +196,7 @@ describe("F11 skill curator API", () => {
         reason: null,
       },
       modelPresets: {
-        available: false,
+        available: true,
         endpoint: "/model-presets",
       },
     });
