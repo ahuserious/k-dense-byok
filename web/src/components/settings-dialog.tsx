@@ -33,7 +33,10 @@ import {
   NetworkIcon,
   ExternalLinkIcon,
   CloudIcon,
+  TerminalIcon,
 } from "lucide-react";
+import { KadyCliPanel } from "@/components/settings/kady-cli-panel";
+import { SettingsNavGroup } from "@/components/settings/settings-nav-group";
 import { apiFetch } from "@/lib/projects";
 import { notifyModalCredentialsChanged } from "@/lib/modal-jobs";
 import {
@@ -653,6 +656,13 @@ export function SettingsDialog({
             variant="line"
             className="w-44 shrink-0 overflow-y-auto border-r rounded-none px-2 py-3 items-start justify-start"
           >
+            {/* Grouped, not flat. The rail is vertical and already scrolls, so
+                eight entries was never an overflow problem — it is a
+                navigability one, and F11's supervisor settings are queued behind
+                this. Every existing `value` is unchanged: other code and tests
+                reference them. F11 mounts under Runtime, below Kady CLI.
+                Rationale and rejected alternatives: docs/inventory/f8-settings.json. */}
+            <SettingsNavGroup label="Workspace" />
             <TabsTrigger
               value="model-providers"
               className="justify-start gap-2 px-3 text-xs w-full"
@@ -668,6 +678,14 @@ export function SettingsDialog({
               API keys
             </TabsTrigger>
             <TabsTrigger
+              value="connectors"
+              className="justify-start gap-2 px-3 text-xs w-full"
+            >
+              <PlugIcon className="size-3.5" />
+              Connectors
+            </TabsTrigger>
+            <SettingsNavGroup label="Agents" />
+            <TabsTrigger
               value="skills"
               className="justify-start gap-2 px-3 text-xs w-full"
             >
@@ -682,19 +700,13 @@ export function SettingsDialog({
               Specialists
             </TabsTrigger>
             <TabsTrigger
-              value="connectors"
-              className="justify-start gap-2 px-3 text-xs w-full"
-            >
-              <PlugIcon className="size-3.5" />
-              Connectors
-            </TabsTrigger>
-            <TabsTrigger
               value="fusion"
               className="justify-start gap-2 px-3 text-xs w-full"
             >
               <BrainCircuitIcon className="size-3.5" />
               Fusion
             </TabsTrigger>
+            <SettingsNavGroup label="Runtime" />
             <TabsTrigger
               value="pipelines"
               className="justify-start gap-2 px-3 text-xs w-full"
@@ -702,6 +714,14 @@ export function SettingsDialog({
               <NetworkIcon className="size-3.5" />
               Pipelines
             </TabsTrigger>
+            <TabsTrigger
+              value="kady-cli"
+              className="justify-start gap-2 px-3 text-xs w-full"
+            >
+              <TerminalIcon className="size-3.5" />
+              Kady CLI
+            </TabsTrigger>
+            <SettingsNavGroup label="Appearance" />
             <TabsTrigger
               value="appearance"
               className="justify-start gap-2 px-3 text-xs w-full"
@@ -734,6 +754,9 @@ export function SettingsDialog({
           </TabsContent>
           <TabsContent value="pipelines" className="flex-1 min-h-0 p-5">
             <PipelinesPanel />
+          </TabsContent>
+          <TabsContent value="kady-cli" className="flex-1 min-h-0 p-5 overflow-y-auto">
+            <KadyCliPanel />
           </TabsContent>
         </Tabs>
       </DialogContent>
