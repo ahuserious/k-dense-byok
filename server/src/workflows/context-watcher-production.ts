@@ -61,11 +61,38 @@ const CONTEXT_ENGINEERING_LEDGER_SESSION = "context-engineering";
 const STOPPED_RUN_POLL_MS = 5_000;
 const MAX_MODEL_OUTPUT_TOKENS = 8_000;
 
+/**
+ * #41: nothing this lane starts may outlive or pile up.
+ *
+ * The durability sweep runs inside the 5-second stopped-run feed, and it now
+ * makes real provider calls. A slow or hung provider would otherwise hold a
+ * tick open indefinitely, so every durability-originated model call is bounded
+ * here: an AbortSignal reaches `runtime.complete` (which honours it), and a
+ * wall-clock race bounds the call even when the completion seam ignores the
+ * signal. Four minutes is generous for a 1M-context rescue at xhigh and far
+ * below the point at which a stuck call would matter.
+ */
+const DURABILITY_MODEL_TIMEOUT_MS = 240_000;
+
+export class DurabilityModelTimeoutError extends Error {
+  constructor(model: string, timeoutMs: number) {
+    super(
+      `The durability model ${model} did not answer within ${Math.round(timeoutMs / 1000)} ` +
+        "seconds and was cancelled. The run was left exactly as it was.",
+    );
+    this.name = "DurabilityModelTimeoutError";
+  }
+}
+
 export interface ContextEngineeringModelCall {
   projectId: string;
   model: string;
   instruction: string;
   input: unknown;
+  /** Caller cancellation, honoured by `runtime.complete`. */
+  signal?: AbortSignal;
+  /** Provider-side wall clock for this one call. */
+  timeoutMs?: number;
 }
 
 export interface ContextEngineeringProductionOptions {
@@ -105,7 +132,11 @@ async function productionCompleteJson(call: ContextEngineeringModelCall): Promis
       timestamp: Date.now(),
     }],
   };
-  const message = await runtime.complete(model, context, { maxTokens: MAX_MODEL_OUTPUT_TOKENS });
+  const message = await runtime.complete(model, context, {
+    maxTokens: MAX_MODEL_OUTPUT_TOKENS,
+    ...(call.signal ? { signal: call.signal } : {}),
+    ...(call.timeoutMs === undefined ? {} : { timeoutMs: call.timeoutMs }),
+  });
   if (["error", "aborted", "pending"].includes(message.stopReason)) {
     throw new Error(message.errorMessage ?? `Context model stopped with ${message.stopReason}.`);
   }
@@ -233,7 +264,10 @@ class ProjectContextEngineeringRuntime {
         proposeRescue: async (request) => proposalReceipt(projectId, request),
       },
       sessions: {
-        summarizeLateralPass: (request) => this.completeJson({
+        // Bounded like every other model call the 5-second feed can reach: the
+        // durability watcher's `lateral-pass` action dispatches this behavior
+        // from inside a sweep (#41).
+        summarizeLateralPass: (request) => this.durabilityCompleteJson({
           projectId,
           model: request.model,
           instruction: request.instruction,
@@ -279,7 +313,7 @@ class ProjectContextEngineeringRuntime {
       readFingerprintAudit: readTrustedDagFusionCompactionAudit,
       semanticModel: async (request) => {
         await assertBudgetAdmission(projectId, request.model);
-        return this.completeJson({
+        return this.durabilityCompleteJson({
           projectId,
           model: request.model,
           instruction: request.instruction,
@@ -298,6 +332,42 @@ class ProjectContextEngineeringRuntime {
         : {}),
       onError,
     });
+  }
+
+  /**
+   * Every model call the durability sweep can reach, bounded (#41).
+   *
+   * The sweep runs inside a 5-second `setInterval`, so an unbounded provider
+   * call would hold a tick open for as long as the provider hangs. The abort
+   * signal reaches `runtime.complete`; the race bounds the call even when the
+   * injected completion seam ignores the signal, which is what makes this
+   * testable and what stops a stubbed or non-compliant provider from stalling
+   * the feed. Nothing is retried and the run is never touched on a timeout.
+   */
+  private async durabilityCompleteJson(
+    call: Omit<ContextEngineeringModelCall, "signal" | "timeoutMs">,
+  ): Promise<unknown> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expiry = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new DurabilityModelTimeoutError(call.model, DURABILITY_MODEL_TIMEOUT_MS));
+      }, DURABILITY_MODEL_TIMEOUT_MS);
+      timer.unref?.();
+    });
+    try {
+      return await Promise.race([
+        this.completeJson({
+          ...call,
+          signal: controller.signal,
+          timeoutMs: DURABILITY_MODEL_TIMEOUT_MS,
+        }),
+        expiry,
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   async dispatchLateralPass(request: DispatchLateralPassRequest) {
@@ -331,7 +401,7 @@ class ProjectContextEngineeringRuntime {
     );
     if (!definitionAtAudit) throw new Error(`Workflow ${source.manifest.workflowId} is missing.`);
     const expectedRevision = definitionAtAudit.revision;
-    const repairedGraph = await this.completeJson({
+    const repairedGraph = await this.durabilityCompleteJson({
       projectId: this.projectId,
       model: request.model,
       instruction: [
@@ -342,6 +412,10 @@ class ProjectContextEngineeringRuntime {
         request,
         workflowRevision: expectedRevision,
         workflow: definitionAtAudit.graph,
+        // Row 24: the failing run's context, carried through the escalate
+        // dispatch. `request` already carries it, but it is named separately
+        // here so a repair prompt cannot lose it in the request envelope.
+        ...(request.carriedContext ? { carriedContext: request.carriedContext } : {}),
       },
     });
     const current = this.store.readDefinition(this.projectId, source.manifest.workflowId);
@@ -465,6 +539,15 @@ export class ContextEngineeringProduction {
   private readonly durabilityJournal: DurabilityJournal;
   private readonly presetResolver: DurabilityPresetResolver | undefined;
   private stoppedRunTimer: ReturnType<typeof setInterval> | undefined;
+  /**
+   * #41: the 5-second feed must not stack sweeps. A durability sweep now makes
+   * real provider calls, so under a slow provider each tick would start another
+   * full project sweep while the previous escalation was still awaiting, and
+   * the pre-existing restart scan would queue behind all of them. A tick that
+   * arrives while a sweep is in flight is a no-op.
+   */
+  private observingDurability = false;
+  private skippedDurabilitySweeps = 0;
 
   constructor(
     private readonly controller: WorkflowRunController | null,
@@ -538,14 +621,68 @@ export class ContextEngineeringProduction {
     );
   }
 
-  /** Durability settings for a project, and how its models resolve right now. */
+  /**
+   * Durability settings for a project, and how its models resolve right now.
+   *
+   * This is a READ. It deliberately does not call `forProject`, which would
+   * instantiate a per-project runtime, register behaviours, construct the file
+   * operation store (creating a state directory and publishing a process
+   * identity) and cache all of it forever — as a side effect of a GET. A
+   * project the watcher is not yet observing simply reports no watched runs,
+   * which is the truth.
+   */
   durabilityState(projectId: string) {
     const settings = this.durabilitySettings.read(projectId);
+    const runtime = this.runtimes.get(projectId);
+    const watchedRuns = runtime?.durability.watchedRuns() ?? [];
     return {
       settings,
       resolution: resolveDurabilityModels(settings, this.presetResolver),
-      watchedRuns: this.forProject(projectId).durability.watchedRuns(),
+      watchedRuns,
+      stopPolicy: settings.stopPolicy,
+      // §6.7: F6 must be able to render a Stop control disabled WITH A REASON
+      // before the click, not discover the refusal from a 409 after it.
+      stopAvailability: watchedRuns.map((run) => this.stopAvailability(settings, run)),
     };
+  }
+
+  /** "Can this run be stopped, and if not, why not" — as data, before the click. */
+  private stopAvailability(
+    settings: DurabilitySettingsV1,
+    run: { runId: string; status: string; stops: number },
+  ): { runId: string; canStop: boolean; reason?: string } {
+    if (!this.controller) {
+      return {
+        runId: run.runId,
+        canStop: false,
+        reason: "Workflow execution is disabled in this build, so a run cannot be stopped.",
+      };
+    }
+    if (!settings.stopPolicy.allowStop) {
+      return {
+        runId: run.runId,
+        canStop: false,
+        reason:
+          "Stopping runs is switched off. Turn on Pipeline options ▸ Durability ▸ Allow stop.",
+      };
+    }
+    if (!["queued", "running", "waiting", "blocked", "paused"].includes(run.status)) {
+      return {
+        runId: run.runId,
+        canStop: false,
+        reason: `This run is ${run.status}, so there is nothing left to stop.`,
+      };
+    }
+    if (run.stops >= settings.stopPolicy.maxStopsPerRun) {
+      return {
+        runId: run.runId,
+        canStop: false,
+        reason:
+          `This run has already been stopped ${run.stops} time(s), the configured maximum. ` +
+          "Raise the stop limit in Pipeline options ▸ Durability.",
+      };
+    }
+    return { runId: run.runId, canStop: true };
   }
 
   writeDurabilitySettings(projectId: string, patch: unknown): DurabilitySettingsV1 {
@@ -582,16 +719,30 @@ export class ContextEngineeringProduction {
     return receipt;
   }
 
+  /** How many ticks were skipped because a sweep was still in flight. */
+  durabilitySweepsSkipped(): number {
+    return this.skippedDurabilitySweeps;
+  }
+
   async observeDurability(): Promise<DurabilityObservation[]> {
+    if (this.observingDurability) {
+      this.skippedDurabilitySweeps += 1;
+      return [];
+    }
+    this.observingDurability = true;
     const observations: DurabilityObservation[] = [];
-    for (const project of listProjects()) {
-      // One unreadable project must not take the background feed down with it.
-      // A feed that throws is how a backend gets orphaned (#41).
-      try {
-        observations.push(...await this.forProject(project.id).durability.observeProject());
-      } catch (error) {
-        this.onError(error);
+    try {
+      for (const project of listProjects()) {
+        // One unreadable project must not take the background feed down with
+        // it. A feed that throws is how a backend gets orphaned (#41).
+        try {
+          observations.push(...await this.forProject(project.id).durability.observeProject());
+        } catch (error) {
+          this.onError(error);
+        }
       }
+    } finally {
+      this.observingDurability = false;
     }
     return observations;
   }

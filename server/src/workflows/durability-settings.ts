@@ -101,6 +101,26 @@ export interface DurabilitySignalDescriptor {
 export const DURABILITY_DEFAULT_WATCHER_REF = "openrouter/qwen/qwen3.8-27b";
 
 /**
+ * ...and it is ABSENT from this build's vendored pricing catalogue
+ * (`web/src/data/models.json`, 154 entries). An uncatalogued OpenRouter model
+ * prices at $0 (`agent/models.ts:146-163`), so every watcher call would record
+ * a zero cost and the project spend cap would never accrue against it.
+ *
+ * Round 1 surfaced that as `pricing: "unpriced"` and asked Team C for the
+ * catalogue row. That is not enough: a SHIPPED DEFAULT that quietly disables a
+ * budget control is not made safe by a field the UI may or may not render. So
+ * the watcher slot now ships unset for exactly the same reason the rescue slot
+ * does: nothing is guessed, nothing is substituted, and the API names the
+ * user's next action. Add the catalogue row (INTEGRATION.md section 5) or choose a
+ * priced model, and the owner's default works as named.
+ */
+export const DURABILITY_WATCHER_UNSET_REASON =
+  'The default watcher model "Qwen 3.8 27B" (' + DURABILITY_DEFAULT_WATCHER_REF + ") resolves on " +
+  "OpenRouter but is missing from this build's pricing catalogue, so its calls would cost $0 on " +
+  "paper and the project spend limit would never count them. It is not selected for you. Pick a " +
+  "priced watcher model in Pipeline options \u25b8 Durability \u25b8 Watcher model.";
+
+/**
  * The owner's named rescue default does NOT resolve. There is no
  * `openai/gpt-5.6-pro`; three live ids carry the "GPT-5.6 … Pro" name. Rather
  * than hardcode an id nobody verified, the default ships unset and fails closed
@@ -115,6 +135,22 @@ const SKILL_FIRE_UNOBSERVABLE_REASON =
   "This build cannot observe skill failures. Skills are activated by reading their SKILL.md " +
   "rather than by a skill-invocation event, so no success or failure is recorded anywhere the " +
   "watcher can read. Enable this signal once the agent runtime reports skill invocations.";
+
+/**
+ * Verified by grep over `server/src`, `server/pi-packages` and `server/vendor`
+ * on 2026-08-19: `run_paused` and `run_blocked` exist only as frozen literals
+ * and reducer cases in `run-state.ts`; NOTHING appends them. The single
+ * emitter of a stalled state is `prompt-opt-interview-contract.ts:144`, which
+ * appends `run_waiting` when a prompt-optimization node awaits durable
+ * structured answers. So one third of this signal's trigger set is reachable
+ * and two thirds are not, and the API says so rather than shipping a
+ * fully-enabled toggle over a condition that cannot occur.
+ */
+const STALL_PARTIAL_REASON =
+  "Only a run waiting on a durable prompt-optimization answer can stall in this build. Paused " +
+  "and blocked runs are never produced \u2014 no code appends run_paused or run_blocked \u2014 so two of " +
+  "this signal's three trigger statuses cannot occur. It still fires on a waiting run that stops " +
+  "advancing. Enable it once a pause or block can be recorded.";
 
 const SCRIPT_RUN_PARTIAL_REASON =
   "Script failures are observed only for workflow nodes that run an external process. This build " +
@@ -165,11 +201,13 @@ export const DURABILITY_SIGNALS: readonly DurabilitySignalDescriptor[] = [
     id: "paused-no-progress",
     label: "Paused with no progress",
     observable: true,
-    observability: "full",
+    observability: "partial",
+    unobservableReason: STALL_PARTIAL_REASON,
     observationSource: "durable run state: the run status and its last event sequence",
     firesWhen:
-      "the run is paused, waiting, or blocked and its last event sequence has not moved for the " +
-      "configured stall time",
+      "the run is waiting and its last event sequence has not moved for the configured stall " +
+      "time. Paused and blocked runs would also fire, but this build never produces those two " +
+      "statuses",
     supportedActions: ["observe", "restart", "escalate", "lateral-pass", "stop"],
     thresholdLabel: "Stalled observations before firing",
   },
@@ -212,7 +250,7 @@ export function defaultDurabilitySettings(): DurabilitySettingsV1 {
   return {
     version: DURABILITY_SETTINGS_VERSION,
     enabled: false,
-    watcherModel: { kind: "direct", ref: DURABILITY_DEFAULT_WATCHER_REF, effort: "high" },
+    watcherModel: { kind: "unset", reason: DURABILITY_WATCHER_UNSET_REASON },
     rescueModel: { kind: "unset", reason: DURABILITY_RESCUE_UNSET_REASON },
     rescueEffort: "xhigh",
     minRescueContextWindow: 1_000_000,
@@ -398,8 +436,13 @@ export function parseDurabilitySettings(
     for (const id of DURABILITY_SIGNAL_IDS) {
       const provided = (patch.signals as Record<string, unknown>)[id];
       if (provided === undefined) continue;
+      // A non-object here used to merge as {} and return 200 with nothing
+      // changed, which reads to the caller as "saved". Name the field instead.
+      if (!plainRecord(provided)) {
+        invalid(`signals.${id} must be an object with enabled, action, and threshold.`);
+      }
       signals[id] = parseSignalSetting(
-        { ...signals[id], ...(plainRecord(provided) ? provided : {}) },
+        { ...signals[id], ...provided },
         durabilitySignalDescriptor(id),
       );
     }

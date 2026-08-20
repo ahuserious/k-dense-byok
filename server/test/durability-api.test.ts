@@ -49,6 +49,8 @@ function contextEngineering(options: {
             firedSignals: [],
             stops: 0,
           }],
+          stopPolicy: stored.stopPolicy,
+          stopAvailability: [{ runId: RUN_ID, canStop: true }],
         };
       },
       writeDurabilitySettings(projectId: string, patch: unknown) {
@@ -105,8 +107,12 @@ describe("durability API", () => {
     expect(response.statusCode).toBe(200);
     const body = response.json();
     expect(body.settings).toEqual(defaultDurabilitySettings());
-    expect(body.resolution.watcher).toMatchObject({ status: "resolved", pricing: "unpriced" });
-    // The rescue slot fails closed with a reason the UI renders verbatim.
+    // BOTH slots fail closed with a reason the UI renders verbatim. The watcher
+    // default is unset because the owner's model is absent from this build's
+    // pricing catalogue and would silently disable the project spend cap.
+    expect(body.resolution.watcher.status).toBe("unset");
+    expect(body.resolution.watcher.reason).toContain("pricing catalogue");
+    expect(body.resolution.watcher.nextAction).toContain("watcher model");
     expect(body.resolution.rescue.status).toBe("unset");
     expect(body.resolution.rescue.reason).toContain("GPT-5.6 Pro");
   });
@@ -144,6 +150,20 @@ describe("durability API", () => {
     expect(response.json()).toMatchObject({ code: "SIGNAL_NOT_OBSERVABLE" });
     expect(response.json().detail)
       .toBe(durabilitySignalDescriptor("failed-skill-fire").unobservableReason);
+  });
+
+  it("rejects a non-object signal value with a 400 naming the field, not a silent 200", async () => {
+    const { app, settings } = await appWith();
+    const response = await app.inject({
+      method: "PUT",
+      url: "/durability/settings",
+      payload: { signals: { compaction: "yes" } },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().detail).toContain("signals.compaction must be an object");
+    // ...and nothing was written.
+    expect(settings.read(DEFAULT_PROJECT_ID)).toEqual(defaultDurabilitySettings());
   });
 
   it("rejects a malformed patch with a 400 that names the fix, and no path", async () => {
@@ -247,7 +267,49 @@ describe("durability API", () => {
 
     const response = await app.inject({ method: "GET", url: "/durability/settings" });
     expect(response.statusCode).toBe(500);
-    expect(response.json().detail).toContain("Reset them in Pipeline options");
+    expect(response.json().detail).toContain("reset them in Pipeline options");
+  });
+
+  it("never echoes a raw error message from a generic catch (#71)", async () => {
+    // An ErrnoException's `message` carries an absolute path. Round 1's
+    // generic catches returned `error.message` verbatim on three routes.
+    const leaky = () => {
+      const error = new Error(
+        "ENOENT: no such file or directory, open '/Users/someone/projects/p/durability/settings.json'",
+      ) as NodeJS.ErrnoException;
+      error.code = "ENOENT";
+      throw error;
+    };
+
+    for (const [url, method] of [
+      ["/durability/settings", "GET"],
+      ["/durability/state", "GET"],
+    ] as const) {
+      const harness = contextEngineering();
+      (harness.production as unknown as {
+        durabilityState(projectId: string): unknown;
+      }).durabilityState = leaky;
+      const { app } = await appWith(harness);
+      const response = await app.inject({ method, url });
+      expect(response.statusCode).toBe(500);
+      expect(
+        response.json().detail,
+        `${method} ${url} leaked: ${response.json().detail}`,
+      ).not.toMatch(/[/\\](Users|home|var|tmp|private)[/\\]/);
+      expect(response.json().detail).not.toContain("ENOENT");
+    }
+
+    // ...and the stop route's generic catch.
+    const stopping = contextEngineering({ stopRun: leaky });
+    const { app } = await appWith(stopping);
+    const stop = await app.inject({
+      method: "POST",
+      url: `/durability/runs/${RUN_ID}/stop`,
+      payload: { reason: "Stop it" },
+    });
+    expect(stop.statusCode).toBe(409);
+    expect(stop.json().detail).toBe("This run could not be stopped. Reload the run and try again.");
+    expect(stop.json().detail).not.toMatch(/[/\\](Users|home|var|tmp|private)[/\\]/);
   });
 
   it("reports watcher state for the runs it is observing", async () => {
@@ -257,6 +319,49 @@ describe("durability API", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ enabled: false });
     expect(response.json().watchedRuns[0]).toMatchObject({ runId: RUN_ID, status: "paused" });
+    // §6.7: F6 must be able to disable a Stop control WITH A REASON before the
+    // click, not learn the refusal from a 409 after it.
+    expect(response.json().stopPolicy).toEqual({ allowStop: true, maxStopsPerRun: 1 });
+    expect(response.json().stopAvailability[0]).toMatchObject({ runId: RUN_ID, canStop: true });
+  });
+
+  it("says why a run cannot be stopped, before the operator clicks Stop", async () => {
+    const harness = contextEngineering();
+    // Stopping switched off, and a run that has already used its stop budget.
+    (harness.production as unknown as {
+      durabilityState(projectId: string): unknown;
+    }).durabilityState = () => {
+      const stored = {
+        ...defaultDurabilitySettings(),
+        stopPolicy: { allowStop: false, maxStopsPerRun: 1 },
+      };
+      return {
+        settings: stored,
+        resolution: resolveDurabilityModels(stored),
+        watchedRuns: [{
+          runId: RUN_ID,
+          status: "running",
+          lastSeq: 7,
+          lastObservedAt: 1_700_000_000_000,
+          firedSignals: [],
+          stops: 1,
+        }],
+        stopPolicy: stored.stopPolicy,
+        stopAvailability: [{
+          runId: RUN_ID,
+          canStop: false,
+          reason: "Stopping runs is switched off. Turn on Pipeline options ▸ Durability ▸ Allow stop.",
+        }],
+      };
+    };
+    const { app } = await appWith(harness);
+
+    const response = await app.inject({ method: "GET", url: "/durability/state" });
+    expect(response.statusCode).toBe(200);
+    const availability = response.json().stopAvailability[0];
+    expect(availability.canStop).toBe(false);
+    expect(availability.reason).toContain("Allow stop");
+    expect(availability.reason).not.toMatch(/[/\\](Users|home|var|tmp|private)[/\\]/);
   });
 });
 

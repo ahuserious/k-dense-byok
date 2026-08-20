@@ -1,8 +1,12 @@
 {
   "lane": "F14",
   "title": "Durability watcher (server)",
-  "matrixRows": [23, 24, "44-server"],
-  "baseSha": "b22c84b",
+  "matrixRows": [
+    23,
+    24,
+    "44-server"
+  ],
+  "baseSha": "cc547ba",
   "recordedAt": "2026-08-19",
   "note": "There is exactly ONE durability watcher. Rows 23 and 44 are the same capability; lane F6 builds the pipeline-options UI on this API and lane F11 builds the workflow-supervisor skill on it.",
   "modules": {
@@ -24,7 +28,9 @@
       "resolves": true,
       "contextWindow": 262144,
       "pricing": "unpriced",
-      "pricingNote": "Absent from web/src/data/models.json (154 entries), so it prices at $0 and project spend caps do not accrue for watcher calls. web/** is Team C's; the catalogue row is requested in INTEGRATION.md."
+      "shippedAsDefault": false,
+      "failClosed": true,
+      "reason": "It resolves live on OpenRouter but is absent from this build's vendored pricing catalogue web/src/data/models.json (154 entries), so agent/models.ts prices it at $0, productionCompleteJson records a $0 cost, and assertBudgetAdmission compares against a total watcher calls never increase — the project spend cap is off, not merely inaccurate. Round 1 surfaced this as pricing:\"unpriced\"; round 2 refuses it. The resolver returns status:\"unresolvable\" for any unpriced OpenRouter ref and the shipped default is {kind:\"unset\"} with a legible reason. Nothing was substituted: shipping openrouter/qwen/qwen3.6-27b (which IS priced) would be guessing a model the owner did not name. The catalogue row is requested in INTEGRATION.md section 5; once it exists the owner's default resolves priced and can ship live."
     },
     "rescue": {
       "ownerName": "GPT-5.6 Pro @ xhigh",
@@ -41,7 +47,8 @@
       ],
       "reason": "There is no openai/gpt-5.6-pro. Three live ids carry the \"GPT-5.6 … Pro\" name, each with a 1,050,000 token context window. The name is ambiguous across three ids, so the shipped default is unset and escalation is disabled-with-reason until an operator chooses."
     },
-    "reconciliation": "DEFAULT_COMPACTION_WATCHER_MODEL and DEFAULT_COMPACTION_REPAIR_MODEL (server/src/workflows/compaction-watcher.ts:13-16) are NOT a second source of default. Durability settings feed the watcher's existing watcherModel/repairModel parameters, which already take precedence over the KADY_* environment variables, which already take precedence over those constants. The constants are only reached when durability is switched off."
+    "reconciliation": "DEFAULT_COMPACTION_WATCHER_MODEL and DEFAULT_COMPACTION_REPAIR_MODEL (server/src/workflows/compaction-watcher.ts:13-16) are NOT a second source of default. Durability settings feed the watcher's existing watcherModel/repairModel parameters, which already take precedence over the KADY_* environment variables, which already take precedence over those constants. The constants are only reached when durability is switched off. ROUND 2: that claim had one exception and it is closed. #fireCompactionSignal's run-missing branch dispatched escalate-fix-redeploy with no repairModel, so compaction-watcher.ts fell back to DEFAULT_COMPACTION_REPAIR_MODEL. It was unreachable through the sole production caller, but watchCompaction is a public method the published interface points F11 at. That branch no longer dispatches anything.",
+    "contextWindowFloor": "minRescueContextWindow (default 1000000) now fails closed when a selection's context window cannot be established, not only when a KNOWN window is too small. Round 1 only checked a known window, so the floor passed silently for every non-OpenRouter ref and every uncatalogued OpenRouter ref — the exact case it exists for."
   },
   "signals": [
     {
@@ -78,11 +85,14 @@
       "id": "paused-no-progress",
       "label": "Paused with no progress",
       "observableToday": true,
-      "observability": "full",
+      "observability": "partial",
       "observationSource": "durable run state: WorkflowRunState.status and .lastSeq via WorkflowStore.readRun (server/src/workflows/store.ts:2500)",
-      "firesWhen": "the run is paused, waiting, or blocked and lastSeq has not advanced for stallMs",
+      "firesWhen": "the run is waiting and lastSeq has not advanced for stallMs. It also fires on paused and blocked, but this build never produces either status.",
       "defaultAction": "restart",
-      "test": "server/test/durability-signals.test.ts — 'fires paused-no-progress from real run state, and not before the stall time'"
+      "test": "server/test/durability-signals.test.ts - 'fires paused-no-progress from real run state, and not before the stall time'; server/test/durability-settings.test.ts - 'narrows paused-no-progress to what this build can actually produce' and 'tallies the catalogue as 3 full, 2 partial, 1 none'",
+      "unobservablePart": "The paused and blocked statuses. Verified by grep over server/src, server/pi-packages and server/vendor on 2026-08-19: run_paused and run_blocked appear only as frozen event-type literals, static event-contract cases and reducer cases in server/src/workflows/run-state.ts. Nothing appends them. The only emitter of a stalled state anywhere in the tree is server/src/workflows/prompt-opt-interview-contract.ts:144, which appends run_waiting when a prompt-optimization node awaits durable structured answers.",
+      "unobservableReason": "Only a run waiting on a durable prompt-optimization answer can stall in this build. Paused and blocked runs are never produced - no code appends run_paused or run_blocked - so two of this signal's three trigger statuses cannot occur. It still fires on a waiting run that stops advancing. Enable it once a pause or block can be recorded.",
+      "apiBehaviour": "GET /durability/signals reports observability:\"partial\" with that reason; PUT /durability/settings still allows enabling it, because the waiting third is real. Lane F6 renders it enabled-but-labelled-partial, exactly as it does failed-script-run."
     },
     {
       "id": "failed-script-run",
@@ -108,7 +118,13 @@
       "test": "server/test/durability-settings.test.ts — 'refuses to enable a signal this build cannot observe, with the reason the UI shows'"
     }
   ],
-  "actions": ["observe", "restart", "escalate", "lateral-pass", "stop"],
+  "actions": [
+    "observe",
+    "restart",
+    "escalate",
+    "lateral-pass",
+    "stop"
+  ],
   "runTimelineEvents": {
     "insideTheAuthoritativeRunEventStream": [
       {
@@ -131,20 +147,45 @@
       "durability.action.failed",
       "durability.escalation.started",
       "durability.escalation.completed",
+      "durability.escalation.deferred",
       "durability.stop.requested",
       "durability.stop.completed",
       "durability.model.unresolved",
       "durability.watch.stopped"
     ],
-    "whyTwoPlaces": "WORKFLOW_RUN_EVENT_TYPES is frozen in server/src/workflows/run-state.ts (lanes F2/F5) and each event type's data is validated against an exact key set, so a watcher observation has no legal slot there. Every state CHANGE still goes through the run event stream; only the watcher's own observations live in the journal, stamped with the run's lastSeq so a UI can interleave them deterministically. INTEGRATION.md carries the exact event types F2/F5 would add to fold the journal into the run stream."
+    "whyTwoPlaces": "WORKFLOW_RUN_EVENT_TYPES is frozen in server/src/workflows/run-state.ts (lanes F2/F5) and each event type's data is validated against an exact key set, so a watcher observation has no legal slot there. Every state CHANGE still goes through the run event stream; only the watcher's own observations live in the journal, stamped with the run's lastSeq so a UI can interleave them deterministically. INTEGRATION.md carries the exact event types F2/F5 would add to fold the journal into the run stream.",
+    "escalationOutcomes": {
+      "completed": "A repaired workflow revision WAS deployed and a replacement run exists. ok:true, dispatched:true. This is the only outcome whose detail may say the run continued.",
+      "deferred": "repairAndRedeploy returned redeployed:false with an unapplied proposal - a normal resolve, not a throw - which is what happens on every escalation of a run that is not interrupted-and-recoverable. ok:false, dispatched:false, proposalId set, and no string claims continuation. Round 1 reported this case as a success.",
+      "failed": "The dispatch threw. ok:false, dispatched:false."
+    }
   },
   "endpoints": [
     "GET /durability/signals",
     "GET /durability/settings",
     "PUT /durability/settings",
-    "GET /durability/state",
+    "GET /durability/state  (round 2: also returns stopPolicy and stopAvailability, so a Stop control can be rendered disabled with a reason BEFORE the click)",
     "GET /durability/runs/:runId/timeline",
     "POST /durability/runs/:runId/stop"
   ],
-  "lifecycle": "The watcher owns no timer and no process. It rides ContextEngineeringProduction.startStoppedRunFeed (one unref'd interval that already existed) and is released by ContextEngineeringProduction.close, which server/src/index.ts already calls on shutdown. Proven in server/test/durability-lifecycle.test.ts (#41)."
+  "lifecycle": "The watcher owns no timer and no process. It rides ContextEngineeringProduction.startStoppedRunFeed (one unref'd interval that already existed) and is released by ContextEngineeringProduction.close, which server/src/index.ts already calls on shutdown. Proven in server/test/durability-lifecycle.test.ts (#41). ROUND 2: the sweep now makes real provider calls inside that 5-second interval, so ContextEngineeringProduction has an in-flight guard (a tick during a sweep is a no-op, counted by durabilitySweepsSkipped()) and every durability-originated model call carries an AbortSignal plus a 240000 ms bound (DURABILITY_MODEL_TIMEOUT_MS). Both proven in server/test/durability-lifecycle.test.ts.",
+  "round": 2,
+  "roundTwoChanges": [
+    "paused-no-progress narrowed from observability:full to partial. run_paused and run_blocked have NO emitter anywhere in server/src, server/pi-packages or server/vendor; only run_waiting is ever appended (server/src/workflows/prompt-opt-interview-contract.ts:144). Honest tally is 3 full / 2 partial / 1 none, not 4 / 1 / 1.",
+    "The shipped watcherModel default is now unset. The owner's named model is absent from web/src/data/models.json, so its calls price at $0 and the project spend cap never accrues; the resolver now refuses any unpriced OpenRouter model rather than surfacing a field. Nothing was substituted.",
+    "An escalation that produces only a proposal is a distinct outcome: durability.escalation.deferred (ok:false, proposalId), dispatched:false, and no string claims the run continued. durability.escalation.completed now means a revision was deployed AND a replacement run exists.",
+    "The escalate action no longer fires a separate lateral pass. The failing run's context rides the escalate dispatch as payload.carriedContext and reaches the repair model's input, so escalate costs one model call and creates no stray chat session.",
+    "watchCompaction reinstated validateSemanticRecord before the semantic model call.",
+    "The compaction run-missing branch no longer dispatches escalate-fix-redeploy at DEFAULT_COMPACTION_REPAIR_MODEL; it journals durability.action.failed and changes nothing.",
+    "minRescueContextWindow fails closed when a model's context window cannot be established; pricing is always populated and gained a third value, \"unknown\".",
+    "The durability sweep has an in-flight guard, and every durability-originated model call carries an AbortSignal plus a 240000 ms bound.",
+    "durability-journal.ts no longer contains a raw NUL byte, so git treats it as text.",
+    "GET /durability/settings and /durability/state no longer construct a per-project runtime as a side effect, and no generic catch echoes a raw error message (#71). /durability/state gained stopPolicy and stopAvailability."
+  ],
+  "observabilityTally": {
+    "full": 3,
+    "partial": 2,
+    "none": 1,
+    "note": "Round 1 reported 4 / 1 / 1. paused-no-progress was counted as full without checking that any code produces its trigger statuses."
+  }
 }

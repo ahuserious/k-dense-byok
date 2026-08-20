@@ -21,9 +21,15 @@ import type { TrustedDagFusionCompactionAudit } from
 const PROJECT_ID = "durability-signals-test";
 const RUN_ID = "wrun_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-/** A rescue model that really resolves, with a 1M context window. */
+/** A rescue model that really resolves, priced, with a 1M context window. */
 const RESCUE_REF = "openrouter/openai/gpt-5.6-luna-pro";
-const WATCHER_REF = "openrouter/qwen/qwen3.8-27b";
+/**
+ * A PRICED watcher model. The owner's named default (`qwen/qwen3.8-27b`) is
+ * absent from this build's pricing catalogue and now fails closed, so a test
+ * that wants the watcher to run must choose a model whose spend the project cap
+ * can actually see — exactly what an operator has to do.
+ */
+const WATCHER_REF = "openrouter/qwen/qwen3.6-27b";
 
 function runRecord(options: {
   status?: WorkflowRunRecord["state"]["status"];
@@ -84,10 +90,13 @@ function harness(options: {
   events?: WorkflowRunEventV1[];
   audit?: TrustedDagFusionCompactionAudit;
   semanticVerdict?: unknown;
+  /** The compaction audit arrives for a run the store can no longer read. */
+  runMissing?: boolean;
 } = {}): Harness {
   const settings: DurabilitySettingsV1 = {
     ...defaultDurabilitySettings(),
     enabled: true,
+    watcherModel: { kind: "direct", ref: WATCHER_REF, effort: "high" },
     rescueModel: { kind: "direct", ref: RESCUE_REF, effort: "xhigh" },
     ...options.settings,
   };
@@ -160,7 +169,7 @@ function harness(options: {
 
   const runs: DurabilityRunSource = {
     readRun: (projectId, runId) =>
-      projectId === PROJECT_ID && runId === run.manifest.id ? run : null,
+      !options.runMissing && projectId === PROJECT_ID && runId === run.manifest.id ? run : null,
     listRuns: () => [run],
     readRunEvents: (_projectId, _runId, requestOptions) => {
       const after = requestOptions?.after ?? 0;
@@ -434,8 +443,69 @@ describe("durability watcher — per-signal firing on real observed state", () =
   });
 });
 
+describe("durability watcher — the compaction path keeps the audit guard", () => {
+  it("refuses an over-bounds semantic record instead of sending it to a billed model", async () => {
+    // `watch()` — the path durability replaces when the toggles are on —
+    // calls validateSemanticRecord before the semantic model
+    // (compaction-watcher.ts). Round 1's watchCompaction did not, so switching
+    // durability ON silently removed the bound in front of a paid call.
+    const guarded = harness({
+      audit: { occurred: true, checks: [{ attempt: 1, phase: "pre", passed: true }] },
+    });
+
+    await expect(guarded.watcher.watchCompaction({
+      runId: RUN_ID,
+      childRunId: "child-1",
+      sandboxRoot: "/sandbox",
+      preCompactionRecord: "",
+      compactedSummary: "Decision B.",
+      userPrompt: "Verify C.",
+      goal: "Verify C.",
+      openTodos: ["Verify C"],
+    })).rejects.toMatchObject({ code: "INVALID_AUDIT_INPUT" });
+
+    // The point of the guard: no provider call was made.
+    expect(guarded.semanticModel).not.toHaveBeenCalled();
+  });
+
+  it("does not act on a compaction whose owning run is no longer readable", async () => {
+    // Round 1 dispatched escalate-fix-redeploy here regardless of the
+    // configured action and with NO repairModel, so the pre-existing
+    // DEFAULT_COMPACTION_REPAIR_MODEL ran a DAG repair at a model the operator
+    // never chose — while the rescue slot was deliberately unset.
+    const missing = harness({
+      runMissing: true,
+      settings: {
+        signals: {
+          ...defaultDurabilitySettings().signals,
+          compaction: { enabled: true, action: "stop", threshold: 1 },
+        },
+      },
+      audit: {
+        occurred: true,
+        checks: [{ attempt: 1, phase: "post", passed: false, detail: "fingerprint mismatch" }],
+      },
+    });
+    const result = await missing.watcher.watchCompaction({
+      runId: RUN_ID,
+      childRunId: "child-1",
+      sandboxRoot: "/sandbox",
+      preCompactionRecord: "Decision B. TODO verify C.",
+      compactedSummary: "Decision B.",
+      userPrompt: "Verify C.",
+      goal: "Verify C.",
+      openTodos: ["Verify C"],
+    });
+
+    expect(result.status).toBe("fired");
+    expect(result.detail).toContain("no longer readable");
+    expect(result.detail).toContain("Nothing was changed");
+    expect(missing.repairAndRedeploy).not.toHaveBeenCalled();
+  });
+});
+
 describe("durability watcher — the escalation binds the rescue model (row 24)", () => {
-  it("carries the rescue model and effort into BOTH the lateral pass and the repair call", async () => {
+  it("carries the rescue model, its effort AND the failing run's context into the repair call", async () => {
     const escalating = harness({
       settings: {
         signals: {
@@ -460,8 +530,29 @@ describe("durability watcher — the escalation binds the rescue model (row 24)"
     const observation = await escalating.watcher.observeRun(RUN_ID);
 
     expect(observation.fires[0]).toMatchObject({ signal: "failed-script-run", dispatched: true });
-    expect(escalating.summarize.mock.calls[0][0].model).toBe(`${RESCUE_REF}-xhigh`);
-    expect(escalating.repairAndRedeploy.mock.calls[0][0].model).toBe(`${RESCUE_REF}-xhigh`);
+
+    // The rescue model and its effort reach the repair call, in the routing
+    // form OpenRouter accepts.
+    const repair = escalating.repairAndRedeploy.mock.calls[0][0];
+    expect(repair.model).toBe(`${RESCUE_REF}-xhigh`);
+
+    // Row 24: "the larger model RECEIVES THE CONTEXT". Round 1 paid for a
+    // separate lateral pass whose summary was concatenated into a detail
+    // string and never reached the repair; the context now arrives with it.
+    expect(repair.carriedContext).toMatchObject({
+      runId: RUN_ID,
+      signal: "failed-script-run",
+      runStatus: "running",
+      goal: "Finish the durability run.",
+    });
+    expect(repair.carriedContext.transcript.length).toBeGreaterThan(0);
+    expect(repair.carriedContext.transcript[0].content).toContain("Failed scripts");
+
+    // ...and the escalate action buys exactly ONE model call. The lateral pass
+    // is gone from this path: its output was discarded and production's
+    // `openCleanWindow` left a real chat session in the project per escalation.
+    expect(escalating.summarize).not.toHaveBeenCalled();
+
     expect(journalNames(escalating.journal)).toEqual(
       expect.arrayContaining([
         "durability.signal.fired",
@@ -471,6 +562,76 @@ describe("durability watcher — the escalation binds the rescue model (row 24)"
         "durability.action.completed",
       ]),
     );
+    expect(journalNames(escalating.journal)).not.toContain("durability.escalation.deferred");
+  });
+
+  it("reports a proposal-only escalation as NOT dispatched, and never says the run continued", async () => {
+    // THE common production path. `repairAndRedeploy` returns
+    // `{redeployed:false, proposal}` — a normal resolve, not a throw — whenever
+    // the run is not `interrupted`-and-recoverable, i.e. on every escalation of
+    // a RUNNING run. No revision was created and no replacement run exists.
+    // Round 1 journalled ok:true, returned dispatched:true, and the fallback
+    // detail literally said the run continued.
+    const deferring = harness({
+      settings: {
+        signals: {
+          ...defaultDurabilitySettings().signals,
+          "failed-script-run": { enabled: true, action: "escalate", threshold: 1 },
+        },
+      },
+      events: [
+        event(5, "node_failed", {
+          executionId: "exec-1",
+          nodeId: "lean-proof",
+          attempt: 1,
+          branchId: "entry",
+          data: {
+            error: { code: "LEAN_FAILED", message: "Lean rejected the proof.", retryable: true },
+            routeCondition: "failure",
+          },
+        }),
+      ],
+    });
+    deferring.repairAndRedeploy.mockResolvedValue({
+      redeployed: false,
+      proposal: {
+        proposalId: "context-proposal-abc123",
+        reason: "context-repair-requires-verified-recovery:durability:failed-script-run",
+      },
+      detail: "Persisted unapplied rescue proposal context-proposal-abc123. " +
+        "No replacement was created or started.",
+    });
+
+    const observation = await deferring.watcher.observeRun(RUN_ID);
+    const fire = observation.fires[0];
+
+    expect(fire.signal).toBe("failed-script-run");
+    expect(fire.dispatched).toBe(false);
+    expect(fire.proposalId).toBe("context-proposal-abc123");
+    expect(fire.detail).not.toMatch(/run continued|repaired the workflow/i);
+    expect(fire.detail).toContain("did not repair");
+
+    // The timeline F6 renders must agree: deferred, ok:false, proposal named,
+    // and no completed event claiming success.
+    const events = deferring.journal.read(PROJECT_ID, RUN_ID, { limit: 200 }).events;
+    const names = events.map((item) => item.name);
+    expect(names).toContain("durability.escalation.deferred");
+    expect(names).not.toContain("durability.escalation.completed");
+
+    const deferred = events.find((item) => item.name === "durability.escalation.deferred")!;
+    expect(deferred.ok).toBe(false);
+    expect(deferred.proposalId).toBe("context-proposal-abc123");
+    expect(deferred.detail).not.toMatch(/run continued/i);
+
+    const completed = events.find((item) => item.name === "durability.action.completed")!;
+    expect(completed.ok).toBe(false);
+    expect(completed.proposalId).toBe("context-proposal-abc123");
+
+    // Nothing in the whole timeline may claim the run continued.
+    for (const item of events) {
+      expect(item.detail, `"${item.name}" must not claim continuation: ${item.detail}`)
+        .not.toMatch(/the run continued/i);
+    }
   });
 
   it("fails closed on an unresolved rescue model and leaves the run untouched", async () => {

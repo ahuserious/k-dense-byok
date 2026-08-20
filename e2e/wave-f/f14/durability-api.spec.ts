@@ -36,7 +36,8 @@ interface DurabilityModelResolution {
   ref?: string;
   effort?: string;
   contextWindow?: number;
-  pricing?: "priced" | "unpriced";
+  pricing?: "priced" | "unpriced" | "unknown";
+  warning?: string;
   reason?: string;
   nextAction?: string;
 }
@@ -127,7 +128,7 @@ test("@live @live-alt serves a six-signal durability catalogue with an honest ob
   );
 });
 
-test("@live @live-alt reports the two signals this build cannot fully observe, with a reason the UI renders", async ({
+test("@live @live-alt reports the three signals this build cannot fully observe, with a reason the UI renders", async ({
   liveWorkspace,
 }) => {
   const observed = await backendJson<{ signals: DurabilitySignalDescriptor[] }>(
@@ -149,8 +150,21 @@ test("@live @live-alt reports the two signals this build cannot fully observe, w
   expect(scriptRun.observability).toBe("partial");
   expect(scriptRun.unobservableReason).toContain("no CI integration");
 
+  // `run_paused` and `run_blocked` have NO emitter anywhere in the server tree,
+  // so a signal labelled "Paused with no progress" can never fire on a paused
+  // run and never on a blocked one. It is partial, not full.
+  const stalled = byId.get("paused-no-progress")!;
+  expect(stalled.observability).toBe("partial");
+  expect(stalled.unobservableReason).toContain("run_paused");
+  expect(stalled.unobservableReason).toContain("run_blocked");
+  expect(stalled.firesWhen).toContain("waiting");
+
+  const tally = { full: 0, partial: 0, none: 0 } as Record<string, number>;
+  for (const signal of observed.body.signals) tally[signal.observability] += 1;
+  expect(tally).toEqual({ full: 3, partial: 2, none: 1 });
+
   // The honest reason must name what the user can do, and never a path on disk.
-  for (const signal of [skillFire, scriptRun]) {
+  for (const signal of [skillFire, scriptRun, stalled]) {
     expect(
       signal.unobservableReason,
       `${signal.id} reason must not leak a filesystem path.`,
@@ -158,7 +172,7 @@ test("@live @live-alt reports the two signals this build cannot fully observe, w
   }
 });
 
-test("@live @live-alt fails closed on the rescue model the owner named, instead of guessing one of three", async ({
+test("@live @live-alt fails closed on BOTH model defaults, instead of guessing or spending unpriced", async ({
   liveWorkspace,
 }) => {
   const observed = await backendJson<DurabilitySettingsResponse>(
@@ -171,12 +185,19 @@ test("@live @live-alt fails closed on the rescue model the owner named, instead 
   ).toBe(200);
 
   const { watcher, rescue } = observed.body.resolution;
-  // The watcher default resolves; it is also absent from this build's pricing
-  // catalogue, which the API reports rather than hides.
-  expect(watcher.status).toBe("resolved");
-  expect(watcher.ref).toBe("openrouter/qwen/qwen3.8-27b");
-  expect(watcher.effort).toBe("high");
-  expect(watcher.pricing).toBe("unpriced");
+  // The owner's named watcher model resolves live on OpenRouter but is absent
+  // from this build's pricing catalogue, so its calls would record $0 and the
+  // project spend cap would never accrue. A shipped default that silently
+  // disables a budget control is not made safe by a field the UI may render, so
+  // it ships unset with a reason — the same standard as the rescue slot.
+  expect(
+    watcher.status,
+    `The watcher slot reported ${JSON.stringify(watcher)}; an unpriced default must fail closed.`,
+  ).toBe("unset");
+  expect(watcher.ref).toBeUndefined();
+  expect(watcher.reason).toContain("pricing catalogue");
+  expect(watcher.reason).toContain("openrouter/qwen/qwen3.8-27b");
+  expect(watcher.nextAction).toContain("watcher model");
 
   // "GPT-5.6 Pro" matches three live OpenRouter ids, so nothing is chosen.
   expect(
@@ -189,8 +210,7 @@ test("@live @live-alt fails closed on the rescue model the owner named, instead 
   expect(rescue.reason).toContain("GPT-5.6 Sol Pro");
   expect(rescue.nextAction).toContain("Pipeline options");
   console.log(
-    `LIVE_VALUES durability_watcher=${String(watcher.ref)} pricing=${String(watcher.pricing)} ` +
-      `rescue_status=${rescue.status}`,
+    `LIVE_VALUES durability_watcher_status=${watcher.status} rescue_status=${rescue.status}`,
   );
 });
 
@@ -208,6 +228,7 @@ test("@live @live-alt round-trips a durability settings change through the serve
     method: "PUT",
     payload: {
       enabled: true,
+      watcherModel: { kind: "direct", ref: "openrouter/qwen/qwen3.6-27b", effort: "high" },
       rescueModel: {
         kind: "direct",
         ref: "openrouter/openai/gpt-5.6-sol-pro",
@@ -227,6 +248,13 @@ test("@live @live-alt round-trips a durability settings change through the serve
     status: "resolved",
     ref: "openrouter/openai/gpt-5.6-sol-pro",
     effort: "xhigh",
+    pricing: "priced",
+  });
+  // An operator-chosen PRICED watcher model resolves, so the spend cap accrues.
+  expect(saved.body.resolution.watcher).toMatchObject({
+    status: "resolved",
+    ref: "openrouter/qwen/qwen3.6-27b",
+    pricing: "priced",
   });
   // A resolved rescue model must clear the 1M-context floor the row demands.
   expect(saved.body.resolution.rescue.contextWindow)
@@ -310,6 +338,8 @@ test("@live @live-alt reports watcher state the pipeline-options panel can rende
     enabled: boolean;
     resolution: { watcher: DurabilityModelResolution; rescue: DurabilityModelResolution };
     watchedRuns: Array<{ runId: string; status: string; stops: number }>;
+    stopPolicy: { allowStop: boolean; maxStopsPerRun: number };
+    stopAvailability: Array<{ runId: string; canStop: boolean; reason?: string }>;
   }>(liveWorkspace, { path: "/durability/state" });
 
   expect(
@@ -318,6 +348,14 @@ test("@live @live-alt reports watcher state the pipeline-options panel can rende
   ).toBe(200);
   expect(typeof observed.body.enabled).toBe("boolean");
   expect(Array.isArray(observed.body.watchedRuns)).toBe(true);
+  // §6.7: the reason a Stop control must be rendered disabled, supplied BEFORE
+  // the click. One entry per watched run, and a false always carries a reason.
+  expect(typeof observed.body.stopPolicy.allowStop).toBe("boolean");
+  expect(Array.isArray(observed.body.stopAvailability)).toBe(true);
+  expect(observed.body.stopAvailability).toHaveLength(observed.body.watchedRuns.length);
+  for (const availability of observed.body.stopAvailability) {
+    if (!availability.canStop) expect(availability.reason).toBeTruthy();
+  }
   // #62: a panel reading this endpoint must never get a malformed 200. Every
   // resolution slot is either resolved with a ref, or carries a legible reason.
   for (const slot of ["watcher", "rescue"] as const) {

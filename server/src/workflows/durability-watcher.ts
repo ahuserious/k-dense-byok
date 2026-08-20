@@ -5,8 +5,10 @@ import {
   compactionAuditIdentity,
   fingerprintFailure,
   parseCompactionSemanticVerdict,
+  validateSemanticRecord,
   type CompactionSemanticModel,
   type CompactionSemanticVerdict,
+  type CompactionWatcherBehaviorResult,
   type WatchCompactionRequest,
 } from "./compaction-watcher.ts";
 import { LATERAL_PASS_BEHAVIOR, type LateralPassMessage } from "../context/lateral-pass.ts";
@@ -102,8 +104,45 @@ export interface DurabilitySignalFire {
   runId: string;
   signal: DurabilitySignalId;
   action: DurabilityAction;
+  /**
+   * TRUE only when the action actually took effect: the run was restarted, the
+   * run was stopped, a clean window was opened, or — for `escalate` — a repaired
+   * workflow revision was deployed and a replacement run was created.
+   *
+   * It is deliberately NOT "a behavior handler resolved". `repairAndRedeploy`
+   * resolves normally with `redeployed:false` and an unapplied proposal whenever
+   * the run is not `interrupted`-and-recoverable, which is the COMMON case; round
+   * 1 reported that as a success and told F6 the run had continued when no
+   * revision and no replacement run existed. See `proposalId`.
+   */
   dispatched: boolean;
+  /** The unapplied rescue proposal, when an escalation deferred instead of repairing. */
+  proposalId?: string;
   detail: string;
+}
+
+/** What `#dispatch` reports back to `#act`, so `ok` and `dispatched` can tell the truth. */
+interface DurabilityDispatchOutcome {
+  detail: string;
+  /** Did the action actually change the run? See DurabilitySignalFire.dispatched. */
+  effective: boolean;
+  proposalId?: string;
+}
+
+/**
+ * The failing run's context, carried to the rescue model so it repairs the DAG
+ * with knowledge of what went wrong rather than from the graph alone. This is
+ * row 24's "the larger model receives the context" and it now reaches the
+ * provider call: `escalate-fix-redeploy` threads it into the repair input.
+ */
+export interface DurabilityCarriedContext {
+  runId: string;
+  signal: DurabilitySignalId;
+  runStatus: string;
+  goal: string;
+  userPrompt: string;
+  openTodos: string[];
+  transcript: LateralPassMessage[];
 }
 
 export interface DurabilityObservation {
@@ -383,17 +422,26 @@ export class DurabilityWatcher {
     });
 
     try {
-      const detail = await this.#dispatch(run, state, signal, action, settings);
+      const outcome = await this.#dispatch(run, state, signal, action, settings);
       this.#journal({
         name: "durability.action.completed",
         runId,
         runLastSeq,
         signal,
         action,
-        ok: true,
-        detail,
+        // `ok` follows the EFFECT, not the fact that a handler resolved.
+        ok: outcome.effective,
+        ...(outcome.proposalId ? { proposalId: outcome.proposalId } : {}),
+        detail: outcome.detail,
       });
-      return { runId, signal, action, dispatched: true, detail };
+      return {
+        runId,
+        signal,
+        action,
+        dispatched: outcome.effective,
+        ...(outcome.proposalId ? { proposalId: outcome.proposalId } : {}),
+        detail: outcome.detail,
+      };
     } catch (error) {
       const failure = error instanceof DurabilityModelUnavailableError
         ? error
@@ -421,7 +469,7 @@ export class DurabilityWatcher {
     signal: DurabilitySignalId,
     action: DurabilityAction,
     settings: DurabilitySettingsV1,
-  ): Promise<string> {
+  ): Promise<DurabilityDispatchOutcome> {
     const runId = run.manifest.id;
     if (action === "stop") return this.#stop(run, state, signal, settings);
     if (action === "restart") {
@@ -429,17 +477,50 @@ export class DurabilityWatcher {
         capability: "restart-workflow",
         runId,
         payload: { reason: `durability:${signal}` },
-      });
-      return result.detail ?? `Requested a restart of ${runId}.`;
+      }) as CompactionWatcherBehaviorResult;
+      return {
+        detail: result.detail ?? `Requested a restart of ${runId}.`,
+        effective: result.resumed !== false,
+      };
     }
     const rescue = this.#requireRescue();
     if (action === "lateral-pass") {
       return this.#lateralPass(run, signal, rescue);
     }
-    // "escalate" is row 24: the lateral pass carries the failing run's context
-    // to the larger model, then the SAME escalate-fix-redeploy behavior repairs
-    // the DAG and continues the run. One escalation path, not a second one.
-    const handoff = await this.#lateralPass(run, signal, rescue);
+    return this.#escalate(run, signal, action, rescue);
+  }
+
+  /**
+   * Row 24. The rescue model receives the failing run's context AND its graph,
+   * repairs the DAG, and the run continues — through the SAME
+   * `escalate-fix-redeploy` behavior the compaction watcher already registers.
+   *
+   * Round 1 also fired a separate `lateral-pass` here first. That bought a
+   * second call at the same 1M-context model at xhigh whose summary was
+   * concatenated into a detail string and never reached the repair, and each
+   * one left a real chat session in the project that nobody opened (production's
+   * `openCleanWindow` calls `createSession`). The context is now carried in the
+   * escalate payload instead: one paid call, no orphaned session, and the thing
+   * row 24 asks for actually reaches the provider. `lateral-pass` remains its
+   * own action, where the clean session is the deliberate product.
+   */
+  async #escalate(
+    run: WorkflowRunRecord,
+    signal: DurabilitySignalId,
+    action: DurabilityAction,
+    rescue: { ref: string; effort?: DurabilityEffortValue },
+  ): Promise<DurabilityDispatchOutcome> {
+    const runId = run.manifest.id;
+    this.#journal({
+      name: "durability.escalation.started",
+      runId,
+      runLastSeq: run.state.lastSeq,
+      signal,
+      action,
+      model: rescue.ref,
+      ...(rescue.effort ? { effort: rescue.effort } : {}),
+      detail: `Carrying this run's context to ${rescue.ref} to repair the workflow.`,
+    });
     const result = await this.#dependencies.registry.dispatch(COMPACTION_WATCHER_BEHAVIOR, {
       capability: "escalate-fix-redeploy",
       runId,
@@ -447,8 +528,44 @@ export class DurabilityWatcher {
         reason: `durability:${signal}`,
         auditIdentity: signalAuditIdentity(runId, signal, run.state.lastSeq),
         repairModel: durabilityDispatchRef(rescue),
+        carriedContext: this.#carriedContext(run, signal),
       },
-    });
+    }) as CompactionWatcherBehaviorResult;
+
+    // THE distinction this whole branch exists for. `repairAndRedeploy` returns
+    // `redeployed:false` with an unapplied proposal — a normal resolve, not a
+    // throw — whenever the run is not `interrupted`-and-recoverable, which is
+    // every escalation on a *running* run. No revision was created and no
+    // replacement run exists, so nothing here may say the run continued.
+    if (result.redeployed !== true) {
+      const proposalId = result.proposal?.proposalId;
+      const detail = proposalId
+        ? `The rescue model did not repair this run. An unapplied rescue proposal (${proposalId}) ` +
+          "is waiting for approval; the run was left exactly as it was."
+        : "The rescue model did not repair this run, and no replacement run was created. " +
+          "The run was left exactly as it was.";
+      this.#journal({
+        name: "durability.escalation.deferred",
+        runId,
+        runLastSeq: run.state.lastSeq,
+        signal,
+        action,
+        model: rescue.ref,
+        ...(rescue.effort ? { effort: rescue.effort } : {}),
+        ...(proposalId ? { proposalId } : {}),
+        ok: false,
+        detail: result.detail ? `${detail} ${result.detail}` : detail,
+      });
+      return {
+        detail: result.detail ? `${detail} ${result.detail}` : detail,
+        effective: false,
+        ...(proposalId ? { proposalId } : {}),
+      };
+    }
+
+    const detail = result.detail ??
+      `The rescue model repaired the workflow at revision ${String(result.workflowRevision)} and ` +
+        "the run continued.";
     this.#journal({
       name: "durability.escalation.completed",
       runId,
@@ -458,9 +575,24 @@ export class DurabilityWatcher {
       model: rescue.ref,
       ...(rescue.effort ? { effort: rescue.effort } : {}),
       ok: true,
-      detail: result.detail ?? "The rescue model repaired the workflow and the run continued.",
+      detail,
     });
-    return `${handoff} ${result.detail ?? "The workflow was repaired and the run continued."}`;
+    return { detail, effective: true };
+  }
+
+  #carriedContext(
+    run: WorkflowRunRecord,
+    signal: DurabilitySignalId,
+  ): DurabilityCarriedContext {
+    return {
+      runId: run.manifest.id,
+      signal,
+      runStatus: run.state.status,
+      goal: run.manifest.input.goal ?? `Complete workflow ${run.manifest.workflowId}.`,
+      userPrompt: run.manifest.input.goal ?? `Continue workflow run ${run.manifest.id}.`,
+      openTodos: this.#openTodos(run),
+      transcript: this.#transcript(run, signal),
+    };
   }
 
   #requireRescue(): { ref: string; effort?: DurabilityEffortValue } {
@@ -475,22 +607,34 @@ export class DurabilityWatcher {
     run: WorkflowRunRecord,
     signal: DurabilitySignalId,
     rescue: { ref: string; effort?: DurabilityEffortValue },
-  ): Promise<string> {
+  ): Promise<DurabilityDispatchOutcome> {
     const runId = run.manifest.id;
+    // A lateral pass summarizes a CHAT SESSION into a new clean window. A run
+    // id passes the behavior's session-id pattern, so round 1 substituted it
+    // when a run had no session and the model was asked to summarize something
+    // that is not a session. Fail closed instead.
+    const sourceSessionId = run.manifest.sessionId;
+    if (!sourceSessionId) {
+      throw new Error(
+        "This run has no chat session, so there is nothing for a lateral pass to carry into a " +
+          "clean window. Choose Escalate for this signal in Pipeline options \u25b8 Durability.",
+      );
+    }
     this.#journal({
       name: "durability.escalation.started",
       runId,
       runLastSeq: run.state.lastSeq,
       signal,
+      action: "lateral-pass",
       model: rescue.ref,
       ...(rescue.effort ? { effort: rescue.effort } : {}),
-      detail: `Handing this run's context to ${rescue.ref} for a lateral pass.`,
+      detail: `Handing this run's session to ${rescue.ref} for a lateral pass.`,
     });
     const result = await this.#dependencies.registry.dispatch(LATERAL_PASS_BEHAVIOR, {
       capability: "lateral-pass",
       runId,
       payload: {
-        sourceSessionId: run.manifest.sessionId ?? runId,
+        sourceSessionId,
         userPrompt: run.manifest.input.goal ?? `Continue workflow run ${runId}.`,
         goal: run.manifest.input.goal ?? `Complete workflow ${run.manifest.workflowId}.`,
         openTodos: this.#openTodos(run),
@@ -498,7 +642,19 @@ export class DurabilityWatcher {
         model: durabilityDispatchRef(rescue),
       },
     });
-    return result.detail ?? `Lateral pass to ${rescue.ref} completed.`;
+    const detail = result.detail ?? `Lateral pass to ${rescue.ref} completed.`;
+    this.#journal({
+      name: "durability.escalation.completed",
+      runId,
+      runLastSeq: run.state.lastSeq,
+      signal,
+      action: "lateral-pass",
+      model: rescue.ref,
+      ...(rescue.effort ? { effort: rescue.effort } : {}),
+      ok: true,
+      detail,
+    });
+    return { detail, effective: true };
   }
 
   #openTodos(run: WorkflowRunRecord): string[] {
@@ -534,7 +690,7 @@ export class DurabilityWatcher {
     state: RunWatchState,
     signal: DurabilitySignalId,
     settings: DurabilitySettingsV1,
-  ): string {
+  ): DurabilityDispatchOutcome {
     const runId = run.manifest.id;
     if (!settings.stopPolicy.allowStop) {
       throw new Error(
@@ -576,7 +732,7 @@ export class DurabilityWatcher {
           ? "The run timeline records this as a durability stop."
           : "The run timeline records this as a cancellation; this timeline records who stopped it."),
     });
-    return receipt.detail;
+    return { detail: receipt.detail, effective: receipt.stopped };
   }
 
   /**
@@ -640,6 +796,12 @@ export class DurabilityWatcher {
       return { status: "suppressed", signal: "context-rot", audit };
     }
 
+    // The guard the path this replaces enforces (`compaction-watcher.ts:934`).
+    // Without it an empty, malformed or over-bounds record goes straight to a
+    // billed provider call whenever durability is switched on, which would make
+    // a settings flag the difference between a validated and an unvalidated
+    // audit. Throws CompactionWatcherError("INVALID_AUDIT_INPUT").
+    validateSemanticRecord(request);
     const watcher = requireDurabilityModel("watcher", this.resolution().watcher);
     const verdict = parseCompactionSemanticVerdict(
       await this.#dependencies.semanticModel({
@@ -699,27 +861,31 @@ export class DurabilityWatcher {
       return { status: "fired", signal, detail: fire.detail };
     }
     // The compaction audit can arrive for a child run whose owner is no longer
-    // in the store. Escalate through the same behavior anyway, with the same
-    // deterministic identity, so nothing is silently dropped.
+    // readable. Round 1 dispatched `escalate-fix-redeploy` here regardless of
+    // the configured action AND with no repairModel, so the pre-existing
+    // DEFAULT_COMPACTION_REPAIR_MODEL constant ran a DAG repair at a model the
+    // operator never chose — while the rescue slot was deliberately unset. That
+    // contradicted both of this lane's headline claims. Every action this
+    // watcher can take (restart, stop, escalate, lateral pass) needs the run
+    // record it no longer has, so the honest outcome is to record the failure
+    // and change nothing.
+    const detail =
+      `${descriptor.label} fired for run ${request.runId}, but that run is no longer readable, ` +
+      `so the configured ${action} action cannot be carried out. Nothing was changed. Reopen the ` +
+      "run from the workflow list, or re-run the workflow.";
     this.#journal({
-      name: "durability.action.dispatched",
+      name: "durability.action.failed",
       runId: request.runId,
       runLastSeq,
       signal,
       action,
-      detail: `Dispatching ${action} for ${descriptor.label}.`,
+      ok: false,
+      detail,
     });
-    const result = await this.#dependencies.registry.dispatch(COMPACTION_WATCHER_BEHAVIOR, {
-      capability: "escalate-fix-redeploy",
-      runId: request.runId,
-      ...(request.nodeId ? { nodeId: request.nodeId } : {}),
-      payload: { reason: `durability:${signal}`, auditIdentity },
-    });
-    return {
-      status: "fired",
-      signal,
-      detail: result.detail ?? `Escalated ${signal} for ${request.runId}.`,
-    };
+    // Referenced so the identity stays part of this branch's contract even
+    // though nothing is dispatched with it.
+    void auditIdentity;
+    return { status: "fired", signal, detail };
   }
 }
 

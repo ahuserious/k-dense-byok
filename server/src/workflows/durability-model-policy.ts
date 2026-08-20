@@ -15,12 +15,28 @@ import type {
  */
 export type DurabilityModelStatus = "resolved" | "unset" | "unresolvable";
 
+/**
+ * `pricing` is ALWAYS populated, so F6 can tell three cases apart instead of
+ * two:
+ *  - "priced"   the OpenRouter catalogue knows this model's per-token cost, so
+ *               the project spend cap accrues against it;
+ *  - "unpriced" it is an OpenRouter (pay-as-you-go) model the catalogue does
+ *               NOT know, so it would bill at $0 and the cap would never fire.
+ *               This resolver refuses it;
+ *  - "unknown"  a non-OpenRouter ref, whose billing mode is decided by
+ *               `cost/billing.ts` at dispatch, not by the OpenRouter
+ *               catalogue. Allowed, with a warning.
+ */
+export type DurabilityModelPricing = "priced" | "unpriced" | "unknown";
+
 export interface DurabilityModelResolution {
   status: DurabilityModelStatus;
   ref?: string;
   effort?: DurabilityEffort;
   contextWindow?: number;
-  pricing?: "priced" | "unpriced";
+  pricing?: DurabilityModelPricing;
+  /** Legible caveat on a resolution that is allowed but not fully verified. */
+  warning?: string;
   reason?: string;
   nextAction?: string;
 }
@@ -55,8 +71,19 @@ function resolveDirect(
   const orId = openRouterId(ref);
   if (!orId) {
     // A non-OpenRouter provider ref is carried through untouched; its
-    // catalogue lives with that provider, not in the OpenRouter catalogue.
-    return { status: "resolved", ref, ...(effort ? { effort } : {}) };
+    // catalogue lives with that provider, not in the OpenRouter catalogue, and
+    // `cost/billing.ts` decides at dispatch whether it counts toward the cap
+    // at all (a local model, for instance, never does).
+    return {
+      status: "resolved",
+      ref,
+      ...(effort ? { effort } : {}),
+      pricing: "unknown",
+      warning:
+        "This model is not an OpenRouter model, so its per-token price and context window " +
+        "cannot be read from the OpenRouter catalogue. Its spend is governed by its own " +
+        "provider's billing mode.",
+    };
   }
   const entry = catalogueEntryFor(orId);
   return {
@@ -109,6 +136,26 @@ export function resolveDurabilityModel(
     resolution = resolveDirect(selection.ref, selection.effort ?? options.defaultEffort);
   }
 
+  // An OpenRouter model the catalogue does not know bills at $0
+  // (`agent/models.ts:146-163`), so every call would record zero cost and the
+  // project spend limit would never accrue against it. Refuse it: a budget
+  // control that is silently off is worse than a model that will not start.
+  if (resolution.pricing === "unpriced") {
+    return {
+      status: "unresolvable",
+      ref: resolution.ref,
+      ...(resolution.effort ? { effort: resolution.effort } : {}),
+      ...(resolution.contextWindow === undefined
+        ? {}
+        : { contextWindow: resolution.contextWindow }),
+      pricing: "unpriced",
+      reason:
+        `The selected ${options.slotLabel} is missing from this build's pricing catalogue, so ` +
+        "its calls would be recorded at $0 and the project spend limit would never count them.",
+      nextAction: `Choose a priced ${options.slotLabel} in Pipeline options ▸ Durability.`,
+    };
+  }
+
   // Row 24 asks for a large 1M-context model. A model whose context window is
   // known to be too small is rejected here rather than discovered mid-rescue.
   if (
@@ -121,11 +168,32 @@ export function resolveDurabilityModel(
       ref: resolution.ref,
       ...(resolution.effort ? { effort: resolution.effort } : {}),
       contextWindow: resolution.contextWindow,
+      ...(resolution.pricing ? { pricing: resolution.pricing } : {}),
       reason:
         `The selected ${options.slotLabel} has a ${resolution.contextWindow.toLocaleString("en-US")} ` +
         `token context window, below the ${options.minContextWindow.toLocaleString("en-US")} tokens ` +
         "a rescue needs to carry a failing run's context.",
       nextAction: `Choose a larger ${options.slotLabel} in Pipeline options ▸ Durability.`,
+    };
+  }
+
+  // ...and a model whose context window cannot be established at all must fail
+  // the SAME way. Round 1 only checked a KNOWN window, so a 1,000,000-token
+  // floor passed silently for every ref the OpenRouter catalogue does not
+  // carry, which is the entire reason the floor exists.
+  if (options.minContextWindow !== undefined && resolution.contextWindow === undefined) {
+    return {
+      status: "unresolvable",
+      ref: resolution.ref,
+      ...(resolution.effort ? { effort: resolution.effort } : {}),
+      ...(resolution.pricing ? { pricing: resolution.pricing } : {}),
+      reason:
+        `This build cannot establish the selected ${options.slotLabel}'s context window, so it ` +
+        `cannot confirm the ${options.minContextWindow.toLocaleString("en-US")} tokens a rescue ` +
+        "needs to carry a failing run's context.",
+      nextAction:
+        `Choose a ${options.slotLabel} from the OpenRouter catalogue in Pipeline options ▸ ` +
+        "Durability, or lower the rescue context floor.",
     };
   }
   return resolution;

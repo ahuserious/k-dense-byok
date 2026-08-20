@@ -22,8 +22,22 @@ import { WorkflowRunControllerError } from "../workflows/controller.ts";
  *    must never receive a malformed 200, because a malformed 200 takes the app
  *    down in the render phase.
  *  - No error body names a filesystem path (#71); every error names what the
- *    user should do next.
+ *    user should do next. That is why NO generic catch here returns
+ *    `error.message`: an ErrnoException carries an absolute path, and a
+ *    500 handler that echoes it breaches #71 by accident. Authored,
+ *    caller-facing errors (`DurabilitySettingsError`,
+ *    `WorkflowRunControllerError`) are returned verbatim because their text is
+ *    written in this lane; everything else becomes a fixed sentence and the
+ *    original is logged server-side.
  */
+
+const SETTINGS_UNAVAILABLE =
+  "Durability settings could not be read. Reload the page, or reset them in " +
+  "Pipeline options ▸ Durability.";
+const STATE_UNAVAILABLE =
+  "Durability state could not be read. Reload the page.";
+const STOP_FAILED =
+  "This run could not be stopped. Reload the run and try again.";
 
 interface TimelineQuery {
   after?: string;
@@ -58,9 +72,7 @@ function assertRenderableSettings(
       : typeof entry.reason === "string" && entry.reason.length > 0;
   });
   if (!signalsPresent || !resolutionLegible) {
-    throw new Error(
-      "Durability settings could not be read. Reset them in Pipeline options ▸ Durability.",
-    );
+    throw new Error(SETTINGS_UNAVAILABLE);
   }
 }
 
@@ -77,13 +89,14 @@ export async function registerDurabilityRoutes(
   /** The static signal catalogue. Safe to render before settings have loaded. */
   app.get("/durability/signals", async () => ({ signals: DURABILITY_SIGNALS }));
 
-  app.get("/durability/settings", async (_request, reply) => {
+  app.get("/durability/settings", async (request, reply) => {
     try {
       const state = readState();
       return { settings: state.settings, resolution: state.resolution };
     } catch (error) {
+      request.log?.error({ err: error }, "durability settings read failed");
       reply.code(500);
-      return { detail: error instanceof Error ? error.message : "Durability settings are unavailable." };
+      return { detail: SETTINGS_UNAVAILABLE };
     }
   });
 
@@ -96,6 +109,7 @@ export async function registerDurabilityRoutes(
         reply.code(400);
         return { detail: error.message, code: error.code };
       }
+      request.log?.error({ err: error }, "durability settings write failed");
       reply.code(500);
       return { detail: "Durability settings could not be saved. Try again." };
     }
@@ -103,17 +117,22 @@ export async function registerDurabilityRoutes(
     return { settings: state.settings, resolution: state.resolution };
   });
 
-  app.get("/durability/state", async (_request, reply) => {
+  app.get("/durability/state", async (request, reply) => {
     try {
       const state = readState();
       return {
         enabled: state.settings.enabled,
         resolution: state.resolution,
         watchedRuns: state.watchedRuns,
+        stopPolicy: state.stopPolicy,
+        // §6.7: the reason a Stop control must be rendered disabled, supplied
+        // BEFORE the click rather than as a 409 after it.
+        stopAvailability: state.stopAvailability ?? [],
       };
     } catch (error) {
+      request.log?.error({ err: error }, "durability state read failed");
       reply.code(500);
-      return { detail: error instanceof Error ? error.message : "Durability state is unavailable." };
+      return { detail: STATE_UNAVAILABLE };
     }
   });
 
@@ -161,12 +180,11 @@ export async function registerDurabilityRoutes(
           reply.code(error.code === "RUN_NOT_FOUND" ? 404 : 409);
           return { detail: error.message, code: error.code };
         }
+        // Anything else is not an authored caller-facing message, so it never
+        // reaches the caller: an fs error's `message` carries a path (#71).
+        request.log?.error({ err: error }, "durability stop failed");
         reply.code(409);
-        return {
-          detail: error instanceof Error
-            ? error.message
-            : "This run could not be stopped. Reload the run and try again.",
-        };
+        return { detail: STOP_FAILED };
       }
     },
   );
