@@ -1,9 +1,10 @@
 /**
  * Public surface of the Lean 4 proof renderer (lane F4, matrix row 10).
  *
- * Lane F6's node inspector and lane F11's `lean4-prover` skill surface both
- * import from HERE. The props type is the contract published in
- * `interfaces/F4-lean4.md`; the wire types live in `@/lib/lean4-proof`.
+ * Dest Console, lane F6's node inspector, and lane F11's `lean4-prover`
+ * skill surface all import from HERE. Dest apply is INTEGRATION.md §2.
+ * The props type is the contract published in `interfaces/F4-lean4.md`;
+ * the wire types live in `@/lib/lean4-proof`. Do not take F6 files.
  */
 export {
   Lean4ProofArtifact,

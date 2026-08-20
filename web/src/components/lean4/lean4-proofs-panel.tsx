@@ -13,11 +13,12 @@ import {
 } from "@/lib/lean4-proof";
 
 /**
- * The one mounted host for `Lean4ProofArtifact`.
+ * The one host for `Lean4ProofArtifact`.
  *
- * F4 owns this file. Dest / F6 / F11 import `{ Lean4ProofsPanel }` from
- * `@/components/lean4` — they must not write a second renderer. This panel
- * owns the fetches; the artifact stays presentational.
+ * F4 owns this file. Dest Console applies `{ Lean4ProofsPanel }` from
+ * `@/components/lean4` (INTEGRATION.md §2). F6 / F11 reuse the same host —
+ * they must not write a second renderer. This panel owns the fetches; the
+ * artifact stays presentational. Do not take F6 palette / inspector files.
  */
 export interface Lean4ProofsPanelProps {
   projectId: string;

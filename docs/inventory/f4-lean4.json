@@ -14,8 +14,8 @@
     "web/src/components/lean4/lean4-proof-artifact.test.tsx",
     "web/src/components/lean4/lean4-proof-artifact.tsx",
     "web/src/components/lean4/lean4-proofs-panel.tsx",
-    "web/src/lib/lean4-proof.ts",
-    "server/src/index.ts"
+    "web/src/components/lean4/lean4-proofs-panel.test.tsx",
+    "web/src/lib/lean4-proof.ts"
   ],
   "new_file_globs": [
     "server/src/api/lean4*.ts",
@@ -37,14 +37,14 @@
     "GET /lean4/runs/:runId/proofs",
     "GET /lean4/runs/:runId/proofs/:executionId/source?artifact=proof|log"
   ],
-  "route_registration": "Published on this tip from server/src/index.ts (registerLean4Routes after registerDagWorkflowRoutes). Dest 33a13ea does not yet have the lines; clone-root INTEGRATION.md quotes dest's F2/F8 register block. index.ts is orchestrator-owned — lead request s11/wave-f/requests/f4-handoff.md. Lean routes stay out of F12 integrations.ts.",
+  "route_registration": "Dest-unpublished on this tip. server/src/index.ts is dest-identical to dest b3bc962. Orchestrator applies registerLean4Routes from clone-root INTEGRATION.md after registerDagWorkflowRoutes and before registerElevateToDagRoutes. Keep dest harness / elevate / subscription-usage. Lean routes stay out of F12 integrations.ts.",
   "published_interface": "dfg-evidence-20260807-135127/s11/wave-f/interfaces/F4-lean4.md",
   "consumers": {
     "F6": "Team C \u2014 node palette entry and the inspector fields for mode/theorem/solverModel/mathlib; mounts <Lean4ProofArtifact>.",
     "F11": "Team E \u2014 the lean4-prover skill surface (matrix row 45) reuses the SAME renderer and the SAME client. No second proof renderer exists."
   },
   "gate_status": {
-    "U": "PARTIAL on this tip. Lean routes are registered and Lean4ProofsPanel mounts the one renderer. F6 still owns the node-palette / inspector user path. Thin fixture spec remains. Not a review PASS.",
+    "U": "PARTIAL. Lean4ProofsPanel is the one host. Dest Console apply lives in INTEGRATION.md (not F6 palette/inspector). Lean routes dest-unpublished. Thin fixture spec remains. Awaiting r2, not a review PASS.",
     "B": "DONE. server/test/lean4-proof-api.test.ts (10 tests) asserts the effect through the real executor, the real runner receipt gate and the real event log, including refusal of an untrusted path, a symlinked path, and a file the run never accepted. The seam is the TrustedLeanVerifier boundary because no Lean toolchain or pinned Mathlib checkout exists in this environment.",
     "D": "DONE. Contrast measured in a live preview on ports 18203/13203/13213; light 19.8:1 / 4.74:1, dark 17.18:1 / 6.94:1, focus outline 19.8:1 light and 17.18:1 dark. Zero raw colour literals added."
   }

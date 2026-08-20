@@ -19,8 +19,9 @@ import { expect, test } from "../../fixtures";
  * bar exists to catch. So these items prove what they actually prove — that the
  * renderer's real markup is legible, accessible and contrast-compliant under
  * the app's real tokens — and Gate U for row 10 is reported NOT DONE, pending
- * F6's inspector wiring. See `interfaces/F4-lean4.md` for the mount contract
- * F6 needs, and `reports/F4-evidence.md` for the U/B/D table.
+ * F6's inspector wiring. Dest Console apply is clone-root INTEGRATION.md §2
+ * (not F6 palette / inspector). See `interfaces/F4-lean4.md` and
+ * `reports/F4-evidence.md` for the U/B/D table.
  *
  * The markup is not hand-written: `lean4-proof-artifact.fixture.html` is the
  * REAL `<Lean4ProofArtifact>` render, emitted and equality-checked by

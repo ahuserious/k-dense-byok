@@ -70,8 +70,9 @@ import { Lean4ProofArtifact } from "@/components/lean4";
 ```
 
 Purely presentational: the mounting surface owns both fetches (`web/src/lib/lean4-proof.ts`). This tip
-ships `Lean4ProofsPanel` as that surface. Lane F6's node inspector and lane F11's `lean4-prover`
-skill reuse the same renderer. **There must be no second proof renderer.**
+ships `Lean4ProofsPanel` as that surface. Dest Console applies it (INTEGRATION.md §2).
+Lane F6's node inspector and lane F11's `lean4-prover` skill reuse the same renderer.
+**There must be no second proof renderer.** Do not copy F6 files into this clone.
 
 ## Known gap: a rejected proof loses its Mathlib pin
 
@@ -90,8 +91,9 @@ recorded in the clone's `INTEGRATION.md`.
 
 ## Reachability today
 
-This tip publishes the Lean routes from `server/src/index.ts` (`registerLean4Routes`) and mounts
-`Lean4ProofsPanel` as the one host for `Lean4ProofArtifact`. Dest `33a13ea` does not yet have those
-lines; `INTEGRATION.md` quotes them against dest's current register block (after
-`registerDagWorkflowRoutes`, before `registerScheduleRoutes`). F6 still owns the node palette /
-inspector mount. Do not copy F6 files into this clone.
+`server/src/index.ts` on this tip is dest-identical to dest `b3bc962`. Lean
+routes stay dest-unpublished until the orchestrator applies `INTEGRATION.md` §1
+(`registerLean4Routes` after `registerDagWorkflowRoutes`, before
+`registerElevateToDagRoutes`). `Lean4ProofsPanel` is the one host for
+`Lean4ProofArtifact`. Dest Console applies `INTEGRATION.md` §2. F6 still owns
+the node palette / inspector. Do not copy F6 files into this clone.
