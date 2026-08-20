@@ -34,6 +34,8 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   // Wave F lane F5 (rows 26–36, 19, 33): node kinds. All four items are THIN —
   // Gate U is F6's palette/inspector, which this lane must not invent.
   ["wave-f/f5/f5-node-kinds.spec.ts", 4],
+  // Wave F lane F3 (matrix rows 8-9): GPT-5.6 Sol Pro Fusion refresh.
+  ["wave-f/f3/fusion-refresh.spec.ts", 2],
   ["live-backend.spec.ts", 3],
   // Wave F lane F14 (rows 23-24, server half of 44): durability API.
   // Seven items are pinned. `--list` is not a live run; dest apply
@@ -51,8 +53,8 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   ["wave-f/harness/smoke.spec.ts", 1],
 ]);
 // 270 after F8. F5's 4 items are thin (Gate U is F6). F14 adds 7.
-// F11 adds 3 substantive curator items. F1 adds 7 model-preset items.
-const EXPECTED_SUBSTANTIVE_ITEMS = 287;
+// F11 adds 3 substantive curator items. F1 adds 7. F3 adds 2.
+const EXPECTED_SUBSTANTIVE_ITEMS = 289;
 // 35 pre-existing thin items (labelled inventory smokes plus the 3 fixmes) + the 3 Wave-F
 // evidence-fixture contract items + F5's 4.
 const EXPECTED_THIN_ITEMS = 42;

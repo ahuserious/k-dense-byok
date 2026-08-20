@@ -8,10 +8,11 @@
 // the judge `model`, and `max_tool_calls`. `reasoning_effort` (and optional
 // `temperature`) are top-level request params.
 //
-// The four multi-model panels below are the configurations OpenRouter reported
-// as tested in "Fusion beats Frontier"
-// (https://openrouter.ai/blog/announcements/fusion-beats-frontier/); Exaflop is
-// our own panel. All are judged by Opus 4.8 at xhigh reasoning.
+// Several panels originated in OpenRouter's "Fusion beats Frontier" report
+// (https://openrouter.ai/blog/announcements/fusion-beats-frontier/), but their
+// GPT member has since been refreshed. Those predecessor scores are not
+// transferable: every shipped note below says unmeasured until this exact
+// router configuration is benchmarked. All are judged by Opus 4.8 at xhigh.
 
 export interface StoredFusionConfig {
   id: string;
@@ -24,7 +25,7 @@ export interface StoredFusionConfig {
 
 // Bump when the built-in defaults below change so existing installs re-seed them.
 // User-added configs are preserved during migration (see settings-dialog).
-export const FUSION_DEFAULTS_VERSION = 4;
+export const FUSION_DEFAULTS_VERSION = 5;
 
 function fusionBody(b: {
   preset: string;
@@ -50,15 +51,16 @@ function fusionBody(b: {
 }
 
 const JUDGE = "anthropic/claude-opus-4.8";
+export const GPT_56_SOL_PRO_FUSION_ID = "openai/gpt-5.6-sol-pro";
 
 export const DEFAULT_FUSION_CONFIGS: StoredFusionConfig[] = [
   {
-    id: "fable5-gpt55",
-    name: "Fable 5 + GPT-5.5",
-    note: "69.0% DRACO — beats every individual model",
+    id: "fable5-gpt56-sol-pro",
+    name: "Fable 5 + GPT-5.6 Sol Pro",
+    note: "DRACO: unmeasured after GPT-5.6 Sol Pro refresh",
     config: fusionBody({
       preset: "general-high",
-      analysis_models: ["anthropic/claude-fable-5", "openai/gpt-5.5"],
+      analysis_models: ["anthropic/claude-fable-5", GPT_56_SOL_PRO_FUSION_ID],
       judge: JUDGE,
       reasoning_effort: "xhigh",
       temperature: 1,
@@ -66,14 +68,14 @@ export const DEFAULT_FUSION_CONFIGS: StoredFusionConfig[] = [
     }),
   },
   {
-    id: "opus48-gpt55-gemini31pro",
-    name: "Opus 4.8 + GPT-5.5 + Gemini 3.1 Pro",
-    note: "68.3% DRACO (deep research)",
+    id: "opus48-gpt56-sol-pro-gemini31pro",
+    name: "Opus 4.8 + GPT-5.6 Sol Pro + Gemini 3.1 Pro",
+    note: "DRACO: unmeasured after GPT-5.6 Sol Pro refresh (deep research)",
     config: fusionBody({
       preset: "general-high",
       analysis_models: [
         "anthropic/claude-opus-4.8",
-        "openai/gpt-5.5",
+        GPT_56_SOL_PRO_FUSION_ID,
         "google/gemini-3.1-pro-preview",
       ],
       judge: JUDGE,
@@ -83,12 +85,12 @@ export const DEFAULT_FUSION_CONFIGS: StoredFusionConfig[] = [
     }),
   },
   {
-    id: "opus48-gpt55",
-    name: "Opus 4.8 + GPT-5.5",
-    note: "67.6% DRACO",
+    id: "opus48-gpt56-sol-pro",
+    name: "Opus 4.8 + GPT-5.6 Sol Pro",
+    note: "DRACO: unmeasured after GPT-5.6 Sol Pro refresh",
     config: fusionBody({
       preset: "general-high",
-      analysis_models: ["anthropic/claude-opus-4.8", "openai/gpt-5.5"],
+      analysis_models: ["anthropic/claude-opus-4.8", GPT_56_SOL_PRO_FUSION_ID],
       judge: JUDGE,
       reasoning_effort: "xhigh",
       temperature: 1,
@@ -98,7 +100,7 @@ export const DEFAULT_FUSION_CONFIGS: StoredFusionConfig[] = [
   {
     id: "opus48-opus48",
     name: "Opus 4.8 + Opus 4.8",
-    note: "65.5% DRACO — +6.7 pts vs solo Opus 4.8 (synthesis-only lift)",
+    note: "DRACO: unmeasured in this build (synthesis-control panel)",
     config: fusionBody({
       preset: "general-high",
       analysis_models: ["anthropic/claude-opus-4.8", "anthropic/claude-opus-4.8"], // two instances, intentional
@@ -111,11 +113,12 @@ export const DEFAULT_FUSION_CONFIGS: StoredFusionConfig[] = [
   {
     id: "exaflop",
     name: "Exaflop",
-    note: "custom panel — gpt-5.5-pro + gemini 3.1 pro + fable 5, synthesized by opus 4.8",
+    note:
+      "DRACO: unmeasured after GPT-5.6 Sol Pro refresh — GPT-5.6 Sol Pro + Gemini 3.1 Pro + Fable 5, synthesized by Opus 4.8",
     config: fusionBody({
       preset: "general-high",
       analysis_models: [
-        "openai/gpt-5.5-pro",
+        GPT_56_SOL_PRO_FUSION_ID,
         "google/gemini-3.1-pro-preview",
         "anthropic/claude-fable-5",
       ],
@@ -128,7 +131,8 @@ export const DEFAULT_FUSION_CONFIGS: StoredFusionConfig[] = [
   {
     id: "budget-fusion",
     name: "Gemini 3.5 Flash + Kimi K2.6 + DeepSeek V4 Pro",
-    note: "budget — predecessor panel (Gemini 3 Flash) scored 64.7% DRACO, within ~1% of Fable 5",
+    note:
+      "DRACO: unmeasured in this build — predecessor-panel scores are intentionally not carried",
     config: fusionBody({
       preset: "general-budget",
       analysis_models: [
@@ -190,7 +194,14 @@ export const JUDGE_CALLS_PER_TURN = 2;
 
 // Ids of built-in presets that shipped in earlier versions and are retired now.
 // They're dropped on migration so they don't linger as fake "user" configs.
-const RETIRED_DEFAULT_IDS = new Set(["research-fusion", "frontier-council", "budget-trio"]);
+const RETIRED_DEFAULT_IDS = new Set([
+  "research-fusion",
+  "frontier-council",
+  "budget-trio",
+  "fable5-gpt55",
+  "opus48-gpt55-gemini31pro",
+  "opus48-gpt55",
+]);
 
 /**
  * Refresh the built-in presets while preserving genuinely user-added configs.
