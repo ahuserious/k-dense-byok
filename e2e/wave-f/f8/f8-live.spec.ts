@@ -36,6 +36,9 @@ test("@live F8 row 15 exposes the grouped Kady CLI tab but fails closed without 
   liveWorkspace,
 }) => {
   const { page } = liveWorkspace;
+  // React's development Strict Mode mounts the tab effect twice; both reads
+  // reach the same absent F2 route and both refusals remain exact.
+  liveWorkspace.expectRefusedResourceStatus(404);
   liveWorkspace.expectRefusedResourceStatus(404);
   await page.getByRole("button", { name: "Open settings" }).click();
   const settings = page.getByRole("dialog", { name: "Settings" });
