@@ -75,7 +75,17 @@ test("direct CI Playwright config and create-suite metadata exclude credentials"
     },
   );
   assert.equal(ciInvocation.status, 0, ciInvocation.stderr);
-  assert.match(ciInvocation.stdout, /Total: 3 tests in 1 file/);
+  for (const canonicalLiveTest of [
+    "@live @live-alt creates a template workflow and renders API-exact details",
+    "@live @live-alt definition compare-and-set matrix: unchanged no-op, update, conflicting create, missing and malformed preconditions",
+    "@live @live-alt rejects an invalid graph then validates the exact provider-free graph",
+  ]) {
+    assert.equal(
+      ciInvocation.stdout.includes(canonicalLiveTest),
+      true,
+      `missing canonical live test: ${canonicalLiveTest}`,
+    );
+  }
 });
 
 test("workflow and package pin the audited Stably versions", () => {

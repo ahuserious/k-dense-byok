@@ -17,7 +17,6 @@ import {
   writeMcpConfig,
   type McpServerConfig,
 } from "../agent/mcp.ts";
-
 const NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
 
 /** Validate one server entry; returns an error message or null when valid. */

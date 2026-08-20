@@ -29,6 +29,7 @@ import { registerSandboxRoutes } from "./api/sandbox.ts";
 import { registerSkillRoutes } from "./api/skills.ts";
 import { registerSystemRoutes } from "./api/system.ts";
 import { registerMcpRoutes } from "./api/mcp.ts";
+import { registerIntegrationRoutes } from "./api/integrations.ts";
 import { registerCredentialRoutes } from "./api/credentials.ts";
 import { registerAgentRoutes } from "./api/agents.ts";
 import { registerSpeechRoutes } from "./api/speech.ts";
@@ -261,6 +262,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await registerSkillRoutes(app);
   await registerSystemRoutes(app);
   await registerMcpRoutes(app);
+  await registerIntegrationRoutes(app);
   await registerCredentialRoutes(
     app,
     options.workflowSupervisor

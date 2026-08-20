@@ -187,7 +187,8 @@
       "web/src/lib/workflow-library*.ts"
     ],
     "S11": [
-      "e2e/**",
+      "e2e/*.ts",
+      "e2e/*.mjs",
       "playwright.config.*",
       ".stably/**",
       ".github/workflows/stably-cloud.yml",

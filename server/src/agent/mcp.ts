@@ -89,6 +89,16 @@ function sanitizeName(name: string): string {
   return name.replace(/[^a-zA-Z0-9_-]/g, "_");
 }
 
+/**
+ * The name a run sees for one MCP tool. Exported so a caller that needs to
+ * predict it — the integrations registry publishes `mcp__infranodus__<tool>` in
+ * Settings ▸ Connectors — derives it from this rule rather than restating the
+ * template and drifting from it.
+ */
+export function mcpToolName(serverName: string, toolName: string): string {
+  return `mcp__${sanitizeName(serverName)}__${sanitizeName(toolName)}`;
+}
+
 async function connectServer(
   name: string,
   config: McpServerConfig,
@@ -121,7 +131,7 @@ function wrapTool(
     properties: {},
   }) as TSchema;
   return {
-    name: `mcp__${sanitizeName(serverName)}__${sanitizeName(tool.name)}`,
+    name: mcpToolName(serverName, tool.name),
     label: `${serverName}: ${tool.name}`,
     description: tool.description ?? `${tool.name} (MCP server: ${serverName})`,
     parameters,

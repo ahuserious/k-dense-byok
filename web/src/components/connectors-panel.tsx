@@ -22,6 +22,7 @@ import {
   PlusIcon,
 } from "lucide-react";
 import { useProjects } from "@/lib/use-projects";
+import { IntegrationsSection } from "@/components/integrations/integrations-section";
 import {
   getMcpListing,
   saveMcpServers,
@@ -486,6 +487,12 @@ export function ConnectorsPanel() {
           )}
         </>
       )}
+
+      {/* Known integrations load independently of the connector list, so a
+          failure to read mcp.json does not hide them and vice versa. */}
+      <div className="border-t pt-4">
+        <IntegrationsSection />
+      </div>
     </div>
   );
 }
