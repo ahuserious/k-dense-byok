@@ -1,7 +1,6 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import { modalConfigured } from "../config.ts";
-import { MODAL_NOT_CONFIGURED_MESSAGE } from "./credentials.ts";
+import { MODAL_NOT_CONFIGURED_MESSAGE, modalConfigured } from "./credentials.ts";
 import { listProjects, resolvePaths } from "../projects.ts";
 import {
   listComputeReservations,

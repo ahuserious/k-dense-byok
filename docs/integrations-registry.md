@@ -26,7 +26,7 @@ Concretely, for each of the three:
 
 | Integration | Variables | Unconfigured behaviour |
 |---|---|---|
-| InfraNodus | `INFRANODUS_API_KEY` | No `mcpServers` entry is written, so no MCP client is built and no run sees an InfraNodus tool. |
+| InfraNodus | `INFRANODUS_API_KEY` | No `mcpServers` entry is written, so no MCP client is built and no run sees an InfraNodus tool. Connect writes command and args only; the child inherits process env and `mcp.json` never stores the key. |
 | Hugging Face | `HF_TOKEN` | A model search throws before a request is constructed. Zero outbound requests. |
 | Modal | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` | Job submission and the CLI path both refuse without spawning or dialing anything. |
 

@@ -7,21 +7,24 @@
  * every advertised tool as `mcp__<server>__<tool>`. This module contributes one
  * declaration plus a write through the existing `writeMcpConfig()`.
  *
- * Transport choice: stdio (`npx -y infranodus-mcp-server`) with
- * INFRANODUS_API_KEY in `env`. That is the shape both the official repo
+ * Transport choice: stdio (`npx -y infranodus-mcp-server`). The official repo
  * (github.com/infranodus/mcp-server-infranodus) and the vendor docs
- * (infranodus.com/mcp) publish verbatim, it uses a static API key this bridge
- * can actually carry, and — the point for the fail-closed egress rule — it names
- * no host at all, so an unregistered connector cannot contact anything. The
- * remote https://mcp.infranodus.com endpoint is documented as OAuth2, which this
- * bridge does not implement; a user who wants it can still add it by hand.
+ * (infranodus.com/mcp) show the same command with INFRANODUS_API_KEY in the
+ * child's environment. This bridge does **not** copy that value into
+ * sandbox/.pi/mcp.json — the file is not a secret store, and the MCP child
+ * already inherits the backend process environment via StdioClientTransport
+ * (`env: { ...process.env, ...config.env }` in agent/mcp.ts). The file names
+ * the command only. An unregistered connector still names no host, so it
+ * cannot contact anything. The remote https://mcp.infranodus.com endpoint is
+ * documented as OAuth2, which this bridge does not implement; a user who
+ * wants it can still add it by hand.
  *
  * Tool names are deliberately NOT hardcoded. The upstream inventory could not be
  * verified without a real API key, and an invented tool name is worse than an
  * honest empty list. The real list is discovered at dial time by the existing
  * POST /mcp/test route.
  */
-import type { McpServerConfig } from "../agent/mcp.ts";
+import type { McpServerConfig, StdioServerConfig } from "../agent/mcp.ts";
 
 /** The token variable NAME. Its value is forwarded, never read out or logged. */
 export const INFRANODUS_API_KEY_ENV_VAR = "INFRANODUS_API_KEY";
@@ -47,6 +50,10 @@ export function infranodusConfigured(
  * The mcp.json entry agent/mcp.ts dials. Returns null when unconfigured, which
  * is the caller's signal to write nothing at all — an entry carrying an empty
  * key would be a connector that looks registered and reaches nothing.
+ *
+ * The returned object has no `env` map. The API key stays in process env and
+ * the stdio child inherits it. Putting the value on disk would write a secret
+ * into the sandbox.
  */
 export function infranodusMcpConfig(
   environment: NodeJS.ProcessEnv = process.env,
@@ -56,6 +63,29 @@ export function infranodusMcpConfig(
   return {
     command: "npx",
     args: ["-y", INFRANODUS_MCP_PACKAGE],
-    env: { [INFRANODUS_API_KEY_ENV_VAR]: token },
   };
+}
+
+/**
+ * Drop INFRANODUS_API_KEY from a server map in place. Returns true when the
+ * map changed, so the caller can persist the cleaned file. Other env keys on
+ * the same entry are kept.
+ */
+export function stripInfranodusApiKeyFromServers(
+  servers: Record<string, McpServerConfig>,
+): boolean {
+  const entry = servers[INFRANODUS_MCP_SERVER_NAME];
+  if (!entry || !("command" in entry) || !entry.env) return false;
+  if (!(INFRANODUS_API_KEY_ENV_VAR in entry.env)) return false;
+  const restEnv = { ...entry.env };
+  delete restEnv[INFRANODUS_API_KEY_ENV_VAR];
+  const next: StdioServerConfig = {
+    command: entry.command,
+    ...(entry.args ? { args: entry.args } : {}),
+  };
+  if (Object.keys(restEnv).length > 0) {
+    next.env = restEnv;
+  }
+  servers[INFRANODUS_MCP_SERVER_NAME] = next;
+  return true;
 }

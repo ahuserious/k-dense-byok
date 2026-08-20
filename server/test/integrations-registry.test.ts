@@ -7,6 +7,7 @@
  * every unconfigured case — that ZERO outbound work was attempted.
  */
 import fs from "node:fs";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/index.ts";
 import { PROJECTS_ROOT } from "../src/config.ts";
@@ -84,6 +85,17 @@ describe("row 48 — InfraNodus registers through the existing MCP stack", () =>
 
     // 1. No config can even be produced, so there is nothing to dial.
     expect(infranodusMcpConfig({} as NodeJS.ProcessEnv)).toBeNull();
+    expect(
+      infranodusMcpConfig({ [INFRANODUS_API_KEY_ENV_VAR]: "   " } as NodeJS.ProcessEnv),
+    ).toBeNull();
+    expect(
+      infranodusMcpConfig({
+        [INFRANODUS_API_KEY_ENV_VAR]: "test-key-not-a-real-credential",
+      } as NodeJS.ProcessEnv),
+    ).toEqual({
+      command: "npx",
+      args: ["-y", "infranodus-mcp-server"],
+    });
 
     // 2. The route refuses and writes nothing.
     const app = await buildApp();
@@ -132,13 +144,16 @@ describe("row 48 — InfraNodus registers through the existing MCP stack", () =>
       await app.close();
     }
 
-    // THE EFFECT: the on-disk entry is exactly what connectServer() branches on.
+    // THE EFFECT: the on-disk entry is the stdio command connectServer() dials,
+    // and it does not contain the secret. The child inherits process env.
     const servers = readMcpConfig(paths);
     expect(servers.infranodus).toEqual({
       command: "npx",
       args: ["-y", "infranodus-mcp-server"],
-      env: { INFRANODUS_API_KEY: "test-key-not-a-real-credential" },
     });
+    const mcpText = fs.readFileSync(path.join(paths.sandbox, ".pi", "mcp.json"), "utf-8");
+    expect(mcpText).not.toContain("test-key-not-a-real-credential");
+    expect(mcpText).not.toContain("INFRANODUS_API_KEY");
     // agent/mcp.ts: `"url" in config` selects HTTP; this must take the stdio branch.
     expect("url" in servers.infranodus).toBe(false);
     expect("command" in servers.infranodus).toBe(true);
@@ -152,6 +167,34 @@ describe("row 48 — InfraNodus registers through the existing MCP stack", () =>
     expect(`${INFRANODUS_TOOL_PREFIX}generate_knowledge_graph`).toBe(
       mcpToolName(INFRANODUS_MCP_SERVER_NAME, "generate_knowledge_graph"),
     );
+  });
+
+  it("a leftover InfraNodus key in mcp.json is stripped on read so the file no longer holds the secret", () => {
+    ensureProjectExists("default");
+    const paths = resolvePaths("default");
+    const mcpPath = path.join(paths.sandbox, ".pi", "mcp.json");
+    fs.mkdirSync(path.dirname(mcpPath), { recursive: true });
+    fs.writeFileSync(
+      mcpPath,
+      JSON.stringify({
+        mcpServers: {
+          infranodus: {
+            command: "npx",
+            args: ["-y", "infranodus-mcp-server"],
+            env: { INFRANODUS_API_KEY: "leftover-key-must-not-remain" },
+          },
+        },
+      }) + "\n",
+      "utf-8",
+    );
+
+    expect(readMcpConfig(paths).infranodus).toEqual({
+      command: "npx",
+      args: ["-y", "infranodus-mcp-server"],
+    });
+    const mcpText = fs.readFileSync(mcpPath, "utf-8");
+    expect(mcpText).not.toContain("leftover-key-must-not-remain");
+    expect(mcpText).not.toContain("INFRANODUS_API_KEY");
   });
 
   it("registration is idempotent and the registry then reports it registered", async () => {
@@ -496,7 +539,7 @@ describe("row 50 — the Modal CLI reuses the ONE existing credential path", () 
         const byCredentialEnv = modalCredentialEnv(environment) !== null;
         expect(byCredentialEnv).toBe(missingModalEnvVars(environment).length === 0);
 
-        // And against config.ts's modalConfigured(), which manager.ts calls.
+        // And against credentials.modalConfigured(), which manager.ts calls.
         if (tokenId) process.env.MODAL_TOKEN_ID = tokenId;
         else delete process.env.MODAL_TOKEN_ID;
         if (tokenSecret) process.env.MODAL_TOKEN_SECRET = tokenSecret;
@@ -504,6 +547,22 @@ describe("row 50 — the Modal CLI reuses the ONE existing credential path", () 
         expect(modalConfigured()).toBe(byCredentialEnv);
       }
     }
+  });
+
+  it("whitespace-only Modal tokens are absent, not configured", () => {
+    const environment = {
+      MODAL_TOKEN_ID: "   ",
+      MODAL_TOKEN_SECRET: "\t",
+    } as NodeJS.ProcessEnv;
+    expect(missingModalEnvVars(environment)).toEqual([
+      "MODAL_TOKEN_ID",
+      "MODAL_TOKEN_SECRET",
+    ]);
+    expect(modalCredentialEnv(environment)).toBeNull();
+
+    process.env.MODAL_TOKEN_ID = "   ";
+    process.env.MODAL_TOKEN_SECRET = "\t";
+    expect(modalConfigured()).toBe(false);
   });
 
   it("the not-configured message is the SAME constant manager.ts throws, not a new one", () => {

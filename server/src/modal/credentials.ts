@@ -8,12 +8,10 @@
  * A second credential path to one service is a bug; so is a second copy of the
  * sentence that describes it.
  *
- * `modalConfigured` is re-exported rather than reimplemented so there is exactly
- * one computation of "is Modal configured?" in the process.
+ * `modalConfigured` is computed here from `missingModalEnvVars` so whitespace-
+ * only tokens cannot look configured. `config.ts` re-exports this function so
+ * `/config` cannot disagree with the manager.
  */
-import { modalConfigured } from "../config.ts";
-
-export { modalConfigured };
 
 /**
  * The environment variable NAMES Modal needs. Names only — no consumer of this
@@ -29,11 +27,22 @@ export const MODAL_TOKEN_ENV_VARS = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"] as 
 export const MODAL_NOT_CONFIGURED_MESSAGE =
   "Modal is not configured. Add both MODAL_TOKEN_ID and MODAL_TOKEN_SECRET in Settings.";
 
+function envVarPresent(value: string | undefined): boolean {
+  return Boolean(value && value.trim());
+}
+
 /** Which of the required variable NAMES are absent. Never returns a value. */
 export function missingModalEnvVars(
   environment: NodeJS.ProcessEnv = process.env,
 ): string[] {
-  return MODAL_TOKEN_ENV_VARS.filter((name) => !environment[name]);
+  return MODAL_TOKEN_ENV_VARS.filter((name) => !envVarPresent(environment[name]));
+}
+
+/** True only when both Modal token names are present after trim. */
+export function modalConfigured(
+  environment: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return missingModalEnvVars(environment).length === 0;
 }
 
 /**
@@ -46,8 +55,8 @@ export function missingModalEnvVars(
 export function modalCredentialEnv(
   environment: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> | null {
-  const tokenId = environment.MODAL_TOKEN_ID;
-  const tokenSecret = environment.MODAL_TOKEN_SECRET;
+  const tokenId = environment.MODAL_TOKEN_ID?.trim();
+  const tokenSecret = environment.MODAL_TOKEN_SECRET?.trim();
   if (!tokenId || !tokenSecret) return null;
   return { MODAL_TOKEN_ID: tokenId, MODAL_TOKEN_SECRET: tokenSecret };
 }

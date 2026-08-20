@@ -71,9 +71,10 @@ connection is attempted. Its *Connect* button is disabled and states the reason.
 1. Put `INFRANODUS_API_KEY=…` in the repository's `.env` file and restart the backend.
 2. Open **Settings → Connectors**, find InfraNodus under *Known integrations*, click **Connect**.
 
-That writes the standard local (command) entry for you — `npx -y infranodus-mcp-server` with your key
-in its environment — into this project's server list, exactly as if you had typed it by hand. Its
-tools then appear to Kady as `mcp__infranodus__<tool>` in new chat tabs.
+That writes the standard local (command) entry for you — `npx -y infranodus-mcp-server` — into this
+project's server list. The API key stays in the backend process environment; the MCP child inherits
+it. The project `mcp.json` file does not receive the secret. Its tools then appear to Kady as
+`mcp__infranodus__<tool>` in new chat tabs.
 
 The tool list is **discovered when the server connects**, not hardcoded here. Use *Test connection* on
 the connector row to see the tools your version of the server actually offers.
