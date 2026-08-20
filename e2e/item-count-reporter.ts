@@ -16,6 +16,9 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   // Wave F lane F12 (matrix rows 48-50): integrations registry in Settings ▸ Connectors.
   // Path-keyed after F10; the file lives under e2e/wave-f/f12/, not the e2e/ root.
   ["wave-f/f12/f12-integrations.spec.ts", 3],
+  // Lane F13 (row 52): schedules in the Console. Seven substantive items, all
+  // driving the real user path; none thin, fixme or skipped.
+  ["wave-f/f13/f13-schedules.spec.ts", 7],
   ["live-backend.spec.ts", 3],
   ["scientific-pipelines.spec.ts", 57],
   ["workspace.spec.ts", 46],
@@ -23,13 +26,8 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   ["wave-f/harness/evidence-contract.spec.ts", 3],
   ["wave-f/harness/smoke.spec.ts", 1],
 ]);
-// 221 after F12's 3 integrations items, plus 16 Wave-F harness items (15 app-shell + 1 smoke).
-// Every one of those 16 drives a real user path against a real backend.
-//
-// evidence-contract.spec.ts's 3 items are NOT in that figure. They test the `evidence` fixture --
-// the harness itself -- rather than a product surface, so they carry the thin label and land in the
-// count below. A test of my own scaffolding must not raise the wave's substantive floor.
-const EXPECTED_SUBSTANTIVE_ITEMS = 237;
+// 237 after F10+F12, plus F13's 7 schedule items.
+const EXPECTED_SUBSTANTIVE_ITEMS = 244;
 // 35 pre-existing thin items (labelled inventory smokes plus the 3 fixmes) + the 3 Wave-F
 // evidence-fixture contract items.
 const EXPECTED_THIN_ITEMS = 38;
