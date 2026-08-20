@@ -25,8 +25,12 @@ execution. Run on that seed must not look live. The panel F7 does not own should
 set `aria-disabled` and show reason
 `This workflow's cost cap is $0. Raise limits.maxCostUsd before running.`
 See `reports/F7-INTEGRATION.md`. The seeder already has a production call site
-in `ensureProjectExists`; do not disable Run for a missing seed. Edit the
-definition and raise `limits.maxCostUsd` to enable Run.
+in this clone's `ensureProjectExists`. Dest `33a13ea` has no C5→F7 handoff on
+`server/src/projects.ts` — lead request `s11/wave-f/requests/f7-handoff.md`.
+Do not disable Run for a missing seed. This lane cannot edit
+`dag-workflows-panel.tsx`; dest Run stays live-looking at a $0 cap until S1b
+applies the requested disable-with-reason. Edit the definition and raise
+`limits.maxCostUsd` to enable Run after that lands.
 
 ## Two things the seeded pipelines do not have
 
