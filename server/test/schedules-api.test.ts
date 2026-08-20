@@ -23,7 +23,7 @@ import {
   type WorkflowGraphDocument,
   type WorkflowModelResolutionReceipt,
 } from "../src/workflows/index.ts";
-import { readFireRecords } from "../src/scheduling/index.ts";
+import { readFireRecords, readSchedule, writeSchedule } from "../src/scheduling/index.ts";
 
 const WORKFLOW_ID = "scheduled-workflow";
 const HEADERS = { "x-project-id": DEFAULT_PROJECT_ID, "content-type": "application/json" };
@@ -296,6 +296,10 @@ describe("the schedules API", () => {
     const run = workflowStore.readRun(DEFAULT_PROJECT_ID, fire.runId!)!;
     expect(run.manifest.requestId).toBe(fire.requestId);
     expect(run.manifest.workflowId).toBe(WORKFLOW_ID);
+    // The shared route currently hard-codes "user"; do not claim "api" until
+    // the orchestrator-owned integration change described in INTEGRATION.md
+    // lands. The requestId and fire record carry schedule provenance today.
+    expect(run.manifest.requestedBy).toBe("user");
     // …with the DEFINITION's limits, inherited exactly as a hand-fired run does:
     expect(run.manifest.effectiveLimits).toEqual(graph().limits);
     // …and the controller really was asked to start it, so a node executed:
@@ -320,6 +324,74 @@ describe("the schedules API", () => {
 
     await app.inject({ method: "DELETE", url: `/schedules/${schedule.id}`, headers: BODYLESS });
   }, 90_000);
+
+  it("re-anchors the cursor when the zone changes, and when the schedule is resumed", async () => {
+    await saveDefinition();
+    // Sydney is ahead of UTC, so moving a 09:00 daily schedule from Sydney to
+    // UTC moves today's 09:00 window BACKWARDS by ten or eleven hours — into
+    // the past, where an un-anchored cursor would let it fire on the next tick.
+    const created = await createSchedule({
+      expression: "cron:0 9 * * *",
+      timezone: "Australia/Sydney",
+    });
+    const beforeCursor = readSchedule(DEFAULT_PROJECT_ID, created.id)!.cursorMs;
+
+    const rezoned = await app.inject({
+      method: "PATCH",
+      url: `/schedules/${created.id}`,
+      headers: HEADERS,
+      payload: { timezone: "UTC" },
+    });
+    expect(rezoned.statusCode).toBe(200);
+    const afterZoneChange = readSchedule(DEFAULT_PROJECT_ID, created.id)!;
+    expect(afterZoneChange.timezone).toBe("UTC");
+    expect(afterZoneChange.cursorMs).toBeGreaterThan(beforeCursor);
+    // Every reported next fire is in the future — nothing was inherited from
+    // the old zone's unevaluated windows.
+    expect(new Date((rezoned.json() as { schedule: any }).schedule.next_fire_at).getTime())
+      .toBeGreaterThan(Date.now());
+
+    // A zone PATCH that changes nothing leaves the cursor alone.
+    const unchanged = readSchedule(DEFAULT_PROJECT_ID, created.id)!.cursorMs;
+    await app.inject({
+      method: "PATCH",
+      url: `/schedules/${created.id}`,
+      headers: HEADERS,
+      payload: { timezone: "UTC" },
+    });
+    expect(readSchedule(DEFAULT_PROJECT_ID, created.id)!.cursorMs).toBe(unchanged);
+
+    // And resuming re-anchors too: this is what lets the ticker leave a paused
+    // schedule's cursor (and its doc) completely alone while it is paused.
+    const paused = await createSchedule({ expression: "every:1m" });
+    const withOldCursor = readSchedule(DEFAULT_PROJECT_ID, paused.id)!;
+    writeSchedule({ ...withOldCursor, enabled: false, cursorMs: Date.now() - 6 * 3_600_000 });
+    const resumed = await app.inject({
+      method: "POST",
+      url: `/schedules/${paused.id}/enable`,
+      headers: BODYLESS,
+    });
+    expect(resumed.statusCode).toBe(200);
+    const afterResume = readSchedule(DEFAULT_PROJECT_ID, paused.id)!;
+    expect(afterResume.enabled).toBe(true);
+    expect(afterResume.cursorMs).toBeGreaterThan(Date.now() - 5_000);
+
+    // PATCH { enabled: true } is a second public resume path and must carry the
+    // same no-replay guarantee as POST /enable.
+    const patchPaused = await createSchedule({ expression: "every:1m", enabled: false });
+    const patchOld = readSchedule(DEFAULT_PROJECT_ID, patchPaused.id)!;
+    writeSchedule({ ...patchOld, cursorMs: Date.now() - 6 * 3_600_000 });
+    const patchResumed = await app.inject({
+      method: "PATCH",
+      url: `/schedules/${patchPaused.id}`,
+      headers: HEADERS,
+      payload: { enabled: true },
+    });
+    expect(patchResumed.statusCode).toBe(200);
+    const afterPatchResume = readSchedule(DEFAULT_PROJECT_ID, patchPaused.id)!;
+    expect(afterPatchResume.enabled).toBe(true);
+    expect(afterPatchResume.cursorMs).toBeGreaterThan(Date.now() - 5_000);
+  });
 
   it("survives a restart with its next fire time intact", async () => {
     await saveDefinition();

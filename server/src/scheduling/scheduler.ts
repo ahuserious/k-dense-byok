@@ -20,13 +20,15 @@
  *
  * Lifecycle (defect #41): ONE `setInterval`, `.unref()`ed so a pending tick can
  * never be the reason a process refuses to exit, and cleared from the owning
- * app's `onClose` hook. Nothing this module starts survives `app.close()`.
+ * app's `preClose` hook before the run controller's `onClose` hook can run.
+ * Nothing this module starts survives `app.close()`.
  */
 import type { FastifyInstance } from "fastify";
 import { listProjects } from "../projects.ts";
 import { isTerminalWorkflowRunStatus, workflowStore } from "../workflows/index.ts";
 import {
   NEXT_FIRE_HORIZON_DAYS,
+  latestWindowAtOrBefore,
   parseScheduleExpression,
   nextFire,
   windowsBetween,
@@ -86,15 +88,52 @@ interface DispatchOutcome {
  * returns 202 with a run nothing will ever execute. The cancel route DOES fail
  * closed, and checks the controller BEFORE it looks the run up
  * (api/dag-workflows.ts:596-602), so cancelling a run id that cannot exist is a
- * side-effect-free probe: 503 means execution is off, 404 means it is on.
+ * side-effect-free probe: 503/CONTROLLER_CLOSED means execution is off, while
+ * 404/RUN_NOT_FOUND is the only response that proves it is on. Every other
+ * response fails closed and produces no run.
  */
-async function executionEnabled(app: FastifyInstance, projectId: string): Promise<boolean> {
+async function executionBlocker(
+  app: FastifyInstance,
+  projectId: string,
+): Promise<DispatchOutcome | null> {
   const response = await app.inject({
     method: "POST",
     url: `/dag-workflow-runs/${NON_EXISTENT_RUN_ID}/cancel`,
     headers: { "X-Project-Id": projectId },
   });
-  return response.statusCode !== 503;
+  let body: { code?: unknown; reason?: unknown } = {};
+  try {
+    body = response.json() as { code?: unknown; reason?: unknown };
+  } catch {
+    // A non-JSON probe response proves nothing; the generic fail-closed result
+    // below records it without aborting evaluation of the other schedules.
+  }
+  if (response.statusCode === 404 && body.code === "RUN_NOT_FOUND") return null;
+  if (response.statusCode === 404 && body.reason === "unknown_project") {
+    return {
+      reason: "project-missing",
+      detail:
+        "This schedule's project no longer exists, so this window did not run. Delete the " +
+        "schedule, or re-create the project it belongs to.",
+      runId: null,
+    };
+  }
+  if (response.statusCode === 503 && body.code === "CONTROLLER_CLOSED") {
+    return {
+      reason: "controller-absent",
+      detail:
+        "Workflow execution is not enabled in this server process, so no run was created " +
+        "for this window. Start the backend with execution enabled and re-enable the schedule.",
+      runId: null,
+    };
+  }
+  return {
+    reason: "error",
+    detail:
+      `Workflow execution could not be verified (status ${response.statusCode}), so no run ` +
+      "was created for this window.",
+    runId: null,
+  };
 }
 
 export class Scheduler {
@@ -105,6 +144,9 @@ export class Scheduler {
   readonly #now: () => number;
   #timer: NodeJS.Timeout | null = null;
   #ticking = false;
+  /** The tick currently in flight, so `stop()` can wait for it to finish. */
+  #tickPromise: Promise<TickSummary> | null = null;
+  #stopped = false;
 
   constructor(app: FastifyInstance, options: SchedulerOptions = {}) {
     this.#app = app;
@@ -120,6 +162,7 @@ export class Scheduler {
 
   start(): void {
     if (this.#timer) return;
+    this.#stopped = false;
     this.#timer = setInterval(() => {
       void this.tick().catch((error) => {
         this.#app.log.error({ err: error }, "schedule tick failed");
@@ -132,10 +175,29 @@ export class Scheduler {
     this.#timer.unref();
   }
 
-  stop(): void {
-    if (!this.#timer) return;
-    clearInterval(this.#timer);
-    this.#timer = null;
+  /**
+   * Stop the ticker AND wait for a tick that is already in flight.
+   *
+   * Clearing the interval does not unwind a tick that is already past its
+   * re-entry guard, and that tick dispatches by `app.inject`. The owning route
+   * calls this from Fastify's `preClose` phase, before application `onClose`
+   * hooks release the run controller. So: mark the scheduler stopped
+   * (`#dispatch` refuses from here on), clear the timer, wait for the current
+   * tick, and only then let `app.close()` continue.
+   */
+  async stop(): Promise<void> {
+    this.#stopped = true;
+    if (this.#timer) {
+      clearInterval(this.#timer);
+      this.#timer = null;
+    }
+    while (this.#tickPromise) {
+      try {
+        await this.#tickPromise;
+      } catch {
+        // A failing tick is logged where it is raised; shutdown continues.
+      }
+    }
   }
 
   /**
@@ -144,22 +206,31 @@ export class Scheduler {
    * cannot pile up behind itself.
    */
   async tick(): Promise<TickSummary> {
-    const summary: TickSummary = { evaluatedSchedules: 0, dispatched: 0, skipped: 0 };
-    if (this.#ticking) return summary;
+    if (this.#stopped || this.#ticking) {
+      return { evaluatedSchedules: 0, dispatched: 0, skipped: 0 };
+    }
     this.#ticking = true;
+    const running = this.#runTick();
+    this.#tickPromise = running;
     try {
-      let remainingFireBudget = this.#maxConcurrentFires;
-      for (const project of listProjects()) {
-        for (const stored of listSchedules(project.id)) {
-          summary.evaluatedSchedules += 1;
-          const result = await this.#evaluate(stored, remainingFireBudget);
-          remainingFireBudget -= result.dispatched;
-          summary.dispatched += result.dispatched;
-          summary.skipped += result.skipped;
-        }
-      }
+      return await running;
     } finally {
       this.#ticking = false;
+      this.#tickPromise = null;
+    }
+  }
+
+  async #runTick(): Promise<TickSummary> {
+    const summary: TickSummary = { evaluatedSchedules: 0, dispatched: 0, skipped: 0 };
+    let remainingFireBudget = this.#maxConcurrentFires;
+    for (const project of listProjects()) {
+      for (const stored of listSchedules(project.id)) {
+        summary.evaluatedSchedules += 1;
+        const result = await this.#evaluate(stored, remainingFireBudget);
+        remainingFireBudget -= result.dispatched;
+        summary.dispatched += result.dispatched;
+        summary.skipped += result.skipped;
+      }
     }
     return summary;
   }
@@ -174,38 +245,62 @@ export class Scheduler {
       expression = parseScheduleExpression(stored.expression);
     } catch (error) {
       // A schedule whose expression stopped parsing (hand-edited file, or a
-      // format this build no longer accepts) is recorded once, not once per
-      // tick, and then left alone by advancing its cursor past now.
-      if (stored.lastFireReason !== "error") {
-        this.#record(stored, { windowKey: "unreadable-expression", windowAt: now }, {
-          reason: "error",
-          detail: `This schedule's expression cannot be read: ${(error as Error).message}`,
-          runId: null,
-        }, now);
-      }
-      this.#advance(stored, now, "error", null);
+      // format this build no longer accepts) is recorded ONCE, not once per
+      // tick — and once it has been recorded, later ticks write nothing at all:
+      // a doc rewritten every second is two fsyncs a second for a schedule that
+      // is not going to run either way.
+      if (stored.lastFireReason === "error") return { dispatched: 0, skipped: 1 };
+      this.#record(stored, { windowKey: "unreadable-expression", windowAt: now }, {
+        reason: "error",
+        detail: `This schedule's expression cannot be read: ${(error as Error).message}`,
+        runId: null,
+      }, now);
+      this.#advance(stored, null, { reason: "error", fired: null });
       return { dispatched: 0, skipped: 1 };
     }
 
     if (!stored.enabled) {
-      // A paused schedule accrues NO windows: its cursor follows the clock, so
-      // resuming it cannot trigger a catch-up storm for the paused period. The
-      // pause is recorded once, the first time a window is passed over.
+      // A paused schedule accrues NO windows: its cursor stands still and the
+      // enable route re-anchors it to `now` (api/schedules.ts), so resuming
+      // cannot trigger a catch-up storm for the paused period. The pause is
+      // recorded once, the first time a window is passed over, and after that
+      // the doc is not touched again — a paused every:1s schedule must not cost
+      // an atomic write per second, and its "Last fire" column must not tick
+      // along as though a paused schedule had just fired.
+      if (stored.lastFireReason === "disabled") return { dispatched: 0, skipped: 0 };
       const passedOver = nextFire(expression, stored.timezone, stored.cursorMs);
       if (!passedOver || passedOver.instantMs > now) return { dispatched: 0, skipped: 0 };
-      if (stored.lastFireReason !== "disabled") {
-        this.#record(stored, { windowKey: passedOver.windowKey, windowAt: passedOver.instantMs }, {
-          reason: "disabled",
-          detail:
-            "The schedule is paused. Its windows are passed over without running, and they " +
-            "are not caught up when it is resumed.",
-          runId: null,
-        }, now);
-      }
-      this.#advance(stored, now, "disabled", null);
+      this.#record(stored, { windowKey: passedOver.windowKey, windowAt: passedOver.instantMs }, {
+        reason: "disabled",
+        detail:
+          "The schedule is paused. Its windows are passed over without running, and they " +
+          "are not caught up when it is resumed.",
+        runId: null,
+      }, now);
+      this.#advance(stored, null, { reason: "disabled", fired: null });
       return { dispatched: 0, skipped: 1 };
     }
 
+    // Is anything due at all? One call, and the answer is also the OLDEST
+    // missed window, which is what an expired catch-up reports on.
+    const oldestMissed = nextFire(expression, stored.timezone, stored.cursorMs);
+    if (!oldestMissed || oldestMissed.instantMs > now) return { dispatched: 0, skipped: 0 };
+
+    // THE CATCH-UP TARGET: the newest window at or before now, computed
+    // INDEPENDENTLY of the capped enumeration below. Deriving it from a capped
+    // forward walk selects the cap-th OLDEST window, which fires a stale window
+    // and then repeats once per tick until the backlog drains — the defect the
+    // round-1 review found. The search starts at the grace boundary because a
+    // window older than the grace period cannot run whatever else is true, so
+    // the walk costs the same after an hour down as after a week.
+    const graceStartMs = Math.max(stored.cursorMs, now - this.#catchUpGraceMs);
+    const inGrace = latestWindowAtOrBefore(expression, stored.timezone, graceStartMs, now);
+    // When nothing is left inside the grace period every missed window has
+    // expired; #decide says so, on the oldest of them.
+    const target = inGrace ?? oldestMissed;
+
+    // AUDIT ONLY, from here to the dispatch: the capped forward walk names the
+    // windows that were passed over. It never chooses what runs.
     const { windows, truncated } = windowsBetween(
       expression,
       stored.timezone,
@@ -213,46 +308,58 @@ export class Scheduler {
       now,
       MAX_ENUMERATED_MISSED_WINDOWS,
     );
-    if (windows.length === 0) return { dispatched: 0, skipped: 0 };
-
-    if (truncated) {
-      this.#record(stored, { windowKey: windows[0].windowKey, windowAt: windows[0].instantMs }, {
-        reason: "catchup-truncated",
-        detail:
-          `More than ${MAX_ENUMERATED_MISSED_WINDOWS} windows came due while this schedule was ` +
-          "not being evaluated; only the most recent is considered for catch-up.",
-        runId: null,
-      }, now);
-    }
-
-    // Catch-up policy: AT MOST ONE fire per schedule per tick, for the most
-    // recent due window. Every older window is recorded as deliberately
-    // skipped — a stampede and a silent skip are both failures.
-    const target = windows[windows.length - 1];
     let skipped = 0;
-    for (const missed of windows.slice(0, -1)) {
-      this.#record(stored, { windowKey: missed.windowKey, windowAt: missed.instantMs }, {
-        reason: "catchup-skipped",
-        detail:
-          "This window came due while the scheduler was not running. Only the most recent " +
-          "missed window is caught up, so this one was skipped deliberately.",
-        runId: null,
-      }, now);
-      skipped += 1;
+    // Both records below describe a catch-up that is happening. When nothing is
+    // inside the grace period there is no catch-up to describe: the single
+    // expired record written further down says so, and covers the whole backlog.
+    if (inGrace) {
+      if (truncated) {
+        this.#record(stored, { windowKey: windows[0].windowKey, windowAt: windows[0].instantMs }, {
+          reason: "catchup-truncated",
+          detail:
+            `More than ${MAX_ENUMERATED_MISSED_WINDOWS} windows came due while this schedule ` +
+            `was not being evaluated. Window ${target.windowKey} — the most recent one — is the ` +
+            "only one considered for catch-up, and it is caught up in a single tick; the rest " +
+            `are skipped, and only the oldest ${MAX_ENUMERATED_MISSED_WINDOWS} of them are ` +
+            "listed individually.",
+          runId: null,
+        }, now);
+      }
+      for (const missed of windows) {
+        if (missed.windowKey === target.windowKey) continue;
+        this.#record(stored, { windowKey: missed.windowKey, windowAt: missed.instantMs }, {
+          reason: "catchup-skipped",
+          detail:
+            "This window came due while the scheduler was not running. Only the most recent " +
+            "missed window is caught up, so this one was skipped deliberately.",
+          runId: null,
+        }, now);
+        skipped += 1;
+      }
     }
 
     const outcome = await this.#decide(stored, expression.kind, target, now, remainingFireBudget);
-    this.#record(stored, { windowKey: target.windowKey, windowAt: target.instantMs }, outcome, now);
+    this.#record(
+      stored,
+      { windowKey: target.windowKey, windowAt: target.instantMs },
+      outcome.reason === "catchup-expired"
+        ? { ...outcome, detail: `${outcome.detail} ${describeMissed(windows.length, truncated)}` }
+        : outcome,
+      now,
+    );
     const dispatched = outcome.reason === "dispatched" ? 1 : 0;
-    // A capacity-deferred window keeps its cursor so the next tick reconsiders
-    // it; the requestId is unchanged, so catching up cannot double-fire.
-    if (outcome.reason !== "capacity-deferred") {
-      this.#advance(
-        stored,
-        target.instantMs,
-        outcome.reason,
-        dispatched ? { windowKey: target.windowKey, runId: outcome.runId } : null,
-      );
+    // A capacity-deferred or shutdown window keeps its cursor so the next tick —
+    // or the next process — reconsiders it; the requestId is unchanged, so
+    // catching it up cannot double-fire.
+    if (outcome.reason !== "capacity-deferred" && outcome.reason !== "shutdown") {
+      // An expired window advances the cursor to NOW rather than to the window:
+      // every window at or before now is expired too (that is what `inGrace`
+      // being null means), so leaving them behind the cursor would repeat the
+      // same refusal once per tick forever.
+      this.#advance(stored, outcome.reason === "catchup-expired" ? now : target.instantMs, {
+        reason: outcome.reason,
+        fired: dispatched ? { windowKey: target.windowKey, runId: outcome.runId } : null,
+      });
     }
     return { dispatched, skipped: skipped + (dispatched ? 0 : 1) };
   }
@@ -323,15 +430,33 @@ export class Scheduler {
 
   async #dispatch(stored: ScheduleRecord, target: NextFire): Promise<DispatchOutcome> {
     const requestId = `schedule:${stored.id}:${target.windowKey}`;
-    if (!(await executionEnabled(this.#app, stored.projectId))) {
+    // Checked BEFORE the first await: once `stop()` has been called, a dispatch
+    // that lands after the run controller has closed writes a manifest whose
+    // run nothing will ever start. The window keeps its cursor, so the next
+    // process reconsiders it — and the same requestId collapses the retry into
+    // one run.
+    if (this.#stopped) {
       return {
-        reason: "controller-absent",
+        reason: "shutdown",
         detail:
-          "Workflow execution is not enabled in this server process, so no run was created " +
-          "for this window. Start the backend with execution enabled and re-enable the schedule.",
+          "The server was shutting down when this window came due, so no run was started. " +
+          "The window is still due and is reconsidered when the scheduler starts again.",
         runId: null,
       };
     }
+    let blocker: DispatchOutcome | null;
+    try {
+      blocker = await executionBlocker(this.#app, stored.projectId);
+    } catch (error) {
+      this.#app.log.error({ err: error, scheduleId: stored.id }, "schedule execution probe failed");
+      return {
+        reason: "error",
+        detail:
+          "Workflow execution could not be verified, so no run was created for this window.",
+        runId: null,
+      };
+    }
+    if (blocker) return blocker;
     let response;
     try {
       response = await this.#app.inject({
@@ -344,9 +469,11 @@ export class Scheduler {
         },
       });
     } catch (error) {
+      this.#app.log.error({ err: error, scheduleId: stored.id }, "scheduled run request failed");
       return {
         reason: "error",
-        detail: `This window could not start a run: ${(error as Error).message}`,
+        detail:
+          "The run request failed before the server returned a status, so no run was confirmed.",
         runId: null,
       };
     }
@@ -362,6 +489,20 @@ export class Scheduler {
           };
     }
     if (response.statusCode === 404) {
+      // Two different 404s reach here. The project-scope hook answers a write
+      // for an unknown project with `reason: "unknown_project"` (index.ts:210)
+      // BEFORE the route runs, and reporting that as "your workflow is gone"
+      // would send a reader to fix the wrong thing.
+      const body = response.json() as { reason?: unknown };
+      if (body?.reason === "unknown_project") {
+        return {
+          reason: "project-missing",
+          detail:
+            "This schedule's project no longer exists, so this window did not run. Delete the " +
+            "schedule, or re-create the project it belongs to.",
+          runId: null,
+        };
+      }
       return {
         reason: "definition-missing",
         detail:
@@ -397,7 +538,12 @@ export class Scheduler {
     const outcome = await this.#dispatch(stored, { instantMs: now, windowKey });
     const record = this.#record(stored, { windowKey, windowAt: now }, outcome, now);
     if (outcome.reason === "dispatched") {
-      this.#advance(stored, stored.cursorMs, "dispatched", { windowKey, runId: outcome.runId });
+      // The cursor does NOT move: "run now" is out-of-band and must not consume
+      // the schedule's next scheduled window.
+      this.#advance(stored, null, {
+        reason: "dispatched",
+        fired: { windowKey, runId: outcome.runId },
+      });
     }
     return record;
   }
@@ -452,26 +598,56 @@ export class Scheduler {
   }
 
   /**
-   * Persist the cursor. Re-reads the schedule first so a concurrent API edit
-   * (rename, pause, expression change) made between the tick's read and this
-   * write is not clobbered by a stale in-memory copy.
+   * Persist the cursor, and the last-fire fields when a fire actually happened.
+   * Re-reads the schedule first so a concurrent API edit (rename, pause,
+   * expression change) made between the tick's read and this write is not
+   * clobbered by a stale in-memory copy.
+   *
+   * `cursorMs: null` means "leave the cursor where it is", and `fire: null`
+   * means "this is not a fire — do not touch `lastFireAt`". When neither moves
+   * anything, NOTHING IS WRITTEN: `writeSchedule` is a full atomic write (temp
+   * file, fsync, rename, directory fsync), and a state that has not changed must
+   * not cost two fsyncs a second nor make the Console's "Last fire" column tick
+   * along for a schedule that never fired.
    */
   #advance(
     stored: ScheduleRecord,
-    cursorMs: number,
-    reason: ScheduleFireReason,
-    fired: { windowKey: string; runId: string | null } | null,
+    cursorMs: number | null,
+    fire: { reason: ScheduleFireReason; fired: { windowKey: string; runId: string | null } | null }
+      | null,
   ): void {
     const current = readSchedule(stored.projectId, stored.id);
     if (!current) return;
+    const nextCursorMs = cursorMs === null
+      ? current.cursorMs
+      : Math.max(current.cursorMs, cursorMs);
+    if (nextCursorMs === current.cursorMs && !fire) return;
     writeSchedule({
       ...current,
-      cursorMs: Math.max(current.cursorMs, cursorMs),
-      lastFireAt: this.#now(),
-      lastFireReason: reason,
-      ...(fired ? { lastFiredWindowKey: fired.windowKey, lastRunId: fired.runId } : {}),
+      cursorMs: nextCursorMs,
+      ...(fire
+        ? {
+            lastFireAt: this.#now(),
+            lastFireReason: fire.reason,
+            ...(fire.fired
+              ? { lastFiredWindowKey: fire.fired.windowKey, lastRunId: fire.fired.runId }
+              : {}),
+          }
+        : {}),
     });
   }
+}
+
+/** One clause for the expired-catch-up record: how much was passed over. */
+function describeMissed(enumerated: number, truncated: boolean): string {
+  if (truncated) {
+    return `More than ${MAX_ENUMERATED_MISSED_WINDOWS} windows came due while this schedule was ` +
+      "not being evaluated, and none of them ran.";
+  }
+  return enumerated === 1
+    ? "One window came due while this schedule was not being evaluated, and it did not run."
+    : `${enumerated} windows came due while this schedule was not being evaluated, and none of ` +
+      "them ran.";
 }
 
 /** The next-fire instant the API reports, computed by the ticker's own code. */

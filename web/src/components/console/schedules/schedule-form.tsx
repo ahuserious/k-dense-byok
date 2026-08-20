@@ -27,6 +27,8 @@ export interface ScheduleFormValues {
   timezone: string;
   overlapPolicy: ScheduleOverlapPolicy;
   goal: string;
+  /** Preserved verbatim when editing; this form does not expose a variables editor. */
+  variables: Record<string, unknown>;
 }
 
 export interface ScheduleFormProps {

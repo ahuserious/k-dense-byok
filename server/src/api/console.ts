@@ -114,7 +114,7 @@ export async function registerConsoleRoutes(app: FastifyInstance): Promise<void>
   // ticker fires by dispatching an in-process request to the existing
   // POST /dag-workflows/:workflowId/runs route, so it needs no reference to the
   // workflow controller — and index.ts is not this lane's file to edit. The
-  // routes own their own timer lifecycle through an onClose hook, so closing
+  // routes own their own timer lifecycle through a preClose hook, so closing
   // the app stops the ticker. See INTEGRATION.md: if this ever moves to
   // index.ts, this line must be REMOVED in the same change or Fastify throws
   // FST_ERR_DUPLICATED_ROUTE.

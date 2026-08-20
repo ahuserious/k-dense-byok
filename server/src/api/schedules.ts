@@ -9,8 +9,9 @@
  * forwarded.
  *
  * LIFECYCLE (defect #41): the ticker is started here and cleared from this
- * module's `onClose` hook, so closing the Fastify app stops every timer this
- * lane starts, with no line in server/src/index.ts beyond the registration.
+ * module's `preClose` hook, before application `onClose` hooks release the run
+ * controller. Closing the Fastify app therefore stops every timer and drains
+ * any in-flight tick while execution is still available.
  *
  * NEXT-FIRE: computed here, server-side, by the ticker's own
  * `scheduleNextFireAt`. The browser never derives a fire time, so a displayed
@@ -231,8 +232,13 @@ export async function registerScheduleRoutes(
   const { autoStart = autoStartDefault(), ...schedulerOptions } = options;
   const scheduler = new Scheduler(app, schedulerOptions);
 
-  app.addHook("onClose", async () => {
-    scheduler.stop();
+  // Lifecycle (#41), and the close-time race the round-1 review found. Fastify
+  // runs `preClose` before application `onClose` hooks, while avvio runs
+  // same-scope `onClose` hooks in reverse registration order. The controller's
+  // later hook would otherwise close first. Stop here, while the controller is
+  // still available, and await any tick already in flight.
+  app.addHook("preClose", async () => {
+    await scheduler.stop();
   });
 
   app.get("/schedules", async (request, reply) => {
@@ -327,15 +333,30 @@ export async function registerScheduleRoutes(
           // expression that have not been evaluated yet are not inherited.
           updated.cursorMs = Date.now();
         }
-        if (body.timezone !== undefined) updated.timezone = readTimeZone(body.timezone);
+        if (body.timezone !== undefined) {
+          const timezone = readTimeZone(body.timezone);
+          // A changed zone re-anchors the cursor for the same reason a changed
+          // expression does: every window's absolute instant moves, so a window
+          // the OLD zone had not reached yet can land in the past under the new
+          // one and fire the moment the ticker next wakes.
+          if (timezone !== updated.timezone) updated.cursorMs = Date.now();
+          updated.timezone = timezone;
+        }
         if (body.overlapPolicy !== undefined) {
           updated.overlapPolicy = readOverlapPolicy(body.overlapPolicy);
         }
+        // `input` is REPLACED, not merged — the documented contract
+        // (docs/schedules.md). The Console's edit form always submits the whole
+        // input, and merging would make a variable impossible to delete: there
+        // would be no way to express "this schedule now has no variables".
         if (body.input !== undefined) updated.input = readScheduleInput(body.input);
         if (body.enabled !== undefined) {
           if (typeof body.enabled !== "boolean") {
             throw new ScheduleRequestError(400, "INVALID_INPUT", "enabled must be true or false.");
           }
+          // PATCH and /enable must have identical resume semantics: neither may
+          // replay windows accumulated during a pause.
+          if (body.enabled && !updated.enabled) updated.cursorMs = Date.now();
           updated.enabled = body.enabled;
         }
         writeSchedule(updated);

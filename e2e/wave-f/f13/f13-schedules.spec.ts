@@ -22,6 +22,10 @@ interface ScheduleState {
   enabled: boolean;
   deleted: boolean;
   created: unknown[];
+  edited: unknown[];
+  name: string;
+  expression: string;
+  timezone: string;
   cancelledRuns: number;
   runNowRefused: boolean;
 }
@@ -30,12 +34,12 @@ function scheduleBody(state: ScheduleState) {
   return {
     id: SCHEDULE_ID,
     workflow_id: "e2e-workflow",
-    name: "Nightly evidence sweep",
-    expression: "cron:0 9 * * *",
-    timezone: "Australia/Sydney",
+    name: state.name,
+    expression: state.expression,
+    timezone: state.timezone,
     enabled: state.enabled,
     overlap_policy: "skip",
-    input: { goal: "Summarise yesterday" },
+    input: { goal: "Summarise yesterday", variables: { dataset: "kept-on-edit" } },
     created_at: "2026-08-18T00:00:00.000Z",
     updated_at: "2026-08-18T00:00:00.000Z",
     next_fire_at: NEXT_FIRE,
@@ -75,6 +79,10 @@ async function installScheduleRoutes(page: Page): Promise<ScheduleState> {
     enabled: true,
     deleted: false,
     created: [],
+    edited: [],
+    name: "Nightly evidence sweep",
+    expression: "cron:0 9 * * *",
+    timezone: "Australia/Sydney",
     cancelledRuns: 0,
     runNowRefused: false,
   };
@@ -129,6 +137,14 @@ async function installScheduleRoutes(page: Page): Promise<ScheduleState> {
       state.deleted = true;
       return route.fulfill({ status: 204, body: "" });
     }
+    if (method === "PATCH") {
+      const patch = JSON.parse(request.postData() ?? "{}") as Record<string, unknown>;
+      state.edited.push(patch);
+      if (typeof patch.name === "string") state.name = patch.name;
+      if (typeof patch.expression === "string") state.expression = patch.expression;
+      if (typeof patch.timezone === "string") state.timezone = patch.timezone;
+      return json(route, { schedule: scheduleBody(state) });
+    }
     if (method === "POST") {
       state.created.push(JSON.parse(request.postData() ?? "{}"));
       return json(route, { schedule: scheduleBody(state) }, 201);
@@ -152,7 +168,7 @@ async function openSchedules(page: Page) {
 
 test.describe("F13 schedules in the Console", () => {
   test("lists a schedule with the server's next fire time", async ({ workspacePage }) => {
-    await installScheduleRoutes(workspacePage);
+    const state = await installScheduleRoutes(workspacePage);
     const panel = await openSchedules(workspacePage);
 
     await expect(panel.getByText("Nightly evidence sweep")).toBeVisible();
@@ -164,16 +180,41 @@ test.describe("F13 schedules in the Console", () => {
     })).toBeVisible();
     // State is a word, not only a colour.
     await expect(panel.getByTestId(`schedule-state-${SCHEDULE_ID}`)).toContainText("enabled");
+
+    // Edit is keyboard-operable too: open, change a labelled field and submit
+    // without a pointer.
+    const edit = panel.getByRole("button", { name: "Edit" });
+    await edit.focus();
+    await workspacePage.keyboard.press("Enter");
+    const form = panel.getByRole("form", { name: "Edit Nightly evidence sweep" });
+    await expect(form).toBeVisible();
+    await form.getByLabel("Name").focus();
+    await workspacePage.keyboard.press("ControlOrMeta+A");
+    await workspacePage.keyboard.type("Edited evidence sweep");
+    await form.getByRole("button", { name: "Save changes" }).focus();
+    await workspacePage.keyboard.press("Enter");
+
+    await expect.poll(() => state.edited.length).toBe(1);
+    expect(state.edited[0]).toMatchObject({
+      input: { goal: "Summarise yesterday", variables: { dataset: "kept-on-edit" } },
+    });
+    await expect(panel.getByText("Edited evidence sweep")).toBeVisible();
   });
 
   test("pauses a schedule and shows the state change", async ({ workspacePage }) => {
     await installScheduleRoutes(workspacePage);
     const panel = await openSchedules(workspacePage);
 
-    await panel.getByRole("button", { name: "Pause" }).click();
+    const pause = panel.getByRole("button", { name: "Pause" });
+    await pause.focus();
+    await workspacePage.keyboard.press("Enter");
     await expect(panel.getByTestId(`schedule-state-${SCHEDULE_ID}`)).toContainText("paused");
     await expect(panel.getByRole("cell", { name: "paused", exact: true })).toBeVisible();
-    await expect(panel.getByRole("button", { name: "Resume" })).toBeVisible();
+    const resume = panel.getByRole("button", { name: "Resume" });
+    await expect(resume).toBeVisible();
+    await resume.focus();
+    await workspacePage.keyboard.press("Enter");
+    await expect(panel.getByTestId(`schedule-state-${SCHEDULE_ID}`)).toContainText("enabled");
   });
 
   test("creates a schedule from the keyboard alone", async ({ workspacePage }) => {
@@ -187,10 +228,26 @@ test.describe("F13 schedules in the Console", () => {
 
     const form = panel.getByRole("form", { name: "New schedule" });
     await expect(form).toBeVisible();
-    await form.getByLabel("Workflow").selectOption("e2e-workflow");
-    await form.getByLabel("Name").fill("Keyboard schedule");
-    await form.getByLabel("When").fill("every:10m");
-    await form.getByRole("button", { name: "Create schedule" }).press("Enter");
+    await workspacePage.keyboard.press("Tab");
+    await expect(form.getByLabel("Workflow")).toBeFocused();
+    // Native selects support keyboard type-ahead; this chooses the labelled
+    // E2E Workflow option without opening a platform popup or using a pointer.
+    await workspacePage.keyboard.type("E2E Workflow");
+    await expect(form.getByLabel("Workflow")).toHaveValue("e2e-workflow");
+    await workspacePage.keyboard.press("Tab");
+    await expect(form.getByLabel("Name")).toBeFocused();
+    await workspacePage.keyboard.type("Keyboard schedule");
+    await workspacePage.keyboard.press("Tab");
+    await expect(form.getByLabel("When")).toBeFocused();
+    await workspacePage.keyboard.press("ControlOrMeta+A");
+    await workspacePage.keyboard.type("every:10m");
+    // Timezone → overlap policy → optional goal → submit.
+    await workspacePage.keyboard.press("Tab");
+    await workspacePage.keyboard.press("Tab");
+    await workspacePage.keyboard.press("Tab");
+    await workspacePage.keyboard.press("Tab");
+    await expect(form.getByRole("button", { name: "Create schedule" })).toBeFocused();
+    await workspacePage.keyboard.press("Enter");
 
     await expect.poll(() => state.created.length).toBe(1);
     expect(state.created[0]).toMatchObject({
@@ -237,9 +294,13 @@ test.describe("F13 schedules in the Console", () => {
     const state = await installScheduleRoutes(workspacePage);
     const panel = await openSchedules(workspacePage);
 
-    await panel.getByRole("button", { name: "Delete" }).click();
+    const deleteButton = panel.getByRole("button", { name: "Delete" });
+    await deleteButton.focus();
+    await workspacePage.keyboard.press("Enter");
     expect(state.deleted).toBe(false);
-    await panel.getByRole("button", { name: "Confirm delete" }).click();
+    const confirm = panel.getByRole("button", { name: "Confirm delete" });
+    await confirm.focus();
+    await workspacePage.keyboard.press("Enter");
     await expect.poll(() => state.deleted).toBe(true);
     await expect(panel.getByText(/No schedules yet/)).toBeVisible();
   });

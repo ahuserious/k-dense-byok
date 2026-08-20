@@ -15,6 +15,7 @@
 process.env.KADY_SCHEDULER_AUTOSTART = "0";
 
 import fs from "node:fs";
+import type { FastifyInstance } from "fastify";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/index.ts";
 import { DEFAULT_PROJECT_ID, PROJECTS_ROOT } from "../src/config.ts";
@@ -29,6 +30,7 @@ import {
   Scheduler,
   SCHEDULE_STORAGE_VERSION,
   instantsForWallClock,
+  latestWindowAtOrBefore,
   newScheduleId,
   parseScheduleExpression,
   readFireRecords,
@@ -290,6 +292,9 @@ describe("the durable scheduler", () => {
     const run = workflowStore.readRun(DEFAULT_PROJECT_ID, dispatched!.runId!);
     expect(run).not.toBeNull();
     expect(run!.manifest.requestId).toBe(dispatched!.requestId);
+    // Truthful on this lane's base: the shared run route hard-codes "user".
+    // Schedule provenance is the requestId + fire audit, not this enum.
+    expect(run!.manifest.requestedBy).toBe("user");
     expect(run!.manifest.workflowId).toBe(WORKFLOW_ID);
     expect(run!.manifest.effectiveLimits).toEqual(graph().limits);
     expect(run!.manifest.effectiveLimits.maxTokens).toBe(12_345);
@@ -359,6 +364,101 @@ describe("the durable scheduler", () => {
     // The one that ran is the MOST RECENT missed window, not the oldest.
     expect(Number(dispatched[0].windowKey)).toBeGreaterThan(Number(skipped[0].windowKey));
     expect(workflowStore.listRuns(DEFAULT_PROJECT_ID, 50)).toHaveLength(1);
+  });
+
+  it("picks the newest missed window, not the fiftieth-oldest, when the enumeration truncates", () => {
+    // The round-1 defect, isolated. windowsBetween caps at the fifty OLDEST
+    // windows, so its last element is not "the most recent" once it truncates —
+    // taking it fires a stale window and then repeats once per tick.
+    const expression = parseScheduleExpression("every:1s");
+    const nowMs = 1_800_000_000_000;
+    const cursorMs = nowMs - 10 * 60_000;
+
+    const enumerated = windowsBetween(expression, "UTC", cursorMs, nowMs, 50);
+    expect(enumerated.truncated).toBe(true);
+    expect(enumerated.windows).toHaveLength(50);
+    // 550 seconds stale — and inside the 15-minute grace, so round 1 ran it.
+    expect(nowMs - enumerated.windows[enumerated.windows.length - 1].instantMs).toBe(550_000);
+
+    // The independent computation gets the actual newest window.
+    const latest = latestWindowAtOrBefore(expression, "UTC", cursorMs, nowMs)!;
+    expect(latest.instantMs).toBe(nowMs);
+    expect(latest.windowKey).toBe(String(nowMs));
+    // …and the cron path walks rather than using the interval closed form.
+    const cron = parseScheduleExpression("cron:* * * * *");
+    const untilMs = Date.UTC(2026, 7, 19, 4, 20, 30);
+    const latestCron = latestWindowAtOrBefore(cron, "UTC", untilMs - 15 * 60_000, untilMs)!;
+    expect(latestCron.windowKey).toBe("2026-08-19T04:20");
+    // …and reports null, rather than a stale window, when the span holds none.
+    expect(latestWindowAtOrBefore(cron, "UTC", untilMs, untilMs + 20_000)).toBeNull();
+  });
+
+  it.each([
+    ["every:1s", 10 * 60_000, 1_000],
+    ["every:1s", 15 * 60_000, 1_000],
+    ["every:30s", 30 * 60_000, 30_000],
+  ])(
+    "drains %s after %d ms of missed windows in ONE tick and ONE run, above the enumeration cap",
+    async (expression, missedForMs, intervalMs) => {
+      await saveDefinition();
+      // Every one of these is more than MAX_ENUMERATED_MISSED_WINDOWS (50)
+      // missed windows: 600, 900 and 60. Round 1 fired the fiftieth-oldest and
+      // then repeated once per tick — ~6, ~18 and 2 real runs respectively.
+      const clock = Math.floor(Date.now() / 1_000) * 1_000;
+      const schedule = storeSchedule({ expression, cursorMs: clock - missedForMs });
+      const scheduler = new Scheduler(app, {
+        now: () => clock,
+        catchUpGraceMs: 15 * 60_000,
+      });
+
+      const summary = await scheduler.tick();
+      expect(summary.dispatched).toBe(1);
+
+      const fires = firesFor(schedule.id);
+      const dispatched = fires.filter((fire) => fire.reason === "dispatched");
+      expect(dispatched).toHaveLength(1);
+      // THE WINDOW THAT RAN is the newest one at or before now — not the
+      // fiftieth-oldest, which is what the truncated enumeration ends on.
+      const newestWindowMs = Math.floor(clock / intervalMs) * intervalMs;
+      expect(Number(dispatched[0].windowKey)).toBe(newestWindowMs);
+      expect(Number(dispatched[0].windowKey))
+        .toBeGreaterThan(clock - missedForMs + 50 * intervalMs);
+      // Truncation is still visible, and it now says what actually happened.
+      const truncated = fires.filter((fire) => fire.reason === "catchup-truncated");
+      expect(truncated).toHaveLength(1);
+      expect(truncated[0].detail).toContain(String(newestWindowMs));
+      expect(truncated[0].detail).toContain("single tick");
+
+      // ONE TICK TO DRAIN: the cursor is at the newest window, so the very next
+      // tick has nothing left to catch up and creates nothing.
+      expect(readSchedule(DEFAULT_PROJECT_ID, schedule.id)!.cursorMs).toBe(newestWindowMs);
+      const second = await scheduler.tick();
+      expect(second.dispatched).toBe(0);
+      // THE EFFECT: exactly one real run manifest exists for the whole backlog.
+      expect(workflowStore.listRuns(DEFAULT_PROJECT_ID, 50)).toHaveLength(1);
+    },
+  );
+
+  it("does not re-refuse an expired backlog once per tick", async () => {
+    await saveDefinition();
+    // Every missed window is past the grace period. The cursor must jump to
+    // now — leaving it behind would repeat the same refusal on every tick.
+    // The clock is parked 45 s past a minute boundary and the grace is 30 s, so
+    // no window falls inside the grace no matter when the test runs.
+    const clock = Math.floor(Date.now() / 60_000) * 60_000 + 45_000;
+    const schedule = storeSchedule({ expression: "every:1m", cursorMs: clock - 3 * 3_600_000 });
+    const scheduler = new Scheduler(app, { now: () => clock, catchUpGraceMs: 30_000 });
+
+    await scheduler.tick();
+    const expired = firesFor(schedule.id).filter((fire) => fire.reason === "catchup-expired");
+    expect(expired).toHaveLength(1);
+    expect(expired[0].detail).toContain("More than 50 windows came due");
+    expect(readSchedule(DEFAULT_PROJECT_ID, schedule.id)!.cursorMs).toBe(clock);
+
+    await scheduler.tick();
+    expect(firesFor(schedule.id).filter((fire) => fire.reason === "catchup-expired"))
+      .toHaveLength(1);
+    expect(workflowStore.listRuns(DEFAULT_PROJECT_ID, 50)).toHaveLength(0);
   });
 
   it("refuses to run a window that is older than the catch-up grace period", async () => {
@@ -474,6 +574,38 @@ describe("the durable scheduler", () => {
     expect(workflowStore.listRuns(DEFAULT_PROJECT_ID, 50)).toHaveLength(0);
   });
 
+  it("fails closed when the execution probe returns an unexpected response", async () => {
+    await saveDefinition();
+    const schedule = storeSchedule({ expression: "every:1s", cursorMs: Date.now() - 2_000 });
+    const injectedUrls: string[] = [];
+    const probeFailureApp = {
+      inject: async (request: { url: string }) => {
+        injectedUrls.push(request.url);
+        return {
+          statusCode: 500,
+          json: () => ({ code: "UNEXPECTED" }),
+        };
+      },
+      log: { error: () => undefined },
+    } as unknown as FastifyInstance;
+    const scheduler = new Scheduler(probeFailureApp, {});
+
+    await scheduler.tick();
+
+    const fires = firesFor(schedule.id);
+    const probeError = fires.filter((fire) => fire.reason === "error");
+    expect(probeError).toHaveLength(1);
+    expect(probeError[0].detail).toContain("could not be verified");
+    expect(probeError[0].runId).toBeNull();
+    expect(fires.some((fire) => fire.reason === "dispatched")).toBe(false);
+    // Only the side-effect-free probe ran. The run-creation route was never
+    // reached, so an ambiguous capability result cannot mint a queued run.
+    expect(injectedUrls).toEqual([
+      "/dag-workflow-runs/wrun_00000000000000000000000000000000/cancel",
+    ]);
+    expect(workflowStore.listRuns(DEFAULT_PROJECT_ID, 50)).toHaveLength(0);
+  });
+
   it("records the workflow going missing instead of failing silently", async () => {
     const schedule = storeSchedule({
       workflowId: "never-existed",
@@ -503,9 +635,44 @@ describe("the durable scheduler", () => {
     expect(fires[0].reason).toBe("disabled");
     expect(workflowStore.listRuns(DEFAULT_PROJECT_ID, 50)).toHaveLength(0);
 
-    // The cursor followed the clock, so resuming cannot replay the pause.
+    // Resuming cannot replay the pause: the enable route re-anchors the cursor
+    // to now (proved end to end in schedules-api.test.ts), so the paused
+    // schedule does NOT need to burn a disk write per tick to stay safe.
     const stored = readSchedule(DEFAULT_PROJECT_ID, schedule.id)!;
-    expect(stored.cursorMs).toBeGreaterThan(schedule.cursorMs);
+    expect(stored.lastFireReason).toBe("disabled");
+  });
+
+  it("does not rewrite a paused schedule's doc, or move its last fire time, on later ticks", async () => {
+    // Round-1 defect: the paused branch advanced unconditionally and #advance
+    // always stamped lastFireAt, so a paused every:1s schedule cost a full
+    // atomic write (temp + fsync + rename + directory fsync) every second and
+    // the Console's "Last fire" column ticked along for a schedule that had
+    // never fired.
+    await saveDefinition();
+    const schedule = storeSchedule({
+      enabled: false,
+      expression: "every:1s",
+      cursorMs: Date.now() - 5_000,
+    });
+    const scheduler = new Scheduler(app, {});
+    const docPath = `${PROJECTS_ROOT}/${DEFAULT_PROJECT_ID}/sandbox/.kady/schedules/${schedule.id}.json`;
+
+    await scheduler.tick();
+    const afterFirstTick = readSchedule(DEFAULT_PROJECT_ID, schedule.id)!;
+    const mtimeAfterFirstTick = fs.statSync(docPath).mtimeMs;
+    expect(afterFirstTick.lastFireReason).toBe("disabled");
+
+    // Three more seconds of windows go by, with the schedule still paused.
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    await scheduler.tick();
+    await scheduler.tick();
+
+    const afterMoreTicks = readSchedule(DEFAULT_PROJECT_ID, schedule.id)!;
+    expect(fs.statSync(docPath).mtimeMs).toBe(mtimeAfterFirstTick);
+    expect(afterMoreTicks.lastFireAt).toBe(afterFirstTick.lastFireAt);
+    expect(afterMoreTicks.cursorMs).toBe(afterFirstTick.cursorMs);
+    // And the pause is still recorded exactly once, not once per tick.
+    expect(firesFor(schedule.id)).toHaveLength(1);
   });
 
   it("survives a restart with its cursor and its next fire time intact", async () => {
@@ -528,14 +695,62 @@ describe("the durable scheduler", () => {
     scheduler.start();
     expect(scheduler.isRunning()).toBe(true);
 
-    closingApp.addHook("onClose", async () => scheduler.stop());
+    // Production installs the same preClose hook in api/schedules.ts. It runs
+    // before the controller's onClose hook, regardless of avvio's reverse
+    // registration order for same-scope onClose hooks.
+    closingApp.addHook("preClose", async () => {
+      await scheduler.stop();
+    });
     await closingApp.close();
 
     expect(scheduler.isRunning()).toBe(false);
     // And a tick after teardown is inert rather than half-alive.
     const schedule = storeSchedule({ expression: "every:1s", cursorMs: Date.now() - 2_000 });
-    scheduler.stop();
+    expect(await scheduler.tick()).toEqual({
+      evaluatedSchedules: 0,
+      dispatched: 0,
+      skipped: 0,
+    });
     expect(firesFor(schedule.id)).toHaveLength(0);
+  });
+
+  it("refuses to dispatch a window once stopping has begun, and stop() waits for the tick", async () => {
+    // The mid-flight case, not the post-teardown one: a tick that is already
+    // past its re-entry guard keeps running after clearInterval, and its
+    // app.inject could reach createRun after the controller's own onClose
+    // closed it, leaving a run queued on disk forever. The production
+    // preClose hook calls stop() before any onClose hook. Two due schedules:
+    // the first is already past the stopped check when stop() lands, the second
+    // is not.
+    await saveDefinition();
+    const clock = Math.floor(Date.now() / 1_000) * 1_000;
+    const schedules = [0, 1].map(() =>
+      storeSchedule({ expression: "every:1s", cursorMs: clock - 1_500 }),
+    );
+    const scheduler = new Scheduler(app, { now: () => clock });
+
+    const ticking = scheduler.tick();
+    // Same turn of the event loop as the tick's first await: mid-flight.
+    await scheduler.stop();
+
+    // stop() returned only after the whole tick had finished, so both of the
+    // tick's records are already on disk here — no assertion has to wait.
+    const fires = schedules.flatMap((schedule) => firesFor(schedule.id));
+    expect(fires.filter((fire) => fire.reason === "dispatched")).toHaveLength(1);
+    const refused = fires.filter((fire) => fire.reason === "shutdown");
+    expect(refused).toHaveLength(1);
+    expect(refused[0].runId).toBeNull();
+    expect(refused[0].detail).toContain("shutting down");
+    // THE EFFECT: exactly one run exists — the refused window created nothing.
+    expect(workflowStore.listRuns(DEFAULT_PROJECT_ID, 50)).toHaveLength(1);
+
+    // A refused window keeps its cursor, so the next process reconsiders it
+    // rather than losing it.
+    const refusedSchedule = schedules.find((schedule) =>
+      firesFor(schedule.id).some((fire) => fire.reason === "shutdown"))!;
+    expect(readSchedule(DEFAULT_PROJECT_ID, refusedSchedule.id)!.cursorMs)
+      .toBe(refusedSchedule.cursorMs);
+    await ticking;
   });
 
   it("skips an unreadable schedule doc instead of stopping the ticker", async () => {

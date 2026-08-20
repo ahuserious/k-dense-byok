@@ -23,6 +23,13 @@ The whole form is keyboard-operable and every field has a visible label. If the 
 workflows yet, the workflow picker is **disabled and says so** — create a workflow in Scientific
 Pipelines first.
 
+**Editing replaces the input, it does not merge it.** The goal and variables you send when you edit a
+schedule become the schedule's whole input; anything you leave out is dropped. That is deliberate:
+the Console edit form submits the displayed goal and preserves any stored variables verbatim, while
+an API client can replace both explicitly. Merging would leave no way to express "this schedule now
+has no variables". Editing changes future windows only — a window that has already run keeps the
+input it ran with.
+
 ## Writing "when"
 
 Two forms are accepted.
@@ -80,12 +87,21 @@ unchanged.
 
 Windows that came due while the backend was down are handled by an explicit catch-up policy:
 
-- **At most one catch-up run per schedule** — the **most recent** missed window only.
+- **At most one catch-up run per schedule, in one tick** — the **most recent** missed window only,
+  and the backlog is drained in that single tick however large it is. Ten missed windows and ten
+  thousand both produce exactly one run.
 - It only runs if that window came due **within the last 15 minutes**. Anything older is recorded as
   *"skipped, past the catch-up grace period"* and is **not** run.
 - **Every window that was deliberately skipped is recorded** in the fire history with its reason. A
-  restart never produces a burst of catch-up runs, and it never hides what it skipped.
-- A **paused** schedule accrues no windows at all, so resuming one does not replay the pause.
+  restart never produces a burst of catch-up runs, and it never hides what it skipped. Above 50
+  missed windows the individual skips stop being listed one by one and a *"too many missed windows
+  to enumerate"* entry says so, naming the window that was caught up; the enumeration limit affects
+  the **audit detail only**, never which window runs.
+- A **paused** schedule accrues no windows at all, so resuming one does not replay the pause. While
+  it is paused its record is not rewritten and its "Last fire" time does not move.
+- A schedule whose **time zone** is changed re-anchors the same way one whose expression is changed
+  does: windows of the old zone that were never evaluated are not inherited, so a re-zoned schedule
+  cannot fire the moment you save it.
 
 ## If the previous run is still going
 
@@ -138,6 +154,9 @@ state, so it is never stale.
 | skipped, previous run still going | overlap policy `skip` |
 | skipped, older missed window | catch-up ran only the most recent missed window |
 | skipped, past the catch-up grace period | the window was more than 15 minutes stale |
+| too many missed windows to enumerate | more than 50 windows were missed; the entry names the one that was caught up |
+| not run, server was shutting down | the backend closed mid-tick; the window is still due and is reconsidered on the next start |
+| not run, project no longer exists | the schedule outlived its project; delete it, or re-create the project |
 | deferred, tick fire limit reached | it will run on the next tick |
 | already run for this local time | a daylight-saving fall-back repeat |
 | not run, execution disabled in this server | this backend has no workflow controller |

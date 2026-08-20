@@ -38,6 +38,8 @@ export type ScheduleFireReason =
   | "duplicate-window"
   | "controller-absent"
   | "definition-missing"
+  | "project-missing"
+  | "shutdown"
   | "conflict"
   | "error";
 

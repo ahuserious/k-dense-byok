@@ -54,6 +54,8 @@ const REASON_LABEL: Record<string, string> = {
   "duplicate-window": "already run for this local time",
   "controller-absent": "not run, execution disabled in this server",
   "definition-missing": "not run, workflow no longer exists",
+  "project-missing": "not run, project no longer exists",
+  shutdown: "not run, server was shutting down",
   conflict: "not run, window already used with other settings",
   error: "not run, see the reason",
 };
@@ -66,6 +68,7 @@ function emptyFormValues(): ScheduleFormValues {
     timezone: browserTimeZone(),
     overlapPolicy: "skip",
     goal: "",
+    variables: {},
   };
 }
 
@@ -77,6 +80,7 @@ function formValuesOf(schedule: Schedule): ScheduleFormValues {
     timezone: schedule.timezone,
     overlapPolicy: schedule.overlap_policy,
     goal: schedule.goal,
+    variables: schedule.variables,
   };
 }
 
@@ -204,6 +208,7 @@ export function SchedulesPanel() {
         timezone: values.timezone,
         overlapPolicy: values.overlapPolicy,
         ...(values.goal ? { goal: values.goal } : {}),
+        ...(Object.keys(values.variables).length > 0 ? { variables: values.variables } : {}),
       });
       if (!mounted.current) return;
       setCreating(false);
@@ -226,6 +231,7 @@ export function SchedulesPanel() {
         timezone: values.timezone,
         overlapPolicy: values.overlapPolicy,
         goal: values.goal,
+        variables: values.variables,
       });
       if (!mounted.current) return;
       setEditingId(null);

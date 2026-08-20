@@ -92,7 +92,8 @@ describe("SchedulesPanel", () => {
       routeFetch({
         // 200 OK, wrong shape: `schedules` is not an array. Before #62's lesson
         // this class of body threw during render and took the app down.
-        "/schedules": () => jsonResponse({ scheduler_running: true, schedules: { nope: true } }),
+        "/schedules": () =>
+          jsonResponse({ storage_version: 1, scheduler_running: true, schedules: { nope: true } }),
         "/dag-workflows": () => jsonResponse({ workflows: [] }),
       }),
     );
@@ -111,6 +112,7 @@ describe("SchedulesPanel", () => {
       routeFetch({
         "/schedules": () =>
           jsonResponse({
+            storage_version: 1,
             scheduler_running: true,
             schedules: [scheduleBody({ enabled: "yes", next_fire_at: 12345 })],
           }),
@@ -127,7 +129,7 @@ describe("SchedulesPanel", () => {
       "fetch",
       routeFetch({
         "/schedules": () =>
-          jsonResponse({ scheduler_running: false, schedules: [scheduleBody()] }),
+          jsonResponse({ storage_version: 1, scheduler_running: false, schedules: [scheduleBody()] }),
         "/dag-workflows": () => jsonResponse({ workflows: [] }),
       }),
     );
@@ -140,7 +142,8 @@ describe("SchedulesPanel", () => {
     vi.stubGlobal(
       "fetch",
       routeFetch({
-        "/schedules": () => jsonResponse({ scheduler_running: true, schedules: [] }),
+        "/schedules": () =>
+          jsonResponse({ storage_version: 1, scheduler_running: true, schedules: [] }),
         "/dag-workflows": () => jsonResponse({ workflows: [] }),
       }),
     );
@@ -168,7 +171,7 @@ describe("SchedulesPanel", () => {
           created.push(String(init.body));
           return jsonResponse({ schedule: scheduleBody({ name: "Keyboard schedule" }) }, 201);
         }
-        return jsonResponse({ scheduler_running: true, schedules: listed });
+        return jsonResponse({ storage_version: 1, scheduler_running: true, schedules: listed });
       }),
     );
 
@@ -224,7 +227,11 @@ describe("SchedulesPanel", () => {
           );
         }
         if (init?.method === "POST") return jsonResponse({ schedule: scheduleBody() });
-        return jsonResponse({ scheduler_running: true, schedules: [scheduleBody()] });
+        return jsonResponse({
+          storage_version: 1,
+          scheduler_running: true,
+          schedules: [scheduleBody()],
+        });
       }),
     );
 
@@ -246,7 +253,11 @@ describe("SchedulesPanel", () => {
         calls.push(`${init?.method ?? "GET"} ${url}`);
         if (url.includes("/dag-workflows")) return jsonResponse({ workflows: [] });
         if (init?.method === "DELETE") return jsonResponse(null, 204);
-        return jsonResponse({ scheduler_running: true, schedules: [scheduleBody()] });
+        return jsonResponse({
+          storage_version: 1,
+          scheduler_running: true,
+          schedules: [scheduleBody()],
+        });
       }),
     );
 

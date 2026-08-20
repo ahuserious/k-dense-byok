@@ -30,6 +30,8 @@ export type ScheduleFireReason =
   | "duplicate-window"
   | "controller-absent"
   | "definition-missing"
+  | "project-missing"
+  | "shutdown"
   | "conflict"
   | "error";
 
@@ -49,6 +51,7 @@ export interface Schedule {
   last_run_id: string | null;
   last_run_status: string | null;
   goal: string;
+  variables: Record<string, unknown>;
 }
 
 export interface ScheduleFire {
@@ -80,6 +83,8 @@ const FIRE_REASONS = new Set<string>([
   "duplicate-window",
   "controller-absent",
   "definition-missing",
+  "project-missing",
+  "shutdown",
   "conflict",
   "error",
 ]);
@@ -96,7 +101,7 @@ function requiredString(source: Record<string, unknown>, field: string): string 
 
 function nullableString(source: Record<string, unknown>, field: string): string | null {
   const value = source[field];
-  if (value === null || value === undefined) return null;
+  if (value === null) return null;
   if (typeof value !== "string") throw new Error(`The server sent an unreadable ${field}.`);
   return value;
 }
@@ -111,7 +116,20 @@ function parseSchedule(value: unknown): Schedule {
     throw new Error("The server sent a schedule without an enabled flag.");
   }
   const reason = nullableString(value, "last_fire_reason");
-  const goalSource = isRecord(value.input) ? value.input.goal : undefined;
+  if (reason !== null && !FIRE_REASONS.has(reason)) {
+    throw new Error("The server sent a schedule with an unreadable last fire reason.");
+  }
+  if (!isRecord(value.input)) {
+    throw new Error("The server sent a schedule with unreadable input.");
+  }
+  const goalSource = value.input.goal;
+  if (goalSource !== undefined && typeof goalSource !== "string") {
+    throw new Error("The server sent a schedule with an unreadable goal.");
+  }
+  const variablesSource = value.input.variables;
+  if (variablesSource !== undefined && !isRecord(variablesSource)) {
+    throw new Error("The server sent a schedule with unreadable variables.");
+  }
   return {
     id: requiredString(value, "id"),
     workflow_id: requiredString(value, "workflow_id"),
@@ -124,12 +142,11 @@ function parseSchedule(value: unknown): Schedule {
     updated_at: requiredString(value, "updated_at"),
     next_fire_at: nullableString(value, "next_fire_at"),
     last_fire_at: nullableString(value, "last_fire_at"),
-    last_fire_reason: reason !== null && FIRE_REASONS.has(reason)
-      ? (reason as ScheduleFireReason)
-      : null,
+    last_fire_reason: reason as ScheduleFireReason | null,
     last_run_id: nullableString(value, "last_run_id"),
     last_run_status: nullableString(value, "last_run_status"),
     goal: typeof goalSource === "string" ? goalSource : "",
+    variables: variablesSource ?? {},
   };
 }
 
@@ -191,11 +208,16 @@ function jsonRequest(method: string, body?: unknown): RequestInit {
 
 export async function listSchedules(): Promise<ScheduleListing> {
   const body = await readJson(await apiFetch("/schedules"), "listSchedules");
-  if (!isRecord(body) || !Array.isArray(body.schedules)) {
+  if (
+    !isRecord(body) ||
+    body.storage_version !== 1 ||
+    typeof body.scheduler_running !== "boolean" ||
+    !Array.isArray(body.schedules)
+  ) {
     throw new Error("The server sent a schedule list in an unexpected shape.");
   }
   return {
-    schedulerRunning: body.scheduler_running === true,
+    schedulerRunning: body.scheduler_running,
     schedules: body.schedules.map(parseSchedule),
   };
 }
@@ -207,6 +229,7 @@ export interface CreateScheduleInput {
   timezone: string;
   overlapPolicy: ScheduleOverlapPolicy;
   goal?: string;
+  variables?: Record<string, unknown>;
 }
 
 export async function createSchedule(input: CreateScheduleInput): Promise<Schedule> {
@@ -219,7 +242,14 @@ export async function createSchedule(input: CreateScheduleInput): Promise<Schedu
         expression: input.expression,
         timezone: input.timezone,
         overlapPolicy: input.overlapPolicy,
-        ...(input.goal ? { input: { goal: input.goal } } : {}),
+        ...(input.goal || input.variables
+          ? {
+              input: {
+                ...(input.goal ? { goal: input.goal } : {}),
+                ...(input.variables ? { variables: input.variables } : {}),
+              },
+            }
+          : {}),
       }),
     ),
     "createSchedule",
@@ -241,7 +271,14 @@ export async function updateSchedule(
         ...(patch.expression === undefined ? {} : { expression: patch.expression }),
         ...(patch.timezone === undefined ? {} : { timezone: patch.timezone }),
         ...(patch.overlapPolicy === undefined ? {} : { overlapPolicy: patch.overlapPolicy }),
-        ...(patch.goal === undefined ? {} : { input: { goal: patch.goal } }),
+        ...(patch.goal === undefined && patch.variables === undefined
+          ? {}
+          : {
+              input: {
+                ...(patch.goal === undefined ? {} : { goal: patch.goal }),
+                ...(patch.variables === undefined ? {} : { variables: patch.variables }),
+              },
+            }),
       }),
     ),
     "updateSchedule",

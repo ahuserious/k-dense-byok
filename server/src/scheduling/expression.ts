@@ -272,10 +272,46 @@ export function nextFire(
 }
 
 /**
+ * The NEWEST window between `afterMs` (exclusive) and `untilMs` (inclusive), or
+ * null when the expression has none in that span.
+ *
+ * This is what the catch-up pass fires. It exists as its own function, rather
+ * than as "the last element of the enumeration", because the enumeration is
+ * capped and a capped forward walk returns the OLDEST windows — taking its last
+ * element after a long outage selects a stale window, fires it, and then repeats
+ * once per tick until the backlog drains. Round 1 had exactly that defect.
+ *
+ * The caller bounds `afterMs` by the catch-up grace period, so the walk is
+ * bounded by the grace period rather than by how long the process was down.
+ */
+export function latestWindowAtOrBefore(
+  expression: ScheduleExpression,
+  timeZone: string,
+  afterMs: number,
+  untilMs: number,
+): NextFire | null {
+  if (expression.kind === "every") {
+    // Closed form: interval windows are epoch-aligned, so the newest one at or
+    // before `untilMs` needs no walk at all.
+    const instantMs = Math.floor(untilMs / expression.intervalMs) * expression.intervalMs;
+    return instantMs > afterMs ? { instantMs, windowKey: String(instantMs) } : null;
+  }
+  let cursor = afterMs;
+  let latest: NextFire | null = null;
+  for (;;) {
+    const candidate = nextCronFire(expression, timeZone, cursor);
+    if (!candidate || candidate.instantMs > untilMs) return latest;
+    latest = candidate;
+    cursor = candidate.instantMs;
+  }
+}
+
+/**
  * Every window between `afterMs` (exclusive) and `untilMs` (inclusive), oldest
- * first, capped at `limit`. Used by the restart catch-up pass to see what was
- * missed while the process was down. `truncated` is true when the cap hid
- * windows, so the caller can record the omission instead of hiding it.
+ * first, capped at `limit`. Used by the restart catch-up pass to WRITE THE AUDIT
+ * RECORDS for what was missed while the process was down — never to choose what
+ * to fire; see `latestWindowAtOrBefore` for that. `truncated` is true when the
+ * cap hid windows, so the caller can record the omission instead of hiding it.
  */
 export function windowsBetween(
   expression: ScheduleExpression,

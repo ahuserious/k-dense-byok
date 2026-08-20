@@ -79,24 +79,47 @@ does not.
 
 **The honest cost:** a reader of a run manifest alone **cannot** distinguish a scheduled fire from a
 manual one except by parsing the `requestId` for the `schedule:` prefix. `requestedBy` is not a
-discriminator for scheduled runs and must not be used as one. Closing this properly needs a
-`"schedule"` member on the frozen union, or a `requestedBy` pass-through on the run-creation route.
-Both are Team B's; both are written into `INTEGRATION.md` as observations, not as blocking requests.
+discriminator for scheduled runs and must not be used as one. The deterministic and unattended-fire
+tests assert the persisted value is `"user"` so evidence cannot silently call it `"api"`. Closing
+this properly without letting public callers spoof audit origin needs a trusted shared dispatch
+function used by both the route and scheduler; that is Team B's and is recorded in `INTEGRATION.md`
+as a non-blocking follow-up.
 
 ## Decision 4 — catch-up: at most one, most-recent-only, inside a stated grace period
 
 Each schedule persists `cursorMs`: *every firing opportunity at or before this instant has been
-considered.* A tick enumerates the windows between the cursor and now (capped at 50; the cap itself
-is recorded as `catchup-truncated`).
+considered.*
 
-- The **most recent** missed window is the only candidate for a fire.
+- The **most recent** window at or before now is the only candidate for a fire, and it is computed
+  **independently of any enumeration**, by `latestWindowAtOrBefore` (`scheduling/expression.ts`).
+  The search starts at `max(cursorMs, now - grace)`, so it costs the same after a week down as after
+  a minute, and the cursor jumps straight to that window: **the backlog drains in ONE tick whatever
+  its size**.
 - Every older window gets its own `catchup-skipped` fire record. A silent skip is as bad as a
-  stampede, so the skips are enumerated, not summarised away.
-- If even the most recent window is older than `DEFAULT_CATCH_UP_GRACE_MS` (15 minutes) it is
-  recorded as `catchup-expired` and **not** run. A backend that was down for a week does not wake up
-  firing.
-- A **paused** schedule accrues no windows at all: its cursor follows the clock, so resuming cannot
-  replay the pause. The pause is recorded once, the first time a window is passed over.
+  stampede, so the skips are enumerated, not summarised away — but the enumeration is capped at
+  `MAX_ENUMERATED_MISSED_WINDOWS` (50) and the cap is recorded as `catchup-truncated`, naming the
+  window that WAS caught up. **The cap governs the audit detail only. It has no influence on which
+  window fires.**
+- If nothing at all falls inside `DEFAULT_CATCH_UP_GRACE_MS` (15 minutes) the whole backlog is
+  refused with one `catchup-expired` record that says how many windows were passed over, and the
+  cursor moves to *now* so the refusal is not repeated once per tick. A backend that was down for a
+  week does not wake up firing.
+- A **paused** schedule accrues no windows at all. Its cursor stands still and its record is written
+  exactly once (the first window passed over, recorded as `disabled`); the enable route re-anchors
+  `cursorMs` to now, which is what makes resuming safe without a per-tick write.
+
+### Round-1 defect and why the algorithm changed
+
+Round 1 derived the target from `windowsBetween(...).windows[length - 1]`. `windowsBetween` truncates
+to the **fifty oldest** windows, so above the cap that expression selects the fiftieth-oldest window,
+not the most recent: an `every:1s` schedule ten minutes behind fired a window 550 s stale — still
+inside the grace period, so it really did dispatch — and advanced the cursor only fifty windows,
+repeating once per tick until the backlog drained (~6 runs for five minutes down, ~18 for the full
+grace). The `catchup-truncated` record simultaneously claimed "only the most recent is considered for
+catch-up", which was false exactly when it was written. The row's non-negotiable property is *a
+missed window must not stampede on restart*, so the fix is the independent computation above, and the
+regression tests (`server/test/scheduling.test.ts`) now drive 600, 900 and 60 missed windows — all
+above the cap — and assert ONE dispatch, ONE run manifest and ONE tick to drain.
 
 ## Decision 5 — timezone and DST, stated explicitly
 
@@ -115,6 +138,19 @@ Both are asserted in `server/test/scheduling.test.ts` → *"timezone and dayligh
 
 Interval (`every:`) schedules are unaffected by DST by construction: they live on the absolute time
 line and are aligned to the Unix epoch.
+
+**Editing the zone re-anchors the cursor**, exactly as editing the expression does. Changing the zone
+moves every window's absolute instant, so a `cron:0 9 * * *` schedule moved to a zone several hours
+behind can find today's 09:00 already in the past and inside the catch-up grace — it would fire on
+the next tick, which is not what "I changed the time zone" means. `PATCH` therefore sets
+`cursorMs = Date.now()` when, and only when, the zone actually changes
+(`server/src/api/schedules.ts`), proved by *"re-anchors the cursor when the zone changes, and when
+the schedule is resumed"*.
+
+**`input` is replaced, not merged**, on `PATCH`. This is a decision, not an oversight: the Console's
+edit form always submits the displayed goal and preserves stored variables verbatim, while an API
+client can replace the whole object. A merging PATCH would leave no way to remove a variable. It is
+stated as the contract in `docs/schedules.md` under "Creating one".
 
 ## Decision 6 — overlap policy
 
@@ -145,13 +181,24 @@ recorded as `overlap-skipped` with the reason, and no second run is created.
 
 ## Decision 8 — lifecycle: nothing survives `app.close()` (defect #41)
 
-One `setInterval` per registration, `.unref()`ed, cleared from an `onClose` hook registered by
-`server/src/api/schedules.ts` itself.
+One `setInterval` per registration, `.unref()`ed, cleared from a `preClose` hook registered by
+`server/src/api/schedules.ts` itself. `preClose` is deliberate: Fastify runs it before application
+`onClose` hooks release resources.
 
 `unref()` is deliberate: an unref'd interval holds no event-loop reference, so a pending tick can
 never be the reason a backend process refuses to exit. That is precisely the failure mode behind the
 three supervisor processes orphaned since 2026-08-12. The shape mirrors `agent/skills-sync.ts`, which
 already does interval + `unref` + explicit clear.
+
+`stop()` is **async and awaits the tick in flight**. Clearing an interval does not unwind a tick that
+is already past its re-entry guard, and that tick dispatches by `app.inject`. Registration order
+matters here: avvio runs same-scope `onClose` hooks in reverse registration order, so the run
+controller's later hook would run before a scheduler `onClose` hook. The scheduler therefore stops
+in Fastify's earlier `preClose` phase, while the controller is still available. `stop()` sets a
+stopped flag that `#dispatch` checks before its first await, clears the timer, and then waits. A
+window refused that way is recorded as `shutdown` and **keeps its cursor**, so the next process
+reconsiders it; the requestId is unchanged, so the retry cannot double-fire. Calls to `tick()` after
+stop are inert and write no audit records.
 
 ## Decision 9 — fail closed, with the reason, when execution is not enabled
 
@@ -171,7 +218,10 @@ POST /dag-workflow-runs/wrun_000…000/cancel  → 503 CONTROLLER_CLOSED ⇒ exe
 With execution off, **no run is created**, the window is recorded as `controller-absent` with a
 sentence naming the user's next action, and the Console shows it. Three other fail-closed reasons are
 distinct and recorded: `definition-missing` (the workflow id no longer exists), `conflict`, and
-`error`.
+`error`. A 404 from the project-scope hook is **not** reported as a missing definition: that hook
+answers an unknown project with `reason: "unknown_project"` before the route runs (`index.ts:210`),
+and the ticker reads that field and records `project-missing` instead, so a reader is not sent to fix
+the wrong thing.
 
 ## Decision 10 — an own fire-audit store, and why the journal did not fit
 
