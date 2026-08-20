@@ -2,7 +2,7 @@
   "lane": "F3",
   "rows": [8, 9],
   "purpose": "Refresh shipped Fusion built-ins to GPT-5.6 Sol Pro, label inherited DRACO results unmeasured, and prove a shipped config reaches the production router transform.",
-  "rebaseBase": "25d605860e73ec2d3ed268c93cbb17a61bae0497",
+  "rebaseBase": "fdd022102e26aa5986a8300977cefd0cb46f0dc9",
   "files": [
     "docs/inventory/f3-fusion-presets.json",
     "docs/openrouter-fusion.md",
@@ -27,5 +27,5 @@
     "B": "Unit proof sends a shipped DEFAULT_FUSION_CONFIGS body through production buildFusionRequestBody.",
     "D": "Data-only change in fusion-presets.ts. No new visual tokens."
   },
-  "unowned_leftover": "Closed on this tip: docs/openrouter-fusion.md and docs/model-selection.md tombstone GPT-5.5 fusion panels and numeric DRACO percents; every shipped note stays DRACO: unmeasured. Dest policy still owns those docs (S5 / uninventoried). Lead request: s11/wave-f/requests/f3-handoff.md. Do not edit dest token-ban.json from this lane."
+  "unowned_leftover": "Amendment #4 on dest fdd0221 granted docs/model-selection.md and docs/openrouter-fusion.md. This tip tombstones GPT-5.5 fusion panels and numeric DRACO percents; every shipped note stays DRACO: unmeasured. Dest docs stay stale until this lane merges. token-ban.json was rejected (live C5). Do not globally ban GPT-5.5."
 }
