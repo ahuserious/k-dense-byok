@@ -35,7 +35,7 @@
     "GET /lean4/runs/:runId/proofs",
     "GET /lean4/runs/:runId/proofs/:executionId/source?artifact=proof|log"
   ],
-  "route_registration": "PENDING \u2014 server/src/index.ts is not lane F4's file; the two lines are in INTEGRATION.md section 1.",
+  "route_registration": "PENDING \u2014 server/src/index.ts is not lane F4's file. Exact apply lives in dfg-evidence-20260807-135127/s11/wave-f/reports/F4-INTEGRATION.md, not a clone-root INTEGRATION.md. Lean routes stay out of this clone's index.ts.",
   "published_interface": "dfg-evidence-20260807-135127/s11/wave-f/interfaces/F4-lean4.md",
   "consumers": {
     "F6": "Team C \u2014 node palette entry and the inspector fields for mode/theorem/solverModel/mathlib; mounts <Lean4ProofArtifact>.",
