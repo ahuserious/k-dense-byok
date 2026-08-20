@@ -82,7 +82,7 @@
         "hypothesis": "Requires the hypothesis node kind, landing in lane F5."
       },
       "hostState": "enabled is held in dag-builder-surface and seeded from readFusionBoost(loaded.document). Per-stage checks still derive from the document after apply. The control prints that it inserts in-graph fusion nodes, not OpenRouter Fusion presets, and is not dest-live until merge.",
-      "destOwnershipLeftover": "Dest 33a13ea ownership.json never granted server/test/wave-f/f6-stitch-fusion.test.ts, web/package.json, web/package-lock.json, or docs/inventory/web-tabs.json. Lead request: s11/wave-f/requests/f6-handoff.md. Do not edit dest policy from this lane.",
+      "destOwnershipLeftover": "Amendment #4 on dest fdd0221 granted server/test/wave-f/f6-*.test.ts, web/package.json, web/package-lock.json, and docs/inventory/web-tabs.json. Fusion boost still inserts in-graph kind:fusion only; F5 stages stay disabled-with-reason; dest remains unbound until this lane merges. $0 Run disable is on this F6-owned panel. Do not treat the toggle as dest-live OpenRouter Fusion.",
       "evidence": "server/test/wave-f/f6-stitch-fusion.test.ts: boost ON executed kinds ['fusion','agent','agent','fusion']; boost OFF executed ['subject-head','subject-tail']. compose.spec.ts turns the toggle on and checks Planning."
     },
     "33": {
