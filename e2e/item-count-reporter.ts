@@ -14,7 +14,8 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   ["console-live.spec.ts", 12],
   ["console-raindrop.spec.ts", 33],
   // Wave F lane F12 (matrix rows 48-50): integrations registry in Settings ▸ Connectors.
-  ["f12-integrations.spec.ts", 3],
+  // Path-keyed after F10; the file lives under e2e/wave-f/f12/, not the e2e/ root.
+  ["wave-f/f12/f12-integrations.spec.ts", 3],
   ["live-backend.spec.ts", 3],
   ["scientific-pipelines.spec.ts", 57],
   ["workspace.spec.ts", 46],
