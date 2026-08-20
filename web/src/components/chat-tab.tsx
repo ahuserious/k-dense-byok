@@ -25,6 +25,12 @@ import {
   type PromptInputProviderState,
 } from "@/components/ai-elements/prompt-input";
 import { Shimmer } from "@/components/ai-elements/shimmer";
+// Wave F lane F9, master-brief rows 17-18. Both live inside this component on
+// purpose: `page.tsx:1246` hides an inactive ChatTab with `display: none`, so a
+// rail and a panel mounted here inherit that hiding and cannot outlive the chat
+// they describe. Neither needs a line in `page.tsx`.
+import { ChatSideRail } from "@/components/chat/baby-view-rail";
+import { PromptElevationPanel } from "@/components/chat/prompt-elevation-panel";
 import { buildDatabaseContext, type Database } from "@/components/database-selector";
 import {
   ModelSelector,
@@ -1892,10 +1898,11 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
     <div
       ref={rootRef}
       className={cn(
-        "flex flex-1 flex-col min-h-0 overflow-hidden",
+        "flex flex-1 min-h-0 overflow-hidden",
         !isActive && "hidden",
       )}
     >
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
       <ChatLiveGraphTabs
         projection={liveGraphProjection}
         conversation={(
@@ -2006,6 +2013,8 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
         )}
       />
 
+      <PromptElevationPanel sessionId={liveGraphSessionId} />
+
       <div className="px-4 pb-6 pt-2">
         <PromptInputProvider
           initialInput={initialWorkspaceState?.composer.text}
@@ -2055,6 +2064,9 @@ export const ChatTab = forwardRef<ChatTabHandle, ChatTabProps>(function ChatTab(
           />
         </PromptInputProvider>
       </div>
+      </div>
+
+      <ChatSideRail projectId={projectId} sessionId={liveGraphSessionId} enabled={isActive} />
     </div>
   );
 });

@@ -10,11 +10,15 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   ["console-raindrop.spec.ts", 33],
   // Wave F lane F12 (matrix rows 48-50): integrations registry in Settings ▸ Connectors.
   ["f12-integrations.spec.ts", 3],
+  // Wave F lane F9 (rows 17-18). Measured with `npx playwright test --list`,
+  // not projected: 11 substantive items, 0 thin, 0 fixme, 0 skip.
+  ["f9-chat-elevation.spec.ts", 9],
+  ["f9-live.spec.ts", 2],
   ["live-backend.spec.ts", 3],
   ["scientific-pipelines.spec.ts", 57],
   ["workspace.spec.ts", 46],
 ]);
-const EXPECTED_SUBSTANTIVE_ITEMS = 221;
+const EXPECTED_SUBSTANTIVE_ITEMS = 232;
 const EXPECTED_THIN_ITEMS = 35;
 const EXPECTED_FIXME_ITEMS = 3;
 const EXPECTED_SKIP_ITEMS = 0;

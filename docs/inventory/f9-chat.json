@@ -1,0 +1,65 @@
+{
+  "inventory": "f9-chat",
+  "lane": "F9",
+  "wave": "F",
+  "rows": [
+    {
+      "row": 17,
+      "title": "Prompt Elevation panel",
+      "surface": "Chat, immediately above the composer",
+      "gateU": "PASS — the three-block entry point is visible and keyboard reachable",
+      "gateB": "NOT DONE — the single F5 elevate-to-DAG engine/API is not published in this tree; the action is disabled with a visible reason",
+      "gateD": "PASS — semantic tokens, measured contrast, and keyboard evidence"
+    },
+    {
+      "row": 18,
+      "title": "Baby pipeline view",
+      "surface": "96px-at-96dpi-equivalent rail on the right of Chat; 192px square overlay over the document",
+      "gateU": "PASS — opens on hover and keyboard focus",
+      "gateB": "PASS at the client effect boundary — every rendered node comes from the current saved WorkflowGraphDocument",
+      "gateD": "PASS — no motion, focus trap, Escape close, and trigger focus restoration"
+    }
+  ],
+  "files": [
+    "web/src/components/chat-tab.tsx",
+    "web/src/components/chat-tab.test.tsx",
+    "web/src/components/chat/baby-view-rail.tsx",
+    "web/src/components/chat/baby-view-rail.test.tsx",
+    "web/src/components/chat/pipeline-mark.tsx",
+    "web/src/components/chat/prompt-elevation-panel.tsx",
+    "web/src/components/chat/prompt-elevation-panel.test.tsx",
+    "web/src/lib/baby-view.ts",
+    "web/src/lib/baby-view.test.ts",
+    "web/src/lib/prompt-elevation.ts",
+    "web/src/lib/prompt-elevation.test.ts",
+    "docs/inventory/f9-chat.json"
+  ],
+  "playwrightSpecs": [
+    "e2e/wave-f/f9/f9-chat-elevation.spec.ts",
+    "e2e/wave-f/f9/f9-live.spec.ts"
+  ],
+  "itemDelta": {
+    "files": {
+      "f9-chat-elevation.spec.ts": 9,
+      "f9-live.spec.ts": 2
+    },
+    "substantive": 11,
+    "thin": 0,
+    "fixme": 0,
+    "skip": 0,
+    "expectedSubstantiveBefore": 221,
+    "expectedSubstantiveAfter": 232
+  },
+  "sizing": {
+    "referenceDpi": 96,
+    "rail": "6rem = 96 CSS px at a 16px root",
+    "overlay": "12rem × 12rem = 192 × 192 CSS px at a 16px root",
+    "note": "CSS pixels are reference units; physical inches vary by display density and zoom."
+  },
+  "elevationFollowUp": {
+    "owner": "F5",
+    "requiredInterface": "F5 elevate-to-DAG engine/API",
+    "rule": "Rows 17, 26, and 43 call one implementation. Do not import the older Console session-promotion converter.",
+    "patchShape": "Add the published typed client in web/src/lib/prompt-elevation.ts and connect the existing disabled panel to it."
+  }
+}
