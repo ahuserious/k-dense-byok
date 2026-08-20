@@ -42,7 +42,7 @@ The picker lists Pi's built-in NIM catalogue, which won't include private or ear
 
 ## OpenRouter Fusion presets
 
-This fork adds an **Openrouter Fusion** section at the top of the picker: named presets where a panel of models deliberates on your prompt and an Opus 4.8 judge synthesizes one answer, with the combined panel price and (where published) the DRACO benchmark score shown on each entry. Selecting a Fusion preset rewrites the turn into an `openrouter/fusion` request and disables Kady's local tools for that turn so it returns the fused answer instead of running the agent loop. Fusion remains OpenRouter-only and requires `OPENROUTER_API_KEY`; a Pi subscription login cannot authorize it. See [OpenRouter Fusion](./openrouter-fusion.md) for the presets and how the integration works.
+This fork adds an **Openrouter Fusion** section at the top of the picker: named presets where a panel of models deliberates on your prompt and an Opus 4.8 judge synthesizes one answer, with the combined panel price shown on each entry. **DRACO is unmeasured** for every shipped built-in after the GPT-5.6 Sol Pro refresh; predecessor GPT-5.5 panels and numeric DRACO percents are tombstoned and must not be restored. Selecting a Fusion preset rewrites the turn into an `openrouter/fusion` request and disables Kady's local tools for that turn so it returns the fused answer instead of running the agent loop. Fusion remains OpenRouter-only and requires `OPENROUTER_API_KEY`; a Pi subscription login cannot authorize it. See [OpenRouter Fusion](./openrouter-fusion.md) for the presets and how the integration works.
 
 ## Defaults
 

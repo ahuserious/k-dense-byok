@@ -5,6 +5,8 @@
   "rebaseBase": "25d605860e73ec2d3ed268c93cbb17a61bae0497",
   "files": [
     "docs/inventory/f3-fusion-presets.json",
+    "docs/openrouter-fusion.md",
+    "docs/model-selection.md",
     "e2e/item-count-reporter.ts",
     "e2e/wave-f/f3/fusion-refresh.spec.ts",
     "web/src/lib/fusion-presets.ts",
@@ -25,5 +27,5 @@
     "B": "Unit proof sends a shipped DEFAULT_FUSION_CONFIGS body through production buildFusionRequestBody.",
     "D": "Data-only change in fusion-presets.ts. No new visual tokens."
   },
-  "unowned_leftover": "docs/openrouter-fusion.md still advertises GPT-5.5 panels with numeric DRACO percents. F3 does not own that file."
+  "unowned_leftover": "Closed on this tip: docs/openrouter-fusion.md and docs/model-selection.md tombstone GPT-5.5 fusion panels and numeric DRACO percents; every shipped note stays DRACO: unmeasured. Dest policy still owns those docs (S5 / uninventoried). Lead request: s11/wave-f/requests/f3-handoff.md. Do not edit dest token-ban.json from this lane."
 }
