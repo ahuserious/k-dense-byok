@@ -24,6 +24,16 @@ const scriptPath = path.resolve(
 );
 
 /**
+ * Slack bot-token shapes are assembled at runtime so this tracked file never
+ * contains a contiguous `xox` + family + hyphen literal. GitHub push protection
+ * matches those shapes in history; a forward commit can only clean the tip.
+ */
+function plantedSlackBotShape() {
+  const family = String.fromCharCode(98);
+  return `xox${family}-0000000000-FAKEfakeFAKEfake`;
+}
+
+/**
  * One planted, obviously-fake value per pattern, each in its own file so a row can be
  * asserted against a file name. None of these is a real credential: every one is a shape.
  */
@@ -35,7 +45,7 @@ const PLANTED = [
     file: "github.txt",
     line: ["ghp", "_FAKEfakeFAKEfakeFAKEfakeFAKEfake0000"].join(""),
   },
-  { id: "slack-token", file: "slack.txt", line: ["xox", String.fromCharCode(98), "-0000000000-FAKEfakeFAKEfake"].join("") },
+  { id: "slack-token", file: "slack.txt", line: plantedSlackBotShape() },
   { id: "private-key", file: "pem.txt", line: ["---", "--BEGIN RSA PRIVATE KEY-----"].join("") },
   {
     id: "google-api-key",
