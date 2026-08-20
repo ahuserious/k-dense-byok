@@ -1,0 +1,120 @@
+{
+  "schemaVersion": "1.0",
+  "id": "autoresearch-example",
+  "name": "Bounded autoresearch example",
+  "description": "Research until explicit evidence criteria are met, then verify the result.",
+  "entryNodeId": "research",
+  "defaultModel": {
+    "requested": {
+      "source": "fixed",
+      "provider": "ollama",
+      "model": "qwen3:32b",
+      "auth": {
+        "kind": "local"
+      },
+      "reasoning": "high"
+    },
+    "resolution": {
+      "mode": "exact"
+    }
+  },
+  "limits": {
+    "maxIterations": 8,
+    "maxModelCalls": 10,
+    "maxParallelism": 2,
+    "maxSubagents": 2,
+    "timeoutMs": 600000,
+    "maxTokens": 120000,
+    "maxCostUsd": 2,
+    "maxRetries": 1
+  },
+  "rescue": {
+    "enabled": true,
+    "maxAttempts": 1,
+    "triggers": [
+      "failure",
+      "unsupported-output"
+    ]
+  },
+  "evidence": {
+    "enabled": true,
+    "minimumIndependentSources": 1,
+    "requireArtifactReferences": false,
+    "onUnsupportedOutput": "fail"
+  },
+  "nodes": [
+    {
+      "id": "research",
+      "name": "Research against stopping criteria",
+      "kind": "research-until-goal",
+      "terminal": false,
+      "workspace": {
+        "isolation": "read-only",
+        "writePaths": []
+      },
+      "limits": {
+        "maxIterations": 6,
+        "maxModelCalls": 7
+      },
+      "goal": "Determine whether the stated research claim is supported and preserve material counter-evidence.",
+      "completionCriteria": [
+        "At least one independent source directly supports or refutes the claim",
+        "Material uncertainty and contradictory evidence are recorded",
+        "The conclusion states what evidence would change it"
+      ],
+      "settings": {
+        "version": 1,
+        "skills": {
+          "mode": "manual",
+          "list": [
+            "autoresearch-graph-architect",
+            "autoresearch-squared"
+          ]
+        },
+        "autonomy": "strict"
+      }
+    },
+    {
+      "id": "verify",
+      "name": "Verify the research output",
+      "kind": "evidence-gate",
+      "terminal": false,
+      "workspace": {
+        "isolation": "read-only",
+        "writePaths": []
+      },
+      "checks": [
+        "citations",
+        "claim-support",
+        "unsupported-output"
+      ],
+      "artifactIds": [],
+      "onUnsupportedOutput": "fail"
+    },
+    {
+      "id": "complete",
+      "name": "Record the supported conclusion",
+      "kind": "agent",
+      "terminal": true,
+      "workspace": {
+        "isolation": "read-only",
+        "writePaths": []
+      },
+      "prompt": "Summarize the verified conclusion, supporting sources, counter-evidence, and remaining uncertainty without introducing new claims."
+    }
+  ],
+  "edges": [
+    {
+      "id": "research-to-verify",
+      "from": "research",
+      "to": "verify",
+      "condition": "always"
+    },
+    {
+      "id": "verify-to-complete",
+      "from": "verify",
+      "to": "complete",
+      "condition": "evidence-supported"
+    }
+  ]
+}

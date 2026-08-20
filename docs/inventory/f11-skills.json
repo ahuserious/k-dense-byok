@@ -1,0 +1,96 @@
+{
+  "lane": "F11",
+  "base": "51f0b7d2d292093c71603504cbe159371930fffd",
+  "rows": [
+    41,
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    51
+  ],
+  "skills": [
+    {
+      "name": "autoresearch-graph-architect",
+      "row": 41,
+      "effectEvidence": [
+        "validated example WorkflowGraphDocument",
+        "workflow-store save/readback",
+        "Pi loader and NodeSpec delegation tests"
+      ]
+    },
+    {
+      "name": "autoresearch-squared",
+      "row": 42,
+      "effectEvidence": [
+        "live WorkflowStore RunState/event projection",
+        "interactive and autonomous bounded API tests",
+        "monitor-stop and existing run-cancel UI controls"
+      ],
+      "knownGap": "RunState v1 has no critique/evaluation event channel; critiques are explicitly not persisted."
+    },
+    {
+      "name": "prompt-elevation-to-dag",
+      "row": 43,
+      "effectEvidence": [
+        "capability adapter test",
+        "disabled-with-reason UI test"
+      ],
+      "knownGap": "F5 interface is absent; the adapter is intentionally disabled."
+    },
+    {
+      "name": "workflow-supervisor",
+      "row": 44,
+      "effectEvidence": [
+        "F14 API-only client",
+        "preset-id-only UI binding test",
+        "absent-endpoint disabled-state test"
+      ],
+      "knownGap": "F14 and F1 are absent from the integration base."
+    },
+    {
+      "name": "lean4-prover",
+      "row": 45,
+      "effectEvidence": [
+        "real lean4 NodeSpec attachment/delegation",
+        "F4 single renderer/client references"
+      ],
+      "knownGap": "F4 routes and renderer are absent from the integration base."
+    },
+    {
+      "name": "create-scientific-agent",
+      "row": 46,
+      "effectEvidence": [
+        "existing Agents API create/readback test",
+        "scientific specialist UI save test",
+        "existing mimeograph ref curation test"
+      ]
+    },
+    {
+      "name": "infranodus-ontology-creator",
+      "row": 47,
+      "effectEvidence": [
+        "Pi loader test",
+        "F12 mcp__infranodus__ dynamic-tool contract",
+        "unconfigured fail-closed instructions"
+      ]
+    }
+  ],
+  "curator": {
+    "row": 51,
+    "installer": "installStagedSkills -> installSkillTree",
+    "workflowWriter": "workflowStore.saveDefinitionWithIntent",
+    "skillField": "nodes[].settings.skills.list",
+    "skillCap": 64,
+    "personalityField": "nodes[].settings.deliberation.mimeographs.personalityRefs",
+    "personalityCap": 32,
+    "runtimeProof": "DefaultResourceLoader + resolveS4NodeExecutionBindings"
+  },
+  "settingsExports": [
+    "@/components/skills#SkillCuratorPanel",
+    "@/components/skills#AutoresearchMonitorPanel",
+    "@/components/skills#WorkflowSupervisorSettings"
+  ]
+}
