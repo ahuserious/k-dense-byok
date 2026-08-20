@@ -162,6 +162,9 @@ describe("ChatSideRail — Gate U, hover AND keyboard both open it", () => {
     expect(trigger()).toHaveFocus();
     await user.tab({ shift: true });
     expect(close).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "Pipeline preview" })).not.toBeInTheDocument();
+    expect(trigger()).toHaveFocus();
   });
 });
 

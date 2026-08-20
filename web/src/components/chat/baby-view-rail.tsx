@@ -224,6 +224,7 @@ export function ChatSideRail({
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const pointerDownRef = useRef(false);
+  const restoringFocusRef = useRef(false);
   const overlayId = useId();
   const listId = `${overlayId}-nodes`;
   const summaryId = `${overlayId}-summary`;
@@ -259,6 +260,11 @@ export function ChatSideRail({
     setOpenMode(null);
     // Focus after React commits the closed state. Keeping this out of render is
     // the same ref/effect boundary React documents for DOM focus management.
+    if (document.activeElement === triggerRef.current) {
+      restoringFocusRef.current = false;
+      return;
+    }
+    restoringFocusRef.current = true;
     queueMicrotask(() => triggerRef.current?.focus());
   }, []);
 
@@ -340,6 +346,10 @@ export function ChatSideRail({
           pointerDownRef.current = false;
         }}
         onFocus={() => {
+          if (restoringFocusRef.current) {
+            restoringFocusRef.current = false;
+            return;
+          }
           if (!pointerDownRef.current) setOpenMode("keyboard");
         }}
         onBlur={(event) => {
