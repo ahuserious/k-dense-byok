@@ -41,6 +41,10 @@ test.describe("Settings ▸ Fusion model refresh", () => {
         name: "Fable 5 + GPT-5.6 Sol Pro by Openrouter Fusion",
       }),
     ).toBeVisible();
-    await expect(picker.getByText(/GPT-5\.5/i)).toHaveCount(0);
+    const fusionOptions = picker.getByRole("option", {
+      name: /by Openrouter Fusion$/,
+    });
+    await expect(fusionOptions).toHaveCount(6);
+    expect((await fusionOptions.allTextContents()).join("\n")).not.toMatch(/GPT-5\.5/i);
   });
 });
