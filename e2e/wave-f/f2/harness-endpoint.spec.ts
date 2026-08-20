@@ -41,6 +41,7 @@ interface HarnessListEntry {
   detail: string | null;
   supportsBinaryPathOverride: boolean;
   binaryPath: HarnessBinaryPathState | null;
+  unboundControls: Array<{ control: string; reason: string }>;
 }
 
 interface ObservedResponse {
@@ -127,10 +128,16 @@ test("@live @live-alt lists every harness with a total, renderable state", async
       "resolvedExecutable",
       "summary",
       "supportsBinaryPathOverride",
+      "unboundControls",
     ]);
     expect(entry.label.length).toBeGreaterThan(0);
     expect(entry.executables.length).toBeGreaterThan(0);
     expect(["ready", "not-found", "no-adapter", "rejected"]).toContain(entry.availability);
+    expect(Array.isArray(entry.unboundControls)).toBe(true);
+    for (const control of entry.unboundControls) {
+      expect(control.control.length).toBeGreaterThan(0);
+      expect(control.reason.length).toBeGreaterThan(0);
+    }
     // §6.7: a row that cannot act carries the reason it cannot.
     if (entry.availability !== "ready") expect(entry.detail).toBeTruthy();
   }
