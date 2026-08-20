@@ -101,11 +101,6 @@ const GROUPS = [
 ];
 
 const SHARED_DROPPED = {
-  "chat-session": {
-    hyperparameters: "dropped",
-    systemPromptOverride: "dropped",
-    reason: "Chat uses this preset's provider and model, but not its sampling parameters.",
-  },
   "workflow-node": {
     hyperparameters: "dropped",
     systemPromptOverride: "dropped",
@@ -126,10 +121,12 @@ const SHARED_DROPPED = {
 const BINDINGS_BY_GROUP = {
   cerebras: {
     direct: { hyperparameters: "bound", systemPromptOverride: "bound" },
+    "chat-session": { hyperparameters: "bound", systemPromptOverride: "bound" },
     ...SHARED_DROPPED,
   },
   groq: {
     direct: { hyperparameters: "bound", systemPromptOverride: "bound" },
+    "chat-session": { hyperparameters: "bound", systemPromptOverride: "bound" },
     ...SHARED_DROPPED,
   },
   anthropic: {
@@ -139,6 +136,12 @@ const BINDINGS_BY_GROUP = {
       reason:
         "Kady sends a preset's parameters as an OpenAI-shaped chat completion authenticated with an API key. Anthropic is connected with a subscription login instead, so Kady cannot send that call and this preset's hyperparameters and system-prompt override are not carried on it.",
     },
+    "chat-session": {
+      hyperparameters: "dropped",
+      systemPromptOverride: "bound",
+      reason:
+        "Anthropic chat uses Pi's subscription transport, whose sampling payload is provider-specific.",
+    },
     ...SHARED_DROPPED,
   },
   modal: {
@@ -147,6 +150,11 @@ const BINDINGS_BY_GROUP = {
       systemPromptOverride: "dropped",
       reason:
         "Modal presets describe a compute job rather than a chat model, so there is no completion to send. Use Run on Modal instead.",
+    },
+    "chat-session": {
+      hyperparameters: "dropped",
+      systemPromptOverride: "dropped",
+      reason: "Modal presets describe a compute job rather than a chat model.",
     },
     ...SHARED_DROPPED,
   },
@@ -245,8 +253,11 @@ describe("Model presets section", () => {
     // `direct` is summarised by the groups that DO carry it, not asserted once
     // for all eight — Anthropic and Modal do not, and each says so on its own
     // row above.
-    expect(within(notice).getByText(/Carried on Cerebras, Groq/)).toBeVisible();
-    expect(within(notice).getAllByText("Not carried")).toHaveLength(3);
+    expect(within(notice).getAllByText(/Carried on Cerebras, Groq/)).toHaveLength(2);
+    expect(within(notice).getAllByText("Not carried")).toHaveLength(2);
+    expect(
+      within(notice).getByText(/system prompt only on Anthropic/),
+    ).toBeVisible();
     expect(
       within(notice).getByText(/Workflow nodes take their sampling parameters/),
     ).toBeVisible();

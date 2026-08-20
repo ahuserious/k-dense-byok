@@ -353,10 +353,24 @@ export async function registerModelPresetRoutes(
    * refuses on `modalConfigured()` (MODAL_TOKEN_ID + MODAL_TOKEN_SECRET), which
    * is the one Modal credential path.
    */
-  app.post<{ Params: { id: string }; Body: { command?: string } | null }>(
+  app.post<{ Params: { id: string }; Body: unknown }>(
     "/model-presets/:id/modal-job",
     async (req, reply) => {
       try {
+        if (
+          req.body !== undefined &&
+          req.body !== null &&
+          (
+            typeof req.body !== "object" ||
+            Array.isArray(req.body) ||
+            Object.keys(req.body as Record<string, unknown>).length > 0
+          )
+        ) {
+          throw new ModelPresetError(
+            400,
+            "Run on Modal always downloads the Hugging Face model saved in this preset; custom commands are not accepted.",
+          );
+        }
         const preset = requirePreset(req.params.id);
         if (preset.providerId !== "modal") {
           throw new ModelPresetError(
@@ -370,9 +384,7 @@ export async function registerModelPresetRoutes(
             providerGroup("modal")?.notConfiguredReason ?? "Modal is not configured.",
           );
         }
-        const request = modalJobRequestForPreset(preset, {
-          ...(req.body?.command ? { command: String(req.body.command) } : {}),
-        });
+        const request = modalJobRequestForPreset(preset);
         const submit = options.submitModalJob ?? submitToModalJobManager;
         const job = submit(currentProjectId(), request, {
           sessionId: `model-preset-${preset.id}`,
@@ -389,6 +401,7 @@ export async function registerModelPresetRoutes(
             instance: job.request.instance,
             gpuCount: job.request.gpuCount,
             command: job.request.command,
+            image: job.request.image,
           },
           huggingFaceModelId: preset.modal?.huggingFaceModelId ?? null,
         };

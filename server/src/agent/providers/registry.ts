@@ -27,6 +27,7 @@ import {
   isSubscriptionProvider,
   type SubscriptionProviderId,
 } from "../provider-auth.ts";
+import { MODAL_NOT_CONFIGURED_MESSAGE } from "../../modal/credentials.ts";
 
 export const PROVIDER_GROUP_IDS = [
   "cerebras",
@@ -263,8 +264,7 @@ export const PROVIDER_GROUPS: readonly ProviderGroupDefinition[] = [
     // not an OpenAI-shaped chat endpoint, so none of the sampling controls
     // apply; every one of them renders disabled with this recorded.
     parameterSupport: NO_PARAMETERS,
-    notConfiguredReason:
-      "Modal is not configured. Set MODAL_TOKEN_ID and MODAL_TOKEN_SECRET under Settings ▸ API keys.",
+    notConfiguredReason: MODAL_NOT_CONFIGURED_MESSAGE,
     dispatchableAsChatModel: false,
   },
 ] as const;

@@ -23,6 +23,8 @@ import {
   type ProviderGroupId,
   type ProviderGroupParameterSupport,
 } from "./providers/registry.ts";
+import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ModalJobRequest } from "../modal/types.ts";
 import {
   ModelPresetError,
@@ -70,30 +72,24 @@ export interface PresetBinding {
  *    every group, which told an Anthropic preset's owner "Carried" about a call
  *    Kady cannot build. The binding block must be derived from the same
  *    predicate the button is, never asserted alongside it.
- *  - `chat-session`: `POST /run` resolves the ref and calls `session.setModel`,
- *    so provider and model DO bind — but the session is built with no sampling
- *    binder and no system-prompt override, so those two do not. Flips to
- *    "bound" once the preset binder is installed on the chat session (the one
- *    line requested in INTEGRATION.md).
+ *  - `chat-session`: the model-preset extension applies system-prompt
+ *    replacement through Pi's provider-independent `before_agent_start` hook.
+ *    It applies hyperparameters through `before_provider_request` for the
+ *    OpenAI-shaped API-key/local groups whose payload Kady can bind exactly.
+ *    OAuth payloads remain dropped rather than guessed.
  *  - `workflow-node` / `hosted-fusion-supervised`: both transports do carry
  *    per-node provider-request controls, and both refuse to run without them —
  *    but those controls come from the node's own settings. No preset feeds
  *    them, so a preset's values would not be what arrives.
  *
- * The three non-`direct` verdicts are group-independent: none of those surfaces
- * feeds a preset's parameters for ANY group, so a group argument would be
- * decoration there.
+ * Workflow-node verdicts remain group-independent until the typed workflow
+ * model request carries a preset id. Chat is per-group because Pi gives Kady an
+ * exact binding seam for some provider APIs and not others.
  */
 const SURFACE_BINDINGS: Record<
-  Exclude<PresetBindingSurface, "direct">,
+  Exclude<PresetBindingSurface, "direct" | "chat-session">,
   PresetBinding
 > = {
-  "chat-session": {
-    hyperparameters: "dropped",
-    systemPromptOverride: "dropped",
-    reason:
-      "Chat uses this preset's provider and model, but not its sampling parameters or system-prompt override. Use Test preset to send a call that carries them.",
-  },
   "workflow-node": {
     hyperparameters: "dropped",
     systemPromptOverride: "dropped",
@@ -107,6 +103,37 @@ const SURFACE_BINDINGS: Record<
       "Hosted Fusion nodes take their sampling parameters from the node's own settings, so a preset only sets the node's provider and model.",
   },
 };
+
+const CHAT_HYPERPARAMETER_GROUPS = new Set<ProviderGroupId>([
+  "cerebras",
+  "openrouter",
+  "groq",
+  "local",
+]);
+
+function bindingForChat(groupId: ProviderGroupId): PresetBinding {
+  const group = providerGroup(groupId);
+  if (!group?.dispatchableAsChatModel) {
+    return {
+      hyperparameters: "dropped",
+      systemPromptOverride: "dropped",
+      reason: `${group?.label ?? groupId} presets describe a compute job rather than a chat model.`,
+    };
+  }
+  if (CHAT_HYPERPARAMETER_GROUPS.has(groupId)) {
+    return {
+      hyperparameters: "bound",
+      systemPromptOverride: "bound",
+    };
+  }
+  return {
+    hyperparameters: "dropped",
+    systemPromptOverride: "bound",
+    reason:
+      `${group.label} chat uses Pi's subscription transport, whose sampling payload is provider-specific. ` +
+      "Kady replaces the system prompt, but leaves this preset's hyperparameters disabled rather than guessing fields the provider may discard.",
+  };
+}
 
 export function isPresetBindingSurface(value: string): value is PresetBindingSurface {
   return (PRESET_BINDING_SURFACES as readonly string[]).includes(value);
@@ -145,6 +172,7 @@ export function presetBindingForSurface(
   groupId: ProviderGroupId,
 ): PresetBinding {
   if (surface === "direct") return bindingForDirect(groupId);
+  if (surface === "chat-session") return bindingForChat(groupId);
   return { ...SURFACE_BINDINGS[surface] };
 }
 
@@ -256,11 +284,11 @@ export function resolveModelPreset(
  * Reserved keys are never overwritten from `hyperparameters`: the payload's
  * `messages`, `model`, `tools` and `stream` belong to Pi.
  */
-export function applyPresetToProviderPayload(
+export function applyPresetHyperparametersToProviderPayload(
   payload: Record<string, unknown>,
   resolved: Pick<
     ResolvedModelPreset,
-    "hyperparameters" | "systemPromptOverride" | "parameterSupport"
+    "hyperparameters" | "parameterSupport"
   >,
 ): Record<string, unknown> {
   const next: Record<string, unknown> = { ...payload };
@@ -281,6 +309,17 @@ export function applyPresetToProviderPayload(
   if (support.seed && hyperparameters.seed !== undefined) {
     next.seed = hyperparameters.seed;
   }
+  return next;
+}
+
+export function applyPresetToProviderPayload(
+  payload: Record<string, unknown>,
+  resolved: Pick<
+    ResolvedModelPreset,
+    "hyperparameters" | "systemPromptOverride" | "parameterSupport"
+  >,
+): Record<string, unknown> {
+  const next = applyPresetHyperparametersToProviderPayload(payload, resolved);
   if (resolved.systemPromptOverride) {
     const messages = Array.isArray(payload.messages) ? [...payload.messages] : [];
     const withoutSystem = messages.filter(
@@ -297,6 +336,134 @@ export function applyPresetToProviderPayload(
     ];
   }
   return next;
+}
+
+/**
+ * Pi has already serialized the provider-specific request when this runs. The
+ * four chat groups marked hyperparameter-bound all use OpenAI-shaped payloads,
+ * but Responses and Chat Completions spell output caps and reasoning
+ * differently. Bind against the actual model API instead of writing one
+ * provider's keys into another provider's request.
+ */
+export function applyPresetToPiProviderPayload(
+  payload: Record<string, unknown>,
+  resolved: Pick<
+    ResolvedModelPreset,
+    "hyperparameters" | "parameterSupport"
+  >,
+  model: Pick<Model<Api>, "api" | "provider" | "compat">,
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...payload };
+  const hyperparameters = resolved.hyperparameters ?? {};
+  const support = resolved.parameterSupport;
+
+  if (support.temperature && hyperparameters.temperature !== undefined) {
+    next.temperature = hyperparameters.temperature;
+  }
+  if (support.topP && hyperparameters.topP !== undefined) {
+    next.top_p = hyperparameters.topP;
+  }
+  if (support.seed && hyperparameters.seed !== undefined) {
+    next.seed = hyperparameters.seed;
+  }
+  if (support.maxTokens && hyperparameters.maxTokens !== undefined) {
+    if (
+      model.api === "openai-responses" ||
+      model.api === "openai-codex-responses" ||
+      model.api === "azure-openai-responses"
+    ) {
+      next.max_output_tokens = hyperparameters.maxTokens;
+    } else if ("max_completion_tokens" in next) {
+      next.max_completion_tokens = hyperparameters.maxTokens;
+    } else {
+      next.max_tokens = hyperparameters.maxTokens;
+    }
+  }
+  if (support.reasoningEffort && hyperparameters.reasoningEffort !== undefined) {
+    if (
+      model.provider === "openrouter" ||
+      model.api === "openai-responses" ||
+      model.api === "openai-codex-responses" ||
+      model.api === "azure-openai-responses"
+    ) {
+      const current =
+        next.reasoning && typeof next.reasoning === "object" && !Array.isArray(next.reasoning)
+          ? next.reasoning as Record<string, unknown>
+          : {};
+      next.reasoning = { ...current, effort: hyperparameters.reasoningEffort };
+    } else {
+      next.reasoning_effort = hyperparameters.reasoningEffort;
+    }
+  }
+  return next;
+}
+
+const SESSION_PRESETS = new Map<string, ResolvedModelPreset>();
+
+function sessionPresetKey(projectId: string, sessionId: string): string {
+  return `${projectId}\u0000${sessionId}`;
+}
+
+/**
+ * Stash one run's resolved preset for the session extension. The run owner
+ * clears it in every terminal path, so a later run that omits a preset cannot
+ * inherit stale controls.
+ */
+export function setSessionModelPreset(
+  projectId: string,
+  sessionId: string,
+  preset: ResolvedModelPreset | null,
+): void {
+  const key = sessionPresetKey(projectId, sessionId);
+  if (preset) SESSION_PRESETS.set(key, structuredClone(preset));
+  else SESSION_PRESETS.delete(key);
+}
+
+/**
+ * Bind a chat preset at Pi's two supported seams:
+ * - `before_agent_start` replaces the effective system prompt provider-
+ *   independently;
+ * - `before_provider_request` applies hyperparameters only for a group whose
+ *   chat binding is explicitly `bound`.
+ */
+export function makeModelPresetExtension(
+  projectId: string,
+  getSessionId: () => string,
+): ExtensionFactory {
+  const activePreset = (): ResolvedModelPreset | undefined =>
+    SESSION_PRESETS.get(sessionPresetKey(projectId, getSessionId()));
+
+  return (pi) => {
+    pi.on("before_agent_start", (event) => {
+      const preset = activePreset();
+      if (!preset?.systemPromptOverride) return;
+      return { systemPrompt: preset.systemPromptOverride };
+    });
+    pi.on("before_provider_request", (event, context) => {
+      const preset = activePreset();
+      if (
+        !preset ||
+        preset.binding.hyperparameters !== "bound" ||
+        !event.payload ||
+        typeof event.payload !== "object" ||
+        Array.isArray(event.payload)
+      ) {
+        return event.payload;
+      }
+      const model = context.model;
+      if (!model) {
+        throw new ModelPresetError(
+          409,
+          `Preset "${preset.name}" could not bind its hyperparameters because the session has no selected model.`,
+        );
+      }
+      return applyPresetToPiProviderPayload(
+        event.payload as Record<string, unknown>,
+        preset,
+        model,
+      );
+    });
+  };
 }
 
 /**
@@ -317,14 +484,18 @@ export function applyPresetToProviderPayload(
  *     (`MODAL_TOKEN_ID` + `MODAL_TOKEN_SECRET`); adding a second check here
  *     would be the two-paths-to-one-service bug F12's interface calls out.
  *
- * The command is a `snapshot_download` of the preset's model. Interpolating the
- * id into a Python string literal is safe because the store accepts only
- * `org/name` over `[A-Za-z0-9._-]` — there is no quote, backslash or newline it
- * can contain — and that regex is the guard, not this comment.
+ * The request installs `huggingface_hub` into Modal's otherwise-slim default
+ * image and runs `snapshot_download` for exactly the model stored by the
+ * preset. Callers cannot replace the command: accepting an arbitrary command
+ * here would let the endpoint claim it launched one model while running code
+ * that never references it. Interpolating the id into a Python string literal
+ * is safe because the store accepts only `org/name` over
+ * `[A-Za-z0-9._-]` — there is no quote, backslash or newline it can contain —
+ * and that regex is the guard, not this comment.
  */
 export function modalJobRequestForPreset(
   preset: Pick<ModelPreset, "name" | "modal">,
-  options: { command?: string; timeoutSec?: number } = {},
+  options: { timeoutSec?: number } = {},
 ): ModalJobRequest {
   const modal = preset.modal;
   if (!modal) {
@@ -333,13 +504,12 @@ export function modalJobRequestForPreset(
       `Preset "${preset.name}" is not a Modal preset, so there is no Modal job to run.`,
     );
   }
-  const command =
-    options.command?.trim() ||
-    `python -c "from huggingface_hub import snapshot_download; snapshot_download('${modal.huggingFaceModelId}')"`;
   return {
-    command,
+    command:
+      `python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='${modal.huggingFaceModelId}')"`,
     ...(modal.instanceId ? { instance: modal.instanceId } : {}),
     gpuCount: modal.gpuCount,
+    image: { pip: ["huggingface_hub"] },
     label: `preset: ${preset.name}`,
     ...(options.timeoutSec ? { timeoutSec: options.timeoutSec } : {}),
   };

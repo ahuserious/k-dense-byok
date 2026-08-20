@@ -72,7 +72,7 @@ Every surface uses the preset's **provider and model**. Not every surface curren
 | Surface | Provider + model | Hyperparameters & system-prompt override |
 |---|---|---|
 | **Test preset** (the ▶ button in Settings) | carried | **carried on Cerebras, Groq and OpenRouter only** — see below |
-| **Chat and runs** | carried | not carried yet |
+| **Chat and runs** | carried | **both carried on Cerebras, Groq, OpenRouter and Local; system prompt only on OpenAI, Anthropic and xAI; Modal is not a chat model** |
 | **Workflow nodes** | carried | not carried — nodes use their own settings |
 | **Hosted Fusion nodes** | carried | not carried — nodes use their own settings |
 
@@ -93,7 +93,10 @@ every `resolve` call as a `binding` block, and on `GET /model-presets` as `bindi
 offers you a preset can enforce the same rule without re-deriving it.
 
 Use **Test preset** to see exactly what Kady sends: the result names the address, the model id and the sampling values
-that went on the wire.
+that went on the wire. On chat, Kady replaces the turn's effective system prompt through Pi's
+`before_agent_start` hook. It applies hyperparameters after Pi serializes an OpenAI-shaped provider request; OAuth
+sampling remains disabled because those transports have provider-specific constraints that the group-level preset
+editor cannot safely guess.
 
 ---
 
@@ -147,7 +150,7 @@ On `PATCH`, an **absent** key means "leave this as it is" and an explicit **`nul
 | `DELETE` | `/model-presets/:id` | — | `{ ok: true }` |
 | `POST` | `/model-presets/:id/resolve` | `{ surface? }` | the resolved preset + `binding` + `bindingBySurface` |
 | `POST` | `/model-presets/:id/test` | `{ prompt? }` | the outbound request, the status, and the reply |
-| `POST` | `/model-presets/:id/modal-job` | `{ command? }` | the created Modal job's id, state and request (202) |
+| `POST` | `/model-presets/:id/modal-job` | no body | the created Modal job's id, state and prepared request (202) |
 
 `surface` is one of `direct`, `chat-session`, `workflow-node`, `hosted-fusion-supervised`; it defaults to `direct`.
 

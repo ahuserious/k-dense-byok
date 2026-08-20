@@ -115,8 +115,8 @@ describe("row 3 — the preset section covers all eight provider groups", () => 
     expect(body.bindingsByGroup.anthropic.direct.hyperparameters).toBe("dropped");
     expect(body.bindingsByGroup.anthropic.direct.reason).toBeTruthy();
     expect(body.bindingsByGroup.local.direct.hyperparameters).toBe("dropped");
-    expect(body.bindingsByGroup.groq["chat-session"].hyperparameters).toBe("dropped");
-    expect(body.bindingsByGroup.groq["chat-session"].reason).toBeTruthy();
+    expect(body.bindingsByGroup.groq["chat-session"].hyperparameters).toBe("bound");
+    expect(body.bindingsByGroup.groq["chat-session"].systemPromptOverride).toBe("bound");
   });
 
   it("creates, updates, lists and deletes a preset, persisting it", async () => {
@@ -386,8 +386,9 @@ describe("resolve fails closed", () => {
     expect(resolved.hyperparameters.temperature).toBe(0.25);
     expect(resolved.systemPromptOverride).toBe("Be terse.");
     expect(resolved.surface).toBe("chat-session");
-    expect(resolved.binding.hyperparameters).toBe("dropped");
-    expect(resolved.binding.reason).toBeTruthy();
+    expect(resolved.binding.hyperparameters).toBe("bound");
+    expect(resolved.binding.systemPromptOverride).toBe("bound");
+    expect(resolved.binding.reason).toBeUndefined();
     expect(resolved.bindingBySurface.direct.hyperparameters).toBe("bound");
     expect(response.body).not.toContain("test-only-groq-key");
   });
@@ -539,6 +540,35 @@ describe("THE RESOLUTION RULE — a selected preset resolves to its provider and
       const resolved = resolveModel(`${MODEL_PRESET_REF_PREFIX}${id}`, registry);
       expect(resolved.provider).toBe("ollama");
       expect(resolved.id).toBe("llama3");
+    } finally {
+      if (previous === undefined) delete process.env.KADY_MODEL_PRESETS_FILE;
+      else process.env.KADY_MODEL_PRESETS_FILE = previous;
+    }
+  });
+
+  it("refuses a Modal preset before the generic chat resolver can reinterpret it as OpenRouter", async () => {
+    const app = await buildApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/model-presets",
+      payload: {
+        name: "Weights",
+        providerId: "modal",
+        modelId: "meta-llama/Llama-3.3-70B-Instruct",
+        modal: {
+          huggingFaceModelId: "meta-llama/Llama-3.3-70B-Instruct",
+          gpuCount: 1,
+        },
+      },
+    });
+    const { id } = created.json() as { id: string };
+
+    const previous = process.env.KADY_MODEL_PRESETS_FILE;
+    process.env.KADY_MODEL_PRESETS_FILE = storeFile;
+    try {
+      expect(() => resolveModel(`${MODEL_PRESET_REF_PREFIX}${id}`, registry)).toThrow(
+        /compute job, not a chat model/,
+      );
     } finally {
       if (previous === undefined) delete process.env.KADY_MODEL_PRESETS_FILE;
       else process.env.KADY_MODEL_PRESETS_FILE = previous;
@@ -760,11 +790,48 @@ describe("row 6 — a Modal preset's HF model and GPU count reach the Modal job 
     expect(request.instance).toBe("h100");
     // The Hugging Face model id is what the job actually loads.
     expect(String(request.command)).toContain("meta-llama/Llama-3.3-70B-Instruct");
+    // Modal's default image is python:3.13-slim; prepare the dependency the
+    // command imports instead of submitting a job that fails immediately.
+    expect(request.image).toEqual({ pip: ["huggingface_hub"] });
     expect(response.json()).toMatchObject({
       jobId: "job_1",
       huggingFaceModelId: "meta-llama/Llama-3.3-70B-Instruct",
-      request: { gpuCount: 4, instance: "h100" },
+      request: {
+        gpuCount: 4,
+        instance: "h100",
+        image: { pip: ["huggingface_hub"] },
+      },
     });
+  });
+
+  it("does not let a request body replace the model-loading command", async () => {
+    vi.stubEnv("MODAL_TOKEN_ID", "test-only-modal-id");
+    vi.stubEnv("MODAL_TOKEN_SECRET", "test-only-modal-secret");
+    const submit = vi.fn();
+    const app = await buildApp({ submitModalJob: submit as never });
+    const created = await app.inject({
+      method: "POST",
+      url: "/model-presets",
+      payload: {
+        name: "Weights",
+        providerId: "modal",
+        modelId: "org/name",
+        modal: { huggingFaceModelId: "org/name", gpuCount: 1 },
+      },
+    });
+    const { id } = created.json() as { id: string };
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/model-presets/${id}/modal-job`,
+      payload: { command: "python -c 'print(1)'" },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect((response.json() as { detail: string }).detail).toContain(
+      "custom commands are not accepted",
+    );
+    expect(submit).not.toHaveBeenCalled();
   });
 
   it("makes no Modal call at all when Modal is not configured", async () => {

@@ -493,9 +493,6 @@ function PresetBindingNotice({
     { surface: "workflow-node", label: "Workflow nodes" },
     { surface: "hosted-fusion-supervised", label: "Hosted Fusion nodes" },
   ];
-  const anyGroupId = groups[0]?.id;
-  const table =
-    (anyGroupId ? bindingsByGroup[anyGroupId] : undefined) ?? EMPTY_BINDING_TABLE;
   const carrying = groups
     .filter((group) => bindingsByGroup[group.id]?.direct.hyperparameters === "bound")
     .map((group) => group.label);
@@ -519,18 +516,39 @@ function PresetBindingNotice({
           </dd>
         </div>
         {rows.map(({ surface, label }) => {
-          const binding = table[surface];
-          const carried =
-            binding.hyperparameters === "bound" &&
-            binding.systemPromptOverride === "bound";
+          const fullyCarried = groups.filter((group) => {
+            const binding = bindingsByGroup[group.id]?.[surface];
+            return (
+              binding?.hyperparameters === "bound" &&
+              binding.systemPromptOverride === "bound"
+            );
+          });
+          const promptOnly = groups.filter((group) => {
+            const binding = bindingsByGroup[group.id]?.[surface];
+            return (
+              binding?.hyperparameters !== "bound" &&
+              binding?.systemPromptOverride === "bound"
+            );
+          });
+          const firstBinding =
+            (groups[0] ? bindingsByGroup[groups[0].id]?.[surface] : undefined) ??
+            EMPTY_BINDING_TABLE[surface];
           return (
             <div key={surface} className="flex gap-2">
               <dt className="w-36 shrink-0 font-medium">{label}</dt>
               <dd className="text-muted-foreground">
                 <span className="font-medium text-foreground">
-                  {carried ? "Carried" : "Not carried"}
+                  {fullyCarried.length > 0
+                    ? `Carried on ${fullyCarried.map((group) => group.label).join(", ")}`
+                    : "Not carried"}
                 </span>
-                {binding.reason ? ` — ${binding.reason}` : ""}
+                {promptOnly.length > 0
+                  ? ` — system prompt only on ${promptOnly
+                      .map((group) => group.label)
+                      .join(", ")}.`
+                  : fullyCarried.length === 0 && firstBinding.reason
+                    ? ` — ${firstBinding.reason}`
+                    : ""}
               </dd>
             </div>
           );

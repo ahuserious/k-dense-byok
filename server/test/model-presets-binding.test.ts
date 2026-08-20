@@ -10,9 +10,12 @@ import {
   providerGroup,
 } from "../src/agent/providers/registry.ts";
 import {
+  applyPresetToPiProviderPayload,
   applyPresetToProviderPayload,
+  makeModelPresetExtension,
   presetBindingBySurface,
   presetBindingForSurface,
+  setSessionModelPreset,
 } from "../src/agent/model-presets.ts";
 
 /**
@@ -220,6 +223,100 @@ describe("the Pi payload binder replaces rather than appends", () => {
   });
 });
 
+describe("the chat-session extension binds one run and clears cleanly", () => {
+  it("replaces the turn system prompt and maps OpenRouter controls onto the provider payload", async () => {
+    const handlers = new Map<string, (event: any, context: any) => unknown>();
+    const extension = makeModelPresetExtension("project", () => "session");
+    extension({
+      on: (event: string, handler: (event: any, context: any) => unknown) => {
+        handlers.set(event, handler);
+      },
+    } as never);
+    setSessionModelPreset("project", "session", {
+      presetId: "mp_1",
+      name: "Careful",
+      ref: "openrouter/openai/gpt-5.6-sol-pro",
+      providerId: "openrouter",
+      modelId: "openai/gpt-5.6-sol-pro",
+      hyperparameters: {
+        temperature: 0.2,
+        topP: 0.9,
+        maxTokens: 700,
+        reasoningEffort: "xhigh",
+        seed: 7,
+      },
+      systemPromptOverride: "Use only verified evidence.",
+      parameterSupport: providerGroup("openrouter")!.parameterSupport,
+      surface: "chat-session",
+      binding: presetBindingForSurface("chat-session", "openrouter"),
+      bindingBySurface: presetBindingBySurface("openrouter"),
+    });
+
+    try {
+      const startResult = await handlers.get("before_agent_start")!(
+        { systemPrompt: "Kady default" },
+        {},
+      );
+      expect(startResult).toEqual({ systemPrompt: "Use only verified evidence." });
+
+      const providerResult = await handlers.get("before_provider_request")!(
+        {
+          payload: {
+            model: "openai/gpt-5.6-sol-pro",
+            messages: [{ role: "user", content: "hello" }],
+            max_tokens: 8_192,
+          },
+        },
+        {
+          model: {
+            ...modelFor(
+              "openrouter",
+              "openai/gpt-5.6-sol-pro",
+              "https://openrouter.ai/api/v1",
+            ),
+            compat: { thinkingFormat: "openrouter" },
+          },
+        },
+      ) as Record<string, unknown>;
+      expect(providerResult).toMatchObject({
+        temperature: 0.2,
+        top_p: 0.9,
+        max_tokens: 700,
+        seed: 7,
+        reasoning: { effort: "xhigh" },
+      });
+    } finally {
+      setSessionModelPreset("project", "session", null);
+    }
+
+    const passThrough = { model: "openai/gpt-5.6-sol-pro" };
+    expect(
+      await handlers.get("before_provider_request")!(
+        { payload: passThrough },
+        { model: GROQ_MODEL },
+      ),
+    ).toBe(passThrough);
+  });
+
+  it("maps Responses output caps without emitting a Chat Completions max_tokens key", () => {
+    const bound = applyPresetToPiProviderPayload(
+      { model: "gpt-5.6-sol-pro", max_output_tokens: 8_192 },
+      {
+        hyperparameters: { maxTokens: 512, reasoningEffort: "high" },
+        parameterSupport: providerGroup("openai")!.parameterSupport,
+      },
+      {
+        api: "openai-codex-responses",
+        provider: "openai-codex",
+        compat: undefined,
+      },
+    );
+    expect(bound.max_output_tokens).toBe(512);
+    expect(bound).not.toHaveProperty("max_tokens");
+    expect(bound.reasoning).toEqual({ effort: "high" });
+  });
+});
+
 describe("the binding block tells the truth about each surface", () => {
   it("reports direct as bound ONLY for the groups Kady can build the call for", () => {
     // The three API-key, OpenAI-shaped groups. Kady builds this request itself,
@@ -258,10 +355,27 @@ describe("the binding block tells the truth about each surface", () => {
     }
   });
 
-  it("reports every other surface as dropped, each with a reason", () => {
+  it("reports chat bindings per group from the installed Pi extension", () => {
+    const openRouter = presetBindingForSurface("chat-session", "openrouter");
+    expect(openRouter).toEqual({
+      hyperparameters: "bound",
+      systemPromptOverride: "bound",
+    });
+
+    const anthropic = presetBindingForSurface("chat-session", "anthropic");
+    expect(anthropic.hyperparameters).toBe("dropped");
+    expect(anthropic.systemPromptOverride).toBe("bound");
+    expect(anthropic.reason).toMatch(/subscription transport/);
+
+    const modal = presetBindingForSurface("chat-session", "modal");
+    expect(modal.hyperparameters).toBe("dropped");
+    expect(modal.systemPromptOverride).toBe("dropped");
+    expect(modal.reason).toMatch(/compute job/);
+  });
+
+  it("reports the still-unwired typed-workflow surfaces as dropped, each with a reason", () => {
     const bindings = presetBindingBySurface("groq");
     for (const surface of [
-      "chat-session",
       "workflow-node",
       "hosted-fusion-supervised",
     ] as const) {

@@ -1,6 +1,7 @@
 import { renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useModels } from "./use-models";
+import { modelUsesBillableBudget } from "@/components/model-selector";
+import { presetBillingMode, useModels } from "./use-models";
 
 /**
  * The picker's view of the two new API-key providers and of saved presets.
@@ -166,6 +167,7 @@ describe("useModels — Groq, Cerebras and saved presets", () => {
     expect(preset.label).toBe("Fast summariser");
     expect(preset.sourceId).toBe("model-presets");
     expect(preset.available).toBe(true);
+    expect(preset.billingMode).toBe("payg");
     // The row states what it resolves to and what it will and will not carry.
     expect(preset.description).toContain("groq/llama-3.3-70b-versatile");
     expect(preset.description).toContain("temp 0.2");
@@ -180,5 +182,27 @@ describe("useModels — Groq, Cerebras and saved presets", () => {
 
     await waitFor(() => expect(result.current.presetModels).toHaveLength(1));
     expect(result.current.presetModels[0].available).toBe(false);
+  });
+
+  it("classifies local and subscription presets like their resolved providers at the spend cap", () => {
+    const localMode = presetBillingMode("local");
+    const openAiMode = presetBillingMode("openai");
+    const anthropicMode = presetBillingMode("anthropic");
+
+    expect(localMode).toBe("local");
+    expect(openAiMode).toBe("subscription");
+    expect(anthropicMode).toBe("metered_oauth");
+    expect(
+      modelUsesBillableBudget({ id: "preset/local", billingMode: localMode }),
+    ).toBe(false);
+    expect(
+      modelUsesBillableBudget({ id: "preset/openai", billingMode: openAiMode }),
+    ).toBe(false);
+    expect(
+      modelUsesBillableBudget({
+        id: "preset/anthropic",
+        billingMode: anthropicMode,
+      }),
+    ).toBe(true);
   });
 });

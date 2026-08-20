@@ -116,7 +116,10 @@ test.describe("Settings ▸ Model providers ▸ Model presets", () => {
     // OpenAI-shaped groups and cannot build it for the OAuth, Local or Modal
     // ones — so the summary names the groups it does carry rather than
     // asserting one global "Carried" over eight different answers.
-    await expect(section.getByText(/Carried on .*Groq/)).toBeVisible();
+    await expect(section.getByText(/Carried on .*Groq/).first()).toBeVisible();
+    await expect(
+      section.getByText(/system prompt only on OpenAI, Anthropic, xAI/),
+    ).toBeVisible();
     await expect(section.getByText("Not carried", { exact: true }).first()).toBeVisible();
 
     // The per-group verdict, rendered inside each group's own card. This is

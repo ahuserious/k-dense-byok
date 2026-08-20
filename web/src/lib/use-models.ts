@@ -20,6 +20,7 @@ import {
   fetchModelPresets,
   presetSelectorId,
   type ModelPreset,
+  type ProviderGroupId,
   type ProviderGroupStatus,
 } from "@/lib/model-presets";
 
@@ -64,6 +65,34 @@ const API_KEY_PROVIDERS = [
 type ApiKeyProviderId = (typeof API_KEY_PROVIDERS)[number]["id"];
 
 export type ModelAvailability = "checking" | "available" | "unavailable";
+
+/**
+ * Keep a synthetic preset entry's spend-cap behavior identical to the provider
+ * it resolves to. Hard-coding every preset to `payg` made local and
+ * subscription-backed presets unusable after the project cap was reached even
+ * though selecting the same underlying model directly remained allowed.
+ */
+const PRESET_BILLING_MODE: Record<
+  ProviderGroupId,
+  NonNullable<Model["billingMode"]>
+> = {
+  cerebras: "payg",
+  openai: "subscription",
+  openrouter: "payg",
+  anthropic: "metered_oauth",
+  groq: "payg",
+  xai: "subscription",
+  local: "local",
+  // Modal presets are filtered out of the chat-model list. Keep the remote
+  // compute classification conservative if that invariant is ever relaxed.
+  modal: "payg",
+};
+
+export function presetBillingMode(
+  providerId: ProviderGroupId,
+): NonNullable<Model["billingMode"]> {
+  return PRESET_BILLING_MODE[providerId];
+}
 
 interface ProviderDiscovery {
   providers: ModelProviderStatus[];
@@ -685,10 +714,10 @@ export function useModels(): UseModelsReturn {
         modality: "text->text",
         description:
           `${preset.ref}${parts.length > 0 ? ` · ${parts.join(" · ")}` : ""}` +
-          "\nChat uses this preset's provider and model; its parameters are carried by Test preset in Settings.",
+          "\nChat uses this preset's provider and model. Settings shows which controls its provider carries on chat and test calls.",
         sourceId: "model-presets",
         sourceLabel: "Model presets",
-        billingMode: "payg",
+        billingMode: presetBillingMode(preset.providerId),
         reasoning: false,
         available: group ? group.configured : false,
       });

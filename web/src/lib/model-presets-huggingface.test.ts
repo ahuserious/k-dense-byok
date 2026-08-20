@@ -5,8 +5,9 @@ import {
 } from "@/lib/model-presets-huggingface";
 
 /**
- * The Hugging Face chooser's client, written against lane F12's FINAL wire
- * contract rather than against their module (which lives on their branch).
+ * The Hugging Face chooser's state adapter over F12's shared integration
+ * client. These tests pin the editor-specific states while the actual request
+ * shape remains owned in `web/src/lib/integrations.ts`.
  *
  * The assertions that matter are the fail-closed ones: a 503 NOT_CONFIGURED and
  * a 404 both resolve to a state the editor renders as a DISABLED control with a
@@ -39,9 +40,10 @@ describe("Hugging Face model search", () => {
     await searchHuggingFaceModels("llama 3", 5);
 
     const [url] = fetchMock.mock.calls[0];
-    expect(String(url)).toContain("/integrations/huggingface/models");
-    expect(String(url)).toContain("search=llama%203");
-    expect(String(url)).toContain("limit=5");
+    const parsed = new URL(String(url));
+    expect(parsed.pathname).toBe("/integrations/huggingface/models");
+    expect(parsed.searchParams.get("search")).toBe("llama 3");
+    expect(parsed.searchParams.get("limit")).toBe("5");
   });
 
   it("makes NO request at all for an empty query", async () => {
@@ -69,7 +71,7 @@ describe("Hugging Face model search", () => {
   });
 
   it("reports an absent route honestly rather than as a Hugging Face outage", async () => {
-    // The state in this clone until lane F12 merges.
+    // A stale deployment without the integrated route still fails honestly.
     fetchMock.mockResolvedValue(new Response("Not Found", { status: 404 }));
 
     const result = await searchHuggingFaceModels("llama");

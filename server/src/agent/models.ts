@@ -32,6 +32,7 @@ import {
   MODEL_PRESET_REF_PREFIX,
   presetForSelectorRef,
 } from "./model-presets-store.ts";
+import { providerGroup } from "./providers/registry.ts";
 
 // OpenRouter's base URL. Overridable via OPENROUTER_BASE_URL so the
 // OpenAI-compatible provider can point at any compatible gateway — e.g.
@@ -522,6 +523,12 @@ export function resolveModel(
     if (preset.ref.startsWith(MODEL_PRESET_REF_PREFIX)) {
       throw new ModelResolutionError(
         `Model preset "${preset.name}" points at another preset, which Kady cannot dispatch.`,
+      );
+    }
+    const group = providerGroup(preset.providerId);
+    if (!group?.dispatchableAsChatModel) {
+      throw new ModelResolutionError(
+        `Model preset "${preset.name}" describes a ${group?.label ?? preset.providerId} compute job, not a chat model. Run it from Model presets instead.`,
       );
     }
     return resolveModel(preset.ref, registry, fusionConfig);
