@@ -66,6 +66,56 @@ applied, and an optional field under `additionalProperties: false` is not free �
 a document written with it is a document an older server rejects as CORRUPT on
 read.
 
+### Node kinds, and what lane F5 is authorised to add (2026-08-19)
+
+Node **kinds** are outside the frozen `settings` surface — `WorkflowNodeSchema` is a union of per-kind
+objects, and `NodeSpecV1Schema` is one optional property inside each of them. `freeze-check.sh` does not
+read the union. They are recorded here anyway, before the lane that changes them, for the same reason the
+W3 fields above are: the boundary is easy to misread, and a reader who finds a kind in the schema and not
+in the contract cannot tell which of the two is wrong.
+
+**Kinds that exist today** (`server/src/workflows/schema.ts`, union at `:520`): `agent`,
+`research-until-goal`, `council`, `fusion`, `prompt-optimization`, `best-of-n`, `evidence-gate`, `lean4`.
+Matrix rows 27, 28, 31, 32 and 33 are asking for kinds this list already contains — **lane F5 delivers the
+mapping from the owner's vocabulary to these kinds, not a second implementation of any of them.** A
+duplicate kind alongside an existing one is rejected at review.
+
+**Kinds lane F5 is authorised to add** (specification ahead of implementation):
+
+| Kind | Row | What it is |
+| --- | --- | --- |
+| `elevate-to-dag` | 26 | Takes a prompt and emits a durable DAG definition that validates against this contract and saves. **One implementation, three entry points** — the chat panel (row 17, lane F9) and the skill (row 43, lane F11) call F5's engine and API; they do not each build an elevator. |
+| `hypothesis` | 34 | Generates n hypotheses with matched nulls, runs them, and produces the terminal analysis artifact. |
+| `reasoning-style` | 35 | Selects which personas a downstream council instantiates: auto (best fit of n scientists), manual, or from an InfraNodus map. The InfraNodus source is an external service and is gated behind explicit configuration, failing closed when unset (#44/#57/#64). |
+| `formatted-output` | 36 | Constrains and validates the shape of a node's actual output. |
+| `workflow-ref` | 19 | A saved workflow embedded as a node: `workflowId`, optional `expectedRevision`, plus `CommonNodeProperties`. Authorised on 2026-08-19 after lane F6 measured that row 19's Gate B is unreachable today — every object in the schema is closed (`additionalProperties: false`, 43 occurrences), the only provenance slot `meta.compositeOf` is documented as outside validation semantics, and `server/src/workflows/store.ts:2427` `structuredClone`s the definition graph into the run manifest with **no expansion pass**, so a reference would resolve to nothing. The kind is therefore only half the change: F5 also expands every `workflow-ref` at manifest build, namespacing the embedded node ids, stamping each expanded node's `meta.compositeOf` with the source id and its `graphSha256`, and refusing a reference chain that reaches the referencing workflow. Resolving at manifest build is what makes it resolve "at run time" while leaving the executor unchanged and the run reproducible from its own manifest. Evidence: `s11/wave-f/requests/c-f6-4.md`. |
+
+**Existing kinds lane F5 is authorised to extend:**
+
+| Kind | Change | Row |
+| --- | --- | --- |
+| `council` | A **`fuser`** role. `CouncilNodeSchema` (`:413`) has `members` (2-16), `chair`, `rounds` (1-20) and `preserveMinorityReports` — a chair and members, two roles against the three the owner asked for. The owner's default is **4 heads + 1 neutral judge + 1 fuser**. F5 either adds the role to the schema or maps judge→`chair` plus a downstream `fusion` node, and **records which in `docs/adr/F5-council-roles.md`**. Both directions are authorised here; exactly one may land, and this table is corrected to match at merge. | 29 |
+| `council` | Head auto-selection by workflow type, and judge-initiated **recruitment** of additional heads on detecting a blind spot: a bounded `maxRecruits` that respects the effective `maxSubagents` and is observable in RunState v1 (see `RUNSTATE-V1.md`). Recruitment must not let a node exceed the subagent bound it was admitted under. | 30 |
+| `evidence-gate` | A **council evaluator** alongside the single-LLM `evaluator` (`:493`), so "verification style" is LLM *or* LLM council and the council one actually runs a council. | 31 |
+| `best-of-n` | No schema change is authorised. It already executes (`candidateCount` 2-16, `candidateModels`, `evaluator`); the missing half is the visualisation, which is lane F6's. F5 publishes the run-state fields that visualisation reads. | 33 |
+| `rescue` (`RescuePolicySchema`, `:268`) | No new field is authorised without a further contract commit. F5 audits what of `enabled` / `maxAttempts` / `triggers` is not reachable and exposes it; both branches (retry n, and supervisor-fixes-the-DAG) are proven with an induced failure. | 32 |
+
+**Best-of-n candidate concurrency is a runtime question, not a contract one, and it must be answered
+either way.** Row 33 says the graph view renders the n-way split as n *parallel* branches; lane F6 measured
+that `kady-node-executor.ts:2862-2872` awaits inside the `for`, so candidate *k+1* is not even declared until
+candidate *k* resolves. F5 decides: make it bounded-concurrent (keeping the `candidate-${index}` slot ids
+stable, and only if `run-state.ts` slot accounting and `supervised-budget.ts` admit concurrent declaration —
+`run-state.ts:1631-1650` fatals on a duplicate slot but imposes no ordering for this kind, unlike
+`research-until-goal` at `:1640`), or leave it sequential and publish "n branches, resolved in sequence" so
+no lane builds a visualisation against a promise the runtime does not keep. Whichever it is goes in
+`$W/interfaces/F5-palette-mapping.md` and in the evidence file. Evidence: `s11/wave-f/requests/c-f6-5.md`.
+
+**`graphSha256` and the new fields.** `graphSha256 = sha256(canonicalJson(document))` and the canonicaliser
+strips nothing, so every field F5 adds is inside the content address. All of them are **content-derived and
+hash-stable**: they carry authored configuration, not timestamps, run ids or counters, so a retried save of
+the same logical document hashes identically. Whether `meta`/`provenance` — or anything else — *should* be
+inside that address is an owner decision (§12.4 of the wave brief) and is **not** decided here or by F5.
+
 ## Enforcement status
 
 `BOUND` means the current production runtime consumes the field. `FAIL-CLOSED(unit)`
@@ -84,12 +134,12 @@ values until that Wave B unit binds the field.
 | Prompt optimization cumulative envelope | BOUND — one deadline, token cap, and cost cap spans interview plus every iteration; each synthetic deliberation receives only its remaining bounded share and inherits resolved NodeSpec/rescue/evidence policy |
 | Prompt optimization evidence policy | FAIL-CLOSED(S6) — node overrides or enabled workflow evidence are rejected before provider calls pending full evaluator support |
 | Prompt optimization `artifactId` / artifact v1 | BOUND — the graph-declared owned path is a namespace; the host atomically writes a unique run+node+attempt child path and returns a checksummed runner-normalized receipt containing original prompt, iterations, winner, rationale, and cumulative usage |
-| `hyperparameters.temperature` | PARTIAL — bound for Pi-delegated nodes (the trusted child extension stamps it onto `before_provider_request`); **not** bound for hosted OpenRouter Fusion on the production supervised transport, where the request carries no node-control bindings and the value is silently dropped (see "Known production gaps") |
-| `hyperparameters.top_p` | PARTIAL — same as `temperature` |
-| `hyperparameters.sampling` | PARTIAL — bound for Pi-delegated nodes, non-reserved keys only (reserved keys fail validation); same hosted-Fusion gap |
+| `hyperparameters.temperature` | BOUND — for Pi-delegated nodes the trusted child extension stamps it onto `before_provider_request`; for hosted OpenRouter Fusion the serialized supervised request now carries the whole `nodeControl` binding object and the coordinator binds `providerRequest` onto the session, refusing a request that arrives without it (`c988bf0`, #54). Both transports fail closed rather than falling back to provider defaults |
+| `hyperparameters.top_p` | BOUND — same as `temperature` |
+| `hyperparameters.sampling` | BOUND — non-reserved keys only (reserved keys fail validation), on both transports as for `temperature` |
 | `conditions.when` | BOUND — pre-admission boolean evaluator |
 | `conditions.exists` | BOUND — sandbox-safe path/named-input gate |
-| `harness` | NOT BOUND in production — the supervised transport dispatches Pi unconditionally and never reads the field. `dispatchWorkflowHarness`'s unavailable/unbound CLI errors exist but are reachable only through the in-process executor defaults used by tests. A non-`pi` value currently surfaces as a child-side envelope rejection *after* admission and budget reservation (see "Known production gaps") |
+| `harness` | PARTIAL — a real dispatch **decision** now happens on both transports before budget reservation: `assertWorkflowHarnessAdapterBound` is shared by the in-process `dispatchWorkflowHarness` and by the supervised client's `getDelegationSession` override (`c988bf0`, #55/#68/#45), so a non-`pi` harness is refused with `WORKFLOW_HARNESS_NOT_INSTALLED` / `WORKFLOW_HARNESS_NOT_BOUND` instead of quietly buying a Pi child. What is still missing is a *second adapter*: `pi` remains the only harness with one, so no value of this field yet selects a different runtime, and a node whose call ceiling is served entirely by hosted Fusion requests no delegation session at all and so never reaches the decision. **Lane F2 is authorised to close both** — see "Harness registry" below |
 | `databases` | BOUND as provider-visible context text only — refs are resolved against the catalogue and serialised into the child prompt. It grants no network, mount, or credential; it is not a capability gate |
 | `skills.mode` | BOUND — Pi child skill selection |
 | `skills.list` | BOUND — Pi child skill selection |
@@ -103,7 +153,7 @@ values until that Wave B unit binds the field.
 | `budget.maxTokens` | BOUND — budget admission in the Kady runtime and at the pipelines host gate; the vendored engine normalises but never reads it |
 | `budget.maxCostUsd` | BOUND — budget admission |
 | Workflow `settings.version` | BOUND — schema discriminator |
-| Workflow `settings.defaultHarness` | NOT BOUND in production — inheritance resolves correctly, but the inherited value reaches no dispatch decision on the supervised transport, exactly as with `harness` |
+| Workflow `settings.defaultHarness` | PARTIAL — inheritance resolves correctly and the inherited value now reaches the same shared dispatch decision as `harness`, with the same missing-second-adapter and hosted-Fusion-only limitations. Lane F2 is authorised to close both |
 | Workflow `settings.databases` | BOUND as provider-visible context text only, unioned with each node's own list; advisory in the same way as `databases` |
 
 ## Per-node fields
@@ -118,7 +168,7 @@ values until that Wave B unit binds the field.
 | `hyperparameters.sampling` | Extensible sampling map merged into the child provider payload. The keys `messages`, `model`, `tools`, `stream`, `max_tokens`, `temperature`, and `top_p` are reserved and rejected at validation; same hosted-Fusion gap. |
 | `conditions.when` | Optional boolean pre-admission condition, evaluated without eval or shell expansion. Accepts `true`/`false` or one boolean reference (`inputs.*`, `variables.*`, `run.*`, `inbound.<nodeId>.*`, `attempt`, `resumed`), optionally negated with `!` or `not`. A missing or non-boolean reference fails closed before any model slot, receipt, or reservation. |
 | `conditions.exists` | Sandbox-relative paths or named inputs (`input:name` / `inputs.name`) that must exist before admission. Paths are realpath-confined to the project sandbox; absolute, `..`-bearing, or NUL-bearing entries are rejected at validation. |
-| `harness` | CLI selection. `pi` is the only harness with a delegation adapter. On the production supervised transport the value is currently not consulted at dispatch, so a non-`pi` value fails late inside the child rather than at harness selection — see the enforcement-status note and "Known production gaps". |
+| `harness` | CLI selection, from the frozen `HarnessSchema` union. `pi` is today the only harness with a trusted delegation adapter; every other value reaches the shared adapter decision before budget reservation and fails closed there with an explicit discovery diagnostic. The full literal set, what each names, and what lane F2 is authorised to add are in "Harness registry" below. |
 | `databases` | Per-node database references, unioned with the workflow-level list, resolved against the database catalogue and delivered to the child as execution-context data. Advisory: no tool, network, or credential is gated on it. |
 | `skills.mode` | `auto` delegates the installed skill set, `manual` delegates only the authored list, `auto-manual` delegates their union. The result is the child delegation request's skill selection. |
 | `skills.list` | Explicit skill refs used by `manual` and `auto-manual` modes; they become part of the child's skill selection. |
@@ -142,26 +192,106 @@ The optional root `settings` object uses `WorkflowSettingsV1Schema`.
 | `defaultHarness` | Workflow-wide harness default; a node's own `harness` wins. Subject to the same production dispatch gap as `harness`. |
 | `databases` | Workflow-wide database references, unioned with each node's own list; advisory in the same way. |
 
-## Known production gaps (2026-08-18)
+## Harness registry (specification ahead of implementation — authorising lane F2)
+
+`HarnessSchema` (`server/src/workflows/schema.ts`) is inside the frozen surface: it is the type of
+`settings.harness` and of workflow `settings.defaultHarness`. Every literal it carries must be described
+here, and this section is written **before** the lane that adds the last three — the document leads
+(`docs/adr/S11-contract-freeze-mechanism.md`). Rows marked *authorised, not yet in the schema* are a
+specification awaiting implementation; that is the harmless direction, and this is the section that says so.
+
+`server/src/workflows/supervisor/protocol.ts` carries a second copy of this list (`WORKFLOW_HARNESSES`)
+because the supervised node-control envelope is validated on the wire without importing the TypeBox
+schema. The two lists are one contract with two spellings and must move together. A literal in one and
+not the other is the same defect class this freeze exists to prevent, one file over.
+
+| Literal | Names | Adapter state |
+| --- | --- | --- |
+| `pi` | The vendored `pi-subagents` delegation runtime — the default, and the harness the node-control envelope targets (`parsed.harness !== "pi"` is a child-side rejection). | **BOUND.** The only harness with a trusted delegation adapter on either transport. |
+| `claude-code` | The Claude Code CLI, resolved through the vendored engine's existing discovery (`server/vendor/pipeline-engine/packages/providers/src/claude/binary-resolver.ts` → `pathToClaudeCodeExecutable`, consumed at `providers/src/claude/provider.ts:513`). Executable candidates today: `claude`. | Pre-existing literal, no adapter. **Authorised for F2:** a relay adapter reached through the vendored resolver, never a second discovery implementation. |
+| `codex` | The Codex CLI. Executable candidates: `codex`. | Pre-existing literal, no adapter; fails closed at the decision. |
+| `opencode` | The OpenCode CLI. Executable candidates: `opencode`. | Pre-existing literal, no adapter; fails closed at the decision. |
+| `copilot` | The GitHub Copilot CLI. Executable candidates: `github-copilot`, `copilot`. | Pre-existing literal, no adapter; fails closed at the decision. |
+| `deepseek` | The DeepSeek CLI (matrix row 11). | *Authorised, not yet in the schema.* Lane F2 adds the literal to `HarnessSchema` and to `WORKFLOW_HARNESSES`, with its executable candidates registered alongside the existing four. |
+| `grok-cli` | The Grok CLI (matrix row 12). | *Authorised, not yet in the schema.* As above. |
+| `oh-my-pi` | The oh-my-pi harness (matrix row 13). | *Authorised, not yet in the schema.* As above. |
+
+### What BOUND will mean for `harness` and `defaultHarness` once F2 lands
+
+The bar is behavioural and is deliberately stricter than "the schema accepts the literal", because that
+is exactly what shipped last time and reached no dispatch decision (#55/#68/#45):
+
+1. **The dispatch decision is on the supervised transport.** `server/src/index.ts` boots the
+   out-of-process supervisor on every real server start, so the in-process executor defaults are a test
+   path, not production. Evidence for this field must come from the booted-server seam
+   (`WorkflowSupervisorClient.nodeExecutorDependencies().getDelegationSession`), not from the in-process
+   default.
+2. **A node declaring `harness: "grok-cli"` selects the grok-cli adapter**, and a server test asserts on
+   *which adapter the dispatch selected* — the resolved harness, its resolved executable, and the fact
+   that the Pi factory was not called. A test that only proves validation accepts the literal does not
+   satisfy this contract.
+3. **A harness with no adapter on this machine still fails closed**, before admission and before budget
+   reservation, with `WORKFLOW_HARNESS_NOT_INSTALLED` or `WORKFLOW_HARNESS_NOT_BOUND` and a message that
+   names the user's next action without leaking a filesystem path.
+4. **`claude-code` resolves through the vendored resolver.** The resolved path, and any user override of
+   it, are exposed to the web layer through a server endpoint under `server/src/api/harness*.ts`; an
+   unresolvable path yields a legible not-found state, never a silent fallback. The Settings surface that
+   consumes it belongs to lane F8 (Team C) and is fed by that endpoint, not by a second resolver.
+5. **`defaultHarness` inherits into the same decision**, node value winning, proven by the same class of
+   test.
+6. **Hosted-Fusion-only nodes are decided, not skipped.** A node whose entire call ceiling is served by
+   hosted Fusion requests no delegation session, so today it never reaches the decision and `harness` is
+   inert for it. F2 either reaches the decision for such a node or rejects a non-`pi` harness on it at
+   validation. Silently ignoring the field is not an option this contract permits.
+
+Until every one of those holds, the enforcement-status rows above stay `PARTIAL` and say why. The rows
+are updated by the orchestrator when the lane merges with the evidence, not in advance of it.
+
+### Hosted Fusion carries `nodeControl` over the wire (#54)
+
+Recorded here because it changes what a frozen field means in production, and because this document
+asserted the opposite until now. `SerializedHostedOpenRouterFusionRequest`
+(`server/src/workflows/supervisor/protocol.ts`) carries a **required** `nodeControl: S4NodeExecutionBindings`
+field, strictly validated on the wire (frozen enums, NodeSpec ranges, reserved sampling keys rejected);
+the client refuses to send a hosted-Fusion request without it and the coordinator refuses to run one,
+binding `providerRequest` onto the session through the same `createS4HostedFusionSession` the in-process
+path uses. Because the bindings live inside the request, they are inside the journal's request digest.
+That is why the `hyperparameters.*` rows above now read BOUND on both transports. Lane F2 owns
+`protocol.ts` for Wave F and must not regress this while adding harness fields to the same structures;
+Team A's F1 rows 4-5 depend on it holding.
+
+## Known production gaps (2026-08-18, revised 2026-08-19)
 
 Recorded here because this document previously asserted the opposite, and because each one is a case where a
 user can set a value, nothing rejects it, and nothing acts on it. Full evidence with file:line citations:
 `dfg-evidence-20260807-135127/s11/NODESPEC-BOUND-AUDIT-20260818.md`. These are product defects, not contract
 changes; the frozen schema surface is unchanged by this correction.
 
-1. **Hosted-Fusion sampling controls are silently dropped.** `server/src/index.ts` boots the out-of-process
+**Revision, 2026-08-19.** Gaps 1 and 2 were written from an audit of `f5e5079`. Commit `c988bf0`
+(*"carry the node-control bindings and the harness decision across the supervised transport (#54/#55)"*)
+landed before the Wave-F base `b702a8b` and closed the transport half of both. The original text is kept
+below rather than deleted — a gap that was real and is now closed is history a reader needs — with the
+current state stated after it. Gap 3 is unchanged and still open.
+
+1. **CLOSED at `c988bf0`. Hosted-Fusion sampling controls are silently dropped.** `server/src/index.ts` boots the out-of-process
    workflow supervisor on every real server start, and its dependency overrides replace the in-process wrapper
    that fails closed on a missing node-control binding. `WorkflowSupervisorHostedFusionRequest`
    (`server/src/workflows/supervisor/protocol.ts`) carries no `nodeControl` field, so `temperature`, `top_p` and
    `sampling` never cross the wire and the coordinator builds a session with no provider binder. A user who sets
    `temperature: 0.2` on a hosted-Fusion node gets `1`, with no error anywhere.
+   *Current state:* the serialized hosted request carries a required, wire-validated `nodeControl` field and
+   both ends refuse a request without it. See "Hosted Fusion carries `nodeControl` over the wire" above.
 
-2. **`harness` and workflow `defaultHarness` reach no dispatch decision.** The supervisor client's
+2. **PARTIALLY CLOSED at `c988bf0`. `harness` and workflow `defaultHarness` reach no dispatch decision.** The supervisor client's
    `getDelegationSession` drops the harness argument, and the coordinator binds the Pi factory directly, so
    `dispatchWorkflowHarness` — whose own comment says it exists "without silently falling back to Pi" — is
    unreachable from the booted server. The only surviving guard is the child extension's harness check, which
    fires after admission and budget reservation. Hosted-Fusion-only nodes never request a delegation session at
    all, so `harness` is inert for them on every transport.
+   *Current state:* the decision itself now happens on both transports through the shared
+   `assertWorkflowHarnessAdapterBound`, before admission and before budget reservation. Two parts remain open
+   and are lane F2's to close: `pi` is still the only harness with an adapter, so no value selects a different
+   runtime; and the hosted-Fusion-only case above is still undecided. See "Harness registry" for the bar.
 
 3. **`server/src/workflows/node-spec-enforcement.ts` is unreachable.** Its workflow-settings function returns an
    empty list unconditionally; its other two emit only `S5` findings, and both validation loops skip `S5`; and

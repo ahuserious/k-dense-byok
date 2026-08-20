@@ -5,6 +5,11 @@ import path from "node:path";
 import { Value } from "typebox/value";
 import { isWithin } from "../sandbox-fs.ts";
 import {
+  workflowHarnessDefinition,
+  type WorkflowHarnessId,
+} from "./harness-registry.ts";
+import { workflowHarnessDispatchReachability } from "./harness-dispatch-reachability.ts";
+import {
   MAX_WORKFLOW_DOCUMENT_BYTES,
   WorkflowGraphDocumentSchema,
   type EvidencePolicy,
@@ -83,7 +88,7 @@ export interface ResolvedNodeSpecV1 {
     sampling: Record<string, string | number | boolean>;
   };
   conditions: { when?: string; exists: string[] };
-  harness: "pi" | "claude-code" | "codex" | "opencode" | "copilot";
+  harness: WorkflowHarnessId;
   databases: string[];
   skills: { mode: "auto" | "auto-manual" | "manual"; list: string[] };
   subagents: { mode: "auto" | "auto-manual" };
@@ -748,6 +753,7 @@ function validateNode(
   }
   validateWorkspacePolicy(node, nodePath, issues);
   validateDeliberationNodeSpec(node, nodePath, issues);
+  validateHarnessReachesDispatch(document, node, nodePath, issues);
 
   if (
     node.settings?.reasoningEffort !== undefined &&
@@ -1017,6 +1023,68 @@ function validateNode(
       }
       break;
   }
+}
+
+/**
+ * Gap (B) of the harness binding, closed here rather than in the executor.
+ *
+ * `kady-node-executor.ts` only asks for a delegation session when
+ * `requiresPiSubagent` — `callCeiling > 0 && !hostedFusionWithoutPolicyEvaluator`.
+ * When that is false the node starts no child process, so `harness` reaches no
+ * dispatch decision and is silently discarded on every transport: #55's shape.
+ *
+ * Round 1 of lane F2 closed only the second conjunct, which left a `lean4` node
+ * with `mode: "verify"` and an `evidence-gate` with no evaluator and only
+ * `artifact-exists` checks accepting `harness: "grok-cli"` with zero issues and
+ * then discarding it. **Both** conjuncts are closed now, and the predicate is
+ * `workflowHarnessDispatchReachability` — the same function the executor's
+ * `requiresPiSubagent` is computed from — so the two cannot drift.
+ *
+ * Reaching the decision anyway would select an adapter that then executes
+ * nothing: such a node has no CLI child for any harness to *be*. So the honest
+ * branch the contract offers (NodeSpec v1, "What BOUND will mean", condition 6,
+ * second clause) is taken — the declaration is refused, with a message naming
+ * the user's next action. Silently ignoring the field is what #55 was.
+ *
+ * The iteration limit is computed exactly as `effectiveNodeLimits` computes it,
+ * minus the per-node `settings.budget` clamp, which cannot lower `maxIterations`
+ * (it carries only tokens and cost). The schema floors `maxIterations` at 1, so
+ * `research-until-goal` always reaches the decision and is never refused here.
+ */
+function validateHarnessReachesDispatch(
+  document: WorkflowGraphDocument,
+  node: WorkflowNode,
+  nodePath: string,
+  issues: WorkflowValidationIssue[],
+): void {
+  const declaredOnNode = node.settings?.harness;
+  const effective = declaredOnNode ??
+    document.settings?.defaultHarness ??
+    DEFAULT_NODE_SPEC_V1.harness;
+  if (effective === "pi") return;
+  const reachability = workflowHarnessDispatchReachability(node, {
+    maxIterations: Math.min(
+      document.limits.maxIterations,
+      node.limits?.maxIterations ?? document.limits.maxIterations,
+    ),
+    requiresEvidencePolicyEvaluation: requiresWorkflowEvidencePolicyEvaluation(
+      document,
+      node,
+    ),
+  });
+  if (reachability.reachesDispatchDecision) return;
+  const label = workflowHarnessDefinition(effective).label;
+  const cause = reachability.unreachableReason === "hosted-fusion-only"
+    ? "Hosted Fusion runs this node entirely through the OpenRouter router, so no"
+    : `This ${node.kind} node makes no model calls, so no`;
+  issues.push({
+    code: declaredOnNode
+      ? "unreachable-node-harness"
+      : "unreachable-inherited-harness",
+    path: declaredOnNode ? `${nodePath}/settings/harness` : `${nodePath}/settings`,
+    message:
+      `${cause} ${label} process is ever started and the harness would be discarded. Set this node's harness to pi, or give the node work that runs on a CLI harness.`,
+  });
 }
 
 function validateDeliberationNodeSpec(

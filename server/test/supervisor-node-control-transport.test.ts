@@ -13,6 +13,21 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+
+/**
+ * The option list a stub Claude binary advertises. Derived from the relay's own
+ * required-flag constant rather than hardcoded, so adding a flag to the policy
+ * without teaching the stub to advertise it fails these items loudly instead of
+ * leaving them passing against a binary that cannot enforce it.
+ */
+function fakeClaudeHelpText(): string {
+  return [
+    "Usage: claude [options] [command] [prompt]",
+    "Options:",
+    ...CLAUDE_CODE_REQUIRED_POLICY_FLAGS.map((flag) => `  ${flag} <value>`),
+    "",
+  ].join("\n");
+}
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type {
@@ -25,7 +40,10 @@ import {
   applyS4ProviderRequestBindings,
   createS4HostedFusionSession,
   WorkflowHarnessDispatchError,
+  type WorkflowHarness,
 } from "../src/agent/workflow-delegation-session.ts";
+import type { WorkflowHarnessAdapterSelection } from "../src/workflows/harness-registry.ts";
+import { CLAUDE_CODE_REQUIRED_POLICY_FLAGS } from "../src/workflows/claude-code-relay.ts";
 import {
   createKadyWorkflowNodeExecutor,
   type KadyWorkflowUsageAdmission,
@@ -552,12 +570,12 @@ describe("supervised hosted Fusion node control", () => {
   });
 });
 
-function exactModel(): ModelRequest {
+function exactModel(provider = "ollama", model = "qwen3:32b"): ModelRequest {
   return {
     requested: {
       source: "fixed",
-      provider: "ollama",
-      model: "qwen3:32b",
+      provider,
+      model,
       auth: { kind: "local" },
       reasoning: "high",
     },
@@ -565,7 +583,20 @@ function exactModel(): ModelRequest {
   };
 }
 
-function harnessGraph(harness: "pi" | "codex"): WorkflowGraphDocument {
+interface HarnessGraphOptions {
+  /** Omitted so `defaultHarness` inheritance can be exercised on its own. */
+  harness?: WorkflowHarness;
+  defaultHarness?: WorkflowHarness;
+  /**
+   * The provider the node's slots resolve to. `modelReference` turns it into
+   * `` `${provider}/${id}` `` on the delegation request, which is exactly what
+   * the relay has to decide whether `claude --model` can run.
+   */
+  modelProvider?: string;
+  modelId?: string;
+}
+
+function harnessGraph(options: HarnessGraphOptions): WorkflowGraphDocument {
   const node: WorkflowNode = {
     id: "step",
     name: "Step",
@@ -573,14 +604,22 @@ function harnessGraph(harness: "pi" | "codex"): WorkflowGraphDocument {
     terminal: true,
     workspace: { isolation: "read-only", writePaths: [] },
     prompt: "Answer from the supplied evidence only.",
-    settings: { harness },
+    settings: {
+      ...(options.harness ? { harness: options.harness } : {}),
+      // This suite isolates harness dispatch. Auto skills are deliberately not
+      // selected: the Claude relay must refuse request.skill rather than drop it.
+      skills: { mode: "manual", list: [] },
+    },
   } as WorkflowNode;
   return {
+    ...(options.defaultHarness
+      ? { settings: { defaultHarness: options.defaultHarness } }
+      : {}),
     schemaVersion: "1.0",
     id: "harness-dispatch-graph",
     name: "Harness dispatch graph",
     entryNodeId: node.id,
-    defaultModel: exactModel(),
+    defaultModel: exactModel(options.modelProvider, options.modelId),
     limits: {
       maxIterations: 4,
       maxModelCalls: 32,
@@ -643,19 +682,30 @@ function harnessContext(document: WorkflowGraphDocument): WorkflowNodeExecutorCo
   } as unknown as WorkflowNodeExecutorContext;
 }
 
-function localResolution(request: ModelRequest) {
+/**
+ * The resolved model, parameterised by provider so a relayed node can be driven
+ * with the *production* shape of `request.model` — `modelReference` emits
+ * `` `${provider}/${id}` `` (`agent/models.ts:387-391`), which is why round 1's
+ * hand-written `claude-opus-5` fixture could not catch the relay handing a
+ * provider-qualified slug to `claude --model`.
+ */
+function localResolution(
+  request: ModelRequest,
+  provider = "ollama",
+  id = "qwen3:32b",
+) {
   return {
     model: {
-      provider: "ollama",
-      id: "qwen3:32b",
+      provider,
+      id,
       reasoning: true,
       thinkingLevelMap: { xhigh: "xhigh", max: "max" },
     } as Model<Api>,
     receipt: {
       request: structuredClone(request),
       resolved: {
-        provider: "ollama",
-        model: "qwen3:32b",
+        provider,
+        model: id,
         auth: { kind: "local" as const },
         reasoning: "high" as const,
         runtime: "local" as const,
@@ -721,7 +771,7 @@ function delegationReceipt(request: OwnedDelegationRequest): DagFusionDelegation
 }
 
 /** Executor wired to the production supervised transport for its two overridden seams. */
-async function supervisedExecutorRun(harness: "pi" | "codex") {
+async function supervisedExecutorRun(options: HarnessGraphOptions) {
   const paths = temporaryPaths();
   const seen: string[] = [];
   const client = await supervisedClient(paths, (request) => {
@@ -758,8 +808,13 @@ async function supervisedExecutorRun(harness: "pi" | "codex") {
       },
     } as unknown as WorkflowSupervisorResponse;
   });
-  const document = harnessGraph(harness);
+  const document = harnessGraph(options);
   const admissions: KadyWorkflowUsageAdmission[] = [];
+  // Capture what the *production* seam returned, so the assertion is on which
+  // adapter the registry selected — not on the absence of an exception.
+  const productionDependencies = client.nodeExecutorDependencies();
+  const selections: Array<WorkflowHarnessAdapterSelection | undefined> = [];
+  const piSessionFactoryCalls: string[] = [];
   const executor = createKadyWorkflowNodeExecutor({
     reserveUsage: (admission) => {
       admissions.push(admission);
@@ -783,14 +838,25 @@ async function supervisedExecutorRun(harness: "pi" | "codex") {
       };
     },
     dependencies: {
-      ...client.nodeExecutorDependencies(),
+      ...productionDependencies,
+      getDelegationSession: async (projectId, paths, harness) => {
+        piSessionFactoryCalls.push(harness);
+        const session = await productionDependencies.getDelegationSession(
+          projectId,
+          paths,
+          harness,
+        );
+        selections.push(session.harnessSelection);
+        return session;
+      },
       pathsForProject: (projectId: string): ProjectPaths => resolvePaths(projectId),
       loadManifest: () => ({
         projectId: PROJECT_ID,
         workflowId: document.id,
         workflowRevision: 1,
       }),
-      resolveModel: async (request: ModelRequest) => localResolution(request),
+      resolveModel: async (request: ModelRequest) =>
+        localResolution(request, options.modelProvider, options.modelId),
       assertChildRuntimeReady: () => undefined,
       readCompactionAudit: () => ({ occurred: false, checks: [] }),
     },
@@ -800,12 +866,12 @@ async function supervisedExecutorRun(harness: "pi" | "codex") {
     (error: unknown) => ({ ok: false as const, error }),
   );
   await client.close();
-  return { admissions, outcome, seen };
+  return { admissions, outcome, seen, selections, piSessionFactoryCalls };
 }
 
 describe("supervised harness dispatch", () => {
   it("refuses an unbound harness before the node reserves budget", async () => {
-    const { admissions, outcome, seen } = await supervisedExecutorRun("codex");
+    const { admissions, outcome, seen } = await supervisedExecutorRun({ harness: "codex" });
 
     // The whole point: no reservation, and no delegation ever left the backend.
     expect(admissions).toEqual([]);
@@ -820,11 +886,351 @@ describe("supervised harness dispatch", () => {
   });
 
   it("still dispatches a pi harness to the supervised session", async () => {
-    const { admissions, outcome, seen } = await supervisedExecutorRun("pi");
+    const { admissions, outcome, seen, selections } = await supervisedExecutorRun({
+      harness: "pi",
+    });
 
     if (!outcome.ok) throw outcome.error;
     expect(admissions).toHaveLength(1);
     expect(admissions[0]?.nodeControl.harness).toBe("pi");
     expect(seen).toContain("delegate");
+    expect(selections[0]).toEqual({
+      harness: "pi",
+      label: "Pi (built in)",
+      adapter: "pi-delegation",
+      executable: undefined,
+    });
   });
+
+  // Lane F2 / NodeSpec v1 "What BOUND will mean", condition 2. The bar is not
+  // "validation accepts the literal" — it is that the production seam reaches a
+  // registry row for a harness that did not exist before this lane, refuses it
+  // before any budget is reserved, and never buys a Pi child instead.
+  it("reaches the grok-cli row on the production seam and refuses it before budget", async () => {
+    const { admissions, outcome, seen } = await supervisedExecutorRun({
+      harness: "grok-cli",
+    });
+
+    expect(admissions).toEqual([]);
+    expect(seen).not.toContain("delegate");
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error).toBeInstanceOf(WorkflowHarnessDispatchError);
+    const dispatchError = outcome.error as WorkflowHarnessDispatchError;
+    expect(dispatchError.harness).toBe("grok-cli");
+    expect(dispatchError.code).toMatch(/^WORKFLOW_HARNESS_NOT_(INSTALLED|BOUND)$/);
+    // #71: the diagnostic names the next action and no absolute path.
+    expect(dispatchError.message).not.toMatch(/(^|\s)\//);
+    expect(dispatchError.message).toContain("grok");
+  });
+
+  it("refuses deepseek and oh-my-pi on the same seam", async () => {
+    for (const harness of ["deepseek", "oh-my-pi"] as const) {
+      const { admissions, outcome } = await supervisedExecutorRun({ harness });
+      expect(admissions).toEqual([]);
+      expect(outcome.ok).toBe(false);
+      if (outcome.ok) continue;
+      expect((outcome.error as WorkflowHarnessDispatchError).harness).toBe(harness);
+    }
+  });
+
+  it("inherits workflow defaultHarness into the same decision", async () => {
+    const { admissions, outcome, seen } = await supervisedExecutorRun({
+      defaultHarness: "grok-cli",
+    });
+
+    expect(admissions).toEqual([]);
+    expect(seen).not.toContain("delegate");
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect((outcome.error as WorkflowHarnessDispatchError).harness).toBe("grok-cli");
+  });
+
+  it("lets a node harness win over the workflow defaultHarness", async () => {
+    const { admissions, outcome, selections } = await supervisedExecutorRun({
+      harness: "pi",
+      defaultHarness: "grok-cli",
+    });
+
+    if (!outcome.ok) throw outcome.error;
+    expect(admissions).toHaveLength(1);
+    expect(admissions[0]?.nodeControl.harness).toBe("pi");
+    expect(selections[0]?.adapter).toBe("pi-delegation");
+  });
+
+  // Row 16. The second adapter, end to end on the production seam: the registry
+  // selects `claude-code-relay`, the relay resolves the *overridden* binary, and
+  // that binary is invoked in print mode with the system-prompt override — while
+  // the supervised Pi delegate path is never taken.
+  it.skipIf(process.platform === "win32")(
+    "selects the claude-code relay and invokes the resolved binary with -p",
+    async () => {
+      const relayDir = fs.mkdtempSync(path.join(os.tmpdir(), "f2-relay-"));
+      const fakeBinary = path.join(relayDir, "fake-claude");
+      const argvFile = path.join(relayDir, "argv.json");
+      const stdinFile = path.join(relayDir, "stdin");
+      const schemaFile = path.join(relayDir, "schema.json");
+      // Round 1's fake binary `cat`ed a canned fixture, so a relay that never
+      // sent the node's structured-output schema was invisible here. This one
+      // answers *from the schema it was given*: with no schema it says so, the
+      // node's `parse` rejects that, and the whole item goes red.
+      fs.writeFileSync(
+        fakeBinary,
+        [
+          "#!/usr/bin/env node",
+          "const fs = require('node:fs');",
+          // A stub standing in for a policy-capable CLI has to advertise the
+          // same interface: the relay probes `--help` before it will admit a
+          // node, because a confinement expressed in flags the binary does not
+          // implement is not a confinement.
+          "if (process.argv.slice(2).includes('--help')) {",
+          `  process.stdout.write(${JSON.stringify(fakeClaudeHelpText())});`,
+          "  process.exit(0);",
+          "}",
+          "const stdin = fs.readFileSync(0, 'utf8');",
+          `fs.writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(process.argv.slice(2)));`,
+          `fs.writeFileSync(${JSON.stringify(stdinFile)}, stdin);`,
+          "const marker = 'It must validate against this JSON Schema:';",
+          "const at = stdin.indexOf(marker);",
+          "if (at === -1) {",
+          "  process.stdout.write(JSON.stringify({ result: 'NO_SCHEMA_WAS_SENT', num_turns: 1 }));",
+          "  process.exit(0);",
+          "}",
+          "const schema = JSON.parse(stdin.slice(at + marker.length).trim());",
+          `fs.writeFileSync(${JSON.stringify(schemaFile)}, JSON.stringify(schema));`,
+          "const canned = {",
+          "  answer: 'Relayed through the Claude Code CLI.',",
+          "  evidence: ['evidence:supported'],",
+          "  uncertainties: [],",
+          "};",
+          "const value = {};",
+          "for (const key of Object.keys(schema.properties ?? {})) {",
+          "  if (canned[key] !== undefined) value[key] = canned[key];",
+          "}",
+          "process.stdout.write(JSON.stringify({",
+          "  result: JSON.stringify(value),",
+          "  total_cost_usd: 0,",
+          "  num_turns: 1,",
+          "  usage: { input_tokens: 11, output_tokens: 7 },",
+          "}));",
+          "",
+        ].join("\n"),
+      );
+      fs.chmodSync(fakeBinary, 0o755);
+
+      const settingsFile = path.join(relayDir, "harness-settings.json");
+      fs.writeFileSync(
+        settingsFile,
+        JSON.stringify({
+          version: 1,
+          claudeCode: {
+            binaryPath: fakeBinary,
+            systemPrompt: "You are Kady's relayed reviewer.",
+          },
+        }),
+      );
+      const previousSettingsPath = process.env.KADY_HARNESS_SETTINGS_PATH;
+      process.env.KADY_HARNESS_SETTINGS_PATH = settingsFile;
+      try {
+        const { admissions, outcome, seen, selections } = await supervisedExecutorRun({
+          harness: "claude-code",
+          // The production shape: `modelReference` emits `provider/id`.
+          modelProvider: "anthropic",
+          modelId: "claude-sonnet-4-5",
+        });
+
+        if (!outcome.ok) throw outcome.error;
+        expect(selections[0]?.adapter).toBe("claude-code-relay");
+        expect(selections[0]?.harness).toBe("claude-code");
+        // The Pi delegate never left the backend for this node.
+        expect(seen).not.toContain("delegate");
+        // The decision preceded the reservation, and the reservation still ran.
+        expect(admissions).toHaveLength(1);
+        expect(admissions[0]?.nodeControl.harness).toBe("claude-code");
+
+        const argv = JSON.parse(fs.readFileSync(argvFile, "utf-8")) as string[];
+        expect(argv).toContain("-p");
+        expect(argv).toContain("--output-format");
+        expect(argv[argv.indexOf("--system-prompt") + 1]).toBe(
+          "You are Kady's relayed reviewer.",
+        );
+        // The provider prefix is stripped, not relayed: `claude --model` takes
+        // an Anthropic id, and `anthropic/claude-sonnet-4-5` is not one.
+        expect(argv[argv.indexOf("--model") + 1]).toBe("claude-sonnet-4-5");
+        // The node's tool policy (`resolveS4NodeExecutionBindings`,
+        // `kady-node-executor.ts:337-340`) reached the operating system as real
+        // flags — this is `autonomy` being BOUND on this harness.
+        // `--tools` is the availability cap; `--allowedTools` only removes the
+        // approval prompt. Round-3 HIGH 1 was that only the second was sent, so
+        // every other built-in — including the `Agent` subagent tool — stayed in
+        // the child's context on a strict node.
+        expect(argv[argv.indexOf("--tools") + 1]).toBe("Read,Grep,Glob");
+        expect(argv[argv.indexOf("--allowedTools") + 1]).toBe("Read,Grep,Glob");
+        const denied = argv[argv.indexOf("--disallowedTools") + 1]?.split(",");
+        expect(denied).toContain("Bash");
+        expect(denied).toContain("Agent");
+        expect(denied).toContain("mcp__*");
+        expect(argv[argv.indexOf("--permission-mode") + 1]).toBe("default");
+        expect(argv).toContain("--strict-mcp-config");
+        expect(argv).toContain("--safe-mode");
+        expect(argv).toContain("--max-turns");
+
+        const stdin = fs.readFileSync(stdinFile, "utf-8");
+        // The Pi-only node-control envelope never reaches a Claude prompt.
+        expect(stdin).not.toContain("KADY_NODE_CONTROL_V1:");
+        expect(stdin).toContain("Answer from the supplied evidence only.");
+        // The structured-output schema the executor demands reached the child;
+        // its answer above could not have been assembled without it.
+        const schema = JSON.parse(fs.readFileSync(schemaFile, "utf-8")) as {
+          properties?: Record<string, unknown>;
+        };
+        expect(Object.keys(schema.properties ?? {})).toContain("answer");
+        expect(stdin).toContain("It must validate against this JSON Schema:");
+      } finally {
+        if (previousSettingsPath === undefined) {
+          delete process.env.KADY_HARNESS_SETTINGS_PATH;
+        } else {
+          process.env.KADY_HARNESS_SETTINGS_PATH = previousSettingsPath;
+        }
+        fs.rmSync(relayDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // The model medium. `request.model` is `modelReference(resolution.model)` —
+  // `provider/id` — and `claude --model` takes an Anthropic id. A node that
+  // resolved anything else is refused rather than run somewhere other than the
+  // run receipt says, and nothing is spawned.
+  it.skipIf(process.platform === "win32")(
+    "refuses a relayed node whose resolved model the CLI cannot run",
+    async () => {
+      const relayDir = fs.mkdtempSync(path.join(os.tmpdir(), "f2-relay-model-"));
+      const fakeBinary = path.join(relayDir, "fake-claude");
+      const spawnMarker = path.join(relayDir, "spawned");
+      fs.writeFileSync(
+        fakeBinary,
+        [
+          "#!/bin/sh",
+          'case " $* " in *" --help "*)',
+          `  printf '%s' ${JSON.stringify(fakeClaudeHelpText())}`,
+          "  exit 0;;",
+          "esac",
+          `touch ${JSON.stringify(spawnMarker)}`,
+          `printf '%s' '{"result":"{}"}'`,
+          "",
+        ].join("\n"),
+      );
+      fs.chmodSync(fakeBinary, 0o755);
+      const settingsFile = path.join(relayDir, "harness-settings.json");
+      fs.writeFileSync(
+        settingsFile,
+        JSON.stringify({ version: 1, claudeCode: { binaryPath: fakeBinary } }),
+      );
+      const previousSettingsPath = process.env.KADY_HARNESS_SETTINGS_PATH;
+      process.env.KADY_HARNESS_SETTINGS_PATH = settingsFile;
+      try {
+        // Default resolution is `ollama/qwen3:32b`, the shape a local-runtime
+        // node really produces.
+        const { outcome, selections, seen } = await supervisedExecutorRun({
+          harness: "claude-code",
+        });
+        expect(selections[0]?.adapter).toBe("claude-code-relay");
+        expect(seen).not.toContain("delegate");
+        expect(outcome.ok).toBe(false);
+        if (outcome.ok) return;
+        expect(outcome.error).toBeInstanceOf(WorkflowHarnessDispatchError);
+        const dispatchError = outcome.error as WorkflowHarnessDispatchError;
+        expect(dispatchError.code).toBe("WORKFLOW_HARNESS_NOT_BOUND");
+        expect(dispatchError.message).toContain("ollama/qwen3:32b");
+        expect(dispatchError.message).toContain("run it on the pi harness");
+        // Refused before the process, not after it.
+        expect(fs.existsSync(spawnMarker)).toBe(false);
+      } finally {
+        if (previousSettingsPath === undefined) {
+          delete process.env.KADY_HARNESS_SETTINGS_PATH;
+        } else {
+          process.env.KADY_HARNESS_SETTINGS_PATH = previousSettingsPath;
+        }
+        fs.rmSync(relayDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // Round-3 HIGH 1's other half, at the production seam. The relay's tool
+  // confinement is expressed entirely in CLI flags, so a binary that does not
+  // implement `--tools` cannot enforce it — and would have silently run the
+  // node with the whole built-in set available. Refusing is the only honest
+  // outcome, and it must happen before anything is spawned.
+  it.skipIf(process.platform === "win32")(
+    "refuses a relayed node when the binary cannot express the tool policy",
+    async () => {
+      const relayDir = fs.mkdtempSync(path.join(os.tmpdir(), "f2-relay-caps-"));
+      const fakeBinary = path.join(relayDir, "fake-claude");
+      const spawnMarker = path.join(relayDir, "spawned");
+      fs.writeFileSync(
+        fakeBinary,
+        [
+          "#!/bin/sh",
+          // An older CLI: it knows the approval rule but not the cap.
+          'case " $* " in *" --help "*)',
+          `  printf '%s' ${
+            JSON.stringify(
+              [
+                "Options:",
+                "  --allowedTools <tools...>",
+                "  --disallowedTools <tools...>",
+                "  --permission-mode <mode>",
+                "",
+              ].join("\n"),
+            )
+          }`,
+          "  exit 0;;",
+          "esac",
+          `touch ${JSON.stringify(spawnMarker)}`,
+          `printf '%s' '{"result":"{}"}'`,
+          "",
+        ].join("\n"),
+      );
+      fs.chmodSync(fakeBinary, 0o755);
+      const settingsFile = path.join(relayDir, "harness-settings.json");
+      fs.writeFileSync(
+        settingsFile,
+        JSON.stringify({ version: 1, claudeCode: { binaryPath: fakeBinary } }),
+      );
+      const previousSettingsPath = process.env.KADY_HARNESS_SETTINGS_PATH;
+      process.env.KADY_HARNESS_SETTINGS_PATH = settingsFile;
+      try {
+        const { outcome, selections, seen } = await supervisedExecutorRun({
+          harness: "claude-code",
+          modelProvider: "anthropic",
+          modelId: "claude-sonnet-4-5",
+        });
+        // The refusal happens *inside* the delegation-session build, so no
+        // selection is ever handed back — which is the point: the node is
+        // refused at the dispatch decision rather than after it.
+        expect(selections).toHaveLength(0);
+        expect(seen).not.toContain("delegate");
+        expect(outcome.ok).toBe(false);
+        if (outcome.ok) return;
+        expect(outcome.error).toBeInstanceOf(WorkflowHarnessDispatchError);
+        const dispatchError = outcome.error as WorkflowHarnessDispatchError;
+        expect(dispatchError.harness).toBe("claude-code");
+        expect(dispatchError.code).toBe("WORKFLOW_HARNESS_NOT_BOUND");
+        expect(dispatchError.message).toContain("--tools");
+        expect(dispatchError.message).toContain("--safe-mode");
+        expect(dispatchError.message).toContain("Update Claude Code");
+        // No filesystem path in a user-facing message (#71).
+        expect(dispatchError.message).not.toContain(relayDir);
+        // Nothing ran: the node never became a child process.
+        expect(fs.existsSync(spawnMarker)).toBe(false);
+      } finally {
+        if (previousSettingsPath === undefined) {
+          delete process.env.KADY_HARNESS_SETTINGS_PATH;
+        } else {
+          process.env.KADY_HARNESS_SETTINGS_PATH = previousSettingsPath;
+        }
+        fs.rmSync(relayDir, { recursive: true, force: true });
+      }
+    },
+  );
 });

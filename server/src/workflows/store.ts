@@ -35,6 +35,7 @@ import {
   type WorkflowRunManifestV1,
   type WorkflowRunState,
 } from "./run-state.ts";
+import { validateStoredWorkflowGraphDocument } from "./harness-stored-validation.ts";
 import { validateWorkflowGraphDocument } from "./validate.ts";
 
 export const WORKFLOW_DEFINITION_STORAGE_VERSION = 1 as const;
@@ -1189,7 +1190,7 @@ function parseStoredDefinition(
   ) {
     throw new WorkflowStoreError("CORRUPT", `Workflow definition ${workflowId} has invalid metadata.`);
   }
-  const validation = validateWorkflowGraphDocument(value.graph);
+  const validation = validateStoredWorkflowGraphDocument(value.graph);
   if (!validation.ok || validation.document.id !== workflowId) {
     throw new WorkflowStoreError("CORRUPT", `Workflow definition ${workflowId} contains an invalid graph.`);
   }
@@ -1387,7 +1388,7 @@ function parseRunManifest(
   )) {
     throw new WorkflowStoreError("CORRUPT", `Workflow run ${runId} has an invalid session id.`);
   }
-  const validation = validateWorkflowGraphDocument(value.graph);
+  const validation = validateStoredWorkflowGraphDocument(value.graph);
   if (!validation.ok || validation.document.id !== value.workflowId) {
     throw new WorkflowStoreError("CORRUPT", `Workflow run ${runId} contains an invalid graph snapshot.`);
   }

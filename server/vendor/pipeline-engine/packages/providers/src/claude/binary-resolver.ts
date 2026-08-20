@@ -31,6 +31,29 @@ export function fileExists(path: string): boolean {
 /** Platform-specific Claude Code binary filename: `claude.exe` on Windows, `claude` elsewhere. */
 export const CLAUDE_BINARY_NAME = process.platform === 'win32' ? 'claude.exe' : 'claude';
 
+/**
+ * Name of the environment variable that overrides discovery in every mode.
+ *
+ * Exported (rather than left inline below) so a second consumer can name the
+ * same source instead of re-typing the string. The Kady host relay
+ * (`server/src/workflows/claude-code-relay.ts`) resolves the Claude Code binary
+ * for a `harness: "claude-code"` workflow node; it cannot import this module —
+ * `@archon/paths` is a bun workspace package that is not installed on the host's
+ * module path — so `server/test/claude-code-relay-vendor-parity.test.ts` reads
+ * this file and fails the build if the host's copy of the order drifts from the
+ * anchors declared here. Additive only: nothing about resolution changed.
+ */
+export const CLAUDE_BIN_PATH_ENV_VAR = 'CLAUDE_BIN_PATH';
+
+/**
+ * Canonical location the Anthropic native installer writes to, relative to
+ * `$HOME`. Step 3 of the resolution order below, and the same path the host
+ * relay probes. See `CLAUDE_BIN_PATH_ENV_VAR` for why it is exported.
+ */
+export function claudeNativeInstallerPath(): string {
+  return join(homedir(), '.local', 'bin', CLAUDE_BINARY_NAME);
+}
+
 export type PathKind = 'file' | 'directory' | 'missing';
 
 /**
@@ -129,9 +152,9 @@ export async function resolveClaudeBinaryPath(
   // 1. Environment variable override — honored in dev mode too, so operators
   // on libc mismatches (e.g. glibc host with the SDK's musl variant first in
   // its resolution order) can pin a known-good binary without a compiled build.
-  const envPath = process.env.CLAUDE_BIN_PATH;
+  const envPath = process.env[CLAUDE_BIN_PATH_ENV_VAR];
   if (envPath) {
-    const resolvedEnv = validateAndExpand(envPath, 'CLAUDE_BIN_PATH');
+    const resolvedEnv = validateAndExpand(envPath, CLAUDE_BIN_PATH_ENV_VAR);
     getLog().info({ binaryPath: resolvedEnv, source: 'env' }, 'claude.binary_resolved');
     return resolvedEnv;
   }
@@ -155,7 +178,7 @@ export async function resolveClaudeBinaryPath(
   // the recommended install path don't need any env var or config entry;
   // users who deviate (npm global, custom path, etc.) still set one of
   // the higher-priority sources above.
-  const nativeInstallerPath = join(homedir(), '.local', 'bin', CLAUDE_BINARY_NAME);
+  const nativeInstallerPath = claudeNativeInstallerPath();
   if (pathKind(nativeInstallerPath) === 'file') {
     getLog().info(
       { binaryPath: nativeInstallerPath, source: 'autodetect' },

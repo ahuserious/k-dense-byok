@@ -1,5 +1,6 @@
 import { Type, type Static } from "typebox";
 import { InterviewParams } from "../agent/interview.ts";
+import { HarnessLiteralSchema } from "./harness-schema.ts";
 
 export const PROMPT_OPTIMIZATION_ARTIFACT_VERSION = 1 as const;
 export const MAX_PROMPT_OPTIMIZATION_ITERATIONS = 8;
@@ -198,15 +199,13 @@ export const PromptOptimizationNodeSpecV1Schema = Type.Object(
         { additionalProperties: false },
       ),
     ),
-    harness: Type.Optional(
-      Type.Union([
-        Type.Literal("pi"),
-        Type.Literal("claude-code"),
-        Type.Literal("codex"),
-        Type.Literal("opencode"),
-        Type.Literal("copilot"),
-      ]),
-    ),
+    // Derived from the one registry table (`harness-registry.ts`), not spelled
+    // out: this was the fifth hand-kept copy of the harness literal set, and it
+    // silently rejected deepseek / grok-cli / oh-my-pi on prompt-optimization
+    // nodes while every other node kind accepted them. `harness-schema.ts`
+    // explains why `schema.ts` still writes its own union out and this one does
+    // not. Pinned by `harness-registry.test.ts`.
+    harness: Type.Optional(HarnessLiteralSchema),
     databases: Type.Optional(Type.Array(ReferenceSchema, { maxItems: 64 })),
     skills: Type.Optional(
       Type.Object(
