@@ -51,14 +51,14 @@
     "itemDelta": {
       "files": {
         "f8-settings-usage.spec.ts": 9,
-        "f8-live.spec.ts": 2
+        "f8-live.spec.ts": 3
       },
-      "substantive": 11,
+      "substantive": 12,
       "thin": 0,
       "fixme": 0,
       "skip": 0,
       "expectedSubstantiveBefore": 221,
-      "expectedSubstantiveAfter": 232
+      "expectedSubstantiveAfter": 233
     }
   },
 
@@ -156,11 +156,12 @@
 
   "focusRestore": {
     "rule": "§6.6 — an overlay restores focus to its trigger.",
-    "implementation": "SettingsDialog is a controlled Dialog without a DialogTrigger. DialogContent.onCloseAutoFocus preventDefaults and focuses document.querySelector('[aria-label=\"Open settings\"]').",
+    "implementation": "SettingsDialog is a controlled Dialog without a DialogTrigger. A layout-effect triggerRef records the opener (or querySelector('[aria-label=\"Open settings\"]') as last resort). DialogContent.onCloseAutoFocus preventDefaults and focuses that node.",
     "triggerOwners": [
       "web/src/components/project-view.tsx (header gear, aria-label Open settings)",
       "web/src/app/page.tsx (same aria-label on the landing gear)"
     ],
-    "unitTest": "settings-dialog.test.tsx restores focus to a live Open settings button after Escape."
+    "unitTest": "settings-dialog.test.tsx restores focus to a live Open settings button after Escape.",
+    "liveTest": "e2e/wave-f/f8/f8-live.spec.ts: keyboard Enter on the gear, Escape, assert the gear is focused. Unmocked."
   }
 }

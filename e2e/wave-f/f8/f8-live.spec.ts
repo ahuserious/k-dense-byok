@@ -51,3 +51,18 @@ test("@live F8 row 15 exposes the grouped Kady CLI tab but fails closed without 
   await capture(page, "row15-f2-disabled-dark");
   await setDark(page, false);
 });
+
+test("@live F8 Settings Escape restores focus to the Open settings gear", async ({
+  liveWorkspace,
+}) => {
+  const { page } = liveWorkspace;
+  const gear = page.getByRole("button", { name: "Open settings" });
+  await expect(gear).toBeVisible();
+  await gear.focus();
+  await page.keyboard.press("Enter");
+  const settings = page.getByRole("dialog", { name: "Settings" });
+  await expect(settings).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(settings).toHaveCount(0);
+  await expect(gear).toBeFocused();
+});

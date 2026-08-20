@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -628,10 +628,8 @@ function PipelinesPanel() {
 
 const SETTINGS_TRIGGER_SELECTOR = '[aria-label="Open settings"]';
 
-function restoreSettingsTriggerFocus(event: Event) {
-  event.preventDefault();
-  const trigger = document.querySelector<HTMLElement>(SETTINGS_TRIGGER_SELECTOR);
-  trigger?.focus();
+function findSettingsTrigger(): HTMLElement | null {
+  return document.querySelector<HTMLElement>(SETTINGS_TRIGGER_SELECTOR);
 }
 
 export function SettingsDialog({
@@ -641,6 +639,27 @@ export function SettingsDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  // Controlled Dialog has no DialogTrigger, so Radix cannot restore on its own.
+  // Capture the opener before Content's onOpenAutoFocus moves document.activeElement.
+  const triggerRef = useRef<HTMLElement | null>(null);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active.matches(SETTINGS_TRIGGER_SELECTOR)) {
+      triggerRef.current = active;
+      return;
+    }
+    // The gear lives in page.tsx / project-view.tsx (not F8-owned).
+    triggerRef.current ??= findSettingsTrigger();
+  }, [open]);
+
+  const restoreSettingsTriggerFocus = useCallback((event: Event) => {
+    event.preventDefault();
+    const trigger = triggerRef.current ?? findSettingsTrigger();
+    trigger?.focus();
+  }, []);
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
