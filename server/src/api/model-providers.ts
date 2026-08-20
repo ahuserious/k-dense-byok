@@ -11,6 +11,7 @@ import {
 } from "../agent/provider-auth.ts";
 import { buildNvidiaModel, nvidiaExtraModelIds } from "../agent/models.ts";
 import { getModelRuntime } from "../agent/session-registry.ts";
+import { registerModelPresetRoutes } from "./model-presets.ts";
 
 export interface RegisterModelProviderRoutesOptions {
   manager?: ProviderAuthManager;
@@ -242,4 +243,11 @@ export async function registerModelProviderRoutes(
       }
     },
   );
+
+  // Dest `index.ts` already calls this function and does not own F1. Publishing
+  // `/model-presets` here is the dest integration path: a dest-built app that
+  // merges this file serves the presets API without taking F12 integrations or
+  // adding a second root registration. Do not also register from index.ts while
+  // this nested call remains — Fastify would throw FST_ERR_DUPLICATED_ROUTE.
+  await registerModelPresetRoutes(app);
 }

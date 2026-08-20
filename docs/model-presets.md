@@ -145,7 +145,10 @@ a `dropped` control must not look live.
 - **Chat and runs** — the preset's provider and model resolve. Hyperparameters
   and the system-prompt override wait for the session builder to install Kady's
   model-preset extension (`CHAT_SESSION_PRESET_EXTENSION_INSTALLED` in
-  `server/src/agent/model-presets.ts`). Dest does not have that wiring.
+  `server/src/agent/model-presets.ts`). Dest `33a13ea` does not have that
+  wiring; `INTEGRATION.md` quotes the exact `session-registry.ts` /
+  `sessions.ts` lines. Do not flip the flag until those land in the same
+  commit. Pi / Codex / Grok stay fail-closed; this lane does not invent OAuth.
 - **Workflow nodes** — persist `{ provider: "preset", model: "<preset-id>" }` on
   the existing ModelRequest. That resolves to the preset's provider and model.
   Sampling and the system-prompt override still come from the node's own
@@ -157,7 +160,11 @@ a `dropped` control must not look live.
 
 ## API
 
-Base path `/model-presets` on the Kady backend (no `/api` prefix).
+Base path `/model-presets` on the Kady backend (no `/api` prefix). Dest
+already calls `registerModelProviderRoutes` from `server/src/index.ts`; this
+lane publishes the presets routes from that F1-owned function so dest merge
+does not take F12 `integrations.ts` and does not need a second `index.ts`
+registration.
 
 | Method | Path | Body | Returns |
 |---|---|---|---|
