@@ -142,13 +142,14 @@ a `dropped` control must not look live.
 
 - **Test preset (`direct`)** — bound for Groq, Cerebras, and OpenRouter. OAuth,
   Local, and Modal stay dropped with a reason.
-- **Chat and runs** — the preset's provider and model resolve. Hyperparameters
-  and the system-prompt override wait for the session builder to install Kady's
-  model-preset extension (`CHAT_SESSION_PRESET_EXTENSION_INSTALLED` in
-  `server/src/agent/model-presets.ts`). Dest `33a13ea` does not have that
-  wiring; `INTEGRATION.md` quotes the exact `session-registry.ts` /
-  `sessions.ts` lines. Do not flip the flag until those land in the same
-  commit. Pi / Codex / Grok stay fail-closed; this lane does not invent OAuth.
+- **Chat and runs** — this tip installs `makeModelPresetExtension` next to
+  Fusion and arms `setSessionModelPreset` from `/run`
+  (`CHAT_SESSION_PRESET_EXTENSION_INSTALLED` is true here). Dest still lacks
+  those files until this lane merges. OpenAI-shaped API-key/local groups bind
+  hyperparameters and the system-prompt override; subscription chat binds the
+  prompt only. Modal compute presets stay dropped and never fall through to
+  OpenRouter. Pi / Codex / Grok stay fail-closed; this lane does not invent
+  OAuth.
 - **Workflow nodes** — persist `{ provider: "preset", model: "<preset-id>" }` on
   the existing ModelRequest. That resolves to the preset's provider and model.
   Sampling and the system-prompt override still come from the node's own

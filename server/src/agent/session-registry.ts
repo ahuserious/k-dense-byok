@@ -33,6 +33,7 @@ import { makeScientificResultTool } from "./scientific-result.ts";
 import { clearSessionCompute, makeModalTools, MODAL_TOOL_NAMES } from "./modal-tool.ts";
 import { makeSubagentLedgerExtension, subagentsExtensionPath } from "./subagent-bridge.ts";
 import { makeFusionRequestExtension } from "./fusion-bridge.ts";
+import { makeModelPresetExtension } from "./model-presets.ts";
 import { WEB_ACCESS_TOOLS, ensureWebAccess } from "./web-access-bridge.ts";
 // Raindrop Workshop observability (the Raindrop view's optional Workshop
 // mode). This Pi extension mirrors agent runs/turns/LLM/tool spans to the
@@ -801,6 +802,10 @@ async function build(
       // Rewrites the outgoing provider body to an OpenRouter Fusion request when
       // the /run handler stashed a Fusion config for this session (setFusionConfig).
       makeFusionRequestExtension(projectId, () => holder.session?.sessionId ?? ""),
+      // Applies the selected model preset only for the current run. This follows
+      // the Fusion rewrite so any provider-body controls see the final payload;
+      // the /run owner clears the state on every terminal path.
+      makeModelPresetExtension(projectId, () => holder.session?.sessionId ?? ""),
       // Harvest notebook entries the roster's subagents logged (child pi
       // processes get the notebook tool via seedNotebookPackage above) into
       // the parent notebook — the parent is the single writer.

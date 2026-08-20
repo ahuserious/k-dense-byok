@@ -260,9 +260,9 @@ describe("the chat-session extension binds one run and clears cleanly", () => {
       systemPromptOverride: "Use only verified evidence.",
       parameterSupport: providerGroup("openrouter")!.parameterSupport,
       surface: "chat-session",
-      // The dest-rebased tree reports chat-session dropped. This test is the
-      // extension itself: prove it applies controls when the stashed binding
-      // says they are bound.
+      // The extension applies controls from the stashed binding, independent
+      // of the honesty flag. Prove the payload rewrite even if a later
+      // surface still reports dropped.
       binding: { hyperparameters: "bound", systemPromptOverride: "bound" },
       bindingBySurface: presetBindingBySurface("openrouter"),
     });
@@ -370,18 +370,18 @@ describe("the binding block tells the truth about each surface", () => {
     }
   });
 
-  it("reports chat bindings as dropped until the session builder installs the extension", () => {
-    expect(CHAT_SESSION_PRESET_EXTENSION_INSTALLED).toBe(false);
+  it("reports chat bindings as bound once the session extension is installed", () => {
+    expect(CHAT_SESSION_PRESET_EXTENSION_INSTALLED).toBe(true);
     const openRouter = presetBindingForSurface("chat-session", "openrouter");
-    expect(openRouter.hyperparameters).toBe("dropped");
-    expect(openRouter.systemPromptOverride).toBe("dropped");
-    expect(openRouter.reason).toMatch(/session builder/);
-    expect(openRouter.reason).not.toMatch(/\/(Users|home|tmp|var)\//);
+    expect(openRouter.hyperparameters).toBe("bound");
+    expect(openRouter.systemPromptOverride).toBe("bound");
+    expect(openRouter.reason).toBeUndefined();
 
     const anthropic = presetBindingForSurface("chat-session", "anthropic");
     expect(anthropic.hyperparameters).toBe("dropped");
-    expect(anthropic.systemPromptOverride).toBe("dropped");
-    expect(anthropic.reason).toMatch(/session builder/);
+    expect(anthropic.systemPromptOverride).toBe("bound");
+    expect(anthropic.reason).toMatch(/subscription transport/);
+    expect(anthropic.reason).not.toMatch(/\/(Users|home|tmp|var)\//);
 
     const modal = presetBindingForSurface("chat-session", "modal");
     expect(modal.hyperparameters).toBe("dropped");

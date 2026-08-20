@@ -115,9 +115,8 @@ describe("row 3 — the preset section covers all eight provider groups", () => 
     expect(body.bindingsByGroup.anthropic.direct.hyperparameters).toBe("dropped");
     expect(body.bindingsByGroup.anthropic.direct.reason).toBeTruthy();
     expect(body.bindingsByGroup.local.direct.hyperparameters).toBe("dropped");
-    expect(body.bindingsByGroup.groq["chat-session"].hyperparameters).toBe("dropped");
-    expect(body.bindingsByGroup.groq["chat-session"].systemPromptOverride).toBe("dropped");
-    expect(body.bindingsByGroup.groq["chat-session"].reason).toMatch(/session builder/);
+    expect(body.bindingsByGroup.groq["chat-session"].hyperparameters).toBe("bound");
+    expect(body.bindingsByGroup.groq["chat-session"].systemPromptOverride).toBe("bound");
   });
 
   it("creates, updates, lists and deletes a preset, persisting it", async () => {
@@ -378,7 +377,7 @@ describe("resolve fails closed", () => {
       hyperparameters: { temperature: number };
       systemPromptOverride: string;
       surface: string;
-      binding: { hyperparameters: string; reason?: string };
+      binding: { hyperparameters: string; systemPromptOverride?: string; reason?: string };
       bindingBySurface: Record<string, { hyperparameters: string }>;
     };
     expect(resolved.ref).toBe("groq/llama-3.3-70b-versatile");
@@ -387,9 +386,8 @@ describe("resolve fails closed", () => {
     expect(resolved.hyperparameters.temperature).toBe(0.25);
     expect(resolved.systemPromptOverride).toBe("Be terse.");
     expect(resolved.surface).toBe("chat-session");
-    expect(resolved.binding.hyperparameters).toBe("dropped");
-    expect(resolved.binding.systemPromptOverride).toBe("dropped");
-    expect(resolved.binding.reason).toMatch(/session builder/);
+    expect(resolved.binding.hyperparameters).toBe("bound");
+    expect(resolved.binding.systemPromptOverride).toBe("bound");
     expect(resolved.bindingBySurface.direct.hyperparameters).toBe("bound");
     expect(response.body).not.toContain("test-only-groq-key");
   });

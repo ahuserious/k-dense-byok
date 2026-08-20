@@ -72,11 +72,9 @@ export interface PresetBinding {
  *    every group, which told an Anthropic preset's owner "Carried" about a call
  *    Kady cannot build. The binding block must be derived from the same
  *    predicate the button is, never asserted alongside it.
- *  - `chat-session`: the extension in this module can bind the system prompt
- *    and (for OpenAI-shaped API-key/local groups) hyperparameters. Dest does
- *    not install that extension — `session-registry.ts` / `sessions.ts` are
- *    outside F1 — so this tree reports dropped until the orchestrator wires it
- *    and flips `CHAT_SESSION_PRESET_EXTENSION_INSTALLED` in the same commit.
+ *  - `chat-session`: this tip installs `makeModelPresetExtension` next to
+ *    Fusion and arms it from `/run`. Dest still lacks those files until this
+ *    lane merges. No Modal → OpenRouter fallback.
  *  - `workflow-node`: a node can name a preset durably as provider `preset`
  *    and model `<preset-id>`. That resolves to the preset's provider and model.
  *    Sampling and the system-prompt override still come from NodeSpec settings
@@ -103,12 +101,10 @@ const SURFACE_BINDINGS: Record<
 };
 
 /**
- * The chat-session extension is written and tested here. It is not installed
- * in this dest-rebased tree. Flip this in the same commit that adds
- * `makeModelPresetExtension` to `session-registry.ts` and the
- * `setSessionModelPreset` calls in `sessions.ts`.
+ * The chat-session extension is installed in this lane tip (session-registry
+ * + sessions.ts, same commit as this flip). Dest remains unbound until merge.
  */
-export const CHAT_SESSION_PRESET_EXTENSION_INSTALLED = false;
+export const CHAT_SESSION_PRESET_EXTENSION_INSTALLED = true;
 
 const CHAT_HYPERPARAMETER_GROUPS = new Set<ProviderGroupId>([
   "cerebras",
