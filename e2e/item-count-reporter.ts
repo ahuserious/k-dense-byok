@@ -28,6 +28,9 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   // Lane F8 (rows 14-15): subscription bar + Settings ▸ Kady CLI + D-4 live pin.
   ["wave-f/f8/f8-settings-usage.spec.ts", 9],
   ["wave-f/f8/f8-live.spec.ts", 3],
+  // Wave F lane F5 (rows 26–36, 19, 33): node kinds. All four items are THIN —
+  // Gate U is F6's palette/inspector, which this lane must not invent.
+  ["wave-f/f5/f5-node-kinds.spec.ts", 4],
   ["live-backend.spec.ts", 3],
   ["scientific-pipelines.spec.ts", 57],
   ["workspace.spec.ts", 46],
@@ -35,11 +38,11 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   ["wave-f/harness/evidence-contract.spec.ts", 3],
   ["wave-f/harness/smoke.spec.ts", 1],
 ]);
-// 258 after F2, plus F8's 12 settings/live items.
+// 270 after F8. F5's 4 items are thin (Gate U is F6).
 const EXPECTED_SUBSTANTIVE_ITEMS = 270;
 // 35 pre-existing thin items (labelled inventory smokes plus the 3 fixmes) + the 3 Wave-F
-// evidence-fixture contract items.
-const EXPECTED_THIN_ITEMS = 38;
+// evidence-fixture contract items + F5's 4.
+const EXPECTED_THIN_ITEMS = 42;
 const EXPECTED_FIXME_ITEMS = 3;
 const EXPECTED_SKIP_ITEMS = 0;
 

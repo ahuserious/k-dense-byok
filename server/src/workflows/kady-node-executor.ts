@@ -30,10 +30,8 @@ import {
   openClaudeCodeRelay,
 } from "./claude-code-relay.ts";
 import type { WorkflowHarnessAdapterSelection } from "./harness-registry.ts";
-import {
-  workflowHarnessDispatchReachability,
-  type HarnessDispatchReachability,
-} from "./harness-dispatch-reachability.ts";
+import { f5WorkflowHarnessDispatchReachability } from "./kinds/core-model-call-ceiling.ts";
+import type { HarnessDispatchReachability } from "./harness-dispatch-reachability.ts";
 import {
   assertWorkflowNodeControlPackageSeeded,
   createS4HostedFusionSession,
@@ -106,6 +104,24 @@ import {
   resolveNodeSpecV1,
   type ResolvedNodeSpecV1,
 } from "./validate.ts";
+import { mapWithBoundedConcurrency } from "./kinds/bounded-concurrency.ts";
+import {
+  councilRecruitmentObservation,
+  effectiveCouncilRecruitmentBound,
+  inboundReasoningStyleRefs,
+  selectCouncilHeads,
+} from "./council-roles.ts";
+import { elevatePromptToDag } from "./elevate-to-dag.ts";
+import {
+  formattedOutputConstraint,
+  validateFormattedOutput,
+} from "./formatted-output.ts";
+import { buildHypothesisPairs, hypothesisReportMarkdown } from "./hypothesis.ts";
+import {
+  infranodusMapQueryFromMcp,
+  selectReasoningStylePersonas,
+  type InfranodusMapQuery,
+} from "./reasoning-style.ts";
 
 export const KADY_WORKFLOW_READ_ONLY_AGENT =
   "dag-workflow-readonly-executor" as const;
@@ -186,7 +202,8 @@ export type KadyWorkflowNodeErrorCode =
   | "WORKFLOW_EVIDENCE_UNSUPPORTED"
   | "WORKFLOW_LEAN_VERIFIER_UNAVAILABLE"
   | "WORKFLOW_LEAN_VERIFICATION_FAILED"
-  | "WORKFLOW_OPENROUTER_FUSION_UNSUPPORTED";
+  | "WORKFLOW_OPENROUTER_FUSION_UNSUPPORTED"
+  | "WORKFLOW_INTEGRATION_NOT_CONFIGURED";
 
 export class KadyWorkflowNodeError extends Error {
   constructor(
@@ -546,6 +563,7 @@ export interface KadyNodeExecutorDependencies {
   assertChildRuntimeReady(paths: ProjectPaths): void;
   readCompactionAudit(sandboxRoot: string, childRunId: string): TrustedDagFusionCompactionAudit;
   now(): number;
+  queryInfranodusMap?: InfranodusMapQuery;
 }
 
 interface KadyPreResolvedDelegation {
@@ -934,7 +952,7 @@ function harnessDispatchReachability(
   context: WorkflowNodeExecutorContext,
   limits: EffectiveNodeLimits,
 ): HarnessDispatchReachability {
-  return workflowHarnessDispatchReachability(context.node, {
+  return f5WorkflowHarnessDispatchReachability(context.node, {
     maxIterations: limits.maxIterations,
     requiresEvidencePolicyEvaluation: requiresWorkflowEvidencePolicyEvaluation(
       context.graph,
@@ -2711,9 +2729,17 @@ export function createKadyWorkflowNodeExecutor(
       }
 
       if (node.kind === "council") {
-        const memberIds = new Set(node.members.map((member) => member.id));
+        const inboundPersonas = inboundReasoningStyleRefs(context.inbound);
+        const roster = selectCouncilHeads(node, inboundPersonas);
+        const memberIds = new Set(roster.members.map((member) => member.id));
         const minorityReports: MinorityReport[] = [];
         const roundDecisions: string[] = [];
+        const recruitedMembers: Array<{
+          memberId: string;
+          role: string;
+          result: CouncilMemberResult;
+        }> = [];
+        let lastRecruitReason: string | undefined;
         let latestPositions: Array<{
           memberId: string;
           role: string;
@@ -2723,7 +2749,7 @@ export function createKadyWorkflowNodeExecutor(
         let previousChair: CouncilChairResult | undefined;
         for (let round = 1; round <= node.rounds; round += 1) {
           const positions: Array<{ memberId: string; role: string; result: CouncilMemberResult }> = [];
-          for (const member of node.members) {
+          for (const member of roster.members) {
             const result = await delegate({
               slotId: `council-round-${round}-member-${member.id}`,
               task: boundedTask([
@@ -2778,10 +2804,68 @@ export function createKadyWorkflowNodeExecutor(
           previousChair = chair;
           minorityReports.push(...chair.minorityReports);
           roundDecisions.push(compactText(chair.decision, 128));
+
+          const recruitBound = effectiveCouncilRecruitmentBound(node, limits.maxSubagents);
+          if (
+            !chair.consensus &&
+            recruitedMembers.length < recruitBound
+          ) {
+            const recruitIndex = recruitedMembers.length + 1;
+            const recruitId = `recruited-${recruitIndex}`;
+            const persona = inboundPersonas[recruitedMembers.length] ?? `recruited-head-${recruitIndex}`;
+            const result = await delegate({
+              slotId: `council-round-${round}-member-${recruitId}`,
+              declareDynamic: true,
+              task: boundedTask([
+                ...baseTaskContext(context),
+                `Council goal: ${node.goal}`,
+                `You were recruited to close a reasoning blind spot. Assigned persona: ${persona}.`,
+                `Round: ${round} of ${node.rounds}`,
+                `Chair concern: ${compactText(chair.rationale, 512)}`,
+                "Give an independent position that addresses the chair's remaining disagreement.",
+              ]),
+              schema: COUNCIL_MEMBER_SCHEMA,
+              parse: parseCouncilMember,
+            });
+            recruitedMembers.push({
+              memberId: recruitId,
+              role: persona,
+              result,
+            });
+            latestPositions.push({
+              memberId: recruitId,
+              role: compactText(persona, 128),
+              position: compactText(result.position, 256),
+              evidence: result.evidence.slice(0, 8).map((item) => compactText(item, 256)),
+            });
+            lastRecruitReason = compactText(chair.rationale, 256);
+            memberIds.add(recruitId);
+          }
         }
         if (!previousChair) {
           fail("WORKFLOW_DELEGATION_INVALID_RESULT", "Council completed without a chair decision.");
         }
+        let fusedAnswer: string | undefined;
+        if (node.fuser) {
+          const fused = await delegate({
+            slotId: "council-fuser",
+            task: boundedTask([
+              ...baseTaskContext(context),
+              `Council goal: ${node.goal}`,
+              `Chair decision: ${boundedContext(previousChair)}`,
+              `Member positions: ${boundedContext(latestPositions)}`,
+              "Fuse the chair decision and member positions into one supported answer. Do not invent a new claim the panel did not support.",
+            ]),
+            schema: ANALYSIS_SCHEMA,
+            parse: parseAnalysis,
+          });
+          fusedAnswer = compactText(fused.answer, 4_000);
+        }
+        const recruitment = councilRecruitmentObservation(
+          recruitedMembers.length,
+          effectiveCouncilRecruitmentBound(node, limits.maxSubagents),
+          lastRecruitReason,
+        );
         return await applyCommonEvidencePolicy({
           output: checkedOutput({
             kind: "council",
@@ -2789,11 +2873,18 @@ export function createKadyWorkflowNodeExecutor(
             decision: compactText(previousChair.decision, 2_048),
             rationale: compactText(previousChair.rationale, 2_048),
             consensus: previousChair.consensus,
+            ...(fusedAnswer ? { fusedAnswer } : {}),
             minorityReports: node.preserveMinorityReports
               ? compactMinorityReports(minorityReports)
               : [],
             memberPositions: latestPositions,
             roundDecisions,
+            recruitment,
+            headSelection: {
+              mode: roster.mode,
+              source: roster.source,
+              personalityRefs: roster.personalityRefs,
+            },
           }),
         });
       }
@@ -2888,20 +2979,20 @@ export function createKadyWorkflowNodeExecutor(
 
       if (node.kind === "best-of-n") {
         const count = node.candidateCount ?? node.candidateModels?.length ?? 2;
-        const candidates: AnalysisResult[] = [];
-        for (let index = 1; index <= count; index += 1) {
-          candidates.push(await delegate({
-            slotId: `candidate-${index}`,
+        const concurrency = Math.min(count, context.graph.limits.maxParallelism);
+        const candidates = await mapWithBoundedConcurrency(count, concurrency, (index) =>
+          delegate({
+            slotId: `candidate-${index + 1}`,
             task: boundedTask([
               ...baseTaskContext(context),
               `Goal: ${node.goal}`,
-              `Candidate path: ${index} of ${count}`,
+              `Candidate path: ${index + 1} of ${count}`,
               "Develop a genuinely independent way to reach the goal. Return the proposed answer, evidence, and uncertainties.",
             ]),
             schema: ANALYSIS_SCHEMA,
             parse: parseAnalysis,
-          }));
-        }
+          }),
+        );
         const evaluation = await delegate({
           slotId: "candidate-evaluator",
           task: boundedTask([
@@ -2933,6 +3024,13 @@ export function createKadyWorkflowNodeExecutor(
             answer: compactText(winner.answer, 6_000),
             evidence: winner.evidence,
             uncertainties: winner.uncertainties,
+            concurrency,
+            branches: candidates.map((_, index) => ({
+              id: `candidate-${index + 1}`,
+              status: "succeeded",
+              label: `Candidate ${index + 1}`,
+              executionId: context.executionId,
+            })),
           }),
         });
       }
@@ -2961,8 +3059,11 @@ export function createKadyWorkflowNodeExecutor(
             (node.artifactIds.length > 0 && allDeclaredArtifactsVerified)) &&
           allDeclaredArtifactsVerified &&
           (!requireArtifactReferences || artifactVerification.artifacts.length > 0);
-        const usesModel = node.evaluator !== undefined ||
-          node.checks.some((check) => check !== "artifact-exists");
+        const usesCouncil = node.evaluatorMode === "council" && node.council !== undefined;
+        const usesModel = !usesCouncil && (
+          node.evaluator !== undefined ||
+          node.checks.some((check) => check !== "artifact-exists")
+        );
         let evaluation: EvidenceEvaluationResult = {
           supported: deterministicSupported,
           summary: deterministicSupported
@@ -2971,7 +3072,49 @@ export function createKadyWorkflowNodeExecutor(
           sourceIds: [],
           unsupportedClaims: [],
         };
-        if (usesModel) {
+        if (usesCouncil && node.council) {
+          const rounds = node.council.rounds ?? 1;
+          const memberIds = new Set(node.council.members.map((member) => member.id));
+          let chair: CouncilChairResult | undefined;
+          for (let round = 1; round <= rounds; round += 1) {
+            const positions = [];
+            for (const member of node.council.members) {
+              const result = await delegate({
+                slotId: `evidence-council-round-${round}-member-${member.id}`,
+                task: boundedTask([
+                  ...baseTaskContext(context),
+                  `Evidence checks: ${node.checks.join(", ")}`,
+                  `You are council member ${member.id}; assigned role: ${member.role}.`,
+                  `Deterministic artifact checks: ${boundedContext(artifactVerification.checks)}`,
+                  "Give an independent verdict on whether the inbound evidence supports the claims.",
+                ]),
+                schema: COUNCIL_MEMBER_SCHEMA,
+                parse: parseCouncilMember,
+              });
+              positions.push({ memberId: member.id, role: member.role, result });
+            }
+            chair = await delegate({
+              slotId: `evidence-council-round-${round}-chair`,
+              task: boundedTask([
+                ...baseTaskContext(context),
+                `Evidence checks: ${node.checks.join(", ")}`,
+                `Member positions: ${boundedContext(positions.map((position) => ({
+                  memberId: position.memberId,
+                  position: compactText(position.result.position, 1_024),
+                })))}`,
+                "Decide whether the evidence supports the claims. consensus=true only when every member agrees it is supported.",
+              ]),
+              schema: COUNCIL_CHAIR_SCHEMA,
+              parse: (value) => parseCouncilChair(value, memberIds, false),
+            });
+          }
+          evaluation = {
+            supported: Boolean(chair?.consensus),
+            summary: compactText(chair?.decision ?? "Council evaluator produced no decision.", 2_048),
+            sourceIds: [],
+            unsupportedClaims: chair?.consensus ? [] : ["council-disagreement"],
+          };
+        } else if (usesModel) {
           evaluation = await delegate({
             slotId: "evidence-evaluator",
             task: boundedTask([
@@ -3160,6 +3303,159 @@ export function createKadyWorkflowNodeExecutor(
             ],
           }),
         });
+      }
+
+      if (node.kind === "elevate-to-dag") {
+        const elevated = elevatePromptToDag({
+          projectId: context.projectId,
+          prompt: node.prompt,
+          name: node.name,
+          workflowId: node.workflowId,
+          defaultModel: node.model ?? context.graph.defaultModel ?? {
+            requested: {
+              source: "fixed",
+              provider: "ollama",
+              model: "qwen3:32b",
+              auth: { kind: "local" },
+              reasoning: "off",
+            },
+            resolution: { mode: "exact" },
+          },
+          save: true,
+        });
+        return await applyCommonEvidencePolicy({
+          output: checkedOutput({
+            kind: "elevate-to-dag",
+            workflowId: elevated.workflowId,
+            revision: elevated.revision,
+            saved: elevated.saved,
+            nodeCount: elevated.graph.nodes.length,
+          }),
+        });
+      }
+
+      if (node.kind === "hypothesis") {
+        const count = node.hypothesisCount ?? 2;
+        const pairs = buildHypothesisPairs(node.question, count);
+        const analyses: string[] = [];
+        for (const pair of pairs) {
+          const result = await delegate({
+            slotId: `hypothesis-${pair.index}`,
+            task: boundedTask([
+              ...baseTaskContext(context),
+              `Question: ${node.question}`,
+              pair.h1,
+              pair.h0,
+              "Analyze the hypothesis against its matched null. Return the proposed answer, evidence, and uncertainties.",
+            ]),
+            schema: ANALYSIS_SCHEMA,
+            parse: parseAnalysis,
+          });
+          analyses.push(compactText(result.answer, 2_048));
+        }
+        const verdict = await delegate({
+          slotId: "hypothesis-analysis",
+          task: boundedTask([
+            ...baseTaskContext(context),
+            `Question: ${node.question}`,
+            `Pair analyses: ${boundedContext(pairs.map((pair, index) => ({
+              ...pair,
+              analysis: analyses[index],
+            })))}`,
+            "Produce the terminal analysis of every H1/H0 pair.",
+          ]),
+          schema: ANALYSIS_SCHEMA,
+          parse: parseAnalysis,
+        });
+        const report = hypothesisReportMarkdown(
+          node.question,
+          pairs,
+          analyses,
+          verdict.answer,
+        );
+        const relativePath = `workflow_artifacts/hypothesis/${context.runId}/${node.id}/analysis.md`;
+        const absolutePath = path.join(paths.sandbox, relativePath);
+        fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
+        const bytes = Buffer.from(report, "utf8");
+        fs.writeFileSync(absolutePath, bytes);
+        return await applyCommonEvidencePolicy({
+          artifacts: [{
+            path: relativePath,
+            size: bytes.length,
+            sha256: createHash("sha256").update(bytes).digest("hex"),
+            mediaType: "text/markdown",
+          }],
+          output: checkedOutput({
+            kind: "hypothesis",
+            question: compactText(node.question, 1_024),
+            pairs,
+            verdict: compactText(verdict.answer, 4_000),
+            reportPath: relativePath,
+          }),
+        });
+      }
+
+      if (node.kind === "reasoning-style") {
+        try {
+          const query = node.mode === "infranodus"
+            ? dependencies.queryInfranodusMap ??
+              await infranodusMapQueryFromMcp(context.projectId, paths)
+            : undefined;
+          const selection = await selectReasoningStylePersonas(node, process.env, query);
+          return await applyCommonEvidencePolicy({
+            output: checkedOutput(selection),
+          });
+        } catch (error) {
+          const code = error instanceof Error && "code" in error
+            ? String((error as { code?: string }).code)
+            : "WORKFLOW_NODE_INVALID_CONTEXT";
+          fail(
+            code === "WORKFLOW_INTEGRATION_NOT_CONFIGURED"
+              ? "WORKFLOW_INTEGRATION_NOT_CONFIGURED"
+              : "WORKFLOW_NODE_INVALID_CONTEXT",
+            error instanceof Error ? error.message : "Reasoning-style selection failed.",
+          );
+        }
+      }
+
+      if (node.kind === "formatted-output") {
+        const inboundText = context.inbound
+          .map((item) => item.output === undefined ? "" : JSON.stringify(item.output))
+          .filter((part) => part.length > 0)
+          .join("\n");
+        const generated = await delegate({
+          slotId: "formatted-output",
+          task: boundedTask([
+            ...baseTaskContext(context),
+            node.instruction ? `Instruction: ${node.instruction}` : "",
+            inboundText ? `Inbound: ${compactText(inboundText, 4_000)}` : "",
+            formattedOutputConstraint(node.style),
+          ]),
+          schema: ANALYSIS_SCHEMA,
+          parse: parseAnalysis,
+        });
+        const validation = validateFormattedOutput(node.style, generated.answer);
+        if (!validation.ok) {
+          fail(
+            "WORKFLOW_DELEGATION_INVALID_RESULT",
+            validation.reason ?? "Formatted output did not satisfy its style.",
+          );
+        }
+        return await applyCommonEvidencePolicy({
+          output: checkedOutput({
+            kind: "formatted-output",
+            style: node.style,
+            text: compactText(generated.answer, 8_000),
+            validated: true,
+          }),
+        });
+      }
+
+      if (node.kind === "workflow-ref") {
+        fail(
+          "WORKFLOW_NODE_INVALID_CONTEXT",
+          `Workflow-ref node ${node.id} reached the executor unexpanded. Expansion happens at run create.`,
+        );
       }
 
       return fail(

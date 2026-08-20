@@ -4,6 +4,7 @@ export const WORKFLOW_BEHAVIOR_CAPABILITIES = [
   "restart-workflow",
   "escalate-fix-redeploy",
   "lateral-pass",
+  "stop-workflow",
 ] as const;
 
 export type WorkflowBehaviorCapability =
