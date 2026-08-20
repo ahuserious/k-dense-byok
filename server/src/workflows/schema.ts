@@ -447,6 +447,13 @@ export const CouncilNodeSchema = Type.Object(
     chair: ModelRequestSchema,
     rounds: Type.Integer({ minimum: 1, maximum: 20 }),
     preserveMinorityReports: Type.Boolean(),
+    // Optional so existing 2-role graphs keep validating. Palette defaults
+    // still author 4 heads + chair + fuser (see docs/adr/F5-council-roles.md).
+    fuser: Type.Optional(ModelRequestSchema),
+    maxRecruits: Type.Optional(Type.Integer({ minimum: 0, maximum: 8 })),
+    headSelection: Type.Optional(
+      Type.Union([Type.Literal("auto"), Type.Literal("manual")]),
+    ),
   },
   { additionalProperties: false },
 );
@@ -521,6 +528,19 @@ export const EvidenceGateNodeSchema = Type.Object(
     checks: Type.Array(EvidenceCheckSchema, { minItems: 1, maxItems: 4 }),
     artifactIds: Type.Array(IdentifierSchema, { maxItems: 64 }),
     evaluator: Type.Optional(ModelRequestSchema),
+    evaluatorMode: Type.Optional(
+      Type.Union([Type.Literal("llm"), Type.Literal("council")]),
+    ),
+    council: Type.Optional(
+      Type.Object(
+        {
+          members: Type.Array(CouncilMemberSchema, { minItems: 2, maxItems: 8 }),
+          chair: ModelRequestSchema,
+          rounds: Type.Optional(Type.Integer({ minimum: 1, maximum: 4 })),
+        },
+        { additionalProperties: false },
+      ),
+    ),
     onUnsupportedOutput: Type.Union([
       Type.Literal("fail"),
       Type.Literal("rescue"),
@@ -544,6 +564,68 @@ export const Lean4NodeSchema = Type.Object(
   { additionalProperties: false },
 );
 
+// F5 kinds stay module-local so they do not widen the reviewed public export
+// surface pinned by test/guards/typed-workflow-exports.test.ts.
+const ElevateToDagNodeSchema = Type.Object(
+  {
+    ...ModelDrivenNodeProperties,
+    kind: Type.Literal("elevate-to-dag"),
+    prompt: InstructionSchema,
+    workflowId: Type.Optional(IdentifierSchema),
+  },
+  { additionalProperties: false },
+);
+
+const HypothesisNodeSchema = Type.Object(
+  {
+    ...ModelDrivenNodeProperties,
+    kind: Type.Literal("hypothesis"),
+    question: InstructionSchema,
+    hypothesisCount: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })),
+  },
+  { additionalProperties: false },
+);
+
+const ReasoningStyleNodeSchema = Type.Object(
+  {
+    ...ModelDrivenNodeProperties,
+    kind: Type.Literal("reasoning-style"),
+    mode: Type.Union([
+      Type.Literal("auto"),
+      Type.Literal("manual"),
+      Type.Literal("infranodus"),
+    ]),
+    style: Type.Optional(ShortTextSchema),
+    personalityRefs: Type.Optional(Type.Array(ReferenceSchema, { maxItems: 32 })),
+  },
+  { additionalProperties: false },
+);
+
+const FormattedOutputNodeSchema = Type.Object(
+  {
+    ...ModelDrivenNodeProperties,
+    kind: Type.Literal("formatted-output"),
+    style: Type.Union([
+      Type.Literal("markdown"),
+      Type.Literal("json"),
+      Type.Literal("methods"),
+      Type.Literal("latex"),
+    ]),
+    instruction: Type.Optional(InstructionSchema),
+  },
+  { additionalProperties: false },
+);
+
+const WorkflowRefNodeSchema = Type.Object(
+  {
+    ...CommonNodeProperties,
+    kind: Type.Literal("workflow-ref"),
+    workflowId: IdentifierSchema,
+    expectedRevision: Type.Optional(Type.Integer({ minimum: 1 })),
+  },
+  { additionalProperties: false },
+);
+
 export const WorkflowNodeSchema = Type.Union([
   AgentNodeSchema,
   ResearchUntilGoalNodeSchema,
@@ -553,6 +635,11 @@ export const WorkflowNodeSchema = Type.Union([
   BestOfNNodeSchema,
   EvidenceGateNodeSchema,
   Lean4NodeSchema,
+  ElevateToDagNodeSchema,
+  HypothesisNodeSchema,
+  ReasoningStyleNodeSchema,
+  FormattedOutputNodeSchema,
+  WorkflowRefNodeSchema,
 ]);
 
 export const WorkflowEdgeSchema = Type.Object(

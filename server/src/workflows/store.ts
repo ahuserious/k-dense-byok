@@ -37,6 +37,10 @@ import {
 } from "./run-state.ts";
 import { validateStoredWorkflowGraphDocument } from "./harness-stored-validation.ts";
 import { validateWorkflowGraphDocument } from "./validate.ts";
+import {
+  expandWorkflowRefs,
+  WorkflowRefExpansionError,
+} from "./workflow-ref-expand.ts";
 
 export const WORKFLOW_DEFINITION_STORAGE_VERSION = 1 as const;
 export const MAX_WORKFLOW_DEFINITIONS_PER_PROJECT = 256;
@@ -2408,6 +2412,35 @@ export class WorkflowStore {
       if (issues.length > 0) throw new WorkflowPreconditionError(issues);
     }
 
+    let expandedGraph = definition.graph;
+    try {
+      expandedGraph = expandWorkflowRefs(definition.graph, (workflowId) => {
+        const referenced = readDefinitionFile(projectId, workflowId);
+        if (!referenced) return null;
+        return {
+          id: referenced.id,
+          revision: referenced.revision,
+          graphSha256: referenced.graphSha256,
+          graph: referenced.graph,
+        };
+      });
+    } catch (error) {
+      if (error instanceof WorkflowRefExpansionError) {
+        throw new WorkflowStoreError(
+          error.code === "NOT_FOUND" ? "NOT_FOUND" : "INVALID_DEFINITION",
+          error.message,
+        );
+      }
+      throw error;
+    }
+    const expandedValidation = validateWorkflowGraphDocument(expandedGraph);
+    if (!expandedValidation.ok) {
+      throw new WorkflowStoreError(
+        "INVALID_DEFINITION",
+        expandedValidation.issues.map((issue) => issue.message).join("; "),
+      );
+    }
+
     const createdAt = Date.now();
     const manifest: WorkflowRunManifestV1 = {
       storageVersion: WORKFLOW_RUN_STORAGE_VERSION,
@@ -2425,8 +2458,8 @@ export class WorkflowStore {
       createdAt,
       requestedBy: input.requestedBy,
       input: structuredClone(input.input ?? {}),
-      effectiveLimits: structuredClone(definition.graph.limits),
-      graph: structuredClone(definition.graph),
+      effectiveLimits: structuredClone(expandedValidation.document.limits),
+      graph: structuredClone(expandedValidation.document),
     };
     const manifestBytes = Buffer.from(serializedJson(manifest), "utf-8");
     assertByteLimit(manifestBytes, MAX_WORKFLOW_RUN_MANIFEST_BYTES, "Workflow run manifest");

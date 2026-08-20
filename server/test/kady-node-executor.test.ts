@@ -3213,4 +3213,104 @@ describe("production Kady DAG node executor", () => {
     });
     expect(host.calls).toHaveLength(0);
   });
+
+  it("dispatches a council fuser and records recruitment when the chair disagrees", async () => {
+    const fuser = openRouterModel("vendor/fuser");
+    const node: WorkflowNode = {
+      ...baseNode("council"),
+      kind: "council",
+      goal: "Decide whether the claim holds.",
+      members: [
+        { id: "a", role: "Reviewer A", model: openRouterModel("vendor/a") },
+        { id: "b", role: "Reviewer B", model: openRouterModel("vendor/b") },
+      ],
+      chair: openRouterModel("vendor/chair"),
+      fuser,
+      maxRecruits: 1,
+      rounds: 1,
+      preserveMinorityReports: false,
+    };
+    const document = graph(node, { limits: { ...graph(node).limits, maxSubagents: 4, maxModelCalls: 16 } });
+    const events: string[] = [];
+    const host = new FakeHost([
+      { position: "yes", rationale: "a", evidence: ["e1"], concerns: [] },
+      { position: "no", rationale: "b", evidence: ["e2"], concerns: ["gap"] },
+      { decision: "split", rationale: "blind spot on mechanism", consensus: false, minorityReports: [] },
+      { position: "recruited", rationale: "closes the gap", evidence: ["e3"], concerns: [] },
+      analysis("fused answer"),
+    ], events);
+
+    const result = await executorFor(host, document)(contextFor(document, events));
+    expect(host.calls.map((call) => call.request.nodeId.split(":").at(-1))).toEqual([
+      "council-round-1-member-a",
+      "council-round-1-member-b",
+      "council-round-1-chair",
+      "council-round-1-member-recruited-1",
+      "council-fuser",
+    ]);
+    expect(result.output).toMatchObject({
+      kind: "council",
+      fusedAnswer: "fused answer",
+      recruitment: { recruited: 1, maxRecruits: 1 },
+    });
+  });
+
+  it("runs an evidence-gate council evaluator through real member slots", async () => {
+    const node: WorkflowNode = {
+      ...baseNode("evidence-gate"),
+      kind: "evidence-gate",
+      checks: ["claim-support"],
+      artifactIds: [],
+      evaluatorMode: "council",
+      council: {
+        members: [
+          { id: "a", role: "Reviewer A", model: openRouterModel("vendor/a") },
+          { id: "b", role: "Reviewer B", model: openRouterModel("vendor/b") },
+        ],
+        chair: openRouterModel("vendor/chair"),
+        rounds: 1,
+      },
+      onUnsupportedOutput: "fail",
+    };
+    const document = graph(node);
+    const host = new FakeHost([
+      { position: "supported", rationale: "a", evidence: ["e1"], concerns: [] },
+      { position: "supported", rationale: "b", evidence: ["e2"], concerns: [] },
+      { decision: "supported", rationale: "agree", consensus: true, minorityReports: [] },
+    ]);
+
+    const result = await executorFor(host, document)(contextFor(document));
+    expect(host.calls.map((call) => call.request.nodeId.split(":").at(-1))).toEqual([
+      "evidence-council-round-1-member-a",
+      "evidence-council-round-1-member-b",
+      "evidence-council-round-1-chair",
+    ]);
+    expect(result.evidence?.supported).toBe(true);
+  });
+
+  it("publishes real best-of-n candidate branches", async () => {
+    const node: WorkflowNode = {
+      ...baseNode("best-of-n"),
+      kind: "best-of-n",
+      goal: "Pick the strongest answer.",
+      candidateCount: 2,
+      evaluator: exactModel(),
+    };
+    const document = graph(node);
+    const host = new FakeHost([
+      analysis("one"),
+      analysis("two"),
+      { winner: 2, scores: [10, 90], rationale: "two is better" },
+    ]);
+
+    const result = await executorFor(host, document)(contextFor(document));
+    expect(result.output).toMatchObject({
+      kind: "best-of-n",
+      winner: 2,
+      branches: [
+        { id: "candidate-1", status: "succeeded" },
+        { id: "candidate-2", status: "succeeded" },
+      ],
+    });
+  });
 });

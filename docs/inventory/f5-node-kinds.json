@@ -1,0 +1,21 @@
+{
+  "lane": "F5",
+  "kindsAdded": [
+    "elevate-to-dag",
+    "hypothesis",
+    "reasoning-style",
+    "formatted-output",
+    "workflow-ref"
+  ],
+  "kindsExtended": {
+    "council": ["fuser", "maxRecruits", "headSelection"],
+    "evidence-gate": ["evaluatorMode", "council"]
+  },
+  "runStateNodeFields": ["recruitment", "branches"],
+  "defaults": {
+    "councilHeads": 4,
+    "councilJudge": 1,
+    "councilFuser": 1
+  },
+  "mimeographs": "settings.deliberation.mimeographs / personality store"
+}

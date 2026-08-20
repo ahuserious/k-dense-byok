@@ -334,7 +334,9 @@ function inheritedNodeModel(
 ): ModelRequest | undefined {
   if (
     node.kind === "agent" || node.kind === "research-until-goal" ||
-    node.kind === "best-of-n"
+    node.kind === "best-of-n" || node.kind === "hypothesis" ||
+    node.kind === "formatted-output" || node.kind === "elevate-to-dag" ||
+    node.kind === "reasoning-style"
   ) {
     return node.model ?? document.defaultModel;
   }
@@ -491,11 +493,15 @@ export function deriveWorkflowNodeDemand(
       maximumModelCalls = limits.maxIterations;
       maximumIterations = limits.maxIterations;
       break;
-    case "council":
-      minimumModelCalls = maximumModelCalls = (node.members.length + 1) * node.rounds;
+    case "council": {
+      const recruits = node.maxRecruits ?? 0;
+      const fuserCalls = node.fuser ? 1 : 0;
+      minimumModelCalls = maximumModelCalls =
+        (node.members.length + 1) * node.rounds + fuserCalls + recruits * node.rounds;
       maximumIterations = node.rounds;
       preferredParallelism = node.members.length;
       break;
+    }
     case "fusion":
       if (node.fusion.mode === "openrouter-router") {
         // Hosted Fusion performs each panel analysis plus analyst deliberation
@@ -518,6 +524,12 @@ export function deriveWorkflowNodeDemand(
       break;
     }
     case "evidence-gate": {
+      if (node.evaluatorMode === "council" && node.council) {
+        const rounds = node.council.rounds ?? 1;
+        minimumModelCalls = maximumModelCalls = (node.council.members.length + 1) * rounds;
+        preferredParallelism = node.council.members.length;
+        break;
+      }
       const usesModel = node.evaluator !== undefined ||
         node.checks.some((check) => check !== "artifact-exists");
       minimumModelCalls = maximumModelCalls = usesModel ? 1 : 0;
@@ -528,6 +540,23 @@ export function deriveWorkflowNodeDemand(
       minimumModelCalls = maximumModelCalls = node.mode === "solve" ? 1 : 0;
       preferredParallelism = node.mode === "solve" ? 1 : 0;
       break;
+    case "elevate-to-dag":
+    case "reasoning-style":
+    case "workflow-ref":
+      break;
+    case "hypothesis": {
+      const count = node.hypothesisCount ?? 2;
+      minimumModelCalls = maximumModelCalls = count + 1;
+      preferredParallelism = count;
+      break;
+    }
+    case "formatted-output":
+      minimumModelCalls = maximumModelCalls = 1;
+      break;
+    default: {
+      const _exhaustive: never = node;
+      throw new Error(`Unhandled workflow node kind ${String((_exhaustive as WorkflowNode).kind)}.`);
+    }
   }
 
   if (requiresWorkflowEvidencePolicyEvaluation(document, node)) {
@@ -643,6 +672,18 @@ function nodeHasModelOrEvidenceEvaluatorSlot(
       return node.mode === "solve" &&
         (node.settings?.model !== undefined || node.solverModel !== undefined ||
           document.defaultModel !== undefined);
+    case "elevate-to-dag":
+    case "reasoning-style":
+    case "workflow-ref":
+      return false;
+    case "hypothesis":
+    case "formatted-output":
+      return node.settings?.model !== undefined || node.model !== undefined ||
+        document.defaultModel !== undefined;
+    default: {
+      const _exhaustive: never = node;
+      throw new Error(`Unhandled workflow node kind ${String((_exhaustive as WorkflowNode).kind)}.`);
+    }
   }
 }
 
@@ -849,6 +890,16 @@ function validateNode(
           false,
         );
       }
+      if (node.fuser) {
+        validateResolvedModel(node.fuser, `${nodePath}/fuser`, false, false);
+      }
+      if ((node.maxRecruits ?? 0) > (node.limits?.maxSubagents ?? document.limits.maxSubagents)) {
+        issues.push({
+          code: "council-recruits-exceed-subagents",
+          path: `${nodePath}/maxRecruits`,
+          message: "Council maxRecruits must not exceed the node's effective maxSubagents.",
+        });
+      }
       break;
     case "fusion":
       if (node.fusion.mode === "openrouter-router") {
@@ -957,11 +1008,37 @@ function validateNode(
           false,
         );
       }
-      if (needsModelEvaluator && !evaluator) {
+      if (node.evaluatorMode === "council") {
+        if (!node.council) {
+          issues.push({
+            code: "missing-evidence-council",
+            path: `${nodePath}/council`,
+            message: "Council evaluator mode needs council members and a chair.",
+          });
+        } else {
+          validateUniqueMemberIds(node.council.members, `${nodePath}/council/members`, issues);
+          validateResolvedModel(node.council.chair, `${nodePath}/council/chair`, false, false);
+          for (const [index, member] of node.council.members.entries()) {
+            validateResolvedModel(
+              member.model,
+              `${nodePath}/council/members/${index}/model`,
+              false,
+              false,
+            );
+          }
+        }
+      } else if (needsModelEvaluator && !evaluator) {
         issues.push({
           code: "missing-evidence-evaluator",
           path: `${nodePath}/evaluator`,
           message: "Model-based evidence checks need an evaluator or workflow default model.",
+        });
+      }
+      if (node.evaluatorMode === "llm" && node.council) {
+        issues.push({
+          code: "ambiguous-evidence-evaluator",
+          path: `${nodePath}/council`,
+          message: "LLM evaluator mode must not also declare a council evaluator.",
         });
       }
       if (node.onUnsupportedOutput === "rescue") {
@@ -1022,6 +1099,50 @@ function validateNode(
         }
       }
       break;
+    case "elevate-to-dag": {
+      const model = validateResolvedModel(node.model, `${nodePath}/model`);
+      validateInheritedModel(model, nodePath, document, issues);
+      if (!node.prompt.trim()) {
+        issues.push({
+          code: "missing-elevate-prompt",
+          path: `${nodePath}/prompt`,
+          message: "Elevate-to-DAG needs a non-empty prompt.",
+        });
+      }
+      break;
+    }
+    case "hypothesis": {
+      const model = validateResolvedModel(node.model, `${nodePath}/model`);
+      validateInheritedModel(model, nodePath, document, issues);
+      break;
+    }
+    case "reasoning-style":
+      if (node.mode === "manual" && (node.personalityRefs?.length ?? 0) === 0) {
+        issues.push({
+          code: "missing-reasoning-style-refs",
+          path: `${nodePath}/personalityRefs`,
+          message: "Manual reasoning-style needs at least one personalityRef.",
+        });
+      }
+      break;
+    case "formatted-output": {
+      const model = validateResolvedModel(node.model, `${nodePath}/model`);
+      validateInheritedModel(model, nodePath, document, issues);
+      break;
+    }
+    case "workflow-ref":
+      if (node.workflowId === document.id) {
+        issues.push({
+          code: "self-workflow-ref",
+          path: `${nodePath}/workflowId`,
+          message: "A workflow cannot reference itself.",
+        });
+      }
+      break;
+    default: {
+      const _exhaustive: never = node;
+      throw new Error(`Unhandled workflow node kind ${String((_exhaustive as WorkflowNode).kind)}.`);
+    }
   }
 }
 
@@ -1094,11 +1215,15 @@ function validateDeliberationNodeSpec(
 ): void {
   const deliberation = node.settings?.deliberation;
   if (!deliberation) return;
-  if (node.kind !== "best-of-n" && node.kind !== "council" && node.kind !== "fusion") {
+  if (
+    node.kind !== "best-of-n" && node.kind !== "council" &&
+    node.kind !== "fusion" && node.kind !== "reasoning-style"
+  ) {
     issues.push({
       code: "deliberation-node-kind-unsupported",
       path: `${nodePath}/settings/deliberation`,
-      message: "NodeSpec deliberation is executable only on best-of-n, council, and fusion nodes.",
+      message:
+        "NodeSpec deliberation is executable only on best-of-n, council, fusion, and reasoning-style nodes.",
     });
     return;
   }

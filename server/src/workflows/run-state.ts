@@ -305,6 +305,30 @@ export const RunStateV1Schema = Type.Object(
             { additionalProperties: false },
           ),
           executionId: Type.Optional(RunStateV1IdentifierSchema),
+          recruitment: Type.Optional(
+            Type.Object(
+              {
+                recruited: Type.Integer({ minimum: 0 }),
+                maxRecruits: Type.Integer({ minimum: 0 }),
+                reason: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+              },
+              { additionalProperties: false },
+            ),
+          ),
+          branches: Type.Optional(
+            Type.Array(
+              Type.Object(
+                {
+                  id: RunStateV1IdentifierSchema,
+                  status: RunStateV1NodeStatusSchema,
+                  label: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+                  executionId: Type.Optional(RunStateV1IdentifierSchema),
+                },
+                { additionalProperties: false },
+              ),
+              { maxItems: 32 },
+            ),
+          ),
         },
         { additionalProperties: false },
       ),
@@ -788,6 +812,7 @@ function modelRequestsForNode(
     case "council":
       node.members.forEach((member) => add(member.model, false));
       add(node.chair, false);
+      if (node.fuser) add(node.fuser, false);
       break;
     case "fusion":
       if (node.fusion.mode === "openrouter-router") {
@@ -811,11 +836,30 @@ function modelRequestsForNode(
       add(node.evaluator ?? graph.defaultModel, false);
       break;
     case "evidence-gate":
-      add(workflowEvidenceGateEvaluator(graph, node), false);
+      if (node.evaluatorMode === "council" && node.council) {
+        node.council.members.forEach((member) => add(member.model, false));
+        add(node.council.chair, false);
+      } else {
+        add(workflowEvidenceGateEvaluator(graph, node), false);
+      }
       break;
     case "lean4":
       add(node.solverModel ?? graph.defaultModel, true);
       break;
+    case "elevate-to-dag":
+    case "reasoning-style":
+      add(node.model ?? graph.defaultModel, true);
+      break;
+    case "workflow-ref":
+      break;
+    case "hypothesis":
+    case "formatted-output":
+      add(node.model ?? graph.defaultModel, true);
+      break;
+    default: {
+      const _exhaustive: never = node;
+      throw new Error(`Unhandled workflow node kind ${String((_exhaustive as WorkflowNode).kind)}.`);
+    }
   }
   if (requiresWorkflowEvidencePolicyEvaluation(graph, node)) {
     add(workflowEvidencePolicyEvaluator(graph, node), false);
@@ -908,6 +952,12 @@ export function workflowModelCallSlotsForNode(
           request: resolvedNodeSlotModel(graph, node, node.chair, false)!,
         });
       }
+      if (node.fuser) {
+        slots.push({
+          id: "council-fuser",
+          request: resolvedNodeSlotModel(graph, node, node.fuser, false)!,
+        });
+      }
       return withEvidencePolicySlot(graph, node, slots);
     }
     case "fusion": {
@@ -969,6 +1019,23 @@ export function workflowModelCallSlotsForNode(
       return withEvidencePolicySlot(graph, node, slots);
     }
     case "evidence-gate": {
+      if (node.evaluatorMode === "council" && node.council) {
+        const rounds = node.council.rounds ?? 1;
+        const slots: WorkflowModelCallSlot[] = [];
+        for (let round = 1; round <= rounds; round += 1) {
+          for (const member of node.council.members) {
+            slots.push({
+              id: `evidence-council-round-${round}-member-${member.id}`,
+              request: resolvedNodeSlotModel(graph, node, member.model, false)!,
+            });
+          }
+          slots.push({
+            id: `evidence-council-round-${round}-chair`,
+            request: resolvedNodeSlotModel(graph, node, node.council.chair, false)!,
+          });
+        }
+        return slots;
+      }
       const usesModel = node.evaluator !== undefined ||
         node.checks.some((check) => check !== "artifact-exists");
       return usesModel
@@ -999,6 +1066,33 @@ export function workflowModelCallSlotsForNode(
             )
           : [],
       );
+    case "elevate-to-dag":
+    case "reasoning-style":
+    case "workflow-ref":
+      return [];
+    case "hypothesis": {
+      const count = node.hypothesisCount ?? 2;
+      const request = resolvedNodeSlotModel(graph, node, node.model ?? graph.defaultModel, true);
+      const slots: WorkflowModelCallSlot[] = [];
+      for (let index = 1; index <= count; index += 1) {
+        if (request) slots.push({ id: `hypothesis-${index}`, request: structuredClone(request) });
+      }
+      if (request) slots.push({ id: "hypothesis-analysis", request: structuredClone(request) });
+      return withEvidencePolicySlot(graph, node, slots);
+    }
+    case "formatted-output":
+      return withEvidencePolicySlot(
+        graph,
+        node,
+        modelCallSlot(
+          "formatted-output",
+          resolvedNodeSlotModel(graph, node, node.model ?? graph.defaultModel, true),
+        ),
+      );
+    default: {
+      const _exhaustive: never = node;
+      throw new Error(`Unhandled workflow node kind ${String((_exhaustive as WorkflowNode).kind)}.`);
+    }
   }
 }
 
@@ -1021,6 +1115,27 @@ export function workflowModelCallSlotForNode(
         true,
       );
       return request && iteration >= 1 && iteration <= maximumIterations
+        ? { id: slotId, request: structuredClone(request) }
+        : undefined;
+    }
+  }
+  if (node.kind === "council") {
+    const match = /^council-round-([1-9][0-9]*)-member-(recruited-[1-9][0-9]*)$/.exec(slotId);
+    if (match) {
+      const round = Number(match[1]);
+      const recruitIndex = Number(match[2].slice("recruited-".length));
+      const maxRecruits = node.maxRecruits ?? 0;
+      const request = resolvedNodeSlotModel(
+        graph,
+        node,
+        node.fuser ?? node.chair ?? graph.defaultModel,
+        false,
+      );
+      return request &&
+          round >= 1 &&
+          round <= node.rounds &&
+          recruitIndex >= 1 &&
+          recruitIndex <= maxRecruits
         ? { id: slotId, request: structuredClone(request) }
         : undefined;
     }
