@@ -49,7 +49,7 @@
  * defect #54 one harness over, and for the tool policy it would also be a
  * security-relevant drop.
  */
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -418,22 +418,61 @@ export const CLAUDE_CODE_TOOL_TRANSLATION: Readonly<
 };
 
 /**
+ * The flag that actually caps availability, and the reason round 3's review
+ * called the previous policy false.
+ *
+ * `--allowedTools` is an *approval* rule — the CLI reference says it names
+ * "tools that execute without prompting for permission" and then, in the same
+ * row, "to restrict which tools are available, use `--tools` instead". So an
+ * allowlist of `Read,Grep,Glob` did not remove `Agent`, `Bash` or anything else
+ * from the child's context; it only meant those three needed no approval. The
+ * deny list was carrying the whole boundary, and a deny list over a built-in
+ * set that currently holds ~40 tools (`Agent`, `Monitor`, `PowerShell`,
+ * `Workflow`, `Artifact`, `EnterWorktree`, `SendMessage`, `Cron*`, …) is
+ * incomplete the moment the CLI adds one.
+ *
+ * `--tools` is the allow-cap: `""` disables every built-in tool, a list keeps
+ * exactly the named ones. It does **not** touch MCP tools, which is why
+ * `mcp__*` is denied below and why the launch also carries
+ * `--strict-mcp-config`.
+ *
+ * Verified against `claude --help` on 2.1.237 and against
+ * `https://code.claude.com/docs/en/cli-reference`. `assertClaudeCodeCliSupportsPolicy`
+ * re-checks it against the binary actually resolved, because a policy expressed
+ * in flags a binary does not implement is not a policy.
+ */
+export const CLAUDE_CODE_TOOL_AVAILABILITY_FLAG = "--tools";
+
+/**
  * Named on `--disallowedTools` on every relayed launch, whatever the allowlist
- * says. `--allowedTools` plus `--permission-mode default` already denies these
- * (an unlisted tool needs an interactive approval that `-p` cannot obtain), so
- * this is the second lock, not the first: if a future CLI changes the default
- * for unlisted tools, a relayed node must still not be able to write, execute
- * or reach the network.
+ * says. With `--tools` now capping built-in availability this is the second
+ * lock rather than the only one, and it covers the two things `--tools` cannot:
+ *
+ * - `mcp__*` — the CLI reference is explicit that `--tools` "doesn't affect MCP
+ *   tools; to deny those too, use `--disallowedTools \"mcp__*\"`". A bare
+ *   `mcp__*` rule removes every MCP tool from the child's context.
+ * - `Agent` — the current subagent-spawning built-in. Round 3 found this list
+ *   denying only the obsolete `Task` name while the live tools reference
+ *   documents `Agent` as the subagent tool with "Permission required: No", so a
+ *   node whose envelope says `subagents.permitted: false` could still reach it.
+ *   Both names stay listed: `Task` for an older binary, `Agent` for a current
+ *   one, and a name that does not exist is inert.
  */
 export const CLAUDE_CODE_DENIED_TOOLS = [
+  "mcp__*",
+  "Agent",
+  "Task",
   "Bash",
   "BashOutput",
   "KillShell",
+  "PowerShell",
+  "Monitor",
+  "Workflow",
+  "Skill",
   "Write",
   "Edit",
   "MultiEdit",
   "NotebookEdit",
-  "Task",
   "WebFetch",
   "WebSearch",
 ] as const;
@@ -441,9 +480,140 @@ export const CLAUDE_CODE_DENIED_TOOLS = [
 /**
  * Not `bypassPermissions`, and not `acceptEdits`. In `-p` mode an approval
  * prompt cannot be answered, so `default` means "anything outside
- * `--allowedTools` fails" — fail-closed by construction.
+ * `--allowedTools` fails" — fail-closed by construction. `default` is accepted
+ * by 2.1.237 and documented as the value `manual` aliases, though `--help`
+ * lists only the alias.
  */
 export const CLAUDE_CODE_PERMISSION_MODE = "default";
+
+/**
+ * Isolation flags carried on every relayed launch.
+ *
+ * `--strict-mcp-config` with no `--mcp-config` leaves the child with zero MCP
+ * servers, so the `mcp__*` deny rule has nothing left to fire on rather than
+ * being the only thing standing between a relayed node and whatever MCP servers
+ * the host user happens to have configured.
+ *
+ * `--safe-mode` stops the child loading skills, plugins, hooks, custom agents,
+ * output styles, MCP servers and `CLAUDE.md`. The relay already *refuses* a node
+ * that asks for delegated skills; this makes the refusal true of the launch as
+ * well, so a project-local `.claude/` directory in the node's cwd cannot hand
+ * the child a capability the node never declared. Built-in tools and permissions
+ * are unaffected by it, which is why `--tools` above is still the cap.
+ */
+export const CLAUDE_CODE_ISOLATION_FLAGS = [
+  "--strict-mcp-config",
+  "--safe-mode",
+] as const;
+
+/**
+ * Every flag the relay's policy is expressed in. `assertClaudeCodeCliSupportsPolicy`
+ * requires the resolved binary to advertise all of them.
+ */
+export const CLAUDE_CODE_REQUIRED_POLICY_FLAGS = [
+  CLAUDE_CODE_TOOL_AVAILABILITY_FLAG,
+  "--allowedTools",
+  "--disallowedTools",
+  "--permission-mode",
+  ...CLAUDE_CODE_ISOLATION_FLAGS,
+] as const;
+
+export interface ClaudeCodeCliPolicySupport {
+  readonly ok: boolean;
+  readonly missing: readonly string[];
+}
+
+/**
+ * Which of the policy flags a binary's own `--help` advertises.
+ *
+ * This is the version-awareness round 3 asked for. The relay's confinement is
+ * expressed entirely in flags, so a binary that does not implement one of them
+ * does not enforce that part of the policy — and the failure mode is silent:
+ * `commander` rejects an unknown option, but a *renamed* one would simply stop
+ * being passed. Reading the advertised option list turns "we believe the CLI
+ * supports `--tools`" into a checked precondition of every relayed launch.
+ *
+ * Matching is on whole flag tokens, so `--tools` does not match
+ * `--allowedTools` and `--safe-mode` does not match `--safe-mode-extra`.
+ */
+export function claudeCodeCliPolicySupport(
+  helpText: string,
+): ClaudeCodeCliPolicySupport {
+  const missing = CLAUDE_CODE_REQUIRED_POLICY_FLAGS.filter((flag) => {
+    const token = flag.slice(2).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return !new RegExp(`(?<![\\w-])--${token}(?![\\w-])`).test(helpText);
+  });
+  return { ok: missing.length === 0, missing };
+}
+
+/** Reads a binary's advertised option list. Injected in tests. */
+export type ClaudeCodePolicyProbe = (binaryPath: string) =>
+  | { ok: true; helpText: string }
+  | { ok: false; detail: string };
+
+const defaultClaudeCodePolicyProbe: ClaudeCodePolicyProbe = (binaryPath) => {
+  const result = spawnSync(binaryPath, ["--help"], {
+    encoding: "utf8",
+    timeout: 20_000,
+    shell: false,
+  });
+  if (result.error || typeof result.stdout !== "string") {
+    return {
+      ok: false,
+      detail:
+        "The Claude Code binary did not answer --help, so its tool-policy support could not be verified.",
+    };
+  }
+  return { ok: true, helpText: `${result.stdout}\n${result.stderr ?? ""}` };
+};
+
+/**
+ * One probe per binary path per process. `--help` costs a few hundred
+ * milliseconds and the answer cannot change without the path changing or the
+ * process restarting, so paying it per relayed node would be a per-node cost
+ * for a per-install fact.
+ */
+const claudeCodePolicySupportCache = new Map<string, ClaudeCodeCliPolicySupport>();
+
+/** Test seam: the cache is keyed by path, and tests reuse paths. */
+export function resetClaudeCodePolicySupportCache(): void {
+  claudeCodePolicySupportCache.clear();
+}
+
+/**
+ * Refuse the adapter when the resolved binary cannot express the node's tool
+ * policy. `WORKFLOW_HARNESS_NOT_BOUND` is the right code: the harness is
+ * installed, and it is the *binding* that is unavailable. Launching anyway would
+ * be a live-looking control over a dropped value, one layer below the UI.
+ */
+export function assertClaudeCodeCliSupportsPolicy(
+  binaryPath: string,
+  probe: ClaudeCodePolicyProbe = defaultClaudeCodePolicyProbe,
+): void {
+  const cached = claudeCodePolicySupportCache.get(binaryPath);
+  if (cached?.ok) return;
+  if (!cached) {
+    const probed = probe(binaryPath);
+    if (!probed.ok) {
+      throw new WorkflowHarnessDispatchError(
+        "WORKFLOW_HARNESS_NOT_BOUND",
+        "claude-code",
+        probed.detail,
+      );
+    }
+    const support = claudeCodeCliPolicySupport(probed.helpText);
+    claudeCodePolicySupportCache.set(binaryPath, support);
+    if (support.ok) return;
+  }
+  const support = claudeCodePolicySupportCache.get(binaryPath);
+  throw new WorkflowHarnessDispatchError(
+    "WORKFLOW_HARNESS_NOT_BOUND",
+    "claude-code",
+    `This Claude Code version does not advertise ${
+      (support?.missing ?? []).join(", ")
+    }, so a relayed node's tool policy could not be enforced. Update Claude Code, then run the node again.`,
+  );
+}
 
 /**
  * Controls that reach the relay and that the CLI has no way to express. They are
@@ -699,8 +869,9 @@ export function buildClaudeCodeInvocation(
   if (input.systemPrompt) argv.push("--system-prompt", input.systemPrompt);
 
   // The node's tool grant, in the CLI's vocabulary. Present on every launch,
-  // including the case where the node granted nothing: an empty --allowedTools
-  // is the strongest policy, not the absence of one.
+  // including the case where the node granted nothing: `--tools ""` disables
+  // every built-in tool, which is the strongest policy rather than the absence
+  // of one.
   const declaredTools = Array.isArray(nodeControl?.toolPolicy?.allowedTools)
     ? (nodeControl.toolPolicy.allowedTools as unknown[]).filter(
       (tool): tool is string => typeof tool === "string",
@@ -710,9 +881,14 @@ export function buildClaudeCodeInvocation(
     const translated = translateClaudeCodeToolPolicy(declaredTools);
     // Refused above; the guard is for the type, not for control flow.
     const allowed = translated.ok ? translated.allowed : [];
-    argv.push("--allowedTools", allowed.join(","));
+    const list = allowed.join(",");
+    // Order matters for reading a failure later, not for the CLI: the cap
+    // first, then the approval rule, then the deny rule, then the mode.
+    argv.push(CLAUDE_CODE_TOOL_AVAILABILITY_FLAG, list);
+    argv.push("--allowedTools", list);
     argv.push("--disallowedTools", CLAUDE_CODE_DENIED_TOOLS.join(","));
     argv.push("--permission-mode", CLAUDE_CODE_PERMISSION_MODE);
+    argv.push(...CLAUDE_CODE_ISOLATION_FLAGS);
   }
 
   const turnBudget = input.request.turnBudget;
@@ -971,6 +1147,7 @@ export interface OpenClaudeCodeRelayOptions {
   settings?: ClaudeCodeHarnessSettings;
   runProcess?: RunClaudeCodeProcess;
   resolve?: typeof resolveClaudeCodeBinary;
+  probePolicySupport?: ClaudeCodePolicyProbe;
 }
 
 /**
@@ -992,6 +1169,12 @@ export function openClaudeCodeRelay(
       resolution.detail,
     );
   }
+  // Before the session exists, not before the first spawn: a node must not be
+  // admitted against an adapter that cannot confine it.
+  assertClaudeCodeCliSupportsPolicy(
+    resolution.binaryPath,
+    options.probePolicySupport,
+  );
   return createClaudeCodeRelaySession({
     selection: options.selection,
     resolution,

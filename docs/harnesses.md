@@ -136,7 +136,8 @@ vendored resolver's behaviour. Anything else is rejected — never silently repl
 
 ```
 <binary> -p --output-format json [--model <id>] [--system-prompt <override>] \
-         --allowedTools <mapped> --disallowedTools <denied> --permission-mode default \
+         --tools <mapped> --allowedTools <mapped> --disallowedTools <denied> \
+         --permission-mode default --strict-mcp-config --safe-mode \
          --max-turns <n>
 ```
 
@@ -160,18 +161,49 @@ the opposite.
 | the node task / prompt | **bound** — stdin |
 | `claudeCode.systemPrompt` | **bound** — `--system-prompt` |
 | structured-output `result.schema` | **bound** — the exact JSON Schema the slot demands is appended to stdin, and the parsed object goes back on the receipt as `result.kind: "structured"` |
-| `autonomy` / `toolPolicy.allowedTools` | **bound** — translated into `--allowedTools`, plus an explicit `--disallowedTools` of every write/exec/network tool and `--permission-mode default`. Mapping: `read`→`Read`, `grep`→`Grep`, `find`→`Glob`, `ls`→`Glob`. An id with no mapping is **refused**, so a tool added to Pi's vocabulary later cannot silently vanish from the relayed child's policy |
+| `autonomy` / `toolPolicy.allowedTools` | **bound** — translated into `--tools`, the CLI's availability cap, and pre-approved with the same list on `--allowedTools`; plus `--disallowedTools` (`mcp__*`, `Agent`, `Task`, and every write/exec/network built-in), `--permission-mode default`, `--strict-mcp-config` and `--safe-mode`. Mapping: `read`→`Read`, `grep`→`Grep`, `find`→`Glob`, `ls`→`Glob`. An id with no mapping is **refused**, so a tool added to Pi's vocabulary later cannot silently vanish from the relayed child's policy |
 | `turnBudget` | **bound** — `--max-turns (maxTurns + graceTurns)` |
 | `model` | **bound after validation** — `request.model` is `provider/id`; only `anthropic/<id>` translates, and the provider prefix is stripped. Anything else is **refused** |
 | `hyperparameters.temperature` / `top_p` / `sampling` | **refused** — the CLI has no sampling flags |
-| `subagents.permitted` (i.e. `autonomy: "loose"`) | **refused** — the CLI's nearest equivalent is `Task`, whose children are *not* bound by this node's allowlist, so granting it would grant strictly more than the node declared |
+| `subagents.permitted` (i.e. `autonomy: "loose"`) | **refused** — the CLI's nearest equivalent is the `Agent` tool (`Task` on older builds), whose children are *not* bound by this node's tool cap, so granting it would grant strictly more than the node declared. Both names are denied on every launch as well, so the refusal does not depend on the node asking honestly |
 | effective skills (`skills.configured`, `skills.delegated`, or `request.skill`, including auto discovery and the required `byom-dag-fusion` skill) | **refused** — the relay cannot inject them, so none may be silently dropped |
 | `toolBudget` | **not bound** — the CLI counts turns, not tool calls. Published as an `unboundControls` entry on `GET /harnesses`; F8/F1 render the control disabled with that reason |
 | `billingMode` | **not bound** — see the billing boundary below |
 | `supervisedBudget` | **not bound** — see the supervised-transport note above |
 
 `--permission-mode` is `default`, never `bypassPermissions`: in `-p` mode an approval prompt cannot be
-answered, so an unlisted tool fails closed by construction.
+answered, so a tool that needs approval and has none fails closed.
+
+#### Why `--tools`, and not `--allowedTools` alone (round-3 correction)
+
+This section previously said the allowlist plus `--permission-mode default` meant "anything outside
+`--allowedTools` fails … fail-closed by construction". **That was false, and the round-3 reviewer was right
+to call it a security-boundary failure rather than a documentation slip.** The Claude Code CLI reference
+describes `--allowedTools` as the tools that "execute without prompting for permission" and says, in the
+same row, that restricting *which tools are available* requires `--tools`. An allowlist of `Read,Grep,Glob`
+therefore left the whole built-in set in the child's context and only removed the prompt for three of them.
+The deny list was carrying the entire boundary, and it denied the obsolete `Task` name while the live tools
+reference documents `Agent` as the subagent-spawning built-in with *Permission required: No* — so a node
+whose envelope said `subagents.permitted: false` could still reach a subagent.
+
+What the launch carries now, and what each part is for:
+
+| Flag | Role |
+| --- | --- |
+| `--tools <list>` | **The cap.** Restricts the built-in set to exactly the translated list; `""` disables every built-in tool, which is what a node granting nothing gets. Does not affect MCP tools |
+| `--allowedTools <list>` | Approval only — the same list, so the capped tools run without a prompt `-p` could not answer |
+| `--disallowedTools mcp__*,Agent,Task,…` | Removes every MCP tool (the documented way, since `--tools` does not reach them) and re-denies the subagent and write/exec/network built-ins as a second lock |
+| `--permission-mode default` | Never `bypassPermissions`; `manual` is the alias `--help` lists for the same mode |
+| `--strict-mcp-config` | With no `--mcp-config`, the child loads **zero** MCP servers, so the `mcp__*` rule has nothing left to fire on |
+| `--safe-mode` | No skills, plugins, hooks, custom agents, output styles or `CLAUDE.md`. The relay already *refuses* a node asking for delegated skills; this makes that true of the launch, so a `.claude/` directory in the node's cwd cannot widen the grant |
+
+**The policy is verified against the binary, not assumed.** `assertClaudeCodeCliSupportsPolicy` reads the
+resolved binary's own `--help` once per path per process and refuses the adapter with
+`WORKFLOW_HARNESS_NOT_BOUND` when any of those flags is not advertised, naming the missing flag and the
+user's next action. A confinement expressed in flags a binary does not implement is not a confinement, and
+the failure would otherwise be silent. Verified against 2.1.237; `claude-code-relay.test.ts` asserts the
+argv, the whole-token flag matching, the fail-closed paths, and — against the binary actually installed on
+the machine running the suite — that every required flag is advertised.
 
 **The billing boundary.** `billingMode` is admitted against the Kady provider/auth the node *resolved*
 (`assertS4BillingMode`), while the actual call is billed to whatever credentials the local `claude` binary

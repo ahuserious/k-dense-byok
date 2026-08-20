@@ -11,15 +11,20 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
 import {
   CLAUDE_BIN_PATH_ENV_VAR,
   CLAUDE_BINARY_NAME,
+  CLAUDE_CODE_REQUIRED_POLICY_FLAGS,
   CLAUDE_CODE_UNBOUND_CONTROLS,
+  assertClaudeCodeCliSupportsPolicy,
   buildClaudeCodeInvocation,
+  claudeCodeCliPolicySupport,
   claudeCodeModelArgument,
   claudeNativeInstallerPath,
   createClaudeCodeRelaySession,
   openClaudeCodeRelay,
+  resetClaudeCodePolicySupportCache,
   resolveClaudeCodeBinary,
   stripNodeControlEnvelope,
   translateClaudeCodeToolPolicy,
@@ -218,6 +223,101 @@ describe("claude code binary resolution", () => {
   });
 });
 
+describe("claude code CLI policy support", () => {
+  afterEach(() => {
+    resetClaudeCodePolicySupportCache();
+  });
+
+  it("matches whole flag tokens, so --allowedTools is not --tools", () => {
+    // The relay's confinement is expressed entirely in flags. A substring match
+    // would report `--tools` as present in a help text that only advertises
+    // `--allowedTools`, which is the exact confusion round-3 HIGH 1 was about.
+    const onlyAllowed =
+      "--allowedTools, --allowed-tools <tools...>  allow without prompting";
+    expect(claudeCodeCliPolicySupport(onlyAllowed).missing)
+      .toContain("--tools");
+    const withCap = `${onlyAllowed}\n--tools <tools...>  restrict built-ins`;
+    expect(claudeCodeCliPolicySupport(withCap).missing)
+      .not.toContain("--tools");
+    // A renamed flag must not pass by prefix either.
+    expect(
+      claudeCodeCliPolicySupport("--safe-mode-extra\n--strict-mcp-config-v2")
+        .missing,
+    ).toEqual(expect.arrayContaining(["--safe-mode", "--strict-mcp-config"]));
+  });
+
+  it("refuses the adapter when the binary cannot express the policy", () => {
+    let thrown: unknown;
+    try {
+      assertClaudeCodeCliSupportsPolicy("/opt/claude/claude", () => ({
+        ok: true,
+        helpText: "--allowedTools <tools...>\n--permission-mode <mode>",
+      }));
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(WorkflowHarnessDispatchError);
+    const failure = thrown as WorkflowHarnessDispatchError;
+    // NOT_BOUND rather than NOT_INSTALLED: the harness is installed and it is
+    // the binding that is unavailable.
+    expect(failure.code).toBe("WORKFLOW_HARNESS_NOT_BOUND");
+    expect(failure.message).toContain("--tools");
+    // Names the user's next action and leaks no filesystem path (#71).
+    expect(failure.message).toContain("Update Claude Code");
+    expect(failure.message).not.toContain("/opt/claude");
+  });
+
+  it("refuses the adapter when the binary does not answer --help", () => {
+    expect(() =>
+      assertClaudeCodeCliSupportsPolicy("/opt/claude/claude", () => ({
+        ok: false,
+        detail: "The Claude Code binary did not answer --help.",
+      }))
+    ).toThrow(WorkflowHarnessDispatchError);
+  });
+
+  it("probes a path once per process", () => {
+    let calls = 0;
+    const probe = (): { ok: true; helpText: string } => {
+      calls += 1;
+      return {
+        ok: true,
+        helpText: CLAUDE_CODE_REQUIRED_POLICY_FLAGS.map((flag) =>
+          `${flag} <value>`
+        ).join("\n"),
+      };
+    };
+    assertClaudeCodeCliSupportsPolicy("/opt/claude/claude", probe);
+    assertClaudeCodeCliSupportsPolicy("/opt/claude/claude", probe);
+    expect(calls).toBe(1);
+  });
+
+  it("holds against the Claude Code binary installed on this machine", () => {
+    // The version-aware half. Whichever branch runs, it asserts something: a
+    // resolvable binary must advertise every flag the policy is expressed in,
+    // and an unresolvable one must fail the adapter closed. This test is what
+    // turns "the CLI supports --tools" from a belief into a measurement.
+    const resolution = resolveClaudeCodeBinary({ settings: {} });
+    if (resolution.state !== "resolved") {
+      expect(() =>
+        openClaudeCodeRelay({ selection: SELECTION, settings: {} })
+      ).toThrow(WorkflowHarnessDispatchError);
+      return;
+    }
+    const help = spawnSync(resolution.binaryPath, ["--help"], {
+      encoding: "utf8",
+      timeout: 20_000,
+      shell: false,
+    });
+    expect(help.error).toBeUndefined();
+    const support = claudeCodeCliPolicySupport(
+      `${help.stdout ?? ""}\n${help.stderr ?? ""}`,
+    );
+    expect(support.missing).toEqual([]);
+    expect(support.ok).toBe(true);
+  });
+});
+
 describe("claude code relay invocation", () => {
   it("invokes print mode and carries the system-prompt override into argv", () => {
     const invocation = buildClaudeCodeInvocation({
@@ -236,12 +336,17 @@ describe("claude code relay invocation", () => {
       "claude-opus-4-1",
       "--system-prompt",
       "You are Kady's relayed reviewer.",
+      // The availability cap comes before the approval rule.
+      "--tools",
+      "Read,Grep,Glob",
       "--allowedTools",
       "Read,Grep,Glob",
       "--disallowedTools",
       expect.any(String),
       "--permission-mode",
       "default",
+      "--strict-mcp-config",
+      "--safe-mode",
       "--max-turns",
       "4",
     ]);
@@ -290,13 +395,37 @@ describe("claude code relay invocation", () => {
       binarySource: "path",
       systemPrompt: undefined,
     });
+    // `--tools` is the availability cap. The CLI reference is explicit that
+    // `--allowedTools` only removes the approval prompt and that restricting
+    // availability needs `--tools`, so an allowlist alone left `Agent`, `Bash`
+    // and every other built-in in the child's context (round-3 HIGH 1).
+    const toolsIndex = invocation.argv.indexOf("--tools");
+    expect(toolsIndex).toBeGreaterThan(-1);
+    expect(invocation.argv[toolsIndex + 1]).toBe("Read,Grep,Glob");
     const allowedIndex = invocation.argv.indexOf("--allowedTools");
     expect(allowedIndex).toBeGreaterThan(-1);
     expect(invocation.argv[allowedIndex + 1]).toBe("Read,Grep,Glob");
     const disallowedIndex = invocation.argv.indexOf("--disallowedTools");
     expect(disallowedIndex).toBeGreaterThan(-1);
-    for (const denied of ["Bash", "Write", "Edit", "Task", "WebFetch"]) {
-      expect(invocation.argv[disallowedIndex + 1]?.split(",")).toContain(denied);
+    const denyList = invocation.argv[disallowedIndex + 1]?.split(",") ?? [];
+    for (
+      const denied of [
+        // `--tools` does not touch MCP tools; the reference names this exact
+        // rule as the way to remove them.
+        "mcp__*",
+        // The current subagent built-in. Round 3 found only the obsolete
+        // `Task` name denied while the live tools reference documents `Agent`
+        // as the subagent tool needing no permission.
+        "Agent",
+        "Task",
+        "Bash",
+        "Write",
+        "Edit",
+        "Skill",
+        "WebFetch",
+      ]
+    ) {
+      expect(denyList).toContain(denied);
     }
     const modeIndex = invocation.argv.indexOf("--permission-mode");
     expect(modeIndex).toBeGreaterThan(-1);
@@ -304,6 +433,31 @@ describe("claude code relay invocation", () => {
     // answered, so `default` is what makes an unlisted tool fail closed.
     expect(invocation.argv[modeIndex + 1]).toBe("default");
     expect(invocation.argv).not.toContain("bypassPermissions");
+    // No MCP server and no project customization may hand the child a
+    // capability the node never declared.
+    expect(invocation.argv).toContain("--strict-mcp-config");
+    expect(invocation.argv).not.toContain("--mcp-config");
+    expect(invocation.argv).toContain("--safe-mode");
+  });
+
+  it("caps availability at nothing when the node granted nothing", () => {
+    const invocation = buildClaudeCodeInvocation({
+      request: relayRequest({
+        task: controlledTask("Do the work.", {
+          autonomy: "strict",
+          subagents: { mode: "inherit", permitted: false },
+          toolPolicy: { allowedTools: [] },
+        }),
+      }),
+      binaryPath: "/opt/claude/claude",
+      binarySource: "path",
+      systemPrompt: undefined,
+    });
+    // `--tools ""` disables every built-in tool. An omitted flag would have
+    // meant "all of them", which is the opposite of what the node declared.
+    const toolsIndex = invocation.argv.indexOf("--tools");
+    expect(toolsIndex).toBeGreaterThan(-1);
+    expect(invocation.argv[toolsIndex + 1]).toBe("");
   });
 
   it("maps the tool vocabulary exactly, and refuses an id it does not know", () => {

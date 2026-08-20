@@ -13,6 +13,21 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+
+/**
+ * The option list a stub Claude binary advertises. Derived from the relay's own
+ * required-flag constant rather than hardcoded, so adding a flag to the policy
+ * without teaching the stub to advertise it fails these items loudly instead of
+ * leaving them passing against a binary that cannot enforce it.
+ */
+function fakeClaudeHelpText(): string {
+  return [
+    "Usage: claude [options] [command] [prompt]",
+    "Options:",
+    ...CLAUDE_CODE_REQUIRED_POLICY_FLAGS.map((flag) => `  ${flag} <value>`),
+    "",
+  ].join("\n");
+}
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type {
@@ -28,6 +43,7 @@ import {
   type WorkflowHarness,
 } from "../src/agent/workflow-delegation-session.ts";
 import type { WorkflowHarnessAdapterSelection } from "../src/workflows/harness-registry.ts";
+import { CLAUDE_CODE_REQUIRED_POLICY_FLAGS } from "../src/workflows/claude-code-relay.ts";
 import {
   createKadyWorkflowNodeExecutor,
   type KadyWorkflowUsageAdmission,
@@ -963,6 +979,14 @@ describe("supervised harness dispatch", () => {
         [
           "#!/usr/bin/env node",
           "const fs = require('node:fs');",
+          // A stub standing in for a policy-capable CLI has to advertise the
+          // same interface: the relay probes `--help` before it will admit a
+          // node, because a confinement expressed in flags the binary does not
+          // implement is not a confinement.
+          "if (process.argv.slice(2).includes('--help')) {",
+          `  process.stdout.write(${JSON.stringify(fakeClaudeHelpText())});`,
+          "  process.exit(0);",
+          "}",
           "const stdin = fs.readFileSync(0, 'utf8');",
           `fs.writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(process.argv.slice(2)));`,
           `fs.writeFileSync(${JSON.stringify(stdinFile)}, stdin);`,
@@ -1036,10 +1060,19 @@ describe("supervised harness dispatch", () => {
         // The node's tool policy (`resolveS4NodeExecutionBindings`,
         // `kady-node-executor.ts:337-340`) reached the operating system as real
         // flags — this is `autonomy` being BOUND on this harness.
+        // `--tools` is the availability cap; `--allowedTools` only removes the
+        // approval prompt. Round-3 HIGH 1 was that only the second was sent, so
+        // every other built-in — including the `Agent` subagent tool — stayed in
+        // the child's context on a strict node.
+        expect(argv[argv.indexOf("--tools") + 1]).toBe("Read,Grep,Glob");
         expect(argv[argv.indexOf("--allowedTools") + 1]).toBe("Read,Grep,Glob");
-        expect(argv[argv.indexOf("--disallowedTools") + 1]?.split(","))
-          .toContain("Bash");
+        const denied = argv[argv.indexOf("--disallowedTools") + 1]?.split(",");
+        expect(denied).toContain("Bash");
+        expect(denied).toContain("Agent");
+        expect(denied).toContain("mcp__*");
         expect(argv[argv.indexOf("--permission-mode") + 1]).toBe("default");
+        expect(argv).toContain("--strict-mcp-config");
+        expect(argv).toContain("--safe-mode");
         expect(argv).toContain("--max-turns");
 
         const stdin = fs.readFileSync(stdinFile, "utf-8");
@@ -1078,6 +1111,10 @@ describe("supervised harness dispatch", () => {
         fakeBinary,
         [
           "#!/bin/sh",
+          'case " $* " in *" --help "*)',
+          `  printf '%s' ${JSON.stringify(fakeClaudeHelpText())}`,
+          "  exit 0;;",
+          "esac",
           `touch ${JSON.stringify(spawnMarker)}`,
           `printf '%s' '{"result":"{}"}'`,
           "",
@@ -1107,6 +1144,84 @@ describe("supervised harness dispatch", () => {
         expect(dispatchError.message).toContain("ollama/qwen3:32b");
         expect(dispatchError.message).toContain("run it on the pi harness");
         // Refused before the process, not after it.
+        expect(fs.existsSync(spawnMarker)).toBe(false);
+      } finally {
+        if (previousSettingsPath === undefined) {
+          delete process.env.KADY_HARNESS_SETTINGS_PATH;
+        } else {
+          process.env.KADY_HARNESS_SETTINGS_PATH = previousSettingsPath;
+        }
+        fs.rmSync(relayDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // Round-3 HIGH 1's other half, at the production seam. The relay's tool
+  // confinement is expressed entirely in CLI flags, so a binary that does not
+  // implement `--tools` cannot enforce it — and would have silently run the
+  // node with the whole built-in set available. Refusing is the only honest
+  // outcome, and it must happen before anything is spawned.
+  it.skipIf(process.platform === "win32")(
+    "refuses a relayed node when the binary cannot express the tool policy",
+    async () => {
+      const relayDir = fs.mkdtempSync(path.join(os.tmpdir(), "f2-relay-caps-"));
+      const fakeBinary = path.join(relayDir, "fake-claude");
+      const spawnMarker = path.join(relayDir, "spawned");
+      fs.writeFileSync(
+        fakeBinary,
+        [
+          "#!/bin/sh",
+          // An older CLI: it knows the approval rule but not the cap.
+          'case " $* " in *" --help "*)',
+          `  printf '%s' ${
+            JSON.stringify(
+              [
+                "Options:",
+                "  --allowedTools <tools...>",
+                "  --disallowedTools <tools...>",
+                "  --permission-mode <mode>",
+                "",
+              ].join("\n"),
+            )
+          }`,
+          "  exit 0;;",
+          "esac",
+          `touch ${JSON.stringify(spawnMarker)}`,
+          `printf '%s' '{"result":"{}"}'`,
+          "",
+        ].join("\n"),
+      );
+      fs.chmodSync(fakeBinary, 0o755);
+      const settingsFile = path.join(relayDir, "harness-settings.json");
+      fs.writeFileSync(
+        settingsFile,
+        JSON.stringify({ version: 1, claudeCode: { binaryPath: fakeBinary } }),
+      );
+      const previousSettingsPath = process.env.KADY_HARNESS_SETTINGS_PATH;
+      process.env.KADY_HARNESS_SETTINGS_PATH = settingsFile;
+      try {
+        const { outcome, selections, seen } = await supervisedExecutorRun({
+          harness: "claude-code",
+          modelProvider: "anthropic",
+          modelId: "claude-sonnet-4-5",
+        });
+        // The refusal happens *inside* the delegation-session build, so no
+        // selection is ever handed back — which is the point: the node is
+        // refused at the dispatch decision rather than after it.
+        expect(selections).toHaveLength(0);
+        expect(seen).not.toContain("delegate");
+        expect(outcome.ok).toBe(false);
+        if (outcome.ok) return;
+        expect(outcome.error).toBeInstanceOf(WorkflowHarnessDispatchError);
+        const dispatchError = outcome.error as WorkflowHarnessDispatchError;
+        expect(dispatchError.harness).toBe("claude-code");
+        expect(dispatchError.code).toBe("WORKFLOW_HARNESS_NOT_BOUND");
+        expect(dispatchError.message).toContain("--tools");
+        expect(dispatchError.message).toContain("--safe-mode");
+        expect(dispatchError.message).toContain("Update Claude Code");
+        // No filesystem path in a user-facing message (#71).
+        expect(dispatchError.message).not.toContain(relayDir);
+        // Nothing ran: the node never became a child process.
         expect(fs.existsSync(spawnMarker)).toBe(false);
       } finally {
         if (previousSettingsPath === undefined) {
