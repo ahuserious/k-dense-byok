@@ -974,6 +974,54 @@ describe("DagWorkflowsPanel", () => {
     );
   });
 
+  it("does not present a live-looking Run control when the workflow cost cap is $0", async () => {
+    const graph = {
+      ...createDefaultWorkflowGraph("research-starter", "Research Starter"),
+      limits: {
+        ...createDefaultWorkflowGraph("research-starter", "Research Starter").limits,
+        maxCostUsd: 0,
+      },
+    };
+    vi.spyOn(dagApi, "listDagWorkflowDefinitions").mockResolvedValue([{
+      id: "research-starter",
+      revision: 1,
+      createdAt: 1,
+      updatedAt: 1,
+      graphSha256: "zero-cap",
+      schemaVersion: graph.schemaVersion,
+      name: graph.name,
+      description: graph.description ?? null,
+      nodeCount: graph.nodes.length,
+      edgeCount: graph.edges.length,
+    }]);
+    vi.spyOn(dagApi, "readDagWorkflowDefinition").mockResolvedValue({
+      etag: '"1"',
+      definition: {
+        storageVersion: 1,
+        id: "research-starter",
+        revision: 1,
+        createdAt: 1,
+        updatedAt: 1,
+        graphSha256: "zero-cap",
+        graph,
+      },
+    });
+    const createRun = vi.spyOn(dagApi, "createDagWorkflowRun");
+
+    renderPanel();
+    await userEvent.click(await screen.findByRole("button", {
+      name: "Open Research Starter details",
+    }));
+
+    const runButton = await screen.findByRole("button", { name: "Run typed workflow" });
+    expect(runButton).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByText(
+      "This workflow's cost cap is $0. Raise limits.maxCostUsd before running.",
+    )).toBeInTheDocument();
+    await userEvent.click(runButton);
+    expect(createRun).not.toHaveBeenCalled();
+  });
+
   describe("opened details stay inside the pane and keep keyboard focus", () => {
     function mockOneTypedWorkflow() {
       const graph = createDefaultWorkflowGraph("fusion-review", "Fusion review");

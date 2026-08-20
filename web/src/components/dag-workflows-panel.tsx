@@ -22,6 +22,8 @@ import {
   type DagWorkflowDefinitionSummary,
   type VersionedDagWorkflowDefinition,
 } from "@/lib/dag-workflows";
+import { BestOfNBranchView } from "@/components/pipeline/best-of-n-branch-view";
+import { DurabilityTimeline } from "@/components/pipeline/durability-timeline";
 import {
   createDefaultWorkflowGraph,
   isWorkflowIdentifier,
@@ -46,6 +48,8 @@ import {
 } from "@/lib/scientific-pipeline-registry";
 
 const VENDORED_BUILDER_URL = `${PIPELINE_ENGINE_URL}/legacy/workflows/builder`;
+const WORKFLOW_ZERO_CAP_REASON =
+  "This workflow's cost cap is $0. Raise limits.maxCostUsd before running.";
 
 function errorMessage(error: unknown): string {
   if (error instanceof DagWorkflowApiError) {
@@ -388,6 +392,13 @@ function DefinitionDetails({
   const [launching, setLaunching] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [runNotice, setRunNotice] = useState<string | null>(null);
+  /**
+   * Row 33: the run this panel just launched, so its best-of-n candidates can
+   * be watched here rather than only in Console. Held as the run id alone —
+   * the branch view reads the run's OWN state from the server, so nothing about
+   * candidate progress is cached in this component.
+   */
+  const [watchedRunId, setWatchedRunId] = useState<string | null>(null);
   const pendingRunRequest = useRef<{ intentKey: string; requestId: string } | null>(null);
   const previousRunIntentKey = useRef<string | null>(null);
   const restoredRunIntent = useRef(false);
@@ -413,6 +424,16 @@ function DefinitionDetails({
       : [],
     [graph.preconditions, runGoal, runVariables, runFiles],
   );
+  const zeroCap = graph.limits.maxCostUsd === 0;
+  const runBlocked =
+    launching || budgetBlocked || preconditionIssues.length > 0 || zeroCap;
+  const runReason = zeroCap
+    ? WORKFLOW_ZERO_CAP_REASON
+    : budgetBlocked
+      ? "Project spend limit reached"
+      : preconditionIssues.length > 0
+        ? "Complete the required workflow inputs before launch"
+        : undefined;
 
   // Activating a registry row replaces the row's rendered state and used to
   // leave focus on <body> (17 Tabs away from the panel it just opened). The
@@ -464,7 +485,14 @@ function DefinitionDetails({
   }, [activeSessionId, definition.id, definition.revision, projectId, runIntentKey]);
 
   const launchRun = async () => {
-    if (launching || budgetBlocked || preconditionIssues.length > 0) return;
+    if (
+      launching
+      || budgetBlocked
+      || preconditionIssues.length > 0
+      || graph.limits.maxCostUsd === 0
+    ) {
+      return;
+    }
     const goal = runGoal.trim();
     const storedRequest = readStoredRunRequests(projectId)[runIntentKey];
     const request = pendingRunRequest.current?.intentKey === runIntentKey
@@ -506,6 +534,7 @@ function DefinitionDetails({
       setRunNotice(
         `Created run ${run.manifest.id} with status ${run.state.status}. Open Console for runner progress.`,
       );
+      setWatchedRunId(run.manifest.id);
       if (
         pendingRunRequest.current?.intentKey === request.intentKey &&
         pendingRunRequest.current.requestId === request.requestId
@@ -656,22 +685,29 @@ function DefinitionDetails({
           />
           <button
             type="button"
-            disabled={launching || budgetBlocked || preconditionIssues.length > 0}
+            disabled={runBlocked}
+            aria-disabled={runBlocked}
+            aria-describedby={runReason ? "typed-workflow-run-reason" : undefined}
             title={
-              budgetBlocked
-                ? "Project spend limit reached"
-                : preconditionIssues.length > 0
-                  ? "Complete the required workflow inputs before launch"
-                : activeSessionId
+              runReason
+                ?? (activeSessionId
                   ? "Run this saved revision using the active Kady session"
-                  : "Run this saved revision using the configured Kady default model"
+                  : "Run this saved revision using the configured Kady default model")
             }
-            onClick={() => void launchRun()}
-            className="inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
+            onClick={() => {
+              if (runBlocked) return;
+              void launchRun();
+            }}
+            className="inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40 aria-disabled:cursor-not-allowed aria-disabled:opacity-40"
           >
             {launching ? <LoaderCircleIcon className="size-3 animate-spin" /> : <PlayIcon className="size-3" />}
             Run typed workflow
           </button>
+          {runReason ? (
+            <p id="typed-workflow-run-reason" className="w-full text-[10px] text-muted-foreground">
+              {runReason}
+            </p>
+          ) : null}
           <button
             type="button"
             onClick={onClose}
@@ -698,6 +734,10 @@ function DefinitionDetails({
           {runNotice}
         </p>
       ) : null}
+      {watchedRunId ? (
+        <BestOfNBranchView projectId={projectId} runId={watchedRunId} />
+      ) : null}
+      {watchedRunId ? <DurabilityTimeline runId={watchedRunId} /> : null}
       {graph.description ? (
         <p className="border-b px-4 py-3 text-xs text-muted-foreground">{graph.description}</p>
       ) : null}

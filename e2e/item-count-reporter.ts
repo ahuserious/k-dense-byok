@@ -19,6 +19,10 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   // Wave F lane F12 (matrix rows 48-50): integrations registry in Settings ▸ Connectors.
   // Path-keyed after F10; the file lives under e2e/wave-f/f12/, not the e2e/ root.
   ["wave-f/f12/f12-integrations.spec.ts", 3],
+  // Lane F6 (Wave F): rows 19/22/25/33 on the builder Compose surface, plus
+  // unmocked live-builder items. Path-keyed to dest's inventoryKey.
+  ["wave-f/f6/compose.spec.ts", 14],
+  ["wave-f/f6/live-builder.spec.ts", 2],
   // Lane F13 (row 52): schedules in the Console. Seven substantive items, all
   // driving the real user path; none thin, fixme or skipped.
   ["wave-f/f13/f13-schedules.spec.ts", 7],
@@ -57,9 +61,8 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   ["wave-f/harness/smoke.spec.ts", 1],
 ]);
 // 270 after F8. F5's 4 items are thin (Gate U is F6). F14 adds 7.
-// F11 adds 3. F1 adds 7. F3 adds 2. F7 adds pipeline-builder-skill (6)
-// and seeded-pipelines (8).
-const EXPECTED_SUBSTANTIVE_ITEMS = 303;
+// F11 adds 3. F1 adds 7. F3 adds 2. F7 adds 14. F6 compose (14) + live-builder (2).
+const EXPECTED_SUBSTANTIVE_ITEMS = 319;
 // 35 pre-existing thin items (labelled inventory smokes plus the 3 fixmes) + the 3 Wave-F
 // evidence-fixture contract items + F5's 4.
 const EXPECTED_THIN_ITEMS = 42;
