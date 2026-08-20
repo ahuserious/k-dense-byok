@@ -186,26 +186,25 @@ test.describe("Settings ▸ Model providers ▸ Model presets", () => {
   test("a Modal preset chooses its Hugging Face model from a search and bounds the GPU stepper", async ({
     liveWorkspace,
   }) => {
-    const { page } = liveWorkspace;
+    const { page, expectRefusedResourceStatus } = liveWorkspace;
     const section = await openModelPresetsSection(liveWorkspace);
 
     await section.getByRole("button", { name: "Model preset" }).click();
     const editor = section.getByRole("form", { name: "New model preset" });
     await editor.getByLabel("Preset name").fill(MODAL_PRESET_NAME);
+    // The hermetic live stack deliberately carries no HF_TOKEN. F12's search
+    // route therefore refuses the editor's capability probe with its published
+    // 503 NOT_CONFIGURED response, which Chromium also reports to the console.
+    expectRefusedResourceStatus(503);
     await editor.getByLabel("Provider").selectOption("modal");
 
-    // Lane F12's FINAL interface requires a search-backed chooser over
-    // GET /integrations/huggingface/models, and requires that it render
-    // DISABLED with a stated reason when it cannot search — explicitly NOT a
-    // free-text fallback that would store an unvalidated model id. F12's route
-    // is not registered in this clone, so this item asserts exactly that
-    // fail-closed state on the live stack. When F12 merges, the same control
-    // searches and this assertion flips to the results path (already covered
-    // as a unit item in preset-editor.test.tsx).
+    // F12's search-backed chooser renders DISABLED with the exact actionable
+    // reason when Hugging Face is unconfigured — never a free-text fallback
+    // that could persist an unvalidated model id.
     const huggingFace = editor.getByLabel("Hugging Face model");
     await expect(huggingFace).toBeDisabled();
     await expect(
-      editor.getByText(/Hugging Face model search is not available in this build yet/),
+      editor.getByText(/Set HF_TOKEN to search Hugging Face models/),
     ).toBeVisible();
 
     // The GPU stepper and the instance picker are live, and their bounds come
