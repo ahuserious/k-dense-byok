@@ -1,0 +1,108 @@
+{
+  "version": 1,
+  "source": "server/src/workflows/harness-registry.ts",
+  "note": "Derived from the registry table, not hand-typed. server/test/harness-inventory.test.ts fails if this file and the registry disagree.",
+  "contract": "docs/contracts/NODESPEC-V1.md#harness-registry",
+  "harnesses": [
+    {
+      "id": "pi",
+      "label": "Pi (built in)",
+      "executables": [
+        "pi"
+      ],
+      "adapter": "pi-delegation",
+      "adapterPresent": true,
+      "exposesBinaryPath": false,
+      "contractStatus": "bound",
+      "summary": "The vendored pi-subagents delegation runtime. The default, and the only harness the node-control envelope targets."
+    },
+    {
+      "id": "claude-code",
+      "label": "Claude Code CLI",
+      "executables": [
+        "claude"
+      ],
+      "adapter": "claude-code-relay",
+      "adapterPresent": true,
+      "exposesBinaryPath": true,
+      "contractStatus": "bound",
+      "summary": "The Claude Code CLI, invoked in print (-p) mode through the Kady relay. Its binary path is resolved from the same sources the vendored engine uses and can be overridden here."
+    },
+    {
+      "id": "codex",
+      "label": "Codex CLI",
+      "executables": [
+        "codex"
+      ],
+      "adapter": null,
+      "adapterPresent": false,
+      "exposesBinaryPath": false,
+      "contractStatus": "authorised-no-adapter",
+      "summary": "The Codex CLI. No trusted delegation adapter in this build yet."
+    },
+    {
+      "id": "opencode",
+      "label": "OpenCode CLI",
+      "executables": [
+        "opencode"
+      ],
+      "adapter": null,
+      "adapterPresent": false,
+      "exposesBinaryPath": false,
+      "contractStatus": "authorised-no-adapter",
+      "summary": "The OpenCode CLI. No trusted delegation adapter in this build yet."
+    },
+    {
+      "id": "copilot",
+      "label": "GitHub Copilot CLI",
+      "executables": [
+        "github-copilot",
+        "copilot"
+      ],
+      "adapter": null,
+      "adapterPresent": false,
+      "exposesBinaryPath": false,
+      "contractStatus": "authorised-no-adapter",
+      "summary": "The GitHub Copilot CLI. No trusted delegation adapter in this build yet."
+    },
+    {
+      "id": "deepseek",
+      "label": "DeepSeek CLI",
+      "executables": [
+        "deepseek",
+        "deepseek-cli"
+      ],
+      "adapter": null,
+      "adapterPresent": false,
+      "exposesBinaryPath": false,
+      "contractStatus": "authorised-no-adapter",
+      "summary": "The DeepSeek CLI. No trusted delegation adapter in this build yet."
+    },
+    {
+      "id": "grok-cli",
+      "label": "Grok CLI",
+      "executables": [
+        "grok",
+        "grok-cli"
+      ],
+      "adapter": null,
+      "adapterPresent": false,
+      "exposesBinaryPath": false,
+      "contractStatus": "authorised-no-adapter",
+      "summary": "The Grok CLI. No trusted delegation adapter in this build yet."
+    },
+    {
+      "id": "oh-my-pi",
+      "label": "oh-my-pi",
+      "executables": [
+        "oh-my-pi",
+        "ohmypi"
+      ],
+      "adapter": null,
+      "adapterPresent": false,
+      "exposesBinaryPath": false,
+      "contractStatus": "authorised-no-adapter",
+      "summary": "The oh-my-pi harness. No trusted delegation adapter in this build yet."
+    }
+  ]
+}

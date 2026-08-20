@@ -13,6 +13,7 @@ import {
   parseSupervisedWorkflowBudgetDescriptor,
   type SupervisedWorkflowBudgetDescriptorV1,
 } from "../supervised-budget.ts";
+import { WORKFLOW_HARNESS_IDS } from "../harness-registry.ts";
 import type { S4NodeExecutionBindings } from "../kady-node-executor.ts";
 import {
   isWorkflowSupervisorCredentialKey,
@@ -47,13 +48,15 @@ const ATTEMPT_STATES = [
   "quarantined",
 ] as const;
 
-const WORKFLOW_HARNESSES = [
-  "pi",
-  "claude-code",
-  "codex",
-  "opencode",
-  "copilot",
-] as const;
+/**
+ * The wire spelling of the harness set. It used to be a second hand-maintained
+ * copy of `HarnessSchema`; it is now a derivation of the one registry table, so
+ * a literal cannot exist in the schema and not on the wire (or the reverse) —
+ * which is the defect class the NodeSpec v1 freeze exists to prevent, one file
+ * over. The registry is pure data with no filesystem or process dependencies,
+ * which is why the supervisor's wire codec can import it.
+ */
+const WORKFLOW_HARNESSES = WORKFLOW_HARNESS_IDS;
 
 const SKILL_SELECTION_MODES = ["auto", "auto-manual", "manual"] as const;
 const SUBAGENT_SELECTION_MODES = ["auto", "auto-manual"] as const;

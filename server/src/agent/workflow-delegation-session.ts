@@ -12,6 +12,13 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ProjectPaths } from "../projects.ts";
 import { lookPath } from "../binaries.ts";
+import {
+  selectWorkflowHarnessAdapter,
+  WorkflowHarnessDispatchError,
+  type WorkflowHarnessAdapterSelection as HarnessAdapterSelection,
+  type WorkflowHarnessDefinition,
+  type WorkflowHarnessId,
+} from "../workflows/harness-registry.ts";
 import { apiRelative } from "../sandbox-fs.ts";
 import { seedAgentFiles } from "./agent-files.ts";
 import {
@@ -23,6 +30,9 @@ import {
 import type {
   DagFusionDelegationHost,
   DagFusionDelegationHostSnapshot,
+  DagFusionDelegationReceipt,
+  DelegateDagFusionNodeOptions,
+  OwnedDelegationRequest,
 } from "../../pi-packages/dag-fusion-drive/index.ts";
 import { defaultModel } from "./models.ts";
 import {
@@ -58,27 +68,19 @@ export interface DisposeWorkflowDelegationSessionOptions {
   rejectIfOwnedLeaves?: boolean;
 }
 
-export type WorkflowHarness =
-  | "pi"
-  | "claude-code"
-  | "codex"
-  | "opencode"
-  | "copilot";
+/**
+ * The harness literal set is no longer spelled here. It is one row per harness in
+ * `workflows/harness-registry.ts`, and this alias exists so the ~40 existing
+ * references to `WorkflowHarness` keep resolving. Adding a harness is a registry
+ * row, not an edit in four files (#55's defect class).
+ */
+export type WorkflowHarness = WorkflowHarnessId;
 
-export type WorkflowHarnessDispatchErrorCode =
-  | "WORKFLOW_HARNESS_NOT_INSTALLED"
-  | "WORKFLOW_HARNESS_NOT_BOUND";
-
-export class WorkflowHarnessDispatchError extends Error {
-  constructor(
-    readonly code: WorkflowHarnessDispatchErrorCode,
-    readonly harness: WorkflowHarness,
-    message: string,
-  ) {
-    super(message);
-    this.name = "WorkflowHarnessDispatchError";
-  }
-}
+export type {
+  WorkflowHarnessAdapterSelection,
+  WorkflowHarnessDispatchErrorCode,
+} from "../workflows/harness-registry.ts";
+export { WorkflowHarnessDispatchError };
 
 export interface WorkflowHarnessDispatchDependencies {
   pi(
@@ -86,6 +88,12 @@ export interface WorkflowHarnessDispatchDependencies {
     paths: ProjectPaths,
   ): Promise<WorkflowDelegationSession>;
   findExecutable(command: string): string | null;
+  /** Discovery for harnesses that resolve a managed binary path (Claude Code). */
+  resolveManagedExecutable?(definition: WorkflowHarnessDefinition): string | null;
+  /** Built by the composition root; see `dispatchWorkflowHarness`. */
+  claudeCodeRelay?(
+    selection: HarnessAdapterSelection,
+  ): WorkflowHarnessDispatch;
 }
 
 export interface S4ConditionCheck {
@@ -406,65 +414,89 @@ export function assertS4NodeConditions(
   if (!evaluation.passed) throw new S4NodeConditionError(evaluation);
 }
 
-const HARNESS_EXECUTABLES: Record<Exclude<WorkflowHarness, "pi">, string[]> = {
-  "claude-code": ["claude"],
-  codex: ["codex"],
-  opencode: ["opencode"],
-  copilot: ["github-copilot", "copilot"],
-};
-
 /**
  * The harness → adapter decision itself, with no knowledge of which transport
- * owns the Pi session. Returns for `pi` — the only fully bound Wave-B
- * implementation — and throws the explicit discovery diagnostic for every
- * other frozen harness value, so installing a CLI changes the message but
- * cannot accidentally grant it workflow authority before an adapter lands.
+ * owns the resulting session. It is now a lookup in the one registry table
+ * (`workflows/harness-registry.ts`) and it **returns the selection** rather than
+ * only failing to throw: the NodeSpec v1 contract requires a caller to be able
+ * to assert *which* adapter the dispatch chose, not merely that nothing blew up.
  *
  * Both transports call this before the node executor reserves any budget: the
  * in-process executor through `dispatchWorkflowHarness` below, and the
  * supervised transport through its own `getDelegationSession` override, which
  * owns a Pi session living in another process and so cannot reuse the factory.
+ *
+ * `resolveManagedExecutable` is how a harness whose binary is not on PATH still
+ * reports installed — Claude Code's native installer writes to `~/.local/bin`,
+ * and a user override outranks both. Callers that can reach the relay module
+ * pass `claudeCodeManagedExecutable`; a caller that cannot degrades to a PATH
+ * scan, which is a false negative, never a false positive.
  */
 export function assertWorkflowHarnessAdapterBound(
   harness: WorkflowHarness,
   findExecutable: (command: string) => string | null = lookPath,
-): void {
-  if (harness === "pi") return;
+  resolveManagedExecutable?: (definition: WorkflowHarnessDefinition) => string | null,
+): HarnessAdapterSelection {
+  return selectWorkflowHarnessAdapter(harness, {
+    findExecutable,
+    ...(resolveManagedExecutable ? { resolveManagedExecutable } : {}),
+  });
+}
 
-  const installed = HARNESS_EXECUTABLES[harness]
-    .map((command) => findExecutable(command))
-    .find((candidate): candidate is string => candidate !== null);
-  if (!installed) {
-    throw new WorkflowHarnessDispatchError(
-      "WORKFLOW_HARNESS_NOT_INSTALLED",
-      harness,
-      `Workflow harness ${harness} is not installed. Install one of: ${HARNESS_EXECUTABLES[harness].join(", ")}.`,
-    );
-  }
-  throw new WorkflowHarnessDispatchError(
-    "WORKFLOW_HARNESS_NOT_BOUND",
-    harness,
-    `Workflow harness ${harness} was found at ${installed}, but this Kady build has no trusted delegation adapter for it.`,
-  );
+/**
+ * The minimal delegation port a harness adapter has to satisfy. The Pi adapter
+ * satisfies it with the real `DagFusionDelegationHost`; the Claude Code relay
+ * satisfies it with a process invocation. The node executor consumes only this.
+ */
+export interface WorkflowHarnessDelegationPort {
+  delegate(
+    request: OwnedDelegationRequest,
+    options: DelegateDagFusionNodeOptions,
+  ): Promise<DagFusionDelegationReceipt>;
+}
+
+/** What a dispatched harness hands back: the decision, and the host it selected. */
+export interface WorkflowHarnessDispatch {
+  readonly harnessSelection: HarnessAdapterSelection;
+  readonly host: WorkflowHarnessDelegationPort;
 }
 
 /**
  * Select the node's execution harness without silently falling back to Pi.
- * In-process transport: reach the adapter decision, then build the local Pi
- * session it selected.
+ * In-process transport: reach the adapter decision, then build the session the
+ * decision selected — the local Pi session, or the Claude Code relay.
+ *
+ * `claudeCodeRelay` is injected rather than imported so this module stays free
+ * of a cycle with `workflows/claude-code-relay.ts`, which needs the node-control
+ * envelope contract from here. `kady-node-executor.ts` is the composition root
+ * that supplies it.
  */
 export async function dispatchWorkflowHarness(
   harness: WorkflowHarness,
   projectId: string,
   paths: ProjectPaths,
   dependencyOverrides: Partial<WorkflowHarnessDispatchDependencies> = {},
-): Promise<WorkflowDelegationSession> {
+): Promise<WorkflowDelegationSession | WorkflowHarnessDispatch> {
   const dependencies: WorkflowHarnessDispatchDependencies = {
     pi: getOrCreateWorkflowDelegationSession,
     findExecutable: lookPath,
     ...dependencyOverrides,
   };
-  assertWorkflowHarnessAdapterBound(harness, dependencies.findExecutable);
+  const selection = assertWorkflowHarnessAdapterBound(
+    harness,
+    dependencies.findExecutable,
+    dependencies.resolveManagedExecutable,
+  );
+  if (selection.adapter === "claude-code-relay") {
+    if (!dependencies.claudeCodeRelay) {
+      throw new WorkflowHarnessDispatchError(
+        "WORKFLOW_HARNESS_NOT_BOUND",
+        harness,
+        "The Claude Code relay is not wired into this executor. Run the node on the pi harness.",
+      );
+    }
+    return dependencies.claudeCodeRelay(selection);
+  }
   return dependencies.pi(projectId, paths);
 }
 
