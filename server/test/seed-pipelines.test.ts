@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PROJECTS_ROOT } from "../src/config.ts";
+import { ensureProjectExists } from "../src/projects.ts";
 import {
   SEED_PIPELINES_DIR,
   SEED_PIPELINE_PROVENANCE_SOURCE,
@@ -249,6 +250,20 @@ describe("the committed seed pipelines load and validate", () => {
 });
 
 describe("seeding a project's workflow library", () => {
+  it("lists all seeded pipelines immediately after a fresh project scaffold", () => {
+    const projectId = "fresh-seeded-project";
+
+    ensureProjectExists(projectId);
+
+    const listed = new WorkflowStore().listDefinitions(projectId);
+    expect(listed.map((definition) => definition.id).sort()).toEqual([
+      "composed-research-pipeline",
+      "data-scientist",
+      "research-starter",
+    ]);
+    expect(listed.every((definition) => definition.revision === 1)).toBe(true);
+  });
+
   it("writes definitions the workflow-list read returns, with their source bytes recorded", async () => {
     const store = new WorkflowStore();
 

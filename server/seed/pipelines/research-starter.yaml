@@ -7,15 +7,18 @@
 # `POST /dag-workflow-imports/legacy-pipeline/preview`, and the typed document it
 # returns is what lands in the project's workflow library.
 #
-# One adaptation from the source: `interactive` was `true` upstream. The typed
-# NodeSpec v1 runtime has no human gate between stages, and the translator rejects
-# the flag outright rather than silently dropping the pause. See
-# docs/adr/F7-seed-import.md.
+# Adaptations from the source are recorded in docs/adr/F7-seed-import.md: the
+# product-specific name and description were replaced with capability names,
+# prompt prose was tightened without changing the three-step dependency chain,
+# and `interactive` changed from `true` to `false` because NodeSpec v1 has no
+# human gate and the translator rejects that flag rather than dropping it.
 name: Research Starter
 description: |
   A three-step research pipeline: scope the question, gather and synthesize the
   findings, then write the result up. A gentle starting point for a new project —
-  open it, read the three prompts, and edit them into your own question.
+  open it, read the three prompts, and edit them into your own question. Imported
+  legacy workflows start with a $0 workflow cost limit, so increase the limit
+  after review before launching a provider-backed run.
 provider: pi
 interactive: false
 

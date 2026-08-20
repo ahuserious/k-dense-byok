@@ -1,33 +1,18 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import type { Page, Route } from "@playwright/test";
+import type { FrameLocator, Page, TestInfo } from "@playwright/test";
 
-import { expect, test } from "../../fixtures";
+import { expect, selectLiveWorkspaceTab, test } from "../../live-fixtures";
 import { COMMITTED_SKILLS } from "./seeded-pipeline-inventory";
 
-/**
- * Gate U for master-brief row 21: the pipeline-builder skill is discoverable and
- * operable without reading source — it appears in Settings ▸ Skills, named for
- * what it is, described by the bytes it actually ships with, and every per-skill
- * control is keyboard-reachable.
- *
- * The descriptions asserted here are parsed out of the committed
- * `server/seed/skills/<name>/SKILL.md` front matter at spec load time, so a
- * skill whose description drifts from what it ships fails this spec.
- */
+// TIER: UNMOCKED. Real backend on KADY_PORT, real engine on
+// KADY_PIPELINE_ENGINE_PORT. Gate U evidence only; Gate B is in
+// server/test/seed-pipelines-skill-binding.test.ts.
 
-/**
- * The retired brand name, assembled from fragments: `scripts/token-ban.mjs`
- * bans the literal string everywhere outside a short allow-list, and an
- * absence assertion that spells it out would be a violation of the very ban
- * it exists to verify.
- */
 const RETIRED_BRAND = new RegExp(["arch", "on"].join(""), "i");
-
 const SKILLS_DIR = path.resolve(__dirname, "../../../server/seed/skills");
 
-/** The `description:` value from a SKILL.md front-matter block, unwrapped. */
 function committedDescription(skill: string): string {
   const source = fs.readFileSync(path.join(SKILLS_DIR, skill, "SKILL.md"), "utf8");
   const frontMatter = source.split("---")[1] ?? "";
@@ -41,90 +26,80 @@ function committedDescription(skill: string): string {
   return lines.join(" ").trim();
 }
 
-const COMMITTED = COMMITTED_SKILLS.map((skill) => ({
-  name: skill,
-  description: committedDescription(skill),
+const COMMITTED = COMMITTED_SKILLS.map((name) => ({
+  name,
+  description: committedDescription(name),
 }));
 
-/**
- * Serve the two committed skills with the descriptions they actually ship.
- * Registered after the suite's default mocks, so it wins the match.
- */
-async function useCommittedSkills(page: Page): Promise<void> {
-  await page.route("**/skills/all*", async (route: Route) => {
-    if (route.request().method() !== "GET") return route.fallback();
-    const scope = new URL(route.request().url()).searchParams.get("scope");
-    return route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        scope: scope === "global" ? "global" : "project",
-        enabled: COMMITTED.map((skill) => ({
-          id: skill.name,
-          name: skill.name,
-          description: skill.description,
-          origin: "committed",
-          enabled: true,
-        })),
-        disabled: [],
-        problems: [],
-        shadowed: [],
-      }),
-    });
-  });
-}
-
 async function openSkillsTab(page: Page) {
-  await useCommittedSkills(page);
   await page.getByRole("button", { name: "Open settings" }).click();
   const settings = page.getByRole("dialog", { name: "Settings" });
   await settings.getByRole("tab", { name: "Skills" }).click();
+  await expect(settings.getByText("scientific-dag-studio", { exact: true })).toBeVisible();
   return settings;
 }
 
-test.describe("the pipeline builder skill in Settings", () => {
-  test("both committed skills are listed by name", async ({ workspacePage }) => {
-    const settings = await openSkillsTab(workspacePage);
+function inspectorControl(frame: FrameLocator, label: string) {
+  return frame
+    .getByText(label, { exact: true })
+    .locator("..")
+    .locator("input, select, textarea")
+    .first();
+}
 
+async function attachScreenshot(
+  page: Page,
+  testInfo: TestInfo,
+  name = "pipeline-builder-skills",
+): Promise<void> {
+  const evidenceDir = process.env.KADY_E2E_EVIDENCE_DIR ??
+    path.resolve(".stably/wave-f-evidence/f7");
+  fs.mkdirSync(evidenceDir, { recursive: true });
+  const screenshotPath = path.join(evidenceDir, `${name}.png`);
+  await page.screenshot({ path: screenshotPath, fullPage: true });
+  await testInfo.attach(name, {
+    path: screenshotPath,
+    contentType: "image/png",
+  });
+}
+
+test.describe("F7 · the pipeline builder skill in Settings", () => {
+  test("@live both committed skills are listed by the real skills endpoint", async ({
+    liveWorkspace,
+  }, testInfo) => {
+    const settings = await openSkillsTab(liveWorkspace.page);
     for (const skill of COMMITTED) {
-      await expect(
-        settings.getByText(skill.name, { exact: true }),
-        `${skill.name} must be listed`,
-      ).toBeVisible();
+      await expect(settings.getByText(skill.name, { exact: true })).toBeVisible();
     }
+    await attachScreenshot(liveWorkspace.page, testInfo);
   });
 
-  test("each skill is described by the front matter it actually ships with", async ({
-    workspacePage,
+  test("@live each skill is described by the front matter it actually ships with", async ({
+    liveWorkspace,
   }) => {
-    const settings = await openSkillsTab(workspacePage);
-
+    const settings = await openSkillsTab(liveWorkspace.page);
     for (const skill of COMMITTED) {
-      // The first sentence is enough to prove the shipped bytes reached the UI
-      // without asserting on a folded-YAML reflow.
       const firstSentence = skill.description.split(".")[0];
       expect(firstSentence.length).toBeGreaterThan(20);
       await expect(settings.getByText(firstSentence, { exact: false }).first()).toBeVisible();
     }
   });
 
-  test("the builder skill is named and described for what it does, not for the upstream project", async ({
-    workspacePage,
+  test("@live the builder skill is named for its capability, not its source project", async ({
+    liveWorkspace,
   }) => {
-    const settings = await openSkillsTab(workspacePage);
-
+    const settings = await openSkillsTab(liveWorkspace.page);
     await expect(settings).not.toContainText(RETIRED_BRAND);
     await expect(settings).not.toContainText(/scientific-pipeline-builder/i);
-    const studio = COMMITTED.find((skill) => skill.name === "scientific-dag-studio")!;
+    const studio = COMMITTED.find(({ name }) => name === "scientific-dag-studio")!;
     expect(studio.description.toLowerCase()).toContain("workflow");
     expect(studio.description.toLowerCase()).toContain("pipeline");
   });
 
-  test("every per-skill control is keyboard-reachable with an accessible name", async ({
-    workspacePage,
+  test("@live every per-skill control is keyboard-reachable with an accessible name", async ({
+    liveWorkspace,
   }) => {
-    const settings = await openSkillsTab(workspacePage);
-
+    const settings = await openSkillsTab(liveWorkspace.page);
     for (const skill of COMMITTED) {
       for (const label of [`Edit ${skill.name}`, `Remove ${skill.name}`, `Toggle ${skill.name}`]) {
         const control = settings.getByRole(
@@ -132,24 +107,44 @@ test.describe("the pipeline builder skill in Settings", () => {
           { name: label },
         );
         await control.focus();
-        await expect(control, `${label} must take focus`).toBeFocused();
+        await expect(control).toBeFocused();
       }
     }
   });
 
-  test("the skills tab is reachable from the keyboard alone", async ({ workspacePage }) => {
-    await useCommittedSkills(workspacePage);
-    const opener = workspacePage.getByRole("button", { name: "Open settings" });
-    await opener.focus();
-    await workspacePage.keyboard.press("Enter");
+  test("@live the real Builder can attach scientific-dag-studio to a node", async ({
+    liveWorkspace,
+  }, testInfo) => {
+    await selectLiveWorkspaceTab(liveWorkspace.page, "Builder");
+    const frame = liveWorkspace.page.frameLocator('iframe[title="DAG Builder"]');
+    await expect(frame.getByPlaceholder("workflow-name")).toBeVisible();
+    await frame.getByPlaceholder("workflow-name").fill("F7 skill attachment");
+    const canvas = frame.locator(".react-flow");
+    await canvas.dblclick({ position: { x: 640, y: 360 } });
+    await frame.getByRole("button", { name: /^Prompt\s+Inline AI prompt$/ }).click();
+    await frame.getByPlaceholder("Enter inline prompt...").fill(
+      "Use the attached scientific DAG authoring skill.",
+    );
+    await frame.getByRole("tab", { name: "NodeSpec" }).click();
+    const skills = inspectorControl(frame, "Skills list");
+    await skills.fill("scientific-dag-studio");
+    await expect(skills).toHaveValue("scientific-dag-studio");
+    await attachScreenshot(
+      liveWorkspace.page,
+      testInfo,
+      "pipeline-builder-skill-attached",
+    );
+  });
 
-    const settings = workspacePage.getByRole("dialog", { name: "Settings" });
-    await expect(settings).toBeVisible();
+  test("@live the Skills tab is reachable from the keyboard alone", async ({ liveWorkspace }) => {
+    const opener = liveWorkspace.page.getByRole("button", { name: "Open settings" });
+    await opener.focus();
+    await liveWorkspace.page.keyboard.press("Enter");
+    const settings = liveWorkspace.page.getByRole("dialog", { name: "Settings" });
     const skillsTab = settings.getByRole("tab", { name: "Skills" });
     await skillsTab.focus();
     await expect(skillsTab).toBeFocused();
-    await workspacePage.keyboard.press("Enter");
-
+    await liveWorkspace.page.keyboard.press("Enter");
     await expect(settings.getByText("scientific-dag-studio", { exact: true })).toBeVisible();
   });
 });

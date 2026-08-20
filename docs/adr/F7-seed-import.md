@@ -3,7 +3,7 @@
 - Lane: **F7**, master-brief rows 20–21
 - Source: branch `DAG-Pipelines` @ `a6c1962` of the fork
 - Base: `b702a8b`
-- Status: accepted for this wave; the one integration line it depends on is in `INTEGRATION.md`
+- Status: accepted and wired into the project scaffold
 
 `docs/adr/**` is an allowed path in `config/token-ban.json`, so this file — and
 only this file — may name the retired brand token. It is **`archon`**,
@@ -128,14 +128,15 @@ adapted file states which surface each field belongs to, and
 `recipes/two-runtimes.md` exists solely to establish that distinction before any
 other file is read.
 
-### 3.4 The other 47 science skill directories — not imported, and not decided here
+### 3.4 The other 47 science skill directories — not imported
 
 `server/seed/skills/**` at `a6c1962` also holds 619 files across 47 unrelated
 science skills (`docx`, `pptx`, `polars`, `pymc`, `matplotlib`,
 `database-lookup`, …). They are outside rows 20–21 and outside F7's writable
 set, and this app fetches its skills catalogue at runtime. Importing them would
-be a 619-file uninstructed change. Flagged in `INTEGRATION.md` and in
-`W/requests/c-f7-1.md` as a separate decision; **not taken by this lane.**
+be a 619-file uninstructed change. The lead's response to
+`W/requests/c-f7-1.md` explicitly decided that they remain runtime-fetched;
+F7 therefore imports none of those directories.
 
 ---
 
@@ -198,10 +199,18 @@ Behaviour: non-clobbering (a workflow id the project already holds is skipped,
 mirroring `copySkillDirs`), idempotent, and it reports content failures instead
 of throwing — a malformed seed must never be able to take project creation down.
 
-**The one thing this lane cannot close by itself:** the loader needs a call site
-in the project-seed path, which lives in `server/src/api/projects.ts:218`,
-`server/src/prep.ts:24` or `server/src/projects.ts:2191` — none of them F7's.
-The exact lines are in `INTEGRATION.md`; the request is `W/requests/c-f7-1.md`.
+The approved call site is `server/src/projects.ts` inside
+`ensureProjectExists`, the function that scaffolds both new and pre-wave
+projects. The handoff from dormant lane C5 permits exactly one import and one
+call beside `seedSandboxFiles`; no duplicate call was added to
+`server/src/api/projects.ts` or `server/src/prep.ts`.
+
+`ensureProjectExists` is synchronous and has many synchronous callers. The
+loader also performs only synchronous filesystem/store operations, so it now
+returns `SeedPipelineReport` synchronously and is called directly. Converting
+the scaffold to async merely to spell `await` would require widening unrelated
+public APIs and could let callers forget to wait. The direct call preserves the
+approved intent: the first workflow-list read cannot race the seed pass.
 
 ---
 
@@ -282,10 +291,10 @@ that nobody reviewed it.
 
 Recording it here rather than softening it, per master-brief §11:
 
-1. **Row 20's Gate U is not fully closed by this lane.** Seeded pipelines appear
-   in the library only once the orchestrator applies one line in a file F7 does
-   not own. Everything else is done and tested; that line is not, and no amount
-   of lane-local work can make it so.
+1. **Row 20's Gate U depends on the scaffold wire, not only on committed
+   content.** The approved `server/src/projects.ts` handoff is now applied, and
+   both a server effect test and the live browser path create a fresh project
+   without invoking the loader directly before reading the registry.
 2. **The "run" in Gate B is a run of the durable runner, not of a provider.**
    `runWorkflowDag` executed the seeded graphs with the real store, the real run
    manifest and the real event stream, and the assertions are on which node

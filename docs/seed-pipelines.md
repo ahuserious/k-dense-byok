@@ -61,6 +61,11 @@ Seeding is:
 - **non-fatal** — a malformed seed is reported in the returned
   `SeedPipelineReport`, never thrown. A bad seed cannot take project creation down.
 
+`ensureProjectExists` calls the loader beside `seedSandboxFiles`, so the first
+request for a new project and the first request for a pre-wave project both
+back-fill the library before `GET /dag-workflows` reads it. The scaffold and
+loader are synchronous; there is no background seed race.
+
 ## Adding a seed pipeline
 
 1. Drop a `.yaml` file in `server/seed/pipelines/`. **The file name is the

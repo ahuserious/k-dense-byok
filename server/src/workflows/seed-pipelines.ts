@@ -250,10 +250,10 @@ export function listSeedPipelineFiles(seedDir: string = SEED_PIPELINES_DIR): str
  * every later seed pass. Content problems are reported, never thrown — a
  * malformed seed must not be able to take project creation down.
  */
-export async function seedProjectPipelines(
+export function seedProjectPipelines(
   projectId: string,
   options: SeedProjectPipelinesOptions = {},
-): Promise<SeedPipelineReport> {
+): SeedPipelineReport {
   const seedDir = options.seedDir ?? SEED_PIPELINES_DIR;
   const store = options.store ?? new WorkflowStore();
   const outcomes: SeedPipelineOutcome[] = [];
