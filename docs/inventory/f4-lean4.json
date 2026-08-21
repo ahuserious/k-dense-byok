@@ -1,0 +1,51 @@
+{
+  "lane": "F4",
+  "row": 10,
+  "purpose": "Wave F lane F4 \u2014 Lean 4 reachability and proof output. The Lean runtime, the trusted verifier, the artifact trust boundary and the mathlib pin all existed at base f98da86 and none of it reached a browser. This lane adds the read-only projection API and THE one proof renderer (shared with lane F11, matrix row 45); it changes no runtime file.",
+  "files": [
+    "docs/lean4.md",
+    "docs/inventory/f4-lean4.json",
+    "e2e/item-count-reporter.ts",
+    "e2e/wave-f/f4/lean4-proof-artifact.fixture.html",
+    "e2e/wave-f/f4/lean4-proof-renderer.spec.ts",
+    "server/src/api/lean4.ts",
+    "server/test/lean4-proof-api.test.ts",
+    "web/src/components/lean4/index.ts",
+    "web/src/components/lean4/lean4-proof-artifact.test.tsx",
+    "web/src/components/lean4/lean4-proof-artifact.tsx",
+    "web/src/components/lean4/lean4-proofs-panel.tsx",
+    "web/src/components/lean4/lean4-proofs-panel.test.tsx",
+    "web/src/lib/lean4-proof.ts"
+  ],
+  "new_file_globs": [
+    "server/src/api/lean4*.ts",
+    "server/test/lean4-*.test.ts",
+    "web/src/components/lean4/**",
+    "web/src/lib/lean4*.ts",
+    "e2e/wave-f/f4/**"
+  ],
+  "reads_but_does_not_own": [
+    "server/src/workflows/lean4-artifacts.ts",
+    "server/src/workflows/lean4-verifier.ts",
+    "server/src/workflows/kady-node-executor.ts",
+    "server/src/workflows/runner.ts",
+    "server/src/workflows/run-state.ts",
+    "server/src/workflows/schema.ts",
+    "server/src/workflows/validate.ts"
+  ],
+  "endpoints": [
+    "GET /lean4/runs/:runId/proofs",
+    "GET /lean4/runs/:runId/proofs/:executionId/source?artifact=proof|log"
+  ],
+  "route_registration": "Dest-unpublished on this tip. server/src/index.ts is dest-identical to dest b3bc962. Orchestrator applies registerLean4Routes from clone-root INTEGRATION.md after registerDagWorkflowRoutes and before registerElevateToDagRoutes. Keep dest harness / elevate / subscription-usage. Lean routes stay out of F12 integrations.ts.",
+  "published_interface": "dfg-evidence-20260807-135127/s11/wave-f/interfaces/F4-lean4.md",
+  "consumers": {
+    "F6": "Team C \u2014 node palette entry and the inspector fields for mode/theorem/solverModel/mathlib; mounts <Lean4ProofArtifact>.",
+    "F11": "Team E \u2014 the lean4-prover skill surface (matrix row 45) reuses the SAME renderer and the SAME client. No second proof renderer exists."
+  },
+  "gate_status": {
+    "U": "PARTIAL. Lean4ProofsPanel is the one host. Dest Console apply lives in INTEGRATION.md (not F6 palette/inspector). Lean routes dest-unpublished. Thin fixture spec remains. Awaiting r2, not a review PASS.",
+    "B": "DONE. server/test/lean4-proof-api.test.ts (10 tests) asserts the effect through the real executor, the real runner receipt gate and the real event log, including refusal of an untrusted path, a symlinked path, and a file the run never accepted. The seam is the TrustedLeanVerifier boundary because no Lean toolchain or pinned Mathlib checkout exists in this environment.",
+    "D": "DONE. Contrast measured in a live preview on ports 18203/13203/13213; light 19.8:1 / 4.74:1, dark 17.18:1 / 6.94:1, focus outline 19.8:1 light and 17.18:1 dark. Zero raw colour literals added."
+  }
+}

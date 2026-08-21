@@ -40,6 +40,9 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
   ["wave-f/f5/f5-node-kinds.spec.ts", 4],
   // Wave F lane F3 (matrix rows 8-9): GPT-5.6 Sol Pro Fusion refresh.
   ["wave-f/f3/fusion-refresh.spec.ts", 2],
+  // Wave F lane F4 (row 10): Lean 4 proof renderer contrast items. All three
+  // are labelled thin — they are not a real user path (Gate U is F6).
+  ["wave-f/f4/lean4-proof-renderer.spec.ts", 3],
   ["live-backend.spec.ts", 3],
   // Wave F lane F14 (rows 23-24, server half of 44): durability API.
   // Seven items are pinned. `--list` is not a live run; dest apply
@@ -62,10 +65,11 @@ const EXPECTED_ITEMS_BY_FILE = new Map([
 ]);
 // 270 after F8. F5's 4 items are thin (Gate U is F6). F14 adds 7.
 // F11 adds 3. F1 adds 7. F3 adds 2. F7 adds 14. F6 compose (14) + live-builder (2).
+// F4's 3 renderer items are thin.
 const EXPECTED_SUBSTANTIVE_ITEMS = 319;
 // 35 pre-existing thin items (labelled inventory smokes plus the 3 fixmes) + the 3 Wave-F
-// evidence-fixture contract items + F5's 4.
-const EXPECTED_THIN_ITEMS = 42;
+// evidence-fixture contract items + F5's 4 + F4's 3 renderer contrast items.
+const EXPECTED_THIN_ITEMS = 45;
 const EXPECTED_FIXME_ITEMS = 3;
 const EXPECTED_SKIP_ITEMS = 0;
 
