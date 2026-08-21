@@ -24,13 +24,42 @@ const scriptPath = path.resolve(
 );
 
 /**
- * Slack bot-token shapes are assembled at runtime so this tracked file never
- * contains a contiguous `xox` + family + hyphen literal. GitHub push protection
- * matches those shapes in history; a forward commit can only clean the tip.
+ * Provider-shaped fixtures are assembled at runtime so this tracked file never
+ * contains a contiguous GitHub-detectable literal (Slack bot token, Google API
+ * key, and the other PLANTED shapes). Push protection scans history; a forward
+ * commit can only clean the tip.
  */
 function plantedSlackBotShape() {
   const family = String.fromCharCode(98);
   return `xox${family}-0000000000-FAKEfakeFAKEfake`;
+}
+
+function plantedOpenAiShape() {
+  return ["sk", "-FAKEFAKEfake0000000000000000000000"].join("");
+}
+
+function plantedAwsAkiaShape(suffix = "0000") {
+  return ["AKI", `AFAKEFAKEFAKE${suffix}`].join("");
+}
+
+function plantedGithubPatShape() {
+  return ["gh", "p_FAKEfakeFAKEfakeFAKEfakeFAKEfake0000"].join("");
+}
+
+function plantedPemHeader() {
+  return ["-----BEGIN", " RSA PRIVATE KEY-----"].join("");
+}
+
+function plantedGoogleApiShape() {
+  return ["AIz", "aFAKEfakeFAKEfakeFAKEfakeFAKEfake000"].join("");
+}
+
+function plantedJwtShape() {
+  return ["eyJ", "hbGciOiJIUzI1NiJ9.eyJzdWIiOiJmYWtlIn0.FAKEfakeFAKEfake"].join("");
+}
+
+function plantedTailscaleShape() {
+  return ["tskey", "-auth-FAKEfakeFAKEfake"].join("");
 }
 
 /**
@@ -38,26 +67,26 @@ function plantedSlackBotShape() {
  * asserted against a file name. None of these is a real credential: every one is a shape.
  */
 const PLANTED = [
-  { id: "openai-sk", file: "openai.txt", line: "const key = '" + ["sk-", "FAKEFAKEfake0000000000000000000000"].join("") + "'" },
-  { id: "aws-akia", file: "aws.txt", line: ["AKI", "AFAKEFAKEFAKE0000"].join("") },
+  { id: "openai-sk", file: "openai.txt", line: `const key = '${plantedOpenAiShape()}'` },
+  { id: "aws-akia", file: "aws.txt", line: plantedAwsAkiaShape() },
   {
     id: "github-token",
     file: "github.txt",
-    line: ["ghp", "_FAKEfakeFAKEfakeFAKEfakeFAKEfake0000"].join(""),
+    line: plantedGithubPatShape(),
   },
   { id: "slack-token", file: "slack.txt", line: plantedSlackBotShape() },
-  { id: "private-key", file: "pem.txt", line: ["---", "--BEGIN RSA PRIVATE KEY-----"].join("") },
+  { id: "private-key", file: "pem.txt", line: plantedPemHeader() },
   {
     id: "google-api-key",
     file: "google.txt",
-    line: ["AIz", "aFAKEfakeFAKEfakeFAKEfakeFAKEfake000"].join(""),
+    line: plantedGoogleApiShape(),
   },
   {
     id: "jwt",
     file: "jwt.txt",
-    line: ["eyJ", "hbGciOiJIUzI1NiJ9.eyJzdWIiOiJmYWtlIn0.FAKEfakeFAKEfake"].join(""),
+    line: plantedJwtShape(),
   },
-  { id: "tailscale-key", file: "tailscale.txt", line: ["tsk", "ey-auth-FAKEfakeFAKEfake"].join("") },
+  { id: "tailscale-key", file: "tailscale.txt", line: plantedTailscaleShape() },
   {
     id: "ngrok-authtoken",
     file: "ngrok-token.txt",
@@ -151,7 +180,7 @@ test("an allowlisted path is marked and does not fail the gate", () => {
   const allowlisted = ALLOWLIST[0];
   const filePath = path.join(root, allowlisted.path);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, "const key = '" + ["sk-", "FAKEFAKEfake0000000000000000000000"].join("") + "';\\n");
+  fs.writeFileSync(filePath, `const key = '${plantedOpenAiShape()}';\n`);
   git("add", ".");
   git("commit", "--quiet", "-m", "allowlisted fixture");
 
@@ -186,8 +215,8 @@ test("the value-derived check finds a base64'd env value no regex would match", 
 
 test("--worktree sees uncommitted and untracked files", () => {
   const { root, git, base } = makeRepository();
-  fs.writeFileSync(path.join(root, "untracked.txt"), ["AKI", "AFAKEFAKEFAKE0000"].join("") + "\\n");
-  fs.appendFileSync(path.join(root, "README.md"), ["tsk", "ey-auth-FAKEfakeFAKEfake"].join("") + "\\n");
+  fs.writeFileSync(path.join(root, "untracked.txt"), `${plantedAwsAkiaShape()}\n`);
+  fs.appendFileSync(path.join(root, "README.md"), `${plantedTailscaleShape()}\n`);
   git("add", "README.md");
 
   const committed = runGate(["--base", base, "--repo", root]);
@@ -265,7 +294,7 @@ test("environmentRepresentations ignores values too short to search for", () => 
 
 test("scanAddedLines counts LINES, matching the prior art's '26,986 added lines' scope", () => {
   const byFile = new Map([
-    ["a.txt", [["AKI", "AFAKEFAKEFAKE0000"].join(""), ["AKI", "AFAKEFAKEFAKE0001"].join(""), "harmless"]],
+    ["a.txt", [plantedAwsAkiaShape("0000"), plantedAwsAkiaShape("0001"), "harmless"]],
   ]);
   const { rows, failing } = scanAddedLines(byFile, { allowlist: [], representations: [] });
   const aws = rows.find((row) => row.id === "aws-akia");
@@ -275,7 +304,7 @@ test("scanAddedLines counts LINES, matching the prior art's '26,986 added lines'
 });
 
 test("a '*' allowlist entry covers shape patterns but never the value-derived check", () => {
-  const byFile = new Map([["fixtures/planted.txt", [["AKI", "AFAKEFAKEFAKE0000"].join(""), "leaked-value-here-000"]]]);
+  const byFile = new Map([["fixtures/planted.txt", [plantedAwsAkiaShape(), "leaked-value-here-000"]]]);
   const { rows, failing } = scanAddedLines(byFile, {
     allowlist: [
       {
@@ -299,7 +328,7 @@ test("a zero value-derived row says 'not run' when the environment held no secre
   // secret was searched for and none appeared" and "nothing was searched for". CI ships
   // no secrets by default, so the second is the one it produces, and an indistinguishable
   // `0` reads as the first. The row has to say which one happened.
-  const byFile = new Map([["fixtures/planted.txt", [["AKI", "AFAKEFAKEFAKE0000"].join("")]]]);
+  const byFile = new Map([["fixtures/planted.txt", [plantedAwsAkiaShape()]]]);
   const empty = scanAddedLines(byFile, { allowlist: [], representations: [] });
   const emptyRow = empty.rows.find((row) => row.id === ENV_VALUE_PATTERN.id);
   assert.equal(emptyRow.variableCount, 0);
@@ -391,7 +420,7 @@ test("--require-env-values outranks findings: exit 2, both complaints, on a dirt
   const { root, git, base } = makeRepository();
   fs.writeFileSync(
     path.join(root, "planted.txt"),
-    ["AKI", "AQQQQQQQQQQQQQQQQ"].join("") + "\\n" + ["sk-", "abcdefghijklmnopqrstuvwxyz0123456789ABCD"].join("") + "\\n",
+    `${["AKI", "AQQQQQQQQQQQQQQQ"].join("")}\n${["sk", "-abcdefghijklmnopqrstuvwxyz0123456789ABCD"].join("")}\n`,
   );
   git("add", ".");
   git("commit", "--quiet", "-m", "planted");
