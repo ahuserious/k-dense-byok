@@ -68,6 +68,7 @@ function normalizeEffort(effort: string): string {
 export function buildFusionRequestBody(
   basePayload: Record<string, unknown>,
   fusionConfig: FusionConfig | null | undefined,
+  options: { allowJudgeFallback?: boolean } = {},
 ): Record<string, unknown> {
   if (!fusionConfig || !fusionConfig.plugins) return basePayload;
 
@@ -88,13 +89,16 @@ export function buildFusionRequestBody(
   // is a WHOLE-CALL fallback, not a per-panel-model swap — request params
   // propagate, so the retry also attempts fusion (via the judge as host).
   const judge = typeof plugin.model === "string" ? (plugin.model as string) : undefined;
+  const allowJudgeFallback = options.allowJudgeFallback ?? true;
 
   const next: Record<string, unknown> = {
     ...basePayload,
     model: "openrouter/fusion",
     plugins: [plugin],
     tool_choice: "required",
-    ...(judge ? { models: ["openrouter/fusion", judge] } : {}),
+    ...(judge && allowJudgeFallback
+      ? { models: ["openrouter/fusion", judge] }
+      : {}),
   };
   // Don't send our own tools array — the fusion plugin injects openrouter:fusion
   // only when the caller isn't managing tools, and with tool_choice:"required" +
@@ -136,6 +140,7 @@ export function setFusionConfig(
 export function makeFusionRequestExtension(
   projectId: string,
   getSessionId: () => string,
+  options: { allowJudgeFallback?: boolean } = {},
 ): ExtensionFactory {
   return (pi) => {
     pi.on("before_provider_request", async (event) => {
@@ -144,6 +149,7 @@ export function makeFusionRequestExtension(
       return buildFusionRequestBody(
         event.payload as Record<string, unknown>,
         fusionConfig,
+        options,
       );
     });
   };

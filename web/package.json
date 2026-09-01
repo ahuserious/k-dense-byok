@@ -6,6 +6,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "lint:dag": "eslint \"src/components/{chat-tabs-bar,dag-*,helper-agent-chat,persistent-workspace-surfaces,raindrop-panel,settings-dialog,workspace-navigation}*.tsx\" \"src/lib/{dag-*,raindrop,workspace-persistence}*.ts\"",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"

@@ -18,7 +18,6 @@
  * session build.
  */
 import fs from "node:fs";
-import path from "node:path";
 import { createRequire } from "node:module";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
@@ -36,10 +35,9 @@ import { isSubscriptionProvider } from "./provider-auth.ts";
 
 const require_ = createRequire(import.meta.url);
 
-/** Entry file of the pi-subagents extension (per its package.json `pi.extensions`). */
+/** Public package entry, which is also the declared Pi extension entry. */
 export function subagentsExtensionPath(): string {
-  const pkgJson = require_.resolve("pi-subagents/package.json");
-  return path.join(path.dirname(pkgJson), "src", "extension", "index.ts");
+  return require_.resolve("pi-subagents");
 }
 
 /** Shape of the pi-subagents tool result details we consume (subset). */
@@ -566,4 +564,3 @@ export function makeSubagentLedgerExtension(
     });
   };
 }
-

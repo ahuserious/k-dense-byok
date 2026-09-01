@@ -22,13 +22,16 @@ jobs:
           cache-dependency-path: server/package-lock.json
       - name: Install dependencies
         working-directory: server
-        run: npm install
+        run: npm ci
       - name: Typecheck
         working-directory: server
         run: npm run typecheck
       - name: Run tests
         working-directory: server
         run: npm test
+      - name: Inspect private dag-fusion-drive package
+        working-directory: server/pi-packages/dag-fusion-drive
+        run: npm pack --dry-run --json
 
   frontend:
     name: frontend (vitest, ${{ matrix.os }})
@@ -48,9 +51,20 @@ jobs:
       - name: Install frontend dependencies
         working-directory: web
         run: npm ci
+      - name: Typecheck
+        working-directory: web
+        run: npx tsc --noEmit
+      # Upstream main has unrelated existing React 19 lint failures. Keep this
+      # feature gate strict without pretending those baseline files are clean.
+      - name: Lint DAG Workflows changes
+        working-directory: web
+        run: npm run lint:dag
       - name: Run tests
         working-directory: web
         run: npm run test
+      - name: Production build
+        working-directory: web
+        run: npm run build
 
   launcher-smoke:
     name: launcher --check (${{ matrix.os }})

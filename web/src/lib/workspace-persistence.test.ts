@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   WORKSPACE_SCHEMA_VERSION,
   WORKSPACE_STORAGE_KEY,
+  WORKSPACE_VIEWS,
   deletePersistedChatState,
   loadWorkspaceSnapshot,
   parseWorkspaceMetadata,
@@ -165,6 +166,41 @@ describe("workspace persistence schema", () => {
         { id: "tab-2" },
       ],
     });
+  });
+
+  it.each(WORKSPACE_VIEWS)("preserves the %s project workspace view", (view) => {
+    const validated = validateWorkspaceMetadata({
+      version: WORKSPACE_SCHEMA_VERSION,
+      screen: "workspace",
+      openedProjectIds: ["project-a"],
+      projects: {
+        "project-a": {
+          tabs: [{ id: "tab-1", title: "One" }],
+          activeTabId: "tab-1",
+          view,
+          sandbox: { openPaths: [], activePath: null },
+        },
+      },
+    });
+
+    expect(validated.projects["project-a"].view).toBe(view);
+  });
+
+  it("keeps legacy snapshots without a view on Chat", () => {
+    const legacy = validateWorkspaceMetadata({
+      version: WORKSPACE_SCHEMA_VERSION,
+      screen: "workspace",
+      openedProjectIds: ["project-a"],
+      projects: {
+        "project-a": {
+          tabs: [{ id: "tab-1", title: "Legacy" }],
+          activeTabId: "tab-1",
+          sandbox: { openPaths: [], activePath: null },
+        },
+      },
+    });
+
+    expect(legacy.projects["project-a"].view).toBe("chat");
   });
 
   it("sanitizes Compute state without breaking v1 snapshots that predate it", () => {

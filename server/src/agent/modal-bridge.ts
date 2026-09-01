@@ -42,8 +42,7 @@ export function seedModalPackage(paths: ProjectPaths): boolean {
 
 function builtinAgentsDir(): string | null {
   try {
-    const packageJson = require_.resolve("pi-subagents/package.json");
-    return path.join(path.dirname(packageJson), "agents");
+    return path.join(path.dirname(require_.resolve("pi-subagents")), "agents");
   } catch {
     return null;
   }

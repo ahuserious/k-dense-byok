@@ -71,10 +71,87 @@ describe("agent files CRUD + seeding", () => {
     expect(seedAgentFiles(paths)).toBe(SUBAGENT_TYPES.length);
     expect(listProjectAgents(paths)).toHaveLength(SUBAGENT_TYPES.length);
 
+    const names = listProjectAgents(paths).map((agent) => agent.name);
+    expect(names).toContain("dag-workflow-builder");
+    expect(names).toContain("dag-workflow-rescue");
+    expect(names).toContain("raindrop-log-analyst");
+    expect(new Set(names).size).toBe(names.length);
+
     expect(deleteProjectAgent(paths, "code-reviewer")).toBe(true);
     // Re-seeding is a no-op after the marker exists — the deletion sticks.
     expect(seedAgentFiles(paths)).toBe(0);
     expect(listProjectAgents(paths).some((a) => a.name === "code-reviewer")).toBe(false);
+  });
+
+  it("migrates only the bounded DAG helpers into an older seeded project once", () => {
+    const paths = ensureProjectExists("dag-helper-migration-test");
+    const agentDir = path.join(paths.sandbox, ".pi", "agents");
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.writeFileSync(path.join(agentDir, ".seeded"), "legacy\n");
+
+    expect(seedAgentFiles(paths)).toBe(4);
+    const helpers = listProjectAgents(paths);
+    expect(helpers.map((agent) => agent.name).sort()).toEqual([
+      "dag-workflow-builder",
+      "dag-workflow-readonly-executor",
+      "dag-workflow-rescue",
+      "raindrop-log-analyst",
+    ]);
+    for (const helper of helpers) {
+      expect(helper.tools).toBe("read, grep, find, ls");
+      expect(helper.thinking).toBe("high");
+      expect(helper.inheritSkills).toBe(false);
+      expect(helper.extra).toMatchObject({
+        timeoutMs: "300000",
+      });
+      expect(JSON.parse(helper.extra?.turnBudget ?? "null")).toMatchObject({
+        maxTurns: expect.any(Number),
+      });
+      expect(JSON.parse(helper.extra?.toolBudget ?? "null")).toMatchObject({
+        hard: expect.any(Number),
+        block: "*",
+      });
+    }
+
+    expect(deleteProjectAgent(paths, "dag-workflow-builder")).toBe(true);
+    expect(seedAgentFiles(paths)).toBe(0);
+    expect(listProjectAgents(paths).map((agent) => agent.name)).toEqual([
+      "dag-workflow-readonly-executor",
+      "dag-workflow-rescue",
+      "raindrop-log-analyst",
+    ]);
+  });
+
+  it("adds only the helpers from later migrations when the first migration already ran", () => {
+    const paths = ensureProjectExists("dag-executor-migration-test");
+    const agentDir = path.join(paths.sandbox, ".pi", "agents");
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.writeFileSync(path.join(agentDir, ".seeded"), "legacy\n");
+    fs.writeFileSync(path.join(agentDir, ".seeded-dag-helpers-v1"), "migrated\n");
+
+    expect(seedAgentFiles(paths)).toBe(2);
+    expect(listProjectAgents(paths).map((agent) => agent.name)).toEqual([
+      "dag-workflow-readonly-executor",
+      "dag-workflow-rescue",
+    ]);
+    expect(seedAgentFiles(paths)).toBe(0);
+  });
+
+  it("adds the rescue specialist once, then preserves its deletion", () => {
+    const paths = ensureProjectExists("dag-rescue-migration-test");
+    const agentDir = path.join(paths.sandbox, ".pi", "agents");
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.writeFileSync(path.join(agentDir, ".seeded"), "legacy\n");
+    fs.writeFileSync(path.join(agentDir, ".seeded-dag-helpers-v1"), "migrated\n");
+    fs.writeFileSync(path.join(agentDir, ".seeded-dag-helpers-v2"), "migrated\n");
+
+    expect(seedAgentFiles(paths)).toBe(1);
+    expect(listProjectAgents(paths).map((agent) => agent.name)).toEqual([
+      "dag-workflow-rescue",
+    ]);
+    expect(deleteProjectAgent(paths, "dag-workflow-rescue")).toBe(true);
+    expect(seedAgentFiles(paths)).toBe(0);
+    expect(listProjectAgents(paths)).toEqual([]);
   });
 
   it("writes, lists, and validates project agents", () => {

@@ -14,6 +14,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { activePaths, getProject, resolvePaths } from "../projects.ts";
 import {
+  withProjectCostAdmissionLock,
+  workflowBudgetSummary,
+} from "../workflows/budget.ts";
+import {
   billingForProvider,
   normalizeUsageCost,
   type BillingContext,
@@ -280,6 +284,7 @@ export interface ComputeReservation {
 }
 
 const RESERVATION_ID_RE = /^[a-z0-9][a-z0-9_-]{5,80}$/;
+const MAX_COMPUTE_RESERVATION_BYTES = 64 * 1024;
 
 function reservationPath(projectId: string, reservationId: string): string {
   if (!RESERVATION_ID_RE.test(reservationId)) {
@@ -295,38 +300,94 @@ function writeAtomicJson(file: string, value: unknown): void {
   fs.renameSync(tmp, file);
 }
 
+function readComputeReservationFile(
+  projectId: string,
+  file: string,
+): ComputeReservation | null {
+  let before: fs.Stats;
+  try {
+    before = fs.lstatSync(file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  if (before.isSymbolicLink() || !before.isFile()) {
+    throw new Error(`Modal reservation ${path.basename(file)} is not a regular file`);
+  }
+  if (before.size > MAX_COMPUTE_RESERVATION_BYTES) {
+    throw new Error(`Modal reservation ${path.basename(file)} is too large`);
+  }
+
+  const noFollow = (fs.constants as typeof fs.constants & { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | noFollow);
+  let raw: string;
+  try {
+    const after = fs.fstatSync(fd);
+    if (
+      !after.isFile() ||
+      after.size > MAX_COMPUTE_RESERVATION_BYTES ||
+      (before.dev !== 0 && before.ino !== 0 &&
+        (before.dev !== after.dev || before.ino !== after.ino))
+    ) {
+      throw new Error(`Modal reservation ${path.basename(file)} changed while being read`);
+    }
+    raw = fs.readFileSync(fd, "utf-8");
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error(`Modal reservation ${path.basename(file)} is malformed JSON`);
+  }
+  const reservation = value as Partial<ComputeReservation>;
+  if (
+    !reservation || typeof reservation !== "object" ||
+    reservation.version !== 1 ||
+    typeof reservation.id !== "string" || !RESERVATION_ID_RE.test(reservation.id) ||
+    reservation.projectId !== projectId ||
+    typeof reservation.sessionId !== "string" || reservation.sessionId.length < 1 ||
+    typeof reservation.amountUsd !== "number" ||
+    !Number.isFinite(reservation.amountUsd) || reservation.amountUsd < 0 ||
+    typeof reservation.createdAt !== "number" ||
+    !Number.isFinite(reservation.createdAt) || reservation.createdAt < 0 ||
+    path.basename(file) !== `${reservation.id}.json`
+  ) {
+    throw new Error(`Modal reservation ${path.basename(file)} has invalid fields`);
+  }
+  return reservation as ComputeReservation;
+}
+
 export function listComputeReservations(projectId: string): ComputeReservation[] {
   const dir = resolvePaths(projectId).modalReservationsDir;
-  let files: string[];
+  let entries: fs.Dirent[];
   try {
-    files = fs.readdirSync(dir).filter((file) => file.endsWith(".json"));
-  } catch {
-    return [];
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
   }
-  return files.flatMap((file) => {
-    try {
-      const value = JSON.parse(fs.readFileSync(path.join(dir, file), "utf-8")) as ComputeReservation;
-      if (
-        value?.version === 1 &&
-        value.projectId === projectId &&
-        Number.isFinite(value.amountUsd) &&
-        value.amountUsd >= 0
-      ) {
-        return [value];
-      }
-    } catch {
-      // A malformed reservation is ignored rather than making every project
-      // request fail. Atomic writers ensure normal files are never partial.
+  const reservations: ComputeReservation[] = [];
+  for (const entry of entries) {
+    if (!entry.name.endsWith(".json")) continue;
+    if (entry.isSymbolicLink() || !entry.isFile()) {
+      throw new Error(`Modal reservation ${entry.name} is not a regular file`);
     }
-    return [];
-  });
+    const reservation = readComputeReservationFile(projectId, path.join(dir, entry.name));
+    if (!reservation) throw new Error(`Modal reservation ${entry.name} disappeared while reading`);
+    reservations.push(reservation);
+  }
+  return reservations;
 }
 
 /**
  * Reserve the strict worst-case cost before a remote job is admitted.
  *
- * This function is synchronous on purpose: in one server process, no other
- * submit can interleave between the committed-spend check and atomic write.
+ * The committed-spend check and atomic write share Kady's project admission
+ * lock with DAG reservations, so competing processes cannot both consume the
+ * same remaining project allowance.
  */
 export function reserveComputeBudget(args: {
   projectId: string;
@@ -337,35 +398,42 @@ export function reserveComputeBudget(args: {
   if (!Number.isFinite(args.amountUsd) || args.amountUsd < 0) {
     throw new Error("Reservation amount must be a non-negative finite number");
   }
-  const file = reservationPath(args.projectId, args.reservationId);
-  try {
-    return JSON.parse(fs.readFileSync(file, "utf-8")) as ComputeReservation;
-  } catch {
-    // new reservation
-  }
-  const summary = projectCostSummary(args.projectId);
-  if (
-    summary.limitUsd !== null &&
-    summary.committedUsd + args.amountUsd > summary.limitUsd + Number.EPSILON
-  ) {
-    const error = new Error(
-      `Modal job would exceed the project spend limit: ` +
-        `$${summary.committedUsd.toFixed(4)} committed + ` +
-        `$${args.amountUsd.toFixed(4)} reserved > $${summary.limitUsd.toFixed(4)}`,
-    );
-    error.name = "BudgetReservationError";
-    throw error;
-  }
-  const reservation: ComputeReservation = {
-    version: 1,
-    id: args.reservationId,
-    projectId: args.projectId,
-    sessionId: args.sessionId,
-    amountUsd: args.amountUsd,
-    createdAt: Date.now(),
-  };
-  writeAtomicJson(file, reservation);
-  return reservation;
+  return withProjectCostAdmissionLock(args.projectId, () => {
+    const file = reservationPath(args.projectId, args.reservationId);
+    const existing = readComputeReservationFile(args.projectId, file);
+    if (existing) {
+      if (
+        existing.sessionId !== args.sessionId ||
+        Math.abs(existing.amountUsd - args.amountUsd) > Number.EPSILON
+      ) {
+        throw new Error(`Modal reservation ${args.reservationId} was reused for different work`);
+      }
+      return existing;
+    }
+    const summary = projectCostSummary(args.projectId);
+    if (
+      summary.limitUsd !== null &&
+      summary.committedUsd + args.amountUsd > summary.limitUsd + Number.EPSILON
+    ) {
+      const error = new Error(
+        `Modal job would exceed the project spend limit: ` +
+          `$${summary.committedUsd.toFixed(4)} committed + ` +
+          `$${args.amountUsd.toFixed(4)} reserved > $${summary.limitUsd.toFixed(4)}`,
+      );
+      error.name = "BudgetReservationError";
+      throw error;
+    }
+    const reservation: ComputeReservation = {
+      version: 1,
+      id: args.reservationId,
+      projectId: args.projectId,
+      sessionId: args.sessionId,
+      amountUsd: args.amountUsd,
+      createdAt: Date.now(),
+    };
+    writeAtomicJson(file, reservation);
+    return reservation;
+  });
 }
 
 export function releaseComputeReservation(projectId: string, reservationId: string): void {
@@ -373,27 +441,50 @@ export function releaseComputeReservation(projectId: string, reservationId: stri
 }
 
 /**
- * Read one session's ledger, skipping unparseable rows.
+ * Read one session's ledger. Interactive session views retain intact rows when
+ * a row is damaged; project admission uses strict mode and fails closed.
  *
- * A single torn line (crash mid-append) must never discard the rest of the
- * file: these totals feed the spend cap, so losing them silently understates
- * real spend and lets billable work through a cap that should have blocked it.
+ * Interactive views skip malformed rows but preserve every intact row. Strict
+ * project accounting rejects the whole summary when any row is malformed: a
+ * damaged line must never silently understate spend and admit billable work.
  */
-function readEntries(sessionId: string, projectId?: string): CostEntry[] {
+function readEntries(sessionId: string, projectId?: string, strict = false): CostEntry[] {
   const file = costsPath(sessionId, projectId);
   let raw: string;
   try {
     raw = fs.readFileSync(file, "utf-8");
-  } catch {
-    return []; // no ledger yet is normal, not an error
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return []; // no ledger yet is normal, not an error
+    }
+    throw error;
   }
   const entries: CostEntry[] = [];
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     try {
       const parsed = JSON.parse(line) as CostEntry;
-      if (parsed && typeof parsed === "object") entries.push(parsed);
-    } catch {
+      if (!parsed || typeof parsed !== "object") throw new Error("row is not an object");
+      if (strict && (
+        typeof parsed.costUsd !== "number" || !Number.isFinite(parsed.costUsd) ||
+        parsed.costUsd < 0 ||
+        typeof parsed.totalTokens !== "number" || !Number.isFinite(parsed.totalTokens) ||
+        parsed.totalTokens < 0 ||
+        (parsed.listPriceUsd !== undefined && (
+          typeof parsed.listPriceUsd !== "number" ||
+          !Number.isFinite(parsed.listPriceUsd) || parsed.listPriceUsd < 0
+        ))
+      )) {
+        throw new Error("row has invalid accounting fields");
+      }
+      entries.push(parsed);
+    } catch (error) {
+      if (strict) {
+        throw new Error(
+          `Cost ledger ${sessionId} contains a malformed accounting row`,
+          { cause: error },
+        );
+      }
       // Torn or hand-edited row; the remaining rows are still authoritative.
     }
   }
@@ -462,7 +553,15 @@ export interface SessionCostSummary {
 }
 
 export function sessionCostSummary(sessionId: string, projectId?: string): SessionCostSummary {
-  const entries = readEntries(sessionId, projectId);
+  return sessionCostSummaryFromLedger(sessionId, projectId, false);
+}
+
+function sessionCostSummaryFromLedger(
+  sessionId: string,
+  projectId: string | undefined,
+  strict: boolean,
+): SessionCostSummary {
+  const entries = readEntries(sessionId, projectId, strict);
   let totalUsd = 0;
   let listPriceUsd = 0;
   let subscriptionTokens = 0;
@@ -544,6 +643,10 @@ export interface ProjectCostSummary {
   totalUsd: number;
   spentUsd: number;
   reservedUsd: number;
+  ledgerSpentUsd: number;
+  workflowSpentUsd: number;
+  modalReservedUsd: number;
+  workflowReservedUsd: number;
   /** Accrued spend of runs still in flight (not yet ledgered). */
   inFlightUsd: number;
   committedUsd: number;
@@ -576,7 +679,7 @@ export function projectCostSummary(projectId: string): ProjectCostSummary {
   try {
     for (const dirent of fs.readdirSync(paths.runsDir, { withFileTypes: true })) {
       if (!dirent.isDirectory()) continue;
-      const s = sessionCostSummary(dirent.name, projectId);
+      const s = sessionCostSummaryFromLedger(dirent.name, projectId, true);
       if (s.entries.length === 0) continue; // run dir with nothing ledgered yet
       sessionCount++;
       totalUsd += s.totalUsd;
@@ -584,26 +687,42 @@ export function projectCostSummary(projectId: string): ProjectCostSummary {
       subscriptionTokens += s.subscriptionTokens;
       totalTokens += s.totalTokens;
     }
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     /* no runs yet */
   }
   // A null or non-positive limit means "unlimited" (0 is not a hard block).
   const rawLimit = getProject(projectId)?.spendLimitUsd ?? null;
   const limitUsd = rawLimit !== null && rawLimit > 0 ? rawLimit : null;
-  const reservedUsd = listComputeReservations(projectId).reduce(
+  const modalReservedUsd = listComputeReservations(projectId).reduce(
     (sum, reservation) => sum + finite(reservation.amountUsd),
     0,
   );
+  // Workflow reservations are durable and cross-process. A terminal workflow
+  // record contributes its observed incremental cost (or the reserved maximum
+  // when crash recovery could not observe usage); only active records remain
+  // reserved. Malformed records throw so admission fails closed.
+  const workflowBudget = workflowBudgetSummary(projectId);
+  const ledgerSpentUsd = totalUsd;
+  const workflowSpentUsd = workflowBudget.settledSpentUsd;
+  const spentUsd = ledgerSpentUsd + workflowSpentUsd;
+  const workflowReservedUsd = workflowBudget.activeReservedUsd;
+  const reservedUsd = modalReservedUsd + workflowReservedUsd;
+  totalTokens += workflowBudget.settledTokens;
   const inFlightUsd = inFlightUsdFor(projectId);
-  const committedUsd = totalUsd + reservedUsd + inFlightUsd;
+  const committedUsd = spentUsd + reservedUsd + inFlightUsd;
   const ratio = limitUsd ? committedUsd / limitUsd : null;
   let state: BudgetState = "ok";
   if (ratio !== null) state = ratio >= 1 ? "exceeded" : ratio >= 0.8 ? "warn" : "ok";
   return {
     projectId,
-    totalUsd,
-    spentUsd: totalUsd,
+    totalUsd: spentUsd,
+    spentUsd,
     reservedUsd,
+    ledgerSpentUsd,
+    workflowSpentUsd,
+    modalReservedUsd,
+    workflowReservedUsd,
     inFlightUsd,
     committedUsd,
     listPriceUsd,
@@ -613,7 +732,7 @@ export function projectCostSummary(projectId: string): ProjectCostSummary {
     limitUsd,
     budget: {
       totalUsd: committedUsd,
-      spentUsd: totalUsd,
+      spentUsd,
       reservedUsd,
       inFlightUsd,
       committedUsd,

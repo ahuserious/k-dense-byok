@@ -12,7 +12,9 @@ import { PROJECTS_ROOT } from "../src/config.ts";
 import { createProject, ensureProjectExists, resolvePaths } from "../src/projects.ts";
 import {
   isBudgetExceeded,
+  listComputeReservations,
   projectCostSummary,
+  reserveComputeBudget,
   sessionCostSummary,
   trackInFlightRun,
   untrackInFlightRun,
@@ -86,7 +88,42 @@ describe("ledger reads survive damaged rows", () => {
       JSON.stringify({ ...row({ entryId: "a" }), costUsd: Number.NaN }),
       JSON.stringify(row({ entryId: "b", costUsd: 2 })),
     ]);
-    expect(isBudgetExceeded("capped").exceeded).toBe(true);
+    expect(() => isBudgetExceeded("capped")).toThrow(/malformed accounting row/);
+  });
+
+  it("fails project accounting closed when any ledger row is malformed", () => {
+    createProject({ name: "Strict", projectId: "strict", spendLimitUsd: 10 });
+    writeRows("s1", "strict", [
+      JSON.stringify(row({ entryId: "a", costUsd: 1 })),
+      '{"entryId":"torn"',
+    ]);
+
+    expect(() => projectCostSummary("strict")).toThrow(/malformed accounting row/);
+    expect(() => isBudgetExceeded("strict")).toThrow(/malformed accounting row/);
+  });
+
+  it("fails closed on malformed durable Modal reservations", () => {
+    createProject({ name: "Compute", projectId: "compute", spendLimitUsd: 10 });
+    reserveComputeBudget({
+      projectId: "compute",
+      reservationId: "mj_valid",
+      sessionId: "s1",
+      amountUsd: 1,
+    });
+    const reservationFile = path.join(
+      resolvePaths("compute").modalReservationsDir,
+      "mj_valid.json",
+    );
+    fs.writeFileSync(reservationFile, "{broken\n", "utf-8");
+
+    expect(() => listComputeReservations("compute")).toThrow(/malformed JSON/);
+    expect(() => projectCostSummary("compute")).toThrow(/malformed JSON/);
+    expect(() => reserveComputeBudget({
+      projectId: "compute",
+      reservationId: "mj_valid",
+      sessionId: "s1",
+      amountUsd: 1,
+    })).toThrow(/malformed JSON/);
   });
 });
 

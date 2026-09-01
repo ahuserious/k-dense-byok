@@ -9,7 +9,6 @@ import {
   PencilIcon,
   PlusIcon,
   TerminalIcon,
-  WorkflowIcon,
   XIcon,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -37,13 +36,11 @@ export interface ChatTabsBarProps {
   projectId: string;
   tabs: ChatTabDescriptor[];
   activeTabId: string;
-  view: "chat" | "workflows";
   maxTabs: number;
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
   onNew: () => void;
   onRename: (id: string, title: string) => void;
-  onSelectWorkflows: () => void;
   /** Reopen a stored session (from the History menu) into a tab. */
   onOpenSession: (sessionId: string, title: string) => void;
   /** Session id of the active tab, for reproducibility export. */
@@ -251,13 +248,11 @@ export function ChatTabsBar({
   projectId,
   tabs,
   activeTabId,
-  view,
   maxTabs,
   onSelect,
   onClose,
   onNew,
   onRename,
-  onSelectWorkflows,
   onOpenSession,
   activeSessionId,
   canExport = false,
@@ -294,7 +289,7 @@ export function ChatTabsBar({
           the scroll container — off-screen — once the tab strip overflows. */}
       <div className="flex items-center gap-1 min-w-0 flex-1 overflow-x-auto">
         {tabs.map((tab) => {
-          const isActive = view === "chat" && tab.id === activeTabId;
+          const isActive = tab.id === activeTabId;
           const canClose = tabs.length > 1;
           const isEditing = editingId === tab.id;
           return (
@@ -426,36 +421,11 @@ export function ChatTabsBar({
         <HistoryMenu projectId={projectId} onOpenSession={onOpenSession} />
       </div>
 
-      <div className="shrink-0 flex items-center gap-1 pl-2 border-l">
-        {view === "chat" && canExport && activeSessionId && (
+      {canExport && activeSessionId ? (
+        <div className="shrink-0 flex items-center gap-1 pl-2 border-l">
           <ExportMenu projectId={projectId} sessionId={activeSessionId} />
-        )}
-        <InfoTooltip
-          content={
-            <>
-              <b>Workflows</b>
-              <br />
-              Pre-built scientific pipelines (e.g. RNA-seq, literature
-              review). Pick a template, attach inputs, and launch — they
-              run in the active chat tab.
-            </>
-          }
-        >
-          <button
-            onClick={onSelectWorkflows}
-            type="button"
-            className={cn(
-              "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors",
-              view === "workflows"
-                ? "bg-muted text-foreground"
-                : "text-muted-foreground hover:text-foreground hover:bg-muted/50",
-            )}
-          >
-            <WorkflowIcon className="size-3.5" />
-            Workflows
-          </button>
-        </InfoTooltip>
-      </div>
+        </div>
+      ) : null}
     </div>
   );
 }

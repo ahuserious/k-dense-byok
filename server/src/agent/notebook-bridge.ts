@@ -68,8 +68,7 @@ export function seedNotebookPackage(paths: ProjectPaths): boolean {
 /** Dir of pi-subagents' builtin agent definitions (agents/*.md), if installed. */
 function builtinAgentsDir(): string | null {
   try {
-    const pkgJson = require_.resolve("pi-subagents/package.json");
-    return path.join(path.dirname(pkgJson), "agents");
+    return path.join(path.dirname(require_.resolve("pi-subagents")), "agents");
   } catch {
     return null;
   }

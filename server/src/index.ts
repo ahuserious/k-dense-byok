@@ -14,7 +14,7 @@ import multipart from "@fastify/multipart";
 import Fastify, { type FastifyRequest } from "fastify";
 import { DEFAULT_PROJECT_ID, HOST, PORT, modalConfigured } from "./config.ts";
 import { isCorsOriginAllowed } from "./cors.ts";
-import { ensureProjectExists, getProject } from "./projects.ts";
+import { ensureProjectExists, getProject, listProjects } from "./projects.ts";
 import { withActiveProject } from "./scope.ts";
 import { registerProjectRoutes } from "./api/projects.ts";
 import { registerSessionRoutes } from "./api/sessions.ts";
@@ -27,6 +27,16 @@ import { registerAgentRoutes } from "./api/agents.ts";
 import { registerSpeechRoutes } from "./api/speech.ts";
 import { registerModalRoutes } from "./api/modal.ts";
 import { registerModelProviderRoutes } from "./api/model-providers.ts";
+import { registerDagWorkflowRoutes } from "./api/dag-workflows.ts";
+import { disposeAllWorkflowDelegationSessions } from "./agent/workflow-delegation-session.ts";
+import type { WorkflowRunController } from "./workflows/controller.ts";
+import { reconcileStaleWorkflowBudgetReservations } from "./workflows/budget.ts";
+import {
+  createProductionWorkflowController,
+  workflowControllerErrorLogFields,
+} from "./workflows/service.ts";
+import { workflowStore } from "./workflows/store.ts";
+import { assertNoHostedFusionQuarantine } from "./workflows/hosted-fusion.ts";
 import { startAutomaticSkillSync } from "./agent/skills-sync.ts";
 import { modalJobManager } from "./modal/manager.ts";
 import { syncHelperVenv } from "./helpers-env.ts";
@@ -60,7 +70,12 @@ function resolveProjectId(req: FastifyRequest): string {
   return DEFAULT_PROJECT_ID;
 }
 
-export async function buildApp() {
+export interface BuildAppOptions {
+  /** Omit for production execution; pass null only for queued-storage tests. */
+  workflowController?: WorkflowRunController | null;
+}
+
+export async function buildApp(options: BuildAppOptions = {}) {
   const app = Fastify({
     logger: { level: process.env.LOG_LEVEL ?? "info" },
     // Inline image attachments ride the JSON run body as base64 (up to 12 ×
@@ -68,6 +83,16 @@ export async function buildApp() {
     // reject them.
     bodyLimit: 96 * 1024 * 1024,
   });
+  const workflowController = options.workflowController === undefined
+    ? createProductionWorkflowController({
+      onError: ({ projectId, runId, error }) => {
+        app.log.error(
+          { projectId, runId, ...workflowControllerErrorLogFields(error) },
+          "workflow DAG run controller failed",
+        );
+      },
+    })
+    : options.workflowController;
 
   await app.register(fastifyCors, {
     origin: (origin, cb) => {
@@ -118,7 +143,9 @@ export async function buildApp() {
   app.get("/health", async () => ({ status: "ok" }));
   app.get("/config", async () => ({ modal_configured: modalConfigured() }));
 
-  await registerProjectRoutes(app);
+  await registerProjectRoutes(app, {
+    workflowController: workflowController ?? undefined,
+  });
   await registerSessionRoutes(app);
   await registerSandboxRoutes(app);
   await registerSkillRoutes(app);
@@ -129,11 +156,84 @@ export async function buildApp() {
   await registerSpeechRoutes(app);
   await registerModalRoutes(app);
   await registerModelProviderRoutes(app);
+  await registerDagWorkflowRoutes(app, {
+    controller: workflowController ?? undefined,
+  });
+
+  // Budget reconciliation is fail-closed: an expired hold with no observable
+  // terminal usage is charged at its reserved maximum before graph/run state is
+  // recovered. This is accounting protection, not proof that a process-local
+  // pi-subagents child stopped; abnormal child reattachment remains a P0 gate.
+  for (const project of listProjects()) {
+    try {
+      const staleReservations = await reconcileStaleWorkflowBudgetReservations(
+        project.id,
+      );
+      if (staleReservations.length > 0) {
+        app.log.warn(
+          {
+            projectId: project.id,
+            reservationIds: staleReservations.map((reservation) => reservation.id),
+          },
+          "charged stale workflow budget reservations at their unobserved maximum",
+        );
+      }
+    } catch (error) {
+      app.log.error(
+        { projectId: project.id, ...workflowControllerErrorLogFields(error) },
+        "workflow budget restart reconciliation failed closed",
+      );
+    }
+  }
+
+  const logRecovery = (recovery: ReturnType<WorkflowRunController["recoverProjects"]>[number]) => {
+    if (recovery.interrupted.length > 0) {
+      app.log.info(
+        { projectId: recovery.projectId, runIds: recovery.interrupted },
+        "marked workflow runs interrupted after server restart",
+      );
+    }
+    if (recovery.enqueued.length > 0) {
+      app.log.info(
+        { projectId: recovery.projectId, runIds: recovery.enqueued },
+        "re-enqueued durable workflow runs",
+      );
+    }
+    for (const error of recovery.errors) {
+      app.log.warn(
+        { projectId: recovery.projectId, runId: error.runId },
+        "workflow restart reconciliation could not inspect a run",
+      );
+    }
+  };
+
+  if (workflowController) {
+    for (const recovery of workflowController.startRecoveryLoop(
+      () => listProjects().map((project) => project.id),
+    )) {
+      logRecovery(recovery);
+    }
+  } else {
+    // Explicit storage-only mode never launches queued work, but still makes
+    // abandoned in-flight state visibly resumable for API tests and tools.
+    for (const project of listProjects()) {
+      const recovery = workflowStore.reconcileInterruptedRuns(project.id);
+      logRecovery({ projectId: project.id, enqueued: [], ...recovery });
+    }
+  }
 
   // Reattach durable jobs after routes are available. Recovery schedules
   // active jobs in the background and immediately reconciles any terminal job
   // whose accounting write was interrupted by a prior shutdown.
   await modalJobManager.recoverAllProjects();
+
+  app.addHook("onClose", async () => {
+    await workflowController?.close();
+    // Never present shutdown as complete while an OpenRouter request remains
+    // process-owned but lacks positive prompt/abort quiescence evidence.
+    assertNoHostedFusionQuarantine();
+    await disposeAllWorkflowDelegationSessions();
+  });
 
   return app;
 }

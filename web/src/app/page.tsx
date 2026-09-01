@@ -7,6 +7,15 @@ import { ChatTab, type ChatTabHandle, type ChatTabMeta } from "@/components/chat
 import { ChatTabsBar, type ChatTabDescriptor } from "@/components/chat-tabs-bar";
 import { SettingsDialog } from "@/components/settings-dialog";
 import { WorkflowsPanel } from "@/components/workflows-panel";
+import { DagWorkflowConsole } from "@/components/dag-workflow-console";
+import { DagWorkflowsPanel } from "@/components/dag-workflows-panel";
+import { DagBuilder } from "@/components/dag-builder";
+import { RaindropPanel } from "@/components/raindrop-panel";
+import { WorkspaceNavigation } from "@/components/workspace-navigation";
+import {
+  PersistentWorkspaceSurfaces,
+  usePersistentWorkspaceView,
+} from "@/components/persistent-workspace-surfaces";
 import { ProjectSwitcher } from "@/components/project-switcher";
 import { ProjectView } from "@/components/project-view";
 import { SessionCostPill } from "@/components/session-cost-pill";
@@ -20,6 +29,7 @@ import { APP_VERSION, isVersioned, useUpdateCheck } from "@/lib/version";
 import { useSkills } from "@/lib/use-skills";
 import { flattenFiles, useSandbox } from "@/lib/use-sandbox";
 import { ProjectScopeProvider } from "@/lib/projects";
+import type { VersionedDagWorkflowDefinition } from "@/lib/dag-workflows";
 import {
   hasProjectActivity,
   sameProjectActivity,
@@ -323,9 +333,13 @@ function WorkspacePage({
   const [activeTabId, setActiveTabId] = useState<string>(
     () => initialState?.activeTabId ?? initialTabId,
   );
-  const [view, setView] = useState<"chat" | "workflows">(
-    () => initialState?.view ?? "chat",
-  );
+  const {
+    activeView: view,
+    mountedViews: mountedWorkspaceViews,
+    setActiveView: setView,
+  } = usePersistentWorkspaceView(initialState?.view ?? "chat");
+  const [selectedDagDefinition, setSelectedDagDefinition] =
+    useState<VersionedDagWorkflowDefinition | null>(null);
   const [tabWorkspaceStates, setTabWorkspaceStates] = useState<
     Record<string, ChatWorkspaceState>
   >(() =>
@@ -560,7 +574,7 @@ function WorkspacePage({
   useEffect(() => {
     if (!isActive) return;
     return onChatPrefill(() => setView("chat"));
-  }, [isActive]);
+  }, [isActive, setView]);
 
   // Flat list of all sandbox file paths for @ mentions (shared across tabs).
   // Cache artifacts are excluded — mentioning __pycache__/*.pyc is never useful.
@@ -588,7 +602,7 @@ function WorkspacePage({
     );
     setActiveTabId(id);
     setView("chat");
-  }, []);
+  }, [setView]);
 
   const closeTab = useCallback((id: string) => {
     // Abort an in-flight stream so the agent doesn't keep running into a
@@ -632,7 +646,7 @@ function WorkspacePage({
   const selectTab = useCallback((id: string) => {
     setActiveTabId(id);
     setView("chat");
-  }, []);
+  }, [setView]);
 
   // A tab whose stored session no longer exists on disk: keep the tab, drop the
   // binding, so it stops being treated as that session (dedupe, History focus)
@@ -672,7 +686,7 @@ function WorkspacePage({
       setActiveTabId(id);
       setView("chat");
     },
-    [tabsMeta],
+    [setView, tabsMeta],
   );
 
   // ------------------------------------------------------------------
@@ -697,7 +711,15 @@ function WorkspacePage({
         uploadedFiles,
       );
     },
-    [activeTabId],
+    [activeTabId, setView],
+  );
+
+  const handleOpenDagDefinition = useCallback(
+    (definition: VersionedDagWorkflowDefinition) => {
+      setSelectedDagDefinition(definition);
+      setView("dag-builder");
+    },
+    [setView],
   );
 
   const handleFileSelect = useCallback((path: string) => {
@@ -710,23 +732,25 @@ function WorkspacePage({
     if (!handle) return;
     setView("chat");
     void handle.sendQuick("Organize all the files in the sandbox directory");
-  }, [activeTabId]);
+  }, [activeTabId, setView]);
 
   // ------------------------------------------------------------------
   // Chat ↔ notebook deep links (join key: tool-call id === entry id).
   // ------------------------------------------------------------------
   const [notebookFocus, setNotebookFocus] = useState<{ id: string; token: number } | null>(null);
   const handleViewInNotebook = useCallback((entryId: string) => {
+    setView("chat");
     setShowCompute(false);
     setShowNotebook(true);
     setNotebookFocus({ id: entryId, token: Date.now() });
-  }, []);
+  }, [setView]);
   const [computeFocus, setComputeFocus] = useState<{ id: string; token: number } | null>(null);
   const handleViewCompute = useCallback((jobId?: string) => {
+    setView("chat");
     setShowNotebook(false);
     setShowCompute(true);
     if (jobId) setComputeFocus({ id: jobId, token: Date.now() });
-  }, []);
+  }, [setView]);
   useEffect(() => {
     if (!isActive) return;
     const onOpenJob = (event: Event) => {
@@ -749,7 +773,7 @@ function WorkspacePage({
         if (!ok) toast.error("Couldn't find this entry in the chat transcript.");
       }, 50);
     },
-    [activeTabId],
+    [activeTabId, setView],
   );
 
   // ------------------------------------------------------------------
@@ -831,6 +855,16 @@ function WorkspacePage({
         userMessageCount: tabsMeta[t.id]?.userMessageCount ?? 0,
       })),
     [tabs, tabsMeta],
+  );
+  const raindropOpenChatSessions = useMemo(
+    () => tabs.flatMap((tab) => tab.sessionId
+      ? [{
+          id: tab.sessionId,
+          title: tab.title,
+          active: tab.id === activeTabId,
+        }]
+      : []),
+    [activeTabId, tabs],
   );
 
   return (
@@ -916,9 +950,9 @@ function WorkspacePage({
           ) : modalJobsLoading ? (
             <span className="sr-only" aria-live="polite">Checking compute jobs</span>
           ) : null}
-          {/* Panel visibility — collapse either side panel to give the center
-              pane (file preview / LaTeX editor) more room. */}
-          <div className="flex items-center gap-0.5 rounded-lg border bg-muted/30 p-0.5">
+          {/* Panel visibility applies only to the three-column Chat view. */}
+          {view === "chat" ? (
+            <div className="flex items-center gap-0.5 rounded-lg border bg-muted/30 p-0.5">
             <InfoTooltip
               content={
                 <>
@@ -965,7 +999,8 @@ function WorkspacePage({
                 <PanelRightIcon className="size-4" />
               </button>
             </InfoTooltip>
-          </div>
+            </div>
+          ) : null}
           <InfoTooltip
             content={
               <>
@@ -1007,8 +1042,18 @@ function WorkspacePage({
         </div>
       </header>
 
-      {/* Main content area — three columns: file tree | preview | chat */}
-      <div className={cn("flex flex-1 overflow-hidden", isResizing && "select-none")}>
+      <WorkspaceNavigation view={view} onChange={setView} />
+
+      <div className="relative flex min-h-0 flex-1 overflow-hidden">
+        {/* The chat workspace stays mounted behind other views so live tab
+            streams, histories, and per-tab state remain intact. */}
+        <div
+          className={cn(
+            "flex h-full w-full overflow-hidden",
+            view !== "chat" && "hidden",
+            isResizing && "select-none",
+          )}
+        >
 
         {/* Left: file tree */}
         {isActive && sandboxOpen && (
@@ -1083,8 +1128,8 @@ function WorkspacePage({
         {/* Drag handle: preview ↔ chat */}
         {isActive && chatOpen && <ResizeHandle onMouseDown={startDrag("chat")} />}
 
-        {/* Right: chat / workflows. Kept mounted (hidden via CSS when
-            collapsed) so background chat streams keep running. */}
+        {/* Right: chat. Kept mounted when another workspace view is active so
+            background chat streams keep running. */}
         <div
           className={cn(
             "flex flex-col border-l overflow-hidden shrink-0",
@@ -1097,13 +1142,11 @@ function WorkspacePage({
             projectId={projectId}
             tabs={tabDescriptors}
             activeTabId={activeTabId}
-            view={view}
             maxTabs={MAX_CHAT_TABS}
             onSelect={selectTab}
             onClose={closeTab}
             onNew={newTab}
             onRename={renameTab}
-            onSelectWorkflows={() => setView("workflows")}
             onOpenSession={openSession}
             activeSessionId={activeSessionId}
             canExport={(activeMeta?.userMessageCount ?? 0) > 0}
@@ -1139,19 +1182,52 @@ function WorkspacePage({
               onOpenFile={handleFileSelect}
             />
           ))}
+        </div>
+        </div>
 
-          {/* Workflows view */}
-          {isActive && view === "workflows" && (
-            <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
+        {/* Non-chat surfaces mount lazily, then stay mounted behind the active
+            view so local drafts and selections survive workspace navigation. */}
+        <PersistentWorkspaceSurfaces
+          activeView={view}
+          mountedViews={mountedWorkspaceViews}
+          surfaces={{
+            workflows: (
               <WorkflowsPanel
                 onLaunch={handleWorkflowLaunch}
                 onUploadFiles={sandbox.uploadFiles}
                 budgetBlocked={projectCost.budget.state === "exceeded"}
               />
-            </div>
-          )}
-        </div>
-
+            ),
+            "dag-workflows": (
+              <DagWorkflowsPanel
+                projectId={projectId}
+                onOpenDefinition={handleOpenDagDefinition}
+              />
+            ),
+            "dag-builder": (
+              <DagBuilder
+                projectId={projectId}
+                selectedDefinition={selectedDagDefinition}
+                activeSessionId={activeSessionId}
+                budgetBlocked={budgetBlocked}
+                onDefinitionChanged={setSelectedDagDefinition}
+              />
+            ),
+            console: (
+              <DagWorkflowConsole
+                projectId={projectId}
+                active={isActive && view === "console"}
+              />
+            ),
+            raindrop: (
+              <RaindropPanel
+                projectId={projectId}
+                active={isActive && view === "raindrop"}
+                openChatSessions={raindropOpenChatSessions}
+              />
+            ),
+          }}
+        />
       </div>
 
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />

@@ -1,0 +1,1428 @@
+import fs from "node:fs";
+import path from "node:path";
+import { Value } from "typebox/value";
+import { isWithin } from "../sandbox-fs.ts";
+import {
+  MAX_WORKFLOW_DOCUMENT_BYTES,
+  WorkflowGraphDocumentSchema,
+  type EvidencePolicy,
+  type ModelRequest,
+  type NodeLimits,
+  type RequestedModel,
+  type RescuePolicy,
+  type WorkflowEdge,
+  type WorkflowGraphDocument,
+  type WorkflowNode,
+} from "./schema.ts";
+import {
+  effectiveWorkflowEvidencePolicy,
+  requiresWorkflowEvidencePolicyEvaluation,
+  workflowEvidenceGateEvaluator,
+  workflowEvidencePolicyEvaluator,
+} from "./evidence-policy.ts";
+
+export interface WorkflowValidationIssue {
+  code: string;
+  path: string;
+  message: string;
+}
+
+export type WorkflowValidationResult =
+  | { ok: true; document: WorkflowGraphDocument }
+  | { ok: false; issues: WorkflowValidationIssue[] };
+
+export const DEFAULT_WORKFLOW_RESCUE_POLICY: RescuePolicy = {
+  enabled: true,
+  maxAttempts: 2,
+  triggers: [
+    "failure",
+    "stalled",
+    "unsupported-output",
+    "pre-compaction",
+    "post-compaction",
+  ],
+};
+
+/**
+ * Apply canonical defaults without repairing invalid references or topology.
+ * Invalid input stays invalid and is reported by validateWorkflowGraphDocument.
+ */
+export function normalizeWorkflowGraphDocument(
+  document: WorkflowGraphDocument,
+): WorkflowGraphDocument {
+  const normalized = structuredClone(document);
+  normalized.rescue = cloneRescuePolicy(
+    normalized.rescue ?? DEFAULT_WORKFLOW_RESCUE_POLICY,
+  );
+  normalized.artifacts ??= [];
+  normalized.nodes = normalized.nodes.map(normalizeNode);
+  normalized.edges = normalized.edges.map((edge) => ({
+    ...edge,
+    condition: edge.condition ?? "always",
+  }));
+  return normalized;
+}
+
+export function validateWorkflowGraphDocument(
+  value: unknown,
+): WorkflowValidationResult {
+  let serializedDocument: string | undefined;
+  try {
+    serializedDocument = JSON.stringify(value);
+  } catch {
+    return {
+      ok: false,
+      issues: [{ code: "schema", path: "/", message: "Document must be JSON serializable." }],
+    };
+  }
+  if (serializedDocument === undefined) {
+    return {
+      ok: false,
+      issues: [{ code: "schema", path: "/", message: "Document must be a JSON value." }],
+    };
+  }
+  if (new TextEncoder().encode(serializedDocument).byteLength > MAX_WORKFLOW_DOCUMENT_BYTES) {
+    return {
+      ok: false,
+      issues: [
+        {
+          code: "document-too-large",
+          path: "/",
+          message: `Serialized workflow exceeds ${MAX_WORKFLOW_DOCUMENT_BYTES} bytes.`,
+        },
+      ],
+    };
+  }
+
+  const schemaIssues = [...Value.Errors(WorkflowGraphDocumentSchema, value)].map(
+    (error): WorkflowValidationIssue => ({
+      code: "schema",
+      path: error.instancePath || "/",
+      message: error.message,
+    }),
+  );
+  if (schemaIssues.length > 0) return { ok: false, issues: schemaIssues };
+
+  const document = value as WorkflowGraphDocument;
+  const semanticIssues = validateWorkflowGraphSemantics(document);
+  if (semanticIssues.length > 0) return { ok: false, issues: semanticIssues };
+
+  return { ok: true, document: normalizeWorkflowGraphDocument(document) };
+}
+
+/** Validate constraints that JSON Schema cannot express. */
+export function validateWorkflowGraphSemantics(
+  document: WorkflowGraphDocument,
+): WorkflowValidationIssue[] {
+  const issues: WorkflowValidationIssue[] = [];
+  let maximumConfiguredModelCalls = 0;
+  let maximumConfiguredIterations = 0;
+  const nodeById = uniqueItemsById(document.nodes, "/nodes", "duplicate-node-id", issues);
+  const artifactById = uniqueItemsById(
+    document.artifacts ?? [],
+    "/artifacts",
+    "duplicate-artifact-id",
+    issues,
+  );
+
+  validateRescuePolicy(
+    document.rescue ?? DEFAULT_WORKFLOW_RESCUE_POLICY,
+    "/rescue",
+    issues,
+  );
+  validateEvidenceRescueAvailability(
+    document.evidence,
+    document.rescue ?? DEFAULT_WORKFLOW_RESCUE_POLICY,
+    "/evidence/onUnsupportedOutput",
+    issues,
+  );
+  if (document.evidence.evaluator) {
+    validateModelRequest(document.evidence.evaluator, "/evidence/evaluator", issues);
+  }
+  if (document.defaultModel) {
+    validateModelRequest(document.defaultModel, "/defaultModel", issues);
+  }
+
+  for (const [index, node] of document.nodes.entries()) {
+    const nodePath = `/nodes/${index}`;
+    validateNode(node, nodePath, document, artifactById, issues);
+    const demand = deriveWorkflowNodeDemand(node, document);
+    validateWorkflowNodeDemand(node, nodePath, document, demand, issues);
+    maximumConfiguredModelCalls += demand.maximumModelCalls;
+    maximumConfiguredIterations += demand.maximumIterations;
+  }
+  if (maximumConfiguredModelCalls > document.limits.maxModelCalls) {
+    issues.push({
+      code: "workflow-model-call-demand-exceeds-limit",
+      path: "/limits/maxModelCalls",
+      message:
+        `The configured compound-node paths can require up to ${maximumConfiguredModelCalls} ` +
+        `model calls before retries or rescue, exceeding the workflow limit ${document.limits.maxModelCalls}.`,
+    });
+  }
+  if (maximumConfiguredIterations > document.limits.maxIterations) {
+    issues.push({
+      code: "workflow-iteration-demand-exceeds-limit",
+      path: "/limits/maxIterations",
+      message:
+        `The configured compound nodes can require up to ${maximumConfiguredIterations} ` +
+        `bounded iterations, exceeding the workflow limit ${document.limits.maxIterations}.`,
+    });
+  }
+  validateWorkspaceOwnership(document.nodes, issues);
+
+  for (const [index, artifact] of (document.artifacts ?? []).entries()) {
+    const writerNode = nodeById.get(artifact.writerNodeId);
+    if (!writerNode) {
+      issues.push({
+        code: "unknown-artifact-writer",
+        path: `/artifacts/${index}/writerNodeId`,
+        message: `Artifact ${artifact.id} names unknown writer node ${artifact.writerNodeId}.`,
+      });
+      continue;
+    }
+    if (writerNode.workspace.isolation === "read-only") {
+      issues.push({
+        code: "read-only-artifact-writer",
+        path: `/artifacts/${index}/writerNodeId`,
+        message: `Artifact writer ${writerNode.id} is declared read-only.`,
+      });
+    }
+    if (artifact.path) {
+      const normalizedArtifactPath = normalizeWorkflowProjectPath(artifact.path);
+      if (normalizedArtifactPath === undefined) {
+        issues.push({
+          code: "unsafe-artifact-path",
+          path: `/artifacts/${index}/path`,
+          message: "Artifact paths must use canonical, portable sandbox-relative syntax.",
+        });
+      } else {
+        const ownedByWriter = writerNode.workspace.writePaths.some((writePath) => {
+          const normalizedWritePath = normalizeWorkflowProjectPath(writePath);
+          return (
+            normalizedWritePath !== undefined &&
+            pathIsSameOrDescendant(normalizedArtifactPath, normalizedWritePath)
+          );
+        });
+        if (!ownedByWriter) {
+          issues.push({
+            code: "artifact-outside-write-paths",
+            path: `/artifacts/${index}/path`,
+            message: `Artifact path ${artifact.path} is not owned by writer ${writerNode.id}.`,
+          });
+        }
+      }
+    }
+  }
+
+  validateGraphTopology(document, nodeById, issues);
+  return issues;
+}
+
+function normalizeNode(node: WorkflowNode): WorkflowNode {
+  if (node.kind === "best-of-n") {
+    return {
+      ...node,
+      candidateCount: node.candidateCount ?? node.candidateModels?.length ?? 2,
+    };
+  }
+  return node;
+}
+
+function cloneRescuePolicy(policy: RescuePolicy): RescuePolicy {
+  return { ...policy, triggers: [...policy.triggers] };
+}
+
+export interface WorkflowNodeDemand {
+  minimumModelCalls: number;
+  maximumModelCalls: number;
+  maximumIterations: number;
+  minimumConcurrentSubagents: 0 | 1;
+  preferredParallelism: number;
+  /** Shared hard envelopes; runtime accounting remains cumulative across nodes. */
+  maxTokens: number;
+  maxCostUsd: number;
+}
+
+function effectiveNodeLimits(
+  node: WorkflowNode,
+  document: WorkflowGraphDocument,
+): WorkflowGraphDocument["limits"] {
+  return {
+    maxIterations: node.limits?.maxIterations ?? document.limits.maxIterations,
+    maxModelCalls: node.limits?.maxModelCalls ?? document.limits.maxModelCalls,
+    maxParallelism: node.limits?.maxParallelism ?? document.limits.maxParallelism,
+    maxSubagents: node.limits?.maxSubagents ?? document.limits.maxSubagents,
+    timeoutMs: node.limits?.timeoutMs ?? document.limits.timeoutMs,
+    maxTokens: node.limits?.maxTokens ?? document.limits.maxTokens,
+    maxCostUsd: node.limits?.maxCostUsd ?? document.limits.maxCostUsd,
+    maxRetries: node.limits?.maxRetries ?? document.limits.maxRetries,
+  };
+}
+
+/**
+ * Derive structural demand from one normalized node. Token/cost values are the
+ * node's effective share of the run-wide envelope, not predicted spend.
+ */
+export function deriveWorkflowNodeDemand(
+  node: WorkflowNode,
+  document: WorkflowGraphDocument,
+): WorkflowNodeDemand {
+  const limits = effectiveNodeLimits(node, document);
+  let minimumModelCalls = 0;
+  let maximumModelCalls = 0;
+  let maximumIterations = 1;
+  let preferredParallelism = 1;
+
+  switch (node.kind) {
+    case "agent":
+      minimumModelCalls = maximumModelCalls = 1;
+      break;
+    case "research-until-goal":
+      minimumModelCalls = 1;
+      maximumModelCalls = limits.maxIterations;
+      maximumIterations = limits.maxIterations;
+      break;
+    case "council":
+      minimumModelCalls = maximumModelCalls = (node.members.length + 1) * node.rounds;
+      maximumIterations = node.rounds;
+      preferredParallelism = node.members.length;
+      break;
+    case "fusion":
+      if (node.fusion.mode === "openrouter-router") {
+        // Hosted Fusion performs each panel analysis plus analyst deliberation
+        // and final-answer generation, despite being one HTTP router request.
+        minimumModelCalls = maximumModelCalls = node.fusion.members.length + 2;
+        preferredParallelism = 0;
+      } else {
+        minimumModelCalls = maximumModelCalls =
+          node.fusion.members.length * node.fusion.rounds + 1;
+        maximumIterations = node.fusion.rounds;
+        preferredParallelism = node.fusion.members.length;
+      }
+      break;
+    case "best-of-n": {
+      const candidateCount =
+        node.candidateCount ?? node.candidateModels?.length ?? 2;
+      minimumModelCalls = maximumModelCalls = candidateCount + 1;
+      preferredParallelism = candidateCount;
+      break;
+    }
+    case "evidence-gate": {
+      const usesModel = node.evaluator !== undefined ||
+        node.checks.some((check) => check !== "artifact-exists");
+      minimumModelCalls = maximumModelCalls = usesModel ? 1 : 0;
+      preferredParallelism = usesModel ? 1 : 0;
+      break;
+    }
+    case "lean4":
+      minimumModelCalls = maximumModelCalls = node.mode === "solve" ? 1 : 0;
+      preferredParallelism = node.mode === "solve" ? 1 : 0;
+      break;
+  }
+
+  if (requiresWorkflowEvidencePolicyEvaluation(document, node)) {
+    minimumModelCalls += 1;
+    maximumModelCalls += 1;
+    preferredParallelism = Math.max(preferredParallelism, 1);
+  }
+
+  const needsKadySubagent =
+    maximumModelCalls > 0 &&
+    !(
+      node.kind === "fusion" && node.fusion.mode === "openrouter-router" &&
+      !requiresWorkflowEvidencePolicyEvaluation(document, node)
+    );
+  return {
+    minimumModelCalls,
+    maximumModelCalls,
+    maximumIterations,
+    minimumConcurrentSubagents: needsKadySubagent ? 1 : 0,
+    preferredParallelism,
+    maxTokens: limits.maxTokens,
+    maxCostUsd: limits.maxCostUsd,
+  };
+}
+
+function validateWorkflowNodeDemand(
+  node: WorkflowNode,
+  nodePath: string,
+  document: WorkflowGraphDocument,
+  demand: WorkflowNodeDemand,
+  issues: WorkflowValidationIssue[],
+): void {
+  const limits = effectiveNodeLimits(node, document);
+  if (demand.maximumModelCalls > limits.maxModelCalls) {
+    issues.push({
+      code: "node-model-call-demand-exceeds-limit",
+      path: `${nodePath}/limits/maxModelCalls`,
+      message:
+        `${node.kind} can require ${demand.maximumModelCalls} model calls before retries or rescue, ` +
+        `but its effective limit is ${limits.maxModelCalls}.`,
+    });
+  }
+  if (demand.maximumIterations > limits.maxIterations) {
+    issues.push({
+      code: "node-iteration-demand-exceeds-limit",
+      path: `${nodePath}/limits/maxIterations`,
+      message:
+        `${node.kind} requires ${demand.maximumIterations} bounded iterations, ` +
+        `but its effective limit is ${limits.maxIterations}.`,
+    });
+  }
+  if (demand.minimumConcurrentSubagents > limits.maxSubagents) {
+    issues.push({
+      code: "node-subagent-demand-exceeds-limit",
+      path: `${nodePath}/limits/maxSubagents`,
+      message:
+        `${node.kind} requires a Pi-subagent execution slot, but its effective maxSubagents limit is zero.`,
+    });
+  }
+}
+
+function uniqueItemsById<T extends { id: string }>(
+  items: T[],
+  path: string,
+  code: string,
+  issues: WorkflowValidationIssue[],
+): Map<string, T> {
+  const uniqueItems = new Map<string, T>();
+  for (const [index, item] of items.entries()) {
+    if (uniqueItems.has(item.id)) {
+      issues.push({
+        code,
+        path: `${path}/${index}/id`,
+        message: `Duplicate id ${item.id}.`,
+      });
+      continue;
+    }
+    uniqueItems.set(item.id, item);
+  }
+  return uniqueItems;
+}
+
+function validateNode(
+  node: WorkflowNode,
+  nodePath: string,
+  document: WorkflowGraphDocument,
+  artifactById: Map<string, { id: string }>,
+  issues: WorkflowValidationIssue[],
+): void {
+  if (node.limits) validateNodeLimits(node.limits, nodePath, document, issues);
+  if (node.rescue) validateRescuePolicy(node.rescue, `${nodePath}/rescue`, issues);
+  if (node.evidence) {
+    if (node.evidence.evaluator) {
+      validateModelRequest(node.evidence.evaluator, `${nodePath}/evidence/evaluator`, issues);
+    }
+    validateEvidenceRescueAvailability(
+      node.evidence,
+      node.rescue ?? document.rescue ?? DEFAULT_WORKFLOW_RESCUE_POLICY,
+      `${nodePath}/evidence/onUnsupportedOutput`,
+      issues,
+    );
+  }
+  if (
+    requiresWorkflowEvidencePolicyEvaluation(document, node) &&
+    !workflowEvidencePolicyEvaluator(document, node)
+  ) {
+    issues.push({
+      code: "missing-evidence-policy-evaluator",
+      path: `${nodePath}/evidence/evaluator`,
+      message:
+        "Enabled evidence policy requires a node evaluator, workflow evaluator, or workflow default model.",
+    });
+  }
+  validateWorkspacePolicy(node, nodePath, issues);
+
+  switch (node.kind) {
+    case "agent":
+    case "research-until-goal":
+      validateInheritedModel(node.model, nodePath, document, issues);
+      if (node.model) validateModelRequest(node.model, `${nodePath}/model`, issues);
+      break;
+    case "best-of-n":
+      if (node.model && node.candidateModels) {
+        issues.push({
+          code: "ambiguous-candidate-models",
+          path: `${nodePath}/candidateModels`,
+          message: "Best-of-N must use either one repeated model or candidateModels, not both.",
+        });
+      }
+      if (!node.candidateModels) {
+        validateInheritedModel(node.model, nodePath, document, issues);
+      }
+      if (node.model) validateModelRequest(node.model, `${nodePath}/model`, issues);
+      for (const [index, candidateModel] of (node.candidateModels ?? []).entries()) {
+        validateModelRequest(
+          candidateModel,
+          `${nodePath}/candidateModels/${index}`,
+          issues,
+        );
+      }
+      if (
+        node.candidateCount !== undefined &&
+        node.candidateModels !== undefined &&
+        node.candidateCount !== node.candidateModels.length
+      ) {
+        issues.push({
+          code: "candidate-count-mismatch",
+          path: `${nodePath}/candidateCount`,
+          message: "candidateCount must match the explicit candidateModels list.",
+        });
+      }
+      if (node.evaluator) {
+        validateModelRequest(node.evaluator, `${nodePath}/evaluator`, issues);
+      } else if (!document.defaultModel) {
+        issues.push({
+          code: "missing-evaluator-model",
+          path: `${nodePath}/evaluator`,
+          message: "Best-of-N needs an explicit evaluator or the workflow default model.",
+        });
+      }
+      break;
+    case "council":
+      validateUniqueMemberIds(node.members, `${nodePath}/members`, issues);
+      validateModelRequest(node.chair, `${nodePath}/chair`, issues);
+      for (const [index, member] of node.members.entries()) {
+        validateModelRequest(member.model, `${nodePath}/members/${index}/model`, issues);
+      }
+      break;
+    case "fusion":
+      if (node.fusion.mode === "openrouter-router") {
+        validateModelRequest(node.fusion.router, `${nodePath}/fusion/router`, issues);
+        validateHostedOpenRouterModelRequest(
+          node.fusion.router,
+          `${nodePath}/fusion/router`,
+          "invalid-openrouter-router",
+          true,
+          issues,
+        );
+        validateUniqueMemberIds(node.fusion.members, `${nodePath}/fusion/members`, issues);
+        for (const [index, member] of node.fusion.members.entries()) {
+          validateModelRequest(
+            member.model,
+            `${nodePath}/fusion/members/${index}/model`,
+            issues,
+          );
+          validateHostedOpenRouterModelRequest(
+            member.model,
+            `${nodePath}/fusion/members/${index}/model`,
+            "invalid-openrouter-panel-model",
+            false,
+            issues,
+          );
+        }
+        validateModelRequest(node.fusion.judge, `${nodePath}/fusion/judge`, issues);
+        validateHostedOpenRouterModelRequest(
+          node.fusion.judge,
+          `${nodePath}/fusion/judge`,
+          "invalid-openrouter-judge",
+          false,
+          issues,
+        );
+        validateHostedFusionReasoning(node.fusion, nodePath, issues);
+      } else {
+        validateUniqueMemberIds(node.fusion.members, `${nodePath}/fusion/members`, issues);
+        for (const [index, member] of node.fusion.members.entries()) {
+          validateModelRequest(
+            member.model,
+            `${nodePath}/fusion/members/${index}/model`,
+            issues,
+          );
+        }
+        validateModelRequest(
+          node.fusion.synthesizer,
+          `${nodePath}/fusion/synthesizer`,
+          issues,
+        );
+      }
+      break;
+    case "evidence-gate": {
+      validateUniqueStrings(node.checks, `${nodePath}/checks`, "duplicate-check", issues);
+      validateUniqueStrings(
+        node.artifactIds,
+        `${nodePath}/artifactIds`,
+        "duplicate-artifact-reference",
+        issues,
+      );
+      for (const [index, artifactId] of node.artifactIds.entries()) {
+        if (!artifactById.has(artifactId)) {
+          issues.push({
+            code: "unknown-artifact",
+            path: `${nodePath}/artifactIds/${index}`,
+            message: `Evidence gate names unknown artifact ${artifactId}.`,
+          });
+        }
+      }
+      if (node.evaluator) {
+        validateModelRequest(node.evaluator, `${nodePath}/evaluator`, issues);
+      }
+      const needsModelEvaluator = node.checks.some((check) => check !== "artifact-exists");
+      if (needsModelEvaluator && !workflowEvidenceGateEvaluator(document, node)) {
+        issues.push({
+          code: "missing-evidence-evaluator",
+          path: `${nodePath}/evaluator`,
+          message: "Model-based evidence checks need an evaluator or workflow default model.",
+        });
+      }
+      if (node.onUnsupportedOutput === "rescue") {
+        validateRescueEnabled(
+          node.rescue ?? document.rescue ?? DEFAULT_WORKFLOW_RESCUE_POLICY,
+          `${nodePath}/onUnsupportedOutput`,
+          issues,
+        );
+      }
+      break;
+    }
+    case "lean4":
+      if (node.solverModel) {
+        validateModelRequest(node.solverModel, `${nodePath}/solverModel`, issues);
+      }
+      if (node.mode === "verify" && node.solverModel) {
+        issues.push({
+          code: "unexpected-lean-solver-model",
+          path: `${nodePath}/solverModel`,
+          message: "Lean verify mode is deterministic and must not declare a solver model.",
+        });
+      }
+      if (node.mode === "solve" && !node.solverModel && !document.defaultModel) {
+        issues.push({
+          code: "missing-lean-solver-model",
+          path: `${nodePath}/solverModel`,
+          message: "Lean solve mode needs an explicit solverModel or workflow default.",
+        });
+      }
+      {
+        const leanEvidence = effectiveWorkflowEvidencePolicy(document, node);
+        if (leanEvidence.enabled && !leanEvidence.requireArtifactReferences) {
+          issues.push({
+            code: "unsafe-lean-evidence-policy",
+            path: `${nodePath}/evidence`,
+            message:
+              "Enabled Lean evidence checking must require normalized host artifact receipts.",
+          });
+        }
+        if (leanEvidence.enabled && leanEvidence.onUnsupportedOutput === "route") {
+          issues.push({
+            code: "unsafe-lean-evidence-routing",
+            path: `${nodePath}/evidence/onUnsupportedOutput`,
+            message: "A failed Lean verification must fail or enter rescue, not succeed by routing.",
+          });
+        }
+      }
+      break;
+  }
+}
+
+function validateInheritedModel(
+  nodeModel: ModelRequest | undefined,
+  nodePath: string,
+  document: WorkflowGraphDocument,
+  issues: WorkflowValidationIssue[],
+): void {
+  if (!nodeModel && !document.defaultModel) {
+    issues.push({
+      code: "missing-model-request",
+      path: `${nodePath}/model`,
+      message: "Model-driven nodes need an exact or explicit-fallback model request.",
+    });
+  }
+}
+
+function validateModelRequest(
+  request: ModelRequest,
+  path: string,
+  issues: WorkflowValidationIssue[],
+): void {
+  if (request.resolution.mode !== "explicit-fallback") return;
+
+  if (
+    request.requested.source === "kady-current" ||
+    request.resolution.alternatives.some(
+      (alternative) => alternative.source === "kady-current",
+    )
+  ) {
+    issues.push({
+      code: "ambiguous-kady-current-fallback",
+      path: `${path}/resolution`,
+      message:
+        "Kady Current is an exact runtime selection and cannot appear in an explicit fallback list.",
+    });
+  }
+
+  const requestedIdentity = modelIdentity(request.requested);
+  const fallbackIdentities = new Set<string>();
+  for (const [index, alternative] of request.resolution.alternatives.entries()) {
+    const identity = modelIdentity(alternative);
+    if (identity === requestedIdentity) {
+      issues.push({
+        code: "fallback-repeats-request",
+        path: `${path}/resolution/alternatives/${index}`,
+        message: "An explicit fallback must differ from the requested model and auth.",
+      });
+    }
+    if (fallbackIdentities.has(identity)) {
+      issues.push({
+        code: "duplicate-model-fallback",
+        path: `${path}/resolution/alternatives/${index}`,
+        message: "Explicit model fallbacks must be unique.",
+      });
+    }
+    fallbackIdentities.add(identity);
+  }
+}
+
+function validateHostedOpenRouterModelRequest(
+  request: ModelRequest,
+  path: string,
+  code: string,
+  requireFusionRouterAlias: boolean,
+  issues: WorkflowValidationIssue[],
+): void {
+  if (request.resolution.mode !== "exact") {
+    issues.push({
+      code,
+      path: `${path}/resolution`,
+      message: "Hosted OpenRouter Fusion cannot represent per-model fallback policies.",
+    });
+  }
+
+  const selection = request.requested;
+  const isAdapterRepresentable =
+    selection.source === "fixed" &&
+    selection.provider.toLowerCase() === "openrouter" &&
+    selection.auth.kind === "api-key" &&
+    selection.auth.profile === undefined;
+  if (!isAdapterRepresentable) {
+    issues.push({
+      code,
+      path: `${path}/requested`,
+      message:
+        "Hosted OpenRouter Fusion accepts only fixed OpenRouter models using Kady's API-key auth.",
+    });
+    return;
+  }
+
+  if (requireFusionRouterAlias && selection.model !== "openrouter/fusion") {
+    issues.push({
+      code,
+      path: `${path}/requested/model`,
+      message: "The hosted Fusion router must be the exact openrouter/fusion alias.",
+    });
+  }
+  if (!requireFusionRouterAlias && selection.model === "openrouter/fusion") {
+    issues.push({
+      code,
+      path: `${path}/requested/model`,
+      message: "A hosted Fusion panel member or judge cannot recursively select openrouter/fusion.",
+    });
+  }
+  if (selection.reasoning === "max") {
+    issues.push({
+      code: "unsupported-openrouter-reasoning",
+      path: `${path}/requested/reasoning`,
+      message: "Hosted OpenRouter Fusion has no exact max reasoning level; select xhigh explicitly.",
+    });
+  }
+}
+
+type HostedFusion = Extract<
+  Extract<WorkflowNode, { kind: "fusion" }>["fusion"],
+  { mode: "openrouter-router" }
+>;
+
+function validateHostedFusionReasoning(
+  fusion: HostedFusion,
+  nodePath: string,
+  issues: WorkflowValidationIssue[],
+): void {
+  if (fusion.router.requested.source !== "fixed") return;
+  const routerReasoning = fusion.router.requested.reasoning;
+  const participants = [
+    ...fusion.members.map((member, index) => ({
+      request: member.model,
+      path: `${nodePath}/fusion/members/${index}/model/requested/reasoning`,
+    })),
+    {
+      request: fusion.judge,
+      path: `${nodePath}/fusion/judge/requested/reasoning`,
+    },
+  ];
+  for (const participant of participants) {
+    if (
+      participant.request.requested.source === "fixed" &&
+      participant.request.requested.reasoning !== routerReasoning
+    ) {
+      issues.push({
+        code: "openrouter-reasoning-mismatch",
+        path: participant.path,
+        message:
+          "Hosted Fusion exposes one shared reasoning level; every panel model and judge must match the router.",
+      });
+    }
+  }
+}
+
+function modelIdentity(model: RequestedModel): string {
+  if (model.source === "kady-current") {
+    return [model.source, model.auth.kind, model.reasoning].join("\u0000");
+  }
+  return [
+    model.source,
+    model.provider.toLowerCase(),
+    model.model,
+    model.auth.kind,
+    model.auth.profile ?? "",
+    model.reasoning,
+  ].join("\u0000");
+}
+
+function validateWorkspacePolicy(
+  node: WorkflowNode,
+  nodePath: string,
+  issues: WorkflowValidationIssue[],
+): void {
+  validateUniqueStrings(
+    node.workspace.writePaths,
+    `${nodePath}/workspace/writePaths`,
+    "duplicate-write-path",
+    issues,
+  );
+  if (node.workspace.isolation === "read-only" && node.workspace.writePaths.length > 0) {
+    issues.push({
+      code: "read-only-write-path",
+      path: `${nodePath}/workspace/writePaths`,
+      message: "A read-only node cannot own write paths.",
+    });
+  }
+  if (node.workspace.isolation !== "read-only" && node.workspace.writePaths.length === 0) {
+    issues.push({
+      code: "missing-write-path",
+      path: `${nodePath}/workspace/writePaths`,
+      message: "A writable node needs at least one bounded write path.",
+    });
+  }
+  for (const [index, writePath] of node.workspace.writePaths.entries()) {
+    if (normalizeWorkflowProjectPath(writePath) !== undefined) continue;
+    issues.push({
+      code: "unsafe-write-path",
+      path: `${nodePath}/workspace/writePaths/${index}`,
+      message: "Write paths must use canonical, portable sandbox-relative syntax.",
+    });
+  }
+}
+
+const WINDOWS_RESERVED_SEGMENT = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
+const WINDOWS_INVALID_PATH_CHARACTER = /[<>:"|?*\u0000-\u001f]/u;
+
+/**
+ * Return Kady's canonical project-relative path or undefined when the spelling
+ * is unsafe or cannot round-trip on every supported desktop platform.
+ */
+export function normalizeWorkflowProjectPath(writePath: string): string | undefined {
+  if (
+    writePath.length === 0 ||
+    writePath.includes("\\") ||
+    writePath.startsWith("/") ||
+    /^[A-Za-z]:/.test(writePath)
+  ) {
+    return undefined;
+  }
+
+  const normalizedSegments: string[] = [];
+  for (const rawSegment of writePath.split("/")) {
+    const segment = rawSegment.normalize("NFC");
+    if (
+      segment.length === 0 ||
+      segment === "." ||
+      segment === ".." ||
+      segment.length > 255 ||
+      WINDOWS_INVALID_PATH_CHARACTER.test(segment) ||
+      segment.endsWith(".") ||
+      segment.endsWith(" ") ||
+      WINDOWS_RESERVED_SEGMENT.test(segment)
+    ) {
+      return undefined;
+    }
+    normalizedSegments.push(segment);
+  }
+  return normalizedSegments.join("/");
+}
+
+/**
+ * Resolve a validated workflow path and reject lexical or symlink traversal.
+ * Future executors must use this helper at the mutation boundary, not trust a
+ * graph merely because it passed admission earlier.
+ */
+export function resolveWorkflowProjectPath(projectRoot: string, writePath: string): string {
+  const normalized = normalizeWorkflowProjectPath(writePath);
+  if (normalized === undefined) {
+    throw new Error(`Unsafe workflow project path: ${writePath}`);
+  }
+
+  const resolvedRoot = path.resolve(projectRoot);
+  const resolvedTarget = path.resolve(resolvedRoot, ...normalized.split("/"));
+  if (!isWithin(resolvedRoot, resolvedTarget)) {
+    throw new Error(`Workflow path escapes the project root: ${writePath}`);
+  }
+
+  const realRoot = fs.realpathSync(resolvedRoot);
+  let deepestExistingPath = resolvedTarget;
+  while (!fs.existsSync(deepestExistingPath)) {
+    const parentPath = path.dirname(deepestExistingPath);
+    if (parentPath === deepestExistingPath) break;
+    deepestExistingPath = parentPath;
+  }
+  const realExistingPath = fs.realpathSync(deepestExistingPath);
+  if (!isWithin(realRoot, realExistingPath)) {
+    throw new Error(
+      `Workflow path resolves through a symlink outside the project: ${writePath}`,
+    );
+  }
+  return resolvedTarget;
+}
+
+function validateWorkspaceOwnership(
+  nodes: WorkflowNode[],
+  issues: WorkflowValidationIssue[],
+): void {
+  interface OwnedPath {
+    nodeId: string;
+    nodeIndex: number;
+    pathIndex: number;
+    path: string;
+    comparisonSegments: string[];
+  }
+
+  const ownedPaths: OwnedPath[] = [];
+  for (const [nodeIndex, node] of nodes.entries()) {
+    if (node.workspace.isolation === "read-only") continue;
+    for (const [pathIndex, writePath] of node.workspace.writePaths.entries()) {
+      const normalizedPath = normalizeWorkflowProjectPath(writePath);
+      if (normalizedPath === undefined) continue;
+      ownedPaths.push({
+        nodeId: node.id,
+        nodeIndex,
+        pathIndex,
+        path: normalizedPath,
+        comparisonSegments: pathComparisonSegments(normalizedPath),
+      });
+    }
+  }
+
+  // Segment-wise sorting keeps every descendant adjacent to its ancestor
+  // subtree. The active prefix stack then makes collision detection O(P log P)
+  // for P owned paths instead of comparing every pair.
+  ownedPaths.sort(compareOwnedPaths);
+  const activePrefixes: OwnedPath[] = [];
+  const activeOwnerCounts = new Map<string, number>();
+
+  for (const current of ownedPaths) {
+    while (
+      activePrefixes.length > 0 &&
+      !segmentsArePrefix(
+        activePrefixes[activePrefixes.length - 1].comparisonSegments,
+        current.comparisonSegments,
+      )
+    ) {
+      const removed = activePrefixes.pop()!;
+      const remainingCount = (activeOwnerCounts.get(removed.nodeId) ?? 1) - 1;
+      if (remainingCount === 0) activeOwnerCounts.delete(removed.nodeId);
+      else activeOwnerCounts.set(removed.nodeId, remainingCount);
+    }
+
+    const conflictingOwner = differentActiveOwner(activeOwnerCounts, current.nodeId);
+    if (conflictingOwner !== undefined) {
+      issues.push({
+        code: "overlapping-write-ownership",
+        path: `/nodes/${current.nodeIndex}/workspace/writePaths/${current.pathIndex}`,
+        message: `Write path ${current.path} overlaps ownership held by node ${conflictingOwner}.`,
+      });
+    }
+
+    activePrefixes.push(current);
+    activeOwnerCounts.set(current.nodeId, (activeOwnerCounts.get(current.nodeId) ?? 0) + 1);
+  }
+}
+
+function pathComparisonSegments(normalizedPath: string): string[] {
+  return normalizedPath.split("/").map((segment) => segment.toLowerCase());
+}
+
+function differentActiveOwner(
+  activeOwnerCounts: Map<string, number>,
+  currentNodeId: string,
+): string | undefined {
+  const owners = activeOwnerCounts.keys();
+  const firstOwner = owners.next().value;
+  if (firstOwner === undefined || firstOwner !== currentNodeId) return firstOwner;
+  return owners.next().value;
+}
+
+function compareOwnedPaths(
+  left: { comparisonSegments: string[] },
+  right: { comparisonSegments: string[] },
+): number {
+  const sharedLength = Math.min(
+    left.comparisonSegments.length,
+    right.comparisonSegments.length,
+  );
+  for (let index = 0; index < sharedLength; index++) {
+    const leftSegment = left.comparisonSegments[index];
+    const rightSegment = right.comparisonSegments[index];
+    if (leftSegment < rightSegment) return -1;
+    if (leftSegment > rightSegment) return 1;
+  }
+  return left.comparisonSegments.length - right.comparisonSegments.length;
+}
+
+function segmentsArePrefix(prefix: string[], candidate: string[]): boolean {
+  return (
+    prefix.length <= candidate.length &&
+    prefix.every((segment, index) => segment === candidate[index])
+  );
+}
+
+function pathIsSameOrDescendant(candidate: string, owner: string): boolean {
+  return segmentsArePrefix(pathComparisonSegments(owner), pathComparisonSegments(candidate));
+}
+
+const NODE_LIMIT_KEYS = [
+  "maxIterations",
+  "maxModelCalls",
+  "maxParallelism",
+  "maxSubagents",
+  "timeoutMs",
+  "maxTokens",
+  "maxCostUsd",
+  "maxRetries",
+] as const satisfies readonly (keyof NodeLimits)[];
+
+function validateNodeLimits(
+  limits: NodeLimits,
+  nodePath: string,
+  document: WorkflowGraphDocument,
+  issues: WorkflowValidationIssue[],
+): void {
+  for (const key of NODE_LIMIT_KEYS) {
+    const nodeValue = limits[key];
+    if (nodeValue === undefined || nodeValue <= document.limits[key]) continue;
+    issues.push({
+      code: "node-limit-exceeds-workflow",
+      path: `${nodePath}/limits/${key}`,
+      message: `Node limit ${key} (${nodeValue}) exceeds workflow limit (${document.limits[key]}).`,
+    });
+  }
+}
+
+function validateRescuePolicy(
+  policy: RescuePolicy,
+  path: string,
+  issues: WorkflowValidationIssue[],
+): void {
+  validateUniqueStrings(policy.triggers, `${path}/triggers`, "duplicate-rescue-trigger", issues);
+  if (policy.enabled && policy.maxAttempts === 0) {
+    issues.push({
+      code: "unbounded-rescue-disabled",
+      path: `${path}/maxAttempts`,
+      message: "Enabled rescue needs at least one and at most ten attempts.",
+    });
+  }
+  if (policy.enabled && policy.triggers.length === 0) {
+    issues.push({
+      code: "missing-rescue-trigger",
+      path: `${path}/triggers`,
+      message: "Enabled rescue needs at least one explicit trigger.",
+    });
+  }
+  if (!policy.enabled && policy.maxAttempts !== 0) {
+    issues.push({
+      code: "disabled-rescue-attempts",
+      path: `${path}/maxAttempts`,
+      message: "Disabled rescue must set maxAttempts to zero.",
+    });
+  }
+}
+
+function validateEvidenceRescueAvailability(
+  evidencePolicy: EvidencePolicy,
+  effectiveRescuePolicy: RescuePolicy,
+  path: string,
+  issues: WorkflowValidationIssue[],
+): void {
+  if (!evidencePolicy.enabled || evidencePolicy.onUnsupportedOutput !== "rescue") return;
+  validateRescueEnabled(effectiveRescuePolicy, path, issues);
+}
+
+function validateRescueEnabled(
+  effectiveRescuePolicy: RescuePolicy,
+  path: string,
+  issues: WorkflowValidationIssue[],
+): void {
+  if (effectiveRescuePolicy.enabled) return;
+  issues.push({
+    code: "rescue-unavailable",
+    path,
+    message: "This policy requests rescue, but the effective rescue policy is disabled.",
+  });
+}
+
+function validateUniqueMemberIds(
+  members: { id: string }[],
+  path: string,
+  issues: WorkflowValidationIssue[],
+): void {
+  const memberIds = members.map((member) => member.id);
+  validateUniqueStrings(memberIds, path, "duplicate-member-id", issues, "/id");
+}
+
+function validateUniqueStrings(
+  values: readonly string[],
+  path: string,
+  code: string,
+  issues: WorkflowValidationIssue[],
+  pathSuffix = "",
+): void {
+  const seen = new Set<string>();
+  for (const [index, value] of values.entries()) {
+    if (seen.has(value)) {
+      issues.push({
+        code,
+        path: `${path}/${index}${pathSuffix}`,
+        message: `Duplicate value ${value}.`,
+      });
+    }
+    seen.add(value);
+  }
+}
+
+function validateGraphTopology(
+  document: WorkflowGraphDocument,
+  nodeById: Map<string, WorkflowNode>,
+  issues: WorkflowValidationIssue[],
+): void {
+  if (!nodeById.has(document.entryNodeId)) {
+    issues.push({
+      code: "unknown-entry-node",
+      path: "/entryNodeId",
+      message: `Entry node ${document.entryNodeId} does not exist.`,
+    });
+  }
+
+  const edgeIds = new Set<string>();
+  const edgeRoutes = new Set<string>();
+  const adjacency = new Map<string, string[]>();
+  const reverseAdjacency = new Map<string, string[]>();
+  const incomingCounts = new Map<string, number>();
+  for (const nodeId of nodeById.keys()) {
+    adjacency.set(nodeId, []);
+    reverseAdjacency.set(nodeId, []);
+    incomingCounts.set(nodeId, 0);
+  }
+
+  for (const [index, edge] of document.edges.entries()) {
+    const edgePath = `/edges/${index}`;
+    if (edgeIds.has(edge.id)) {
+      issues.push({
+        code: "duplicate-edge-id",
+        path: `${edgePath}/id`,
+        message: `Duplicate edge id ${edge.id}.`,
+      });
+    }
+    edgeIds.add(edge.id);
+
+    const condition = edge.condition ?? "always";
+    const routeIdentity = `${edge.from}\u0000${edge.to}\u0000${condition}`;
+    if (edgeRoutes.has(routeIdentity)) {
+      issues.push({
+        code: "duplicate-edge-endpoints",
+        path: edgePath,
+        message: `Only one ${condition} edge may connect ${edge.from} to ${edge.to}.`,
+      });
+    }
+    edgeRoutes.add(routeIdentity);
+
+    const fromExists = nodeById.has(edge.from);
+    const toExists = nodeById.has(edge.to);
+    if (!fromExists) {
+      issues.push({
+        code: "unknown-edge-source",
+        path: `${edgePath}/from`,
+        message: `Edge source ${edge.from} does not exist.`,
+      });
+    }
+    if (!toExists) {
+      issues.push({
+        code: "unknown-edge-target",
+        path: `${edgePath}/to`,
+        message: `Edge target ${edge.to} does not exist.`,
+      });
+    }
+    if (edge.from === edge.to) {
+      issues.push({
+        code: "self-edge",
+        path: edgePath,
+        message: "Workflow loops belong inside compound nodes; graph self-edges are invalid.",
+      });
+    }
+    validateEdgeCondition(edge, edgePath, document, nodeById, issues);
+
+    if (!fromExists || !toExists) continue;
+    adjacency.get(edge.from)?.push(edge.to);
+    reverseAdjacency.get(edge.to)?.push(edge.from);
+    incomingCounts.set(edge.to, (incomingCounts.get(edge.to) ?? 0) + 1);
+  }
+
+  if ((incomingCounts.get(document.entryNodeId) ?? 0) > 0) {
+    issues.push({
+      code: "entry-has-incoming-edge",
+      path: "/entryNodeId",
+      message: "The entry node must not have incoming edges.",
+    });
+  }
+
+  validateEvidenceRoutes(document, issues);
+  validateOutcomeRoutes(document, issues);
+  validateAcyclic(nodeById, adjacency, incomingCounts, issues);
+  validateReachability(document.entryNodeId, nodeById, adjacency, issues);
+  validateTerminals(nodeById, adjacency, reverseAdjacency, issues);
+}
+
+function validateOutcomeRoutes(
+  document: WorkflowGraphDocument,
+  issues: WorkflowValidationIssue[],
+): void {
+  for (const [nodeIndex, node] of document.nodes.entries()) {
+    if (node.terminal || usesEvidenceRoutes(document, node)) continue;
+    const outgoingConditions = document.edges
+      .filter((edge) => edge.from === node.id)
+      .map((edge) => edge.condition ?? "always");
+    const alwaysCount = outgoingConditions.filter((condition) => condition === "always").length;
+    const successCount = outgoingConditions.filter((condition) => condition === "success").length;
+    const failureCount = outgoingConditions.filter((condition) => condition === "failure").length;
+
+    if (alwaysCount > 0 && (successCount > 0 || failureCount > 0)) {
+      issues.push({
+        code: "mixed-always-and-outcome-routes",
+        path: `/nodes/${nodeIndex}`,
+        message: "A node must use unconditional fan-out or outcome routes, not both.",
+      });
+      continue;
+    }
+    if (alwaysCount > 0) continue;
+    if (successCount === 0) {
+      issues.push({
+        code: "missing-success-route",
+        path: `/nodes/${nodeIndex}`,
+        message: "A nonterminal node needs a success route or an unconditional route.",
+      });
+    }
+    if (failureCount === 0) {
+      issues.push({
+        code: "missing-failure-route",
+        path: `/nodes/${nodeIndex}`,
+        message: "A nonterminal node needs a failure route or an unconditional route.",
+      });
+    }
+  }
+}
+
+function validateEdgeCondition(
+  edge: WorkflowEdge,
+  edgePath: string,
+  document: WorkflowGraphDocument,
+  nodeById: Map<string, WorkflowNode>,
+  issues: WorkflowValidationIssue[],
+): void {
+  const source = nodeById.get(edge.from);
+  if (!source) return;
+  const condition = edge.condition ?? "always";
+  const isEvidenceCondition =
+    condition === "evidence-supported" || condition === "evidence-unsupported";
+  const evidenceRoutes = usesEvidenceRoutes(document, source);
+  if (isEvidenceCondition && !evidenceRoutes) {
+    issues.push({
+      code: "invalid-evidence-edge",
+      path: `${edgePath}/condition`,
+      message:
+        "Evidence edge conditions require an Evidence Gate or enabled route-mode evidence policy.",
+    });
+  }
+  if (evidenceRoutes && !isEvidenceCondition) {
+    issues.push({
+      code: "invalid-gate-edge",
+      path: `${edgePath}/condition`,
+      message: "Evidence-routed nodes must use supported or unsupported conditions.",
+    });
+  }
+}
+
+function usesEvidenceRoutes(
+  document: WorkflowGraphDocument,
+  node: WorkflowNode,
+): boolean {
+  return node.kind === "evidence-gate" || (
+    effectiveWorkflowEvidencePolicy(document, node).enabled &&
+    effectiveWorkflowEvidencePolicy(document, node).onUnsupportedOutput === "route"
+  );
+}
+
+function validateEvidenceRoutes(
+  document: WorkflowGraphDocument,
+  issues: WorkflowValidationIssue[],
+): void {
+  for (const [nodeIndex, node] of document.nodes.entries()) {
+    if (!usesEvidenceRoutes(document, node)) continue;
+    const outgoing = document.edges.filter((edge) => edge.from === node.id);
+    const supportedCount = outgoing.filter(
+      (edge) => edge.condition === "evidence-supported",
+    ).length;
+    const unsupportedCount = outgoing.filter(
+      (edge) => edge.condition === "evidence-unsupported",
+    ).length;
+    if (supportedCount === 0) {
+      issues.push({
+        code: "missing-supported-route",
+        path: `/nodes/${nodeIndex}`,
+        message: "An evidence-routed node needs an evidence-supported outgoing route.",
+      });
+    }
+    const onUnsupportedOutput = node.kind === "evidence-gate"
+      ? node.onUnsupportedOutput
+      : effectiveWorkflowEvidencePolicy(document, node).onUnsupportedOutput;
+    if (onUnsupportedOutput === "route" && unsupportedCount === 0) {
+      const policyPath = node.kind === "evidence-gate"
+        ? `/nodes/${nodeIndex}/onUnsupportedOutput`
+        : `/nodes/${nodeIndex}/evidence/onUnsupportedOutput`;
+      issues.push({
+        code: "missing-unsupported-route",
+        path: policyPath,
+        message: "A routed unsupported output needs an evidence-unsupported edge.",
+      });
+    }
+    if (onUnsupportedOutput !== "route" && unsupportedCount > 0) {
+      const policyPath = node.kind === "evidence-gate"
+        ? `/nodes/${nodeIndex}/onUnsupportedOutput`
+        : `/nodes/${nodeIndex}/evidence/onUnsupportedOutput`;
+      issues.push({
+        code: "unexpected-unsupported-route",
+        path: policyPath,
+        message: "Unsupported edges require onUnsupportedOutput=route.",
+      });
+    }
+  }
+}
+
+function validateAcyclic(
+  nodeById: Map<string, WorkflowNode>,
+  adjacency: Map<string, string[]>,
+  incomingCounts: Map<string, number>,
+  issues: WorkflowValidationIssue[],
+): void {
+  const remainingIncoming = new Map(incomingCounts);
+  const ready = [...nodeById.keys()].filter(
+    (nodeId) => (remainingIncoming.get(nodeId) ?? 0) === 0,
+  );
+  let visitedCount = 0;
+  for (let cursor = 0; cursor < ready.length; cursor++) {
+    const nodeId = ready[cursor];
+    visitedCount++;
+    for (const targetId of adjacency.get(nodeId) ?? []) {
+      const nextIncoming = (remainingIncoming.get(targetId) ?? 0) - 1;
+      remainingIncoming.set(targetId, nextIncoming);
+      if (nextIncoming === 0) ready.push(targetId);
+    }
+  }
+  if (visitedCount === nodeById.size) return;
+
+  const cyclicNodeIds = [...nodeById.keys()].filter(
+    (nodeId) => (remainingIncoming.get(nodeId) ?? 0) > 0,
+  );
+  issues.push({
+    code: "cycle",
+    path: "/edges",
+    message: `The outer workflow must be a DAG; cycle includes ${cyclicNodeIds.join(", ")}.`,
+  });
+}
+
+function validateReachability(
+  entryNodeId: string,
+  nodeById: Map<string, WorkflowNode>,
+  adjacency: Map<string, string[]>,
+  issues: WorkflowValidationIssue[],
+): void {
+  if (!nodeById.has(entryNodeId)) return;
+  const reachable = visitFrom([entryNodeId], adjacency);
+  for (const [index, node] of [...nodeById.values()].entries()) {
+    if (reachable.has(node.id)) continue;
+    issues.push({
+      code: "unreachable-node",
+      path: `/nodes/${index}/id`,
+      message: `Node ${node.id} is not reachable from entry node ${entryNodeId}.`,
+    });
+  }
+}
+
+function validateTerminals(
+  nodeById: Map<string, WorkflowNode>,
+  adjacency: Map<string, string[]>,
+  reverseAdjacency: Map<string, string[]>,
+  issues: WorkflowValidationIssue[],
+): void {
+  const terminalNodeIds: string[] = [];
+  for (const [index, node] of [...nodeById.values()].entries()) {
+    const outgoingCount = adjacency.get(node.id)?.length ?? 0;
+    if (node.terminal) {
+      terminalNodeIds.push(node.id);
+      if (outgoingCount > 0) {
+        issues.push({
+          code: "terminal-has-outgoing-edge",
+          path: `/nodes/${index}/terminal`,
+          message: `Terminal node ${node.id} must not have outgoing edges.`,
+        });
+      }
+    } else if (outgoingCount === 0) {
+      issues.push({
+        code: "unterminated-sink",
+        path: `/nodes/${index}/terminal`,
+        message: `Sink node ${node.id} must be marked terminal.`,
+      });
+    }
+  }
+
+  if (terminalNodeIds.length === 0) {
+    issues.push({
+      code: "missing-terminal",
+      path: "/nodes",
+      message: "A workflow needs at least one terminal node.",
+    });
+    return;
+  }
+
+  const canReachTerminal = visitFrom(terminalNodeIds, reverseAdjacency);
+  for (const [index, node] of [...nodeById.values()].entries()) {
+    if (canReachTerminal.has(node.id)) continue;
+    issues.push({
+      code: "no-terminal-path",
+      path: `/nodes/${index}/id`,
+      message: `Node ${node.id} has no path to a terminal node.`,
+    });
+  }
+}
+
+function visitFrom(
+  startNodeIds: string[],
+  adjacency: Map<string, string[]>,
+): Set<string> {
+  const visited = new Set<string>();
+  const pending = [...startNodeIds];
+  for (let cursor = 0; cursor < pending.length; cursor++) {
+    const nodeId = pending[cursor];
+    if (visited.has(nodeId)) continue;
+    visited.add(nodeId);
+    for (const nextNodeId of adjacency.get(nodeId) ?? []) {
+      if (!visited.has(nextNodeId)) pending.push(nextNodeId);
+    }
+  }
+  return visited;
+}
